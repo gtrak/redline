@@ -229,6 +229,77 @@ impl CommandRegistry {
             "files",
             |store, _arg| store.re_walk(),
         ));
+        // ── issue 03: motion + isearch + goto-line ──────────────────────────
+        reg.register(Command::new(
+            "scroll-line-down",
+            "Scroll down one line (C-n / j)",
+            "motion",
+            |store, _arg| store.scroll_line_down(),
+        ));
+        reg.register(Command::new(
+            "scroll-line-up",
+            "Scroll up one line (C-p / k)",
+            "motion",
+            |store, _arg| store.scroll_line_up(),
+        ));
+        reg.register(Command::new(
+            "scroll-page-down",
+            "Scroll down one page (C-v)",
+            "motion",
+            |store, _arg| store.scroll_page_down(),
+        ));
+        reg.register(Command::new(
+            "scroll-page-up",
+            "Scroll up one page (M-v)",
+            "motion",
+            |store, _arg| store.scroll_page_up(),
+        ));
+        reg.register(Command::new(
+            "scroll-half-page-down",
+            "Scroll down half a page (C-d)",
+            "motion",
+            |store, _arg| store.scroll_half_page_down(),
+        ));
+        reg.register(Command::new(
+            "scroll-half-page-up",
+            "Scroll up half a page (C-u)",
+            "motion",
+            |store, _arg| store.scroll_half_page_up(),
+        ));
+        reg.register(Command::new(
+            "scroll-top",
+            "Scroll to the top of the buffer (g / M-<)",
+            "motion",
+            |store, _arg| store.scroll_to_top(),
+        ));
+        reg.register(Command::new(
+            "scroll-bottom",
+            "Scroll to the bottom of the buffer (G / M->)",
+            "motion",
+            |store, _arg| store.scroll_to_bottom(),
+        ));
+        reg.register(Command::new(
+            "goto-line",
+            "Jump to a line number (M-g g)",
+            "motion",
+            |store, _arg| store.goto_line_start(),
+        ));
+        reg.register(Command::new(
+            "isearch-forward",
+            "Incremental search forward (C-s)",
+            "search",
+            |store, _arg| {
+                store.isearch_start(crate::app::store::IsearchDirection::Forward);
+            },
+        ));
+        reg.register(Command::new(
+            "isearch-backward",
+            "Incremental search backward (C-r)",
+            "search",
+            |store, _arg| {
+                store.isearch_start(crate::app::store::IsearchDirection::Backward);
+            },
+        ));
         reg.register(Command::new(
             "close-view",
             "Close the top view (q in list views)",
@@ -322,7 +393,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 29, "expected 29 seed commands: {names:?}");
+        assert_eq!(names.len(), 40, "expected 40 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -341,6 +412,17 @@ mod tests {
             "switch-project",
             "recent-files",
             "re-walk",
+            "scroll-line-down",
+            "scroll-line-up",
+            "scroll-page-down",
+            "scroll-page-up",
+            "scroll-half-page-down",
+            "scroll-half-page-up",
+            "scroll-top",
+            "scroll-bottom",
+            "goto-line",
+            "isearch-forward",
+            "isearch-backward",
             "close-view",
             "open-buffer-list-selected",
             "buffer-list-next",

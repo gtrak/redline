@@ -3,6 +3,7 @@
 //! app layer (`src/app`) and the theme stay plain Rust.
 
 pub mod diff_view;
+pub mod file_view;
 pub mod magit_status;
 pub mod picker;
 pub mod root;

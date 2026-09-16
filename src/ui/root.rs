@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 
 use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
-use crate::app::store::{AppStore, BufferRow, DirtyCounts, PickerCandidate, ViewId};
+use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewLine, PickerCandidate, ViewId};
 use crate::model::sections::MagitRow;
 use crate::theme;
+use crate::ui::file_view::FileView;
 use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
-use crate::ui::views::buffer::{BufferListView, BufferView};
+use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
 
 /// iocraft key codes to app key codes (the ui layer owns this
@@ -58,7 +59,11 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
     };
     app_key.ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     app_key.alt = key.modifiers.contains(KeyModifiers::ALT);
-    app_key.shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // Char codes already self-encode case; crossterm 0.29 sets SHIFT on
+    // every uppercase char, so copy it only for non-Char codes.
+    if !matches!(code, AppKeyCode::Char(_)) {
+        app_key.shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    }
     Some(app_key)
 }
 
@@ -72,7 +77,6 @@ struct Snapshot {
     pending: String,
     activity: String,
     message: String,
-    text: String,
     buffer_rows: Vec<BufferRow>,
     buffer_list_selected: usize,
     picker: bool,
@@ -84,6 +88,12 @@ struct Snapshot {
     preview: String,
     magit_rows: Vec<MagitRow>,
     dirty: Option<DirtyCounts>,
+    // File view (issue 03).
+    file_view_lines: Vec<FileViewLine>,
+    file_view_title: String,
+    file_view_top_line: usize,
+    file_view_total_lines: usize,
+    file_view_viewport_lines: usize,
 }
 
 #[component]
@@ -99,6 +109,12 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // render snapshot below.
     let event_store = store.clone();
     hooks.use_terminal_events(move |event: TerminalEvent| {
+        if let TerminalEvent::Resize(_, height) = &event {
+            // Update the viewport height on resize (subtract room for
+            // the title, help line, and status line).
+            let viewport = (*height as usize).saturating_sub(3);
+            event_store.lock().unwrap().set_viewport_lines(viewport);
+        }
         if let TerminalEvent::Key(key) = &event
             && key.kind != KeyEventKind::Release
             && let Some(app_key) = to_app_key(key)
@@ -109,6 +125,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let snap = {
         let s = store.lock().unwrap();
+        let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
         Snapshot {
             quit: s.quit,
             project: s.project_display().to_string(),
@@ -117,7 +134,6 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             pending: s.pending_display(),
             activity: s.activity_display(),
             message: s.message.clone(),
-            text: s.buffer_text(),
             buffer_rows: s.buffer_rows(),
             buffer_list_selected: s.buffer_list_selected(),
             picker: s.picker_open(),
@@ -133,6 +149,11 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             preview: s.picker_preview().to_string(),
             magit_rows: s.magit_rows(),
             dirty: s.dirty_counts(),
+            file_view_lines: s.file_view_lines(),
+            file_view_title: s.view_name_display(),
+            file_view_top_line: top_line,
+            file_view_total_lines: total_lines,
+            file_view_viewport_lines: viewport_lines,
         }
     };
 
@@ -142,7 +163,13 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let main_view: Option<AnyElement<'static>> = match snap.view {
         ViewId::Buffer => Some(element! {
-            BufferView(title: snap.view_name.clone(), text: snap.text.clone())
+            FileView(
+                title: snap.file_view_title.clone(),
+                lines: snap.file_view_lines.clone(),
+                total_lines: snap.file_view_total_lines,
+                top_line: snap.file_view_top_line,
+                viewport_lines: snap.file_view_viewport_lines,
+            )
         }
         .into()),
         ViewId::BufferList => Some(element! {
@@ -329,7 +356,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 29"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 40"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }
@@ -347,7 +374,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("Find file: m"), "prompt+query missing:\n{s}");
         assert!(s.contains("src/main.rs"), "candidate missing:\n{s}");
-        assert!(s.contains("fn main()"), "preview missing:\n{s}");
+        assert!(s.contains("fn main"), "preview missing:\n{s}");
     }
 
     /// The buffer-list view renders open buffers with the current one
@@ -417,5 +444,24 @@ mod tests {
         // Mapped codes still convert.
         assert!(to_app_key(&press(KeyCode::Esc)).is_some());
         assert!(to_app_key(&press(KeyCode::Char('a'))).is_some());
+    }
+
+    /// Fix 3 lock-in: crossterm 0.29 sets SHIFT on every uppercase char.
+    /// `to_app_key` must NOT copy that into `Key.shift` for Char codes,
+    /// otherwise `G` → `Key{code: Char('G'), shift: true}` would never
+    /// match a binding stored as `Key{code: Char('G'), shift: false}`.
+    #[test]
+    fn shift_modifier_not_set_for_char_codes() {
+        let mut key = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('G'));
+        key.modifiers = KeyModifiers::SHIFT;
+        let app_key = to_app_key(&key).unwrap();
+        assert!(!app_key.shift, "shift must not be set for Char codes");
+        assert_eq!(app_key, crate::app::keymap::Key::char('G'));
+
+        // Non-Char codes still get shift.
+        let mut key2 = KeyEvent::new(KeyEventKind::Press, KeyCode::PageUp);
+        key2.modifiers = KeyModifiers::SHIFT;
+        let app_key2 = to_app_key(&key2).unwrap();
+        assert!(app_key2.shift, "shift must be set for non-Char codes");
     }
 }

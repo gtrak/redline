@@ -1,39 +1,10 @@
-//! The main view (current buffer's plain text — highlighting arrives
-//! with issue 03) and the `C-x C-b` buffer-list view.
+//! The `C-x C-b` buffer-list view.
 
 use iocraft::prelude::*;
 
 use crate::app::store::BufferRow;
 use crate::theme;
 use crate::ui::{face_bg, face_color, face_weight};
-
-#[derive(Default, Props)]
-pub struct BufferViewProps {
-    pub title: String,
-    pub text: String,
-}
-
-/// The main view: the current buffer, titled, as plain text.
-#[component]
-pub fn BufferView(props: &BufferViewProps, mut _hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let t = theme::current();
-    element! {
-        View(flex_grow: 1.0_f32, overflow: Overflow::Hidden) {
-            View(background_color: face_bg(t.view)) {
-                Text(
-                    content: &props.title,
-                    color: face_color(t.view_title),
-                    weight: face_weight(t.view_title),
-                )
-                Text(content: &props.text, color: face_color(t.view))
-                Text(
-                    content: "C-x C-f find file · C-x b switch · C-x C-b list buffers · C-x k kill · C-c p p project · M-x commands · q quit",
-                    color: face_color(t.preview),
-                )
-            }
-        }
-    }
-}
 
 #[derive(Default, Props)]
 pub struct BufferListViewProps {

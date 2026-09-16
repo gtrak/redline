@@ -2,8 +2,9 @@
 //! and updates. Holds the view stack, keymap state, pending key
 //! sequence, minibuffer message, status line state, quit flag, the
 //! picker overlay state, the project layer (current project, known
-//! projects, per-project recents, cached file lists), and the
-//! open-buffer set.
+//! projects, per-project recents, cached file lists), the open-buffer
+//! set (ropey-backed), the highlight cache, per-buffer scroll state,
+//! isearch state, and goto-line state.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,10 +20,13 @@ use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, par
 use crate::git::diff::{DiffSide, FileDiff};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
-use crate::model::buffer::{BufferTable, SCRATCH_NAME};
+use crate::model::buffer::{load_file, BufferTable, SCRATCH_NAME};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
 use crate::model::sections::{MagitRow, SectionKind, StatusTree};
+use crate::syntax::cache::{CacheKey, HighlightCache};
+use crate::syntax::highlight::{self, HighlightResult};
+use crate::syntax::registry::GrammarRegistry;
 use crate::theme::Theme;
 
 /// A view on the stack. The top of the stack is what the main view
@@ -57,6 +61,26 @@ impl ViewId {
                     .unwrap();
                 km
                     .bind(&[Key::ctrl_char('x'), Key::ctrl_char('i')], "insert-demo-text")
+                    .unwrap();
+                // Motion (issue 03).
+                km.bind(&[Key::ctrl_char('n')], "scroll-line-down").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "scroll-line-up").unwrap();
+                km.bind(&[Key::char('j')], "scroll-line-down").unwrap();
+                km.bind(&[Key::char('k')], "scroll-line-up").unwrap();
+                km.bind(&[Key::ctrl_char('v')], "scroll-page-down").unwrap();
+                km.bind(&[Key::alt_char('v')], "scroll-page-up").unwrap();
+                km.bind(&[Key::ctrl_char('d')], "scroll-half-page-down").unwrap();
+                km.bind(&[Key::ctrl_char('u')], "scroll-half-page-up").unwrap();
+                km.bind(&[Key::char('g')], "scroll-top").unwrap();
+                km.bind(&[Key::char('G')], "scroll-bottom").unwrap();
+                km
+                    .bind(&[Key::alt_char('g'), Key::char('g')], "goto-line")
+                    .unwrap();
+                km
+                    .bind(&[Key::alt_char('<')], "scroll-top")
+                    .unwrap();
+                km
+                    .bind(&[Key::alt_char('>')], "scroll-bottom")
                     .unwrap();
                 km
             }
@@ -142,6 +166,51 @@ pub struct BufferRow {
     pub lines: u64,
 }
 
+/// One visible line in the file view: the text (without trailing
+/// newline) and the highlight spans (byte offsets relative to the
+/// line start). Pre-computed by the store; the file view renders it.
+#[derive(Clone, Debug, Default)]
+pub struct FileViewLine {
+    pub text: String,
+    pub spans: Vec<crate::syntax::highlight::LineSpan>,
+}
+
+/// Direction of an incremental search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsearchDirection {
+    Forward,
+    Backward,
+}
+
+/// Incremental in-buffer search state. The store owns this; the UI
+/// only renders it (query, match count, current position).
+#[derive(Debug)]
+pub struct IsearchState {
+    pub active: bool,
+    pub query: String,
+    pub direction: IsearchDirection,
+    /// All match byte offsets in the current buffer (in search order).
+    pub matches: Vec<usize>,
+    /// Index into `matches` of the current match.
+    pub current: usize,
+    /// The line to restore to when isearch exits without a confirmed
+    /// match (C-g cancel).
+    pub pre_search_line: usize,
+}
+
+impl Default for IsearchState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            direction: IsearchDirection::Forward,
+            matches: Vec::new(),
+            current: 0,
+            pre_search_line: 0,
+        }
+    }
+}
+
 /// Live dirty counts for the status line: staged (index vs HEAD),
 /// unstaged (workdir vs index), and untracked file counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -162,7 +231,7 @@ pub struct AppStore {
     pub engine: KeymapEngine,
     /// View stack; the top of the stack is what the main view renders.
     pub view_stack: Vec<ViewId>,
-    /// Open buffers + the current buffer.
+    /// Open buffers + the current buffer (ropey-backed).
     pub buffers: BufferTable,
     /// Selection cursor of the buffer-list view.
     buffer_list_selected: usize,
@@ -196,6 +265,23 @@ pub struct AppStore {
     /// Live dirty counts for the status line, updated on each magit
     /// refresh (watcher-driven live refresh is issue 04).
     dirty: Option<DirtyCounts>,
+    /// Grammar registry (built once at startup; all tree-sitter API
+    /// churn is isolated in `src/syntax/registry.rs`).
+    pub grammar_registry: GrammarRegistry,
+    /// Highlight cache: keyed by (path, mtime, theme); bounded memory.
+    pub highlight_cache: HighlightCache,
+    /// Per-buffer scroll state: buffer key → top line (the first
+    /// visible line). Preserved across view switches.
+    scroll: HashMap<String, usize>,
+    /// Incremental in-buffer search state (C-s / C-r).
+    isearch: IsearchState,
+    /// Goto-line mode active (M-g g).
+    goto_line_active: bool,
+    /// Goto-line digit input buffer.
+    goto_line_input: String,
+    /// Number of lines visible in the file view (set by the UI on
+    /// resize); used for page-scroll and slice math.
+    viewport_lines: usize,
 }
 
 impl AppStore {
@@ -240,6 +326,9 @@ impl AppStore {
         global
             .bind(&[Key::ctrl_char('x'), Key::char('g')], "magit-status")
             .unwrap();
+        // Isearch (issue 03).
+        global.bind(&[Key::ctrl_char('s')], "isearch-forward").unwrap();
+        global.bind(&[Key::ctrl_char('r')], "isearch-backward").unwrap();
         // Projectile prefix (C-c p …): verified projectile-ux keys.
         global
             .bind(
@@ -297,6 +386,13 @@ impl AppStore {
             git: None,
             status_tree: None,
             dirty: None,
+            grammar_registry: GrammarRegistry::build(),
+            highlight_cache: HighlightCache::new(),
+            scroll: HashMap::new(),
+            isearch: IsearchState::default(),
+            goto_line_active: false,
+            goto_line_input: String::new(),
+            viewport_lines: 24, // default; the UI updates on resize
         }
     }
 
@@ -379,10 +475,11 @@ impl AppStore {
     }
 
     /// The current buffer's text (empty when no buffer is current).
+    #[allow(dead_code)] // public API: used by tests and future UI layers
     pub fn buffer_text(&self) -> String {
         self.buffers
             .current_buffer()
-            .map(|b| b.text.clone())
+            .map(|b| b.text())
             .unwrap_or_default()
     }
 
@@ -394,7 +491,7 @@ impl AppStore {
             .map(|(key, buf)| BufferRow {
                 name: self.buffer_display(key),
                 current: self.buffers.current() == Some(key),
-                lines: buf.text.lines().count() as u64,
+                lines: buf.line_count() as u64,
             })
             .collect()
     }
@@ -440,22 +537,49 @@ impl AppStore {
     }
 
     /// Insert text into the current buffer (the `insert-demo-text`
-    /// demo command); false when no buffer is current.
+    /// demo command); false when no buffer is current or not editable.
     pub fn insert_text(&mut self, text: &str) -> bool {
         let Some(key) = self.buffers.current() else {
             return false;
         };
         let key = key.to_string();
+        // Check editable before mutating.
+        let editable = self.buffers.get(&key).map(|b| b.editable).unwrap_or(false);
+        if !editable {
+            return false;
+        }
         let pos = self
             .buffers
             .get(&key)
-            .map(|b| b.text.chars().count())
+            .map(|b| b.rope.len_chars())
             .unwrap_or(0);
         if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.text.insert_str(pos, text);
+            buf.rope.insert(pos, text);
+            // Invalidate the highlight cache for this buffer (text changed).
+            self.invalidate_highlight_for_key(&key);
             true
         } else {
             false
+        }
+    }
+
+    /// Invalidate the highlight cache entry for a buffer key (called
+    /// after an edit so the next render rebuilds the highlight).
+    fn invalidate_highlight_for_key(&mut self, key: &str) {
+        let buf = match self.buffers.get(key) {
+            Some(b) => b,
+            None => return,
+        };
+        let path = match &buf.path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let cache_key = CacheKey::new(&path, buf.mtime, self.theme.name());
+        // Remove the cache entry so it's rebuilt on next ensure_highlight.
+        // (We can't do this cleanly without a remove method on HighlightCache;
+        // instead we clear the whole cache — simple and correct.)
+        if self.highlight_cache.get(&cache_key).is_some() {
+            self.highlight_cache.clear();
         }
     }
 
@@ -479,18 +603,42 @@ impl AppStore {
         let abs = project.root.join(rel);
         let key = abs.to_string_lossy().into_owned();
         if self.buffers.get(&key).is_none() {
-            match std::fs::read_to_string(&abs) {
-                Ok(text) => {
-                    self.buffers.insert(Some(abs.clone()), text);
+            match load_file(&abs) {
+                Ok((rope, mtime)) => {
+                    self.buffers.insert_rope(Some(abs.clone()), rope, mtime, false);
                 }
                 Err(e) => {
                     self.minibuffer_message(&format!("cannot open {rel}: {e}"));
                     return;
                 }
             }
+        } else {
+            // Re-stat on reopen: reload when mtime changed (spec: "highlight
+            // cache invalidates when a file changes on disk (pre-watcher: on
+            // reopen)"). Issue-03 buffers are read-only, so this is safe.
+            if let Ok(new_mtime) = std::fs::metadata(&abs).and_then(|m| m.modified()) {
+                let old_mtime = self
+                    .buffers
+                    .get(&key)
+                    .map(|b| b.mtime)
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if new_mtime != old_mtime {
+                    match load_file(&abs) {
+                        Ok((rope, mtime)) => {
+                            self.buffers
+                                .insert_rope(Some(abs.clone()), rope, mtime, false);
+                        }
+                        Err(e) => {
+                            self.minibuffer_message(&format!("cannot reload {rel}: {e}"));
+                        }
+                    }
+                }
+            }
         }
         self.buffers.set_current(&key);
         self.record_recent(rel);
+        // Build (or update) the highlight for the new current buffer.
+        self.ensure_highlight();
     }
 
     /// Record `rel` in the current project's recents and persist.
@@ -836,7 +984,7 @@ impl AppStore {
         let abs = project.root.join(rel);
         let key = abs.to_string_lossy().into_owned();
         let text = if let Some(buf) = self.buffers.get(&key) {
-            buf.text.clone()
+            buf.text()
         } else {
             // Bound the read itself (take(N)): a huge file must never be
             // pulled fully into memory on a selection move.
@@ -860,7 +1008,7 @@ impl AppStore {
         self.buffers
             .get(key)
             .map(|b| {
-                b.text
+                b.text()
                     .lines()
                     .take(PREVIEW_LINES)
                     .collect::<Vec<_>>()
@@ -973,6 +1121,461 @@ impl AppStore {
         if n > 0 {
             self.buffer_list_selected = (self.buffer_list_selected + n - 1) % n;
         }
+    }
+
+    // ── file view: scroll + isearch + goto-line (issue 03) ────────────
+
+    /// Set the viewport height (in lines); called by the UI on resize.
+    pub fn set_viewport_lines(&mut self, n: usize) {
+        self.viewport_lines = n.max(1);
+    }
+
+    /// The scroll position (top line) for the current buffer.
+    pub fn scroll_top(&self) -> usize {
+        self.buffers
+            .current()
+            .and_then(|key| self.scroll.get(key))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Set the scroll position for the current buffer.
+    fn set_scroll_top(&mut self, top: usize) {
+        let key = self.buffers.current().map(String::from);
+        if let Some(key) = key {
+            let total = self
+                .buffers
+                .get(&key)
+                .map(|b| b.line_count())
+                .unwrap_or(0);
+            self.scroll.insert(key, top.min(total.saturating_sub(1)));
+        }
+    }
+
+    /// Scroll down by one line.
+    pub fn scroll_line_down(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top + 1);
+    }
+
+    /// Scroll up by one line.
+    pub fn scroll_line_up(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top.saturating_sub(1));
+    }
+
+    /// Scroll down by one page (viewport height).
+    pub fn scroll_page_down(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top + self.viewport_lines);
+    }
+
+    /// Scroll up by one page (viewport height).
+    pub fn scroll_page_up(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top.saturating_sub(self.viewport_lines));
+    }
+
+    /// Scroll down by half a page.
+    pub fn scroll_half_page_down(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top + self.viewport_lines / 2);
+    }
+
+    /// Scroll up by half a page.
+    pub fn scroll_half_page_up(&mut self) {
+        let top = self.scroll_top();
+        self.set_scroll_top(top.saturating_sub(self.viewport_lines / 2));
+    }
+
+    /// Scroll to the top (line 0).
+    pub fn scroll_to_top(&mut self) {
+        self.set_scroll_top(0);
+    }
+
+    /// Scroll to the bottom (last visible line).
+    pub fn scroll_to_bottom(&mut self) {
+        let total = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        let top = total.saturating_sub(self.viewport_lines);
+        self.set_scroll_top(top);
+    }
+
+    /// Pre-compute the visible lines for the file view: text from the
+    /// rope, spans from the highlight cache (or empty for plain text).
+    /// The visible range is `[top_line, top_line + viewport_lines)`.
+    pub fn file_view_lines(&self) -> Vec<FileViewLine> {
+        let Some(buf) = self.buffers.current_buffer() else {
+            return Vec::new();
+        };
+        let total = buf.line_count();
+        if total == 0 {
+            return Vec::new();
+        }
+        let top = self.scroll_top();
+        let start = top.min(total.saturating_sub(1));
+        let end = (top + self.viewport_lines).min(total);
+        if start >= end {
+            return Vec::new();
+        }
+
+        // Get the highlight result from the cache (if any).
+        let highlight: Option<&HighlightResult> = self.buffer_highlight_result();
+
+        let mut out = Vec::with_capacity(end - start);
+        for line in start..end {
+            let text = buf.line_text(line).unwrap_or_default().to_string();
+            let spans = highlight
+                .and_then(|h| h.lines.get(line))
+                .map(|hl| hl.spans.clone())
+                .unwrap_or_default();
+            out.push(FileViewLine { text, spans });
+        }
+        out
+    }
+
+    /// (top_line, total_lines, viewport_lines) for the file view.
+    pub fn file_view_scroll_info(&self) -> (usize, usize, usize) {
+        let total = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        (self.scroll_top(), total, self.viewport_lines)
+    }
+
+    /// The highlight result for the current buffer, from the cache.
+    /// Returns `None` when the buffer is plain text, big-file, or the
+    /// cache has no entry for the current (path, mtime, theme).
+    fn buffer_highlight_result(&self) -> Option<&HighlightResult> {
+        let key = self.buffers.current()?.to_string();
+        let buf = self.buffers.get(&key)?;
+        // Big files skip highlighting entirely.
+        if buf.is_big() {
+            return None;
+        }
+        let path = buf.path.as_ref()?;
+        let lang = self.grammar_registry.language_for(&path.to_string_lossy());
+        if lang == crate::syntax::registry::LanguageId::Plain {
+            return None;
+        }
+        let cache_key = CacheKey::new(path, buf.mtime, self.theme.name());
+        self.highlight_cache.get(&cache_key)
+    }
+
+    /// Ensure the current buffer's highlight is cached; builds it on
+    /// a cache miss. Called on buffer open and on theme change.
+    pub fn ensure_highlight(&mut self) {
+        let key = match self.buffers.current() {
+            Some(k) => k.to_string(),
+            None => return,
+        };
+        let (path, mtime, big) = {
+            let buf = self.buffers.get(&key).unwrap();
+            (
+                buf.path.clone(),
+                buf.mtime,
+                buf.is_big(),
+            )
+        };
+        let Some(path) = path else { return };
+        if big {
+            return;
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        let lang = self.grammar_registry.language_for(&path_str);
+        if lang == crate::syntax::registry::LanguageId::Plain {
+            return;
+        }
+        let cache_key = CacheKey::new(&path, mtime, self.theme.name());
+        if self.highlight_cache.get(&cache_key).is_some() {
+            return; // cache hit
+        }
+        // Cache miss: build the highlight.
+        let rope = {
+            let buf = self.buffers.get(&key).unwrap();
+            // Rope clone is O(1) (data sharing).
+            buf.rope.clone()
+        };
+        let config = match self.grammar_registry.config(lang) {
+            Some(c) => c,
+            None => return,
+        };
+        match highlight::highlight(&rope, config, lang) {
+            Ok(result) => {
+                self.highlight_cache.insert(cache_key, result);
+            }
+            Err(()) => {
+                tracing::warn!("highlight failed for {path_str}");
+            }
+        }
+    }
+
+    // ── isearch (C-s / C-r) ────────────────────────────────────────────
+
+    /// Start an incremental search in the given direction.
+    /// Records the pre-search line for clean exit (C-g restores it).
+    pub fn isearch_start(&mut self, direction: IsearchDirection) {
+        if self.isearch.active {
+            return; // already active; C-s during isearch is a no-op
+        }
+        self.isearch = IsearchState {
+            active: true,
+            query: String::new(),
+            direction,
+            matches: Vec::new(),
+            current: 0,
+            pre_search_line: self.scroll_top(),
+        };
+        self.minibuffer_message("I-search: ");
+    }
+
+    /// Append a character to the isearch query and update matches.
+    fn isearch_query_char(&mut self, c: char) {
+        self.isearch.query.push(c);
+        self.isearch_recompute();
+    }
+
+    /// Remove the last character from the isearch query.
+    fn isearch_backspace(&mut self) {
+        self.isearch.query.pop();
+        self.isearch_recompute();
+    }
+
+    /// Recompute all matches for the current query and jump to the
+    /// first match in the search direction.
+    fn isearch_recompute(&mut self) {
+        let query = self.isearch.query.clone();
+        if query.is_empty() {
+            self.isearch.matches.clear();
+            self.isearch.current = 0;
+            self.minibuffer_message("I-search: ");
+            return;
+        }
+        // Get the full buffer text for searching.
+        let text = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.text())
+            .unwrap_or_default();
+        self.isearch.matches = Self::find_all_matches(&text, &query, self.isearch.direction);
+        if self.isearch.matches.is_empty() {
+            self.isearch.current = 0;
+            self.minibuffer_message(&format!("I-search: {query} [no matches]"));
+        } else {
+            // Jump to the first match in the search direction.
+            let start_line = self.scroll_top();
+            let start_byte = self
+                .buffers
+                .current_buffer()
+                .and_then(|b| b.try_line_to_byte(start_line))
+                .unwrap_or(0);
+            // Find the first match at or after start_byte (forward)
+            // or at or before start_byte (backward).
+            self.isearch.current = match self.isearch.direction {
+                IsearchDirection::Forward => self
+                    .isearch
+                    .matches
+                    .iter()
+                    .position(|&m| m >= start_byte)
+                    .unwrap_or(0),
+                IsearchDirection::Backward => {
+                    // Find the last match at or before start_byte.
+                    self.isearch
+                        .matches
+                        .iter()
+                        .rposition(|&m| m <= start_byte)
+                        .unwrap_or(self.isearch.matches.len().saturating_sub(1))
+                }
+            };
+            self.isearch_jump_to_current();
+            let count = self.isearch.matches.len();
+            let idx = self.isearch.current + 1;
+            self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+        }
+    }
+
+    /// Navigate to the next match (n) with wrap-around.
+    pub fn isearch_next(&mut self) {
+        if !self.isearch.active || self.isearch.matches.is_empty() {
+            return;
+        }
+        let n = self.isearch.matches.len();
+        self.isearch.current = (self.isearch.current + 1) % n;
+        self.isearch_jump_to_current();
+        let count = n;
+        let idx = self.isearch.current + 1;
+        let query = self.isearch.query.clone();
+        self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+    }
+
+    /// Navigate to the previous match (N) with wrap-around.
+    pub fn isearch_prev(&mut self) {
+        if !self.isearch.active || self.isearch.matches.is_empty() {
+            return;
+        }
+        let n = self.isearch.matches.len();
+        self.isearch.current = (self.isearch.current + n - 1) % n;
+        self.isearch_jump_to_current();
+        let count = n;
+        let idx = self.isearch.current + 1;
+        let query = self.isearch.query.clone();
+        self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+    }
+
+    /// Scroll the view to show the current match.
+    fn isearch_jump_to_current(&mut self) {
+        let Some(&match_byte) = self.isearch.matches.get(self.isearch.current) else {
+            return;
+        };
+        let line = self
+            .buffers
+            .current_buffer()
+            .and_then(|b| b.try_byte_to_line(match_byte))
+            .unwrap_or(0);
+        self.set_scroll_top(line);
+    }
+
+    /// Confirm isearch (RET): keep the current position, deactivate.
+    pub fn isearch_confirm(&mut self) {
+        if !self.isearch.active {
+            return;
+        }
+        let query = self.isearch.query.clone();
+        self.isearch.active = false;
+        if query.is_empty() {
+            self.minibuffer_message("");
+        } else if self.isearch.matches.is_empty() {
+            self.minibuffer_message(&format!("I-search: {query} [not found]"));
+        } else {
+            self.minibuffer_message("");
+        }
+    }
+
+    /// Cancel isearch (C-g): restore the pre-search position.
+    pub fn isearch_cancel(&mut self) {
+        if !self.isearch.active {
+            return;
+        }
+        self.isearch.active = false;
+        self.isearch.matches.clear();
+        self.isearch.query.clear();
+        self.set_scroll_top(self.isearch.pre_search_line);
+        self.minibuffer_message("cancel");
+    }
+
+    /// Whether isearch is currently active.
+    #[allow(dead_code)] // public API: used by tests and future UI layers
+    pub fn isearch_active(&self) -> bool {
+        self.isearch.active
+    }
+
+    /// The isearch match count.
+    #[allow(dead_code)] // public API: used by tests and future UI layers
+    pub fn isearch_match_count(&self) -> usize {
+        self.isearch.matches.len()
+    }
+
+    /// The current match index (1-based, for display).
+    #[allow(dead_code)] // public API: used by tests and future UI layers
+    pub fn isearch_match_index(&self) -> usize {
+        self.isearch.current + 1
+    }
+
+    // ── goto-line (M-g g) ──────────────────────────────────────────────
+
+    /// Start goto-line mode.
+    pub fn goto_line_start(&mut self) {
+        self.goto_line_active = true;
+        self.goto_line_input.clear();
+        self.minibuffer_message("Go to line: ");
+    }
+
+    /// Whether goto-line mode is active.
+    #[allow(dead_code)] // public API: used by tests and future UI layers
+    pub fn goto_line_active(&self) -> bool {
+        self.goto_line_active
+    }
+
+    /// The goto-line input buffer (for display).
+    #[allow(dead_code)] // public API: used by tests and future UI layers
+    pub fn goto_line_input(&self) -> &str {
+        &self.goto_line_input
+    }
+
+    /// Append a digit to the goto-line input.
+    fn goto_line_digit(&mut self, c: char) {
+        self.goto_line_input.push(c);
+        self.minibuffer_message(&format!("Go to line: {}", self.goto_line_input));
+    }
+
+    /// Backspace in goto-line input.
+    fn goto_line_backspace(&mut self) {
+        self.goto_line_input.pop();
+        self.minibuffer_message(&format!("Go to line: {}", self.goto_line_input));
+    }
+
+    /// Confirm goto-line (RET): scroll to the target line.
+    pub fn goto_line_confirm(&mut self) {
+        if !self.goto_line_active {
+            return;
+        }
+        self.goto_line_active = false;
+        let input = self.goto_line_input.clone();
+        self.goto_line_input.clear();
+        if let Ok(line) = input.parse::<usize>() {
+            let total = self
+                .buffers
+                .current_buffer()
+                .map(|b| b.line_count())
+                .unwrap_or(0);
+            if line < total {
+                self.set_scroll_top(line);
+                self.minibuffer_message("");
+            } else {
+                self.minibuffer_message(&format!("line {line} out of range (1-{total})"));
+            }
+        } else {
+            self.minibuffer_message("invalid line number");
+        }
+    }
+
+    /// Cancel goto-line (C-g).
+    pub fn goto_line_cancel(&mut self) {
+        if !self.goto_line_active {
+            return;
+        }
+        self.goto_line_active = false;
+        self.goto_line_input.clear();
+        self.minibuffer_message("cancel");
+    }
+
+    /// Find all occurrences of `query` in `text` (case-sensitive, plain
+    /// text). Returns byte offsets in search order.
+    fn find_all_matches(text: &str, query: &str, direction: IsearchDirection) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find(query) {
+            let match_start = search_from + pos;
+            matches.push(match_start);
+            // Advance to the next char boundary after the match start
+            // (avoids landing mid-UTF-8-char on multibyte matches).
+            let mut next = match_start + 1;
+            while next < text.len() && !text.is_char_boundary(next) {
+                next += 1;
+            }
+            search_from = next;
+        }
+        if direction == IsearchDirection::Backward {
+            matches.reverse();
+        }
+        matches
     }
 
     // ── magit status (issue 07) ─────────────────────────────────────────
@@ -1221,7 +1824,10 @@ impl AppStore {
     /// printable characters extend the query, Backspace/C-h edit it,
     /// a small set of keys drives the picker (RET runs, C-g cancels,
     /// arrows / C-n / C-p move); everything else goes to the keymap
-    /// engine.
+    /// engine. While isearch is active, printable characters extend the
+    /// query, n/N navigate, RET confirms, C-g cancels. While goto-line
+    /// is active, digits build the line number, RET confirms, C-g
+    /// cancels.
     pub fn key_event(&mut self, key: Key) {
         if self.quit {
             return;
@@ -1252,6 +1858,60 @@ impl AppStore {
             // Other keys fall through to the keymap engine; the
             // unbound-key echo is suppressed while the picker is open
             // (see dispatch_key).
+        }
+        // Isearch mode: printable chars extend the query, n/N navigate,
+        // RET confirms, C-g cancels (restores pre-search position).
+        if self.isearch.active {
+            if key == Key::ctrl_char('g') {
+                self.isearch_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.isearch_confirm();
+                return;
+            }
+            if key == Key::char('n') {
+                self.isearch_next();
+                return;
+            }
+            if key == Key::char('N') {
+                self.isearch_prev();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.isearch_query_char(c);
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.isearch_backspace();
+                return;
+            }
+            // Other keys: swallow (don't echo "unbound key" mid-search).
+            return;
+        }
+        // Goto-line mode: digits build the line number, RET confirms,
+        // C-g cancels.
+        if self.goto_line_active {
+            if key == Key::ctrl_char('g') {
+                self.goto_line_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.goto_line_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace {
+                self.goto_line_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value()
+                && c.is_ascii_digit()
+            {
+                self.goto_line_digit(c);
+                return;
+            }
+            // Other keys: swallow.
+            return;
         }
         // C-g aborts from any state: it clears the pending sequence and
         // closes the picker before the keymap engine can start one.
@@ -1890,7 +2550,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 29);
+        assert_eq!(store.picker_count().0, 40);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -1908,13 +2568,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 28);
+        assert_eq!(store.picker_selected(), 39);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 27);
+        assert_eq!(store.picker_selected(), 38);
 
-        // RET runs the candidate at the selected index (27: magit-next).
+        // RET runs the candidate at the selected index (38: magit-next).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -1946,7 +2606,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 29);
+        assert_eq!(store.picker_count().0, 40);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -1969,9 +2629,264 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         project_with_files(dir.path());
         let mut store = store(dir.path());
-        store.open_path("src/main.rs");
+        // The scratch buffer is editable; file buffers are read-only (issue 03).
+        store.open_scratch();
         assert!(store.insert_text("demo text\n"));
         assert!(store.buffer_text().contains("demo text"));
+    }
+
+    // ── issue 03 store-level tests (finding 9) ─────────────────────────
+
+    fn store_with_lines(n_lines: usize) -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::new();
+        for i in 0..n_lines {
+            content.push_str(&format!("line{}\n", i));
+        }
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/big.rs"), &content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/big.rs");
+        s.set_viewport_lines(10);
+        (s, dir)
+    }
+
+    #[test]
+    fn scroll_line_down_increments_top() {
+        let (mut s, _dir) = store_with_lines(100);
+        assert_eq!(s.scroll_top(), 0);
+        s.scroll_line_down();
+        assert_eq!(s.scroll_top(), 1);
+        s.scroll_line_down();
+        assert_eq!(s.scroll_top(), 2);
+    }
+
+    #[test]
+    fn scroll_line_up_saturates_at_zero() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_line_up();
+        assert_eq!(s.scroll_top(), 0, "cannot scroll above top");
+    }
+
+    #[test]
+    fn scroll_page_down_advances_by_viewport() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_page_down();
+        assert_eq!(s.scroll_top(), 10);
+        s.scroll_page_down();
+        assert_eq!(s.scroll_top(), 20);
+    }
+
+    #[test]
+    fn scroll_page_up_saturates_at_zero() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_page_up();
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn scroll_half_page_down_advances_by_half_viewport() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_half_page_down();
+        assert_eq!(s.scroll_top(), 5);
+        s.scroll_half_page_down();
+        assert_eq!(s.scroll_top(), 10);
+    }
+
+    #[test]
+    fn scroll_half_page_up_saturates_at_zero() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_half_page_up();
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn scroll_to_bottom_clamps_to_last_visible_line() {
+        let (mut s, _dir) = store_with_lines(100);
+        let total = s.buffers.current_buffer().unwrap().line_count();
+        s.scroll_to_bottom();
+        assert_eq!(s.scroll_top(), total - 10, "top = total - viewport");
+    }
+
+    #[test]
+    fn scroll_top_resets_to_zero() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_page_down();
+        s.scroll_to_top();
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn scroll_preserved_across_buffer_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c1 = String::new();
+        let mut c2 = String::new();
+        for i in 0..100 {
+            c1.push_str(&format!("a{}\n", i));
+            c2.push_str(&format!("b{}\n", i));
+        }
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), &c1).unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), &c2).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.set_viewport_lines(10);
+        s.open_path("src/a.rs");
+        s.scroll_page_down();
+        assert_eq!(s.scroll_top(), 10);
+        s.open_path("src/b.rs");
+        assert_eq!(s.scroll_top(), 0);
+        s.open_path("src/a.rs");
+        assert_eq!(s.scroll_top(), 10, "scroll preserved on return");
+    }
+
+    #[test]
+    fn isearch_forward_incremental_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "foo world\nfoo there\nfoo again\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        assert!(s.isearch_active());
+        s.isearch_query_char('f');
+        assert_eq!(s.isearch_match_count(), 3);
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch_match_count(), 3);
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch_match_count(), 3);
+    }
+
+    #[test]
+    fn isearch_next_prev_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "aaa\nbbb\naaa\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('a');
+        let total = s.isearch_match_count();
+        assert!(total >= 3);
+        let idx = s.isearch_match_index();
+        for _ in 0..total {
+            s.isearch_next();
+        }
+        assert_eq!(s.isearch_match_index(), idx, "next wraps to start");
+        s.isearch_prev();
+        assert_eq!(s.isearch_match_index(), total, "prev wraps to end");
+    }
+
+    #[test]
+    fn isearch_cancel_restores_position() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "alpha\nbeta\ngamma\ndelta\nomega\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.set_viewport_lines(10);
+        s.scroll_line_down();
+        s.scroll_line_down();
+        let pre_line = s.scroll_top();
+        assert_eq!(pre_line, 2);
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o'); // only in "omega" (line 4)
+        assert_ne!(s.scroll_top(), pre_line, "search must move the view");
+        s.isearch_cancel();
+        assert!(!s.isearch_active());
+        assert_eq!(s.scroll_top(), pre_line, "cancel must restore position");
+    }
+
+    #[test]
+    fn isearch_multibyte_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "é\né\né\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('\u{e9}'); // é
+        assert_eq!(s.isearch_match_count(), 3);
+    }
+
+    #[test]
+    fn goto_line_confirm_jumps_to_line() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.goto_line_start();
+        assert!(s.goto_line_active());
+        s.goto_line_digit('5');
+        s.goto_line_digit('0');
+        assert_eq!(s.goto_line_input(), "50");
+        s.goto_line_confirm();
+        assert!(!s.goto_line_active());
+        assert_eq!(s.scroll_top(), 50);
+    }
+
+    #[test]
+    fn goto_line_out_of_range_rejects() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.goto_line_start();
+        s.goto_line_digit('9');
+        s.goto_line_digit('9');
+        s.goto_line_digit('9');
+        s.goto_line_confirm();
+        assert!(!s.goto_line_active());
+        assert!(s.message.contains("out of range"), "msg: {}", s.message);
+    }
+
+    #[test]
+    fn goto_line_cancel() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.scroll_line_down();
+        let pre = s.scroll_top();
+        s.goto_line_start();
+        s.goto_line_digit('5');
+        s.goto_line_cancel();
+        assert!(!s.goto_line_active());
+        assert_eq!(s.scroll_top(), pre, "cancel must not change scroll");
+    }
+
+    #[test]
+    fn reopen_invalidates_stale_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "fn old() {}\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        assert!(s.buffer_text().contains("old"));
+        // Modify the file on disk; ensure mtime differs.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.path().join("src/t.rs"), "fn new() {}\n").unwrap();
+        s.open_path("src/t.rs");
+        assert!(
+            s.buffer_text().contains("new"),
+            "reopen must reload changed file"
+        );
     }
 }
 

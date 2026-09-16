@@ -12,6 +12,7 @@
 mod app;
 mod git;
 mod model;
+mod syntax;
 mod theme;
 mod ui;
 
@@ -78,13 +79,19 @@ async fn main() -> anyhow::Result<()> {
 
     let config: config::Config = config::load_tolerant();
     let mut store = AppStore::new();
+    // Measure the terminal height at startup: crossterm emits no Resize
+    // event at startup, so the store's default viewport_lines (24) would
+    // be wrong on terminals that are not ~27 rows.
+    if let Ok((_, h)) = crossterm::terminal::size() {
+        store.set_viewport_lines(h.saturating_sub(3) as usize);
+    }
     if let Err(err) = config.validate_bindings(&store.registry) {
         tracing::warn!("ignoring some key-bindings: {err}");
     }
     if let Err(err) = store.apply_config(&config) {
         tracing::warn!("key-binding overrides not fully applied: {err}");
     }
-    theme::set_current(*store.theme());
+    theme::set_current(store.theme().clone());
     tracing::info!(bindings = config.key_bindings.len(), "config loaded");
 
     // The store lives in the element context; the root component reads
