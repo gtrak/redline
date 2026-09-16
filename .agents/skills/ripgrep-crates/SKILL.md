@@ -71,6 +71,16 @@ may be set — later calls override. (Use this for redline's path/glob
 restrictions; `types`/`overrides` for `--type`-style filters, built via
 `TypesBuilder` / `OverrideBuilder`.)
 
+**`TypesBuilder` requires an explicit `select`** (verified 0.4.33 by probe):
+`TypesBuilder::new()` starts with NO type selected, and a `types(...)` filter
+with zero selected types is a NO-OP (every file passes). Standard types come
+from `add_defaults()`; then `select(name)` activates one (or more). A custom
+type is registered with `add(name, glob)` (2-arg; returns `Result`) and ALSO
+needs `select(name)`. `select` itself returns `&mut Self` (no per-call
+error); selecting an unknown name fails at `build()` with
+`UnrecognizedFileType`. Other methods: `negate`, `clear`, `add_def`,
+`definitions()` (takes `&mut self`, returns the registered defs).
+
 `Walk` (sequential) is a plain `Iterator<Item = Result<DirEntry, Error>>` —
 cancellation = stop iterating (early `return`/`break` drops the walk).
 
@@ -145,11 +155,13 @@ Semantics (verified doc comments, `src/matcher.rs`):
   and (2) none of its literals are uppercase. This is the `C-c p s s`
   (smart-case search) behavior.
 - `word(true)` — "require that all matches occur on word boundaries."
-  Subtly different from wrapping the pattern in `\b…\b`: a `\b` assertion
-  requires one side to be a word char *and* the other a non-word char; `word`
-  merely requires **one side** to match a non-word character (so `-2` with
-  `word` matches in `foo -2 bar`, while `\b-2\b` does not). This is what
-  `M-?` references need.
+  Verified against the pinned 0.1.14 (probe: pattern `target` with `word`
+  matches `target` and `-target-` but NOT `mytarget`/`target2`): for
+  word-char pattern edges, BOTH sides of the match must be a non-word char
+  or a line edge (like `\b…\b`). The difference from a literal `\b` wrap
+  shows up for patterns with non-word-char edges: `-2` with `word` matches
+  in `foo -2 bar`, while `\b-2\b` does not (no word/non-word *transition*
+  around `-`). This is what `M-?` references need.
 - `fixed_strings(true)` — all characters match literally (use for identifier
   reference search so a pattern like `foo.bar` isn't a regex).
 - `line_terminator(Some(b'\n'))` enables line-oriented optimizations; if set,
