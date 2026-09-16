@@ -1,0 +1,36 @@
+.TH REDLINE 1 "2025" "redline 0.1" "User Commands"
+.SH NAME
+redline \- a read-focused TUI code browser for the terminal
+.SH SYNOPSIS
+.B redline
+[options]
+.SH DESCRIPTION
+Redline is an emacs/helm/magit-flavored code browser that lives in a terminal
+pane. It provides instant navigation (files, symbols, definitions, references,
+grep), a git status/staging/commit surface, live file watching, and light
+editing (commit messages, per-project notes).
+.SH KEY BINDINGS
+See the README.md for the full keymap cheat sheet. Common bindings:
+.TP
+\fBC-x C-f\fR Find a file in the project
+.TP
+\fBC-x g\fR Magit status (stage, unstage, commit)
+.TP
+\fBM-\fR.\fR Jump to the definition under point
+.TP
+\fBC-s\fR Incremental search forward
+.TP
+\fBM-x\fR Command palette
+.TP
+\fBC-x C-c\fR Quit
+.SH FILES
+.TP
+.I ~/.config/redline/config.toml
+Configuration: theme, auto_reload, key-binding overrides.
+.TP
+.I ~/.cache/redline/
+Project registry, recents, and highlight cache.
+.SH SEE ALSO
+\fBgit\fR(1), \fBemacs\fR(1)
+.SH AUTHOR
+Redline contributors.
