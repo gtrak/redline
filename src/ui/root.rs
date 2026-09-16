@@ -94,6 +94,9 @@ struct Snapshot {
     file_view_top_line: usize,
     file_view_total_lines: usize,
     file_view_viewport_lines: usize,
+    // File watching (issue 04): the current buffer's "changed on disk"
+    // conflict marker.
+    file_view_changed_on_disk: bool,
 }
 
 #[component]
@@ -120,6 +123,23 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             && let Some(app_key) = to_app_key(key)
         {
             event_store.lock().unwrap().key_event(app_key);
+        }
+    });
+
+    // Live file watching (issue 04): subscribe to the project-change bus and
+    // apply each change to the store (auto-reload non-edited buffers keeping
+    // the scroll anchor, set the conflict marker on locally-edited ones,
+    // refresh git status). The watch channel is latest-value-wins; `changed`
+    // is cancellation-safe, so no change is lost on re-poll.
+    let bus_store = store.clone();
+    let bus_rx = bus_store.lock().unwrap().watch_bus().subscribe();
+    hooks.use_future(async move {
+        let mut rx = bus_rx;
+        // Latest-value-wins: `changed` is cancellation-safe, so no change is
+        // lost on re-poll. Loop until the publisher (the store) is dropped.
+        while let Ok(()) = rx.changed().await {
+            let change = rx.borrow_and_update().clone();
+            bus_store.lock().unwrap().apply_project_change(&change);
         }
     });
 
@@ -154,6 +174,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_top_line: top_line,
             file_view_total_lines: total_lines,
             file_view_viewport_lines: viewport_lines,
+            file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
         }
     };
 
@@ -169,6 +190,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 total_lines: snap.file_view_total_lines,
                 top_line: snap.file_view_top_line,
                 viewport_lines: snap.file_view_viewport_lines,
+                changed_on_disk: snap.file_view_changed_on_disk,
             )
         }
         .into()),
@@ -356,7 +378,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 40"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 42"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

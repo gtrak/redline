@@ -94,14 +94,29 @@ async fn main() -> anyhow::Result<()> {
     theme::set_current(store.theme().clone());
     tracing::info!(bindings = config.key_bindings.len(), "config loaded");
 
-    // The store lives in the element context; the root component reads
-    // and updates it there.
+    // Start the file watcher for the initial project (plan decision #7). It
+    // runs on this runtime and publishes project-change events to the bus the
+    // FileView / git-status subscribers consume. Stops cleanly on quit (the
+    // store's Drop signals the watcher to tear down).
+    store.start_watcher();
+
+    // The store lives in the element context; the root component reads and
+    // updates it there. Keep a handle so we can stop the watcher cleanly at
+    // shutdown (before the runtime tears down).
+    let store_handle = std::sync::Arc::new(std::sync::Mutex::new(store));
     let mut app = element! {
-        ContextProvider(value: Context::owned(std::sync::Arc::new(std::sync::Mutex::new(store)))) {
+        ContextProvider(value: Context::owned(std::sync::Arc::clone(&store_handle))) {
             Root
         }
     };
     app.fullscreen().await?;
+    // Clean watcher shutdown: take the watcher out (brief lock) and await its
+    // teardown WITHOUT holding the store lock across the await (the runtime
+    // must not block on a std Mutex while a task is running).
+    let watcher = store_handle.lock().unwrap().take_watcher();
+    if let Some(mut w) = watcher {
+        w.stop_and_wait().await;
+    }
     tracing::info!("redline exited cleanly");
     Ok(())
 }

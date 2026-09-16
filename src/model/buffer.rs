@@ -7,7 +7,15 @@
 //! current_buffer / kill / len).
 //!
 //! `mtime` is the file's modification time at load; used for highlight
-//! cache invalidation on reopen (issue 04 adds live watcher invalidation).
+//! cache invalidation on reopen and for live watcher invalidation (issue 04).
+//!
+//! Light-editing flag path (plan decision #6): a buffer carries an
+//! `editable` flag and a `locally_modified` flag. A buffer is *locally
+//! owned* (never auto-clobbered by a disk change) when it has no on-disk
+//! path (the scratch buffer) or it has unsaved local edits
+//! (`locally_modified`). When a disk change lands on a locally-owned
+//! buffer, `changed_on_disk` is set so the view can show a conflict marker
+//! instead of overwriting; `g` forces a reload.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -35,6 +43,15 @@ pub struct Buffer {
     /// Whether the buffer is editable (issue 03: read-only for files;
     /// scratch is editable).
     pub editable: bool,
+    /// True when the in-memory text has unsaved local edits that differ
+    /// from what is on disk (the light-editing flag, plan decision #6).
+    /// Read-only file buffers stay `false` until an edit lands; the scratch
+    /// buffer is locally-owned by virtue of having no path.
+    pub locally_modified: bool,
+    /// A disk change arrived for this buffer while it was locally owned:
+    /// the user must reconcile manually (`g` forces a reload; the view
+    /// shows a "changed on disk" marker while this is set).
+    pub changed_on_disk: bool,
 }
 
 impl std::fmt::Debug for Buffer {
@@ -44,19 +61,31 @@ impl std::fmt::Debug for Buffer {
             .field("lines", &self.rope.len_lines())
             .field("bytes", &self.rope.len_bytes())
             .field("editable", &self.editable)
+            .field("locally_modified", &self.locally_modified)
+            .field("changed_on_disk", &self.changed_on_disk)
             .finish()
     }
 }
 
 impl Buffer {
-    /// Create a buffer from a `Rope` and optional path/mtime.
+    /// Create a buffer from a `Rope` and optional path/mtime. The light-
+    /// editing flags start clear.
     pub fn new(path: Option<PathBuf>, rope: Rope, mtime: SystemTime, editable: bool) -> Self {
         Self {
             path,
             rope,
             mtime,
             editable,
+            locally_modified: false,
+            changed_on_disk: false,
         }
+    }
+
+    /// Whether this buffer is locally owned (never auto-clobbered by a disk
+    /// change): it has no on-disk path (scratch) or it carries unsaved local
+    /// edits.
+    pub fn is_locally_owned(&self) -> bool {
+        self.path.is_none() || self.locally_modified
     }
 
     /// The number of lines in the buffer.

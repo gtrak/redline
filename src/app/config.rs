@@ -28,7 +28,7 @@ impl From<ThemeChoice> for Theme {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Theme selection.
@@ -37,6 +37,26 @@ pub struct Config {
     /// e.g. `quit = "C-q"`. Applied to the global keymap on load.
     #[serde(rename = "key-bindings")]
     pub key_bindings: BTreeMap<String, String>,
+    /// Live-reload changed files on disk (default `true`). A runtime
+    /// `M-x toggle-watcher` command suspends/resumes watching per session;
+    /// this is the on-disk default.
+    #[serde(default = "default_auto_reload")]
+    pub auto_reload: bool,
+}
+
+/// `auto_reload` defaults to on (plan decision #7: the repo is live).
+fn default_auto_reload() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            key_bindings: BTreeMap::new(),
+            auto_reload: true,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

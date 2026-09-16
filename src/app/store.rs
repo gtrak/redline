@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nucleo_matcher::{
     Matcher, pattern::{CaseMatching, Normalization, Pattern},
@@ -16,7 +17,9 @@ use nucleo_matcher::{
 
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
+use crate::app::events::{ChangeBus, ProjectChange};
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, parse_sequence};
+use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use crate::git::diff::{DiffSide, FileDiff};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
@@ -71,7 +74,9 @@ impl ViewId {
                 km.bind(&[Key::alt_char('v')], "scroll-page-up").unwrap();
                 km.bind(&[Key::ctrl_char('d')], "scroll-half-page-down").unwrap();
                 km.bind(&[Key::ctrl_char('u')], "scroll-half-page-up").unwrap();
-                km.bind(&[Key::char('g')], "scroll-top").unwrap();
+                // `g` = force-reload the current file buffer (issue 04's
+                // refresh role; scroll-top is still reachable via M-<).
+                km.bind(&[Key::char('g')], "reload-buffer").unwrap();
                 km.bind(&[Key::char('G')], "scroll-bottom").unwrap();
                 km
                     .bind(&[Key::alt_char('g'), Key::char('g')], "goto-line")
@@ -282,6 +287,16 @@ pub struct AppStore {
     /// Number of lines visible in the file view (set by the UI on
     /// resize); used for page-scroll and slice math.
     viewport_lines: usize,
+    /// Project-change bus: the file watcher publishes here; the UI
+    /// (FileView auto-reload) and git status (07's seam) subscribe.
+    pub watch_bus: ChangeBus,
+    /// The single active file watcher (exactly one per project at a time).
+    watcher: Option<ActiveWatcher>,
+    /// Live-reload changed files on disk (config default `true`).
+    pub auto_reload: bool,
+    /// Runtime suspend state for the watcher (`M-x toggle-watcher`);
+    /// independent of the `auto_reload` config default.
+    watch_suspended: bool,
 }
 
 impl AppStore {
@@ -393,6 +408,10 @@ impl AppStore {
             goto_line_active: false,
             goto_line_input: String::new(),
             viewport_lines: 24, // default; the UI updates on resize
+            watch_bus: ChangeBus::new(),
+            watcher: None,
+            auto_reload: true,
+            watch_suspended: false,
         }
     }
 
@@ -400,6 +419,7 @@ impl AppStore {
     /// Returns an error describing the first unbindable override.
     pub fn apply_config(&mut self, config: &Config) -> Result<(), String> {
         self.theme = Theme::from(config.theme);
+        self.auto_reload = config.auto_reload;
         for (command, sequence) in &config.key_bindings {
             let seq = parse_sequence(sequence)
                 .map_err(|e| format!("`{command}`: invalid key sequence `{sequence}`: {e}"))?;
@@ -555,6 +575,9 @@ impl AppStore {
             .unwrap_or(0);
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(pos, text);
+            // A local edit: the buffer now differs from disk (the
+            // light-editing flag, plan decision #6).
+            buf.locally_modified = true;
             // Invalidate the highlight cache for this buffer (text changed).
             self.invalidate_highlight_for_key(&key);
             true
@@ -1057,6 +1080,10 @@ impl AppStore {
         self.git = None;
         self.status_tree = None;
         self.dirty = None;
+        // Swap the file watcher: stop the old project's watcher and start
+        // one for the new root (exactly one at a time). No-op in plain unit
+        // tests (no runtime).
+        self.start_watcher();
         self.project_store.registry.upsert(&root_path);
         let _ = self.project_store.save_registry();
         self.ensure_files();
@@ -1269,17 +1296,19 @@ impl AppStore {
     /// Ensure the current buffer's highlight is cached; builds it on
     /// a cache miss. Called on buffer open and on theme change.
     pub fn ensure_highlight(&mut self) {
-        let key = match self.buffers.current() {
-            Some(k) => k.to_string(),
-            None => return,
-        };
+        if let Some(key) = self.buffers.current().map(str::to_string) {
+            self.ensure_highlight_for_key(&key);
+        }
+    }
+
+    /// Build (or reuse) the highlight for the buffer with `key`; a no-op
+    /// when the buffer is plain text, big, or already cached for the
+    /// current (path, mtime, theme). Used by reloads so a re-read buffer is
+    /// re-highlighted immediately (cache invalidation by mtime).
+    fn ensure_highlight_for_key(&mut self, key: &str) {
         let (path, mtime, big) = {
-            let buf = self.buffers.get(&key).unwrap();
-            (
-                buf.path.clone(),
-                buf.mtime,
-                buf.is_big(),
-            )
+            let Some(buf) = self.buffers.get(key) else { return };
+            (buf.path.clone(), buf.mtime, buf.is_big())
         };
         let Some(path) = path else { return };
         if big {
@@ -1296,7 +1325,7 @@ impl AppStore {
         }
         // Cache miss: build the highlight.
         let rope = {
-            let buf = self.buffers.get(&key).unwrap();
+            let buf = self.buffers.get(key).unwrap();
             // Rope clone is O(1) (data sharing).
             buf.rope.clone()
         };
@@ -1818,6 +1847,220 @@ impl AppStore {
         true
     }
 
+    // ── file watching (issue 04) ───────────────────────────────────────
+
+    /// The project-change bus (subscribers: FileView auto-reload, git status).
+    pub fn watch_bus(&self) -> &ChangeBus {
+        &self.watch_bus
+    }
+
+    /// Whether a file watcher is currently active (0 or 1 — exactly one at a
+    /// time). Exposed for test diagnostics (the spec's "handle count" check).
+    #[allow(dead_code)]
+    pub fn watcher_count(&self) -> usize {
+        usize::from(self.watcher.is_some())
+    }
+
+    /// The root the active watcher is watching (exactly one at a time).
+    /// Exposed for test diagnostics.
+    #[allow(dead_code)]
+    pub fn watcher_active_root(&self) -> Option<&PathBuf> {
+        self.watcher.as_ref().map(|w| &w.root)
+    }
+
+    /// Whether the watcher is runtime-suspended (`M-x toggle-watcher`).
+    /// Exposed for test diagnostics.
+    #[allow(dead_code)]
+    pub fn watcher_suspended(&self) -> bool {
+        self.watch_suspended
+    }
+
+    /// Start (or replace) the debounced watcher for the current project with
+    /// the default debounce window. No-op when there's no project, watching is
+    /// disabled (`auto_reload`), or it's suspended.
+    pub fn start_watcher(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
+        self.start_watcher_at(&root, DEFAULT_DEBOUNCE);
+    }
+
+    /// Start a watcher for `root` with `debounce`. Stops any current watcher
+    /// first (exactly one at a time) and skips the spawn when no runtime is
+    /// available (plain unit tests have none; production + tokio tests do).
+    pub fn start_watcher_at(&mut self, root: &Path, debounce: Duration) {
+        if !self.auto_reload || self.watch_suspended {
+            self.stop_watcher();
+            return;
+        }
+        if self.watcher.as_ref().is_some_and(|w| w.root.as_path() == root) {
+            return; // already watching this root
+        }
+        self.stop_watcher();
+        if tokio::runtime::Handle::try_current().is_err() {
+            return; // no runtime (plain unit test): nothing to spawn into
+        }
+        match crate::app::watcher::start_watch(root, &self.watch_bus, debounce) {
+            Some(w) => {
+                self.watcher = Some(w);
+                tracing::info!(root = %root.display(), "watcher started");
+            }
+            None => {
+                self.minibuffer_message("file watching unavailable (inotify limit?)");
+            }
+        }
+    }
+
+    /// Stop the current watcher (signal the consumer to tear down the
+    /// debouncer + notify + pump threads). Idempotent.
+    pub fn stop_watcher(&mut self) {
+        if let Some(mut w) = self.watcher.take() {
+            w.stop();
+        }
+    }
+
+    /// `M-x toggle-watcher`: suspend/resume live watching. Suspend stops the
+    /// watcher (events are dropped, not buffered); resume starts a fresh one.
+    pub fn toggle_watcher(&mut self) {
+        self.watch_suspended = !self.watch_suspended;
+        if self.watch_suspended {
+            self.stop_watcher();
+            self.minibuffer_message("file watching suspended (M-x toggle-watcher)");
+        } else {
+            self.start_watcher();
+            self.minibuffer_message("file watching resumed (M-x toggle-watcher)");
+        }
+    }
+
+    /// Take the active watcher out of the store (brief mutable borrow) so the
+    /// caller can tear it down WITHOUT holding the store lock across an
+    /// await. The caller owns the returned `ActiveWatcher`. `None` when no
+    /// watcher is active.
+    pub fn take_watcher(&mut self) -> Option<ActiveWatcher> {
+        self.watcher.take()
+    }
+
+    /// Apply a project change: auto-reload non-locally-owned buffers whose
+    /// path changed (preserving the scroll anchor), set the conflict marker
+    /// on locally-owned ones, and refresh git status (07's seam).
+    ///
+    /// This is the FileView / git-status subscription entry point.
+    pub fn apply_project_change(&mut self, change: &ProjectChange) {
+        if change.is_empty() {
+            return;
+        }
+        let mut reloaded = 0usize;
+        let mut conflicts = 0usize;
+        for path in &change.paths {
+            let key = path.to_string_lossy().into_owned();
+            // Read the buffer's state without holding a borrow across the
+            // mutable reload / conflict update below.
+            let (matches, locally_owned) = match self.buffers.get(&key) {
+                Some(buf) if buf.path.as_ref() == Some(path) => {
+                    (true, buf.is_locally_owned())
+                }
+                _ => (false, false),
+            };
+            if !matches {
+                continue;
+            }
+            if locally_owned {
+                // Conflict: never auto-clobber a locally-owned buffer.
+                if let Some(b) = self.buffers.get_mut(&key) {
+                    b.changed_on_disk = true;
+                }
+                conflicts += 1;
+            } else if self.reload_buffer(path) {
+                reloaded += 1;
+            }
+        }
+        // git status refresh (07's seam): only when a repo is open, so a
+        // non-git project never spams a failure message on every change.
+        if self.git.is_some() {
+            self.refresh_magit();
+        }
+        if conflicts > 0 && reloaded == 0 {
+            // The user should know their edit conflicts with a disk change.
+            self.minibuffer_message("changed on disk — press g to reload");
+        }
+    }
+
+    /// Re-read the file buffer at `path` from disk, preserving the scroll
+    /// anchor (same line number if it still exists, else clamp). Returns true
+    /// when the buffer existed and was reloaded.
+    fn reload_buffer(&mut self, path: &Path) -> bool {
+        let key = path.to_string_lossy().into_owned();
+        let old_top = self.scroll.get(&key).copied().unwrap_or(0);
+        let (rope, mtime) = match load_file(path) {
+            Ok(x) => x,
+            // File vanished / unreadable: keep the old content; no error
+            // spam on every change event.
+            Err(_) => return false,
+        };
+        let new_total = rope.len_lines();
+        let new_top = reload_anchor(old_top, new_total);
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope = rope;
+            buf.mtime = mtime;
+            buf.changed_on_disk = false;
+        }
+        self.scroll.insert(key.clone(), new_top);
+        self.ensure_highlight_for_key(&key);
+        true
+    }
+
+    /// `g`: force-reload the current file buffer from disk, superseding any
+    /// conflict (clears the changed-on-disk marker and the local-modified
+    /// flag). The scratch buffer (no path) is handled gracefully.
+    pub fn reload_current_buffer(&mut self) {
+        let Some(key) = self.buffers.current().map(str::to_string) else {
+            self.minibuffer_message("no buffer to reload");
+            return;
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            // Scratch (no path): nothing on disk to reload.
+            self.minibuffer_message("no file to reload (scratch buffer)");
+            return;
+        };
+        let old_top = self.scroll.get(&key).copied().unwrap_or(0);
+        let (rope, mtime) = match load_file(&path) {
+            Ok(x) => x,
+            Err(e) => {
+                self.minibuffer_message(&format!("reload failed: {e}"));
+                return;
+            }
+        };
+        let new_total = rope.len_lines();
+        let new_top = reload_anchor(old_top, new_total);
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope = rope;
+            buf.mtime = mtime;
+            buf.changed_on_disk = false;
+            buf.locally_modified = false; // force reload supersedes local edits
+        }
+        self.scroll.insert(key.clone(), new_top);
+        self.ensure_highlight_for_key(&key);
+        self.minibuffer_message("reloaded");
+    }
+
+    /// Mark a buffer as locally modified (the light-editing hook; also used
+    /// by tests to exercise the conflict logic before the editing UI lands).
+    #[allow(dead_code)]
+    pub fn mark_locally_modified(&mut self, key: &str) {
+        if let Some(buf) = self.buffers.get_mut(key) {
+            buf.locally_modified = true;
+        }
+    }
+
+    /// Whether the current buffer has an un-reconciled disk change (the
+    /// "changed on disk" conflict marker shown in the file view).
+    pub fn current_buffer_changed_on_disk(&self) -> bool {
+        self.buffers
+            .current_buffer()
+            .map(|b| b.changed_on_disk)
+            .unwrap_or(false)
+    }
+
     // ── keys & dispatch (unchanged skeleton from issue 01) ──────────────
 
     /// Feed one keypress from the terminal. While the picker is open,
@@ -1979,6 +2222,22 @@ impl AppStore {
     pub fn minibuffer_message(&mut self, msg: &str) {
         self.message = msg.to_string();
     }
+}
+
+/// Pure scroll-anchor math for a buffer reload (issue 04).
+///
+/// `old_top` is the scroll top (first visible line, 0-based) before the
+/// reload; `new_total` is the line count after the reload. The reader's line
+/// anchor is preserved when it still exists (`old_top < new_total`); when the
+/// anchor line has vanished (the file shrank past it), the view clamps to the
+/// last line so the reader snaps to the end of the now-shorter file.
+///
+/// Extracted as a pure function so it is testable without notify / IO.
+pub fn reload_anchor(old_top: usize, new_total: usize) -> usize {
+    if new_total == 0 {
+        return 0;
+    }
+    old_top.min(new_total - 1)
 }
 
 fn file_candidate(rel: &str) -> PickerCandidate {
@@ -2550,7 +2809,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 40);
+        assert_eq!(store.picker_count().0, 42);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -2568,13 +2827,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 39);
+        assert_eq!(store.picker_selected(), 41);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 38);
+        assert_eq!(store.picker_selected(), 40);
 
-        // RET runs the candidate at the selected index (38: magit-next).
+        // RET runs the candidate at the selected index (40: reload-buffer).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -2606,7 +2865,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 40);
+        assert_eq!(store.picker_count().0, 42);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -2887,6 +3146,201 @@ mod tests {
             s.buffer_text().contains("new"),
             "reopen must reload changed file"
         );
+    }
+
+    // ── issue 04 store-level tests (no notify needed) ─────────────────
+
+    fn change(paths: Vec<std::path::PathBuf>) -> ProjectChange {
+        let n = paths.len();
+        ProjectChange {
+            seq: 1,
+            paths,
+            kinds: vec![crate::app::events::ChangeKind::Modify; n],
+        }
+    }
+
+    #[test]
+    fn reload_anchor_preserves_line_when_it_exists() {
+        // Gains lines below: the anchor line still exists → keep it.
+        assert_eq!(reload_anchor(50, 100), 50);
+        // Gains lines above: the anchor line still exists (by number) → keep.
+        assert_eq!(reload_anchor(5, 105), 5);
+        // Anchor exactly on the last line.
+        assert_eq!(reload_anchor(19, 20), 19);
+    }
+
+    #[test]
+    fn reload_anchor_clamps_when_anchor_vanished() {
+        // File shrank past the anchor: clamp to the last line.
+        assert_eq!(reload_anchor(50, 20), 19);
+        assert_eq!(reload_anchor(100, 1), 0);
+    }
+
+    #[test]
+    fn reload_anchor_empty_file() {
+        assert_eq!(reload_anchor(50, 0), 0);
+        assert_eq!(reload_anchor(0, 0), 0);
+    }
+
+    #[test]
+    fn auto_reload_defaults_on_and_watcher_inactive_until_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        assert!(s.auto_reload, "auto_reload must default to on");
+        assert!(!s.watcher_suspended());
+        assert_eq!(s.watcher_count(), 0, "no watcher until started");
+    }
+
+    #[test]
+    fn toggle_watcher_flips_suspend_state() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut s = store(dir.path());
+        s.toggle_watcher();
+        assert!(s.watcher_suspended(), "first toggle suspends");
+        s.toggle_watcher();
+        assert!(!s.watcher_suspended(), "second toggle resumes");
+    }
+
+    #[test]
+    fn non_edited_buffer_auto_reloads_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let path = dir.path().join("src/t.rs");
+        std::fs::write(&path, "fn old() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let key = s.buffers.current().unwrap().to_string();
+        // A plain read-only file buffer: not locally owned.
+        assert!(!s.buffers.get(&key).unwrap().is_locally_owned());
+
+        std::fs::write(&path, "fn fresh() {}\n").unwrap();
+        s.apply_project_change(&change(vec![path]));
+        assert!(
+            s.buffer_text().contains("fresh"),
+            "auto-reload must re-read content"
+        );
+        assert!(
+            !s.buffers.get(&key).unwrap().changed_on_disk,
+            "no conflict marker for a clean buffer"
+        );
+    }
+
+    #[test]
+    fn conflict_flag_transitions_on_locally_modified_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let path = dir.path().join("src/t.rs");
+        std::fs::write(&path, "fn old() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let key = s.buffers.current().unwrap().to_string();
+        // Simulate a local edit (the light-editing flag path).
+        s.mark_locally_modified(&key);
+        assert!(s.buffers.get(&key).unwrap().locally_modified);
+
+        // A disk change arrives while locally owned → NO auto-reload; marker set.
+        s.apply_project_change(&change(vec![path.clone()]));
+        assert!(
+            s.buffers.get(&key).unwrap().changed_on_disk,
+            "conflict marker must be set"
+        );
+        assert!(s.current_buffer_changed_on_disk());
+        assert!(
+            s.buffer_text().contains("old"),
+            "no auto-reload while conflicted"
+        );
+
+        // Change the disk, then `g` (force reload) supersedes the conflict.
+        std::fs::write(&path, "fn new() {}\n").unwrap();
+        s.reload_current_buffer();
+        assert!(
+            !s.buffers.get(&key).unwrap().changed_on_disk,
+            "marker cleared after g"
+        );
+        assert!(
+            !s.buffers.get(&key).unwrap().locally_modified,
+            "local flag cleared after g"
+        );
+        assert!(
+            s.buffer_text().contains("new"),
+            "g re-read the new content"
+        );
+    }
+
+    #[test]
+    fn reload_preserves_scroll_anchor_when_lines_added() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let path = dir.path().join("src/big.txt");
+        let base: String = (0..100)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &base).unwrap();
+        let base_dir = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base_dir.path().to_path_buf());
+        s.set_viewport_lines(10);
+        s.open_path("src/big.txt");
+        s.scroll_to_bottom();
+        let n_before = s.buffers.current_buffer().unwrap().line_count();
+        let top_before = s.scroll_top();
+        assert_eq!(top_before, n_before - 10, "scrolled to last visible page");
+
+        // The file grows well past the anchor; the anchor line still exists.
+        let grown: String = (0..200)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &grown).unwrap();
+        s.apply_project_change(&change(vec![path]));
+        assert_eq!(s.scroll_top(), top_before, "anchor line preserved");
+        assert!(
+            s.buffers.current_buffer().unwrap().line_count() > top_before,
+            "file grew past the anchor"
+        );
+    }
+
+    #[test]
+    fn reload_clamps_scroll_anchor_when_file_shrinks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let path = dir.path().join("src/big.txt");
+        let base: String = (0..100)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &base).unwrap();
+        let base_dir = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base_dir.path().to_path_buf());
+        s.set_viewport_lines(10);
+        s.open_path("src/big.txt");
+        s.scroll_to_bottom();
+        let n_before = s.buffers.current_buffer().unwrap().line_count();
+        let top_before = s.scroll_top();
+        assert_eq!(top_before, n_before - 10, "scrolled to last visible page");
+
+        // The file shrinks to 20 content lines (well below the anchor).
+        let shrunken: String = (0..20)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &shrunken).unwrap();
+        s.apply_project_change(&change(vec![path]));
+        let n_after = s.buffers.current_buffer().unwrap().line_count();
+        assert!(
+            n_after <= top_before,
+            "anchor line must vanish: n_after={n_after}, top_before={top_before}"
+        );
+        assert_eq!(s.scroll_top(), n_after - 1, "clamped to last line");
     }
 }
 

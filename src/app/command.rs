@@ -373,6 +373,19 @@ impl CommandRegistry {
             "git",
             |store, _arg| store.magit_cursor_up(),
         ));
+        // ── issue 04: file watching ─────────────────────────────────
+        reg.register(Command::new(
+            "reload-buffer",
+            "Force-reload the current file buffer from disk (g); supersedes a \"changed on disk\" conflict",
+            "watching",
+            |store, _arg| store.reload_current_buffer(),
+        ));
+        reg.register(Command::new(
+            "toggle-watcher",
+            "Suspend/resume live file watching",
+            "watching",
+            |store, _arg| store.toggle_watcher(),
+        ));
         reg
     }
 }
@@ -393,7 +406,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 40, "expected 40 seed commands: {names:?}");
+        assert_eq!(names.len(), 42, "expected 42 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -435,6 +448,8 @@ mod tests {
             "magit-refresh",
             "magit-next",
             "magit-prev",
+            "reload-buffer",
+            "toggle-watcher",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

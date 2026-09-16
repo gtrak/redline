@@ -207,10 +207,14 @@ pub struct FileViewProps {
     pub total_lines: usize,
     pub top_line: usize,
     pub viewport_lines: usize,
+    /// The current buffer has an un-reconciled disk change (the "changed on
+    /// disk" conflict marker; issue 04).
+    pub changed_on_disk: bool,
 }
 
 /// The virtualized file view: titled, renders visible lines with
-/// highlight spans, and shows scroll indicators.
+/// highlight spans, shows scroll indicators, and a "changed on disk" banner
+/// when the current buffer has an un-reconciled disk change.
 #[component]
 pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let t = theme::current();
@@ -222,6 +226,16 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                     color: crate::ui::face_color(t.view_title),
                     weight: crate::ui::face_weight(t.view_title),
                 )
+                #(if props.changed_on_disk {
+                    Some(element! {
+                        Text(
+                            content: "  ⚠ changed on disk — press g to reload",
+                            color: crate::ui::face_color(t.preview),
+                        )
+                    })
+                } else {
+                    None
+                })
                 FileViewCanvas(
                     lines: props.lines.clone(),
                     total_lines: props.total_lines,
