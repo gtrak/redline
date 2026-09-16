@@ -1,0 +1,68 @@
+[package]
+name = "redline"
+version = "0.1.0"
+edition = "2024"
+description = "Read-focused, emacs-flavored TUI code browser for the agent-coding loop"
+
+[dependencies]
+# ── UI layer ────────────────────────────────────────────────────────────────
+iocraft = "0.9.1"          # declarative TUI (latest 0.9.1; re-exports crossterm events)
+crossterm = "0.29"         # pinned to match iocraft's `^0.29` requirement exactly
+
+# ── async runtime + observability ──────────────────────────────────────────
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+
+# ── text model ──────────────────────────────────────────────────────────────
+ropey = "1.6.1"
+
+# ── syntax: tree-sitter 0.24 family ────────────────────────────────────────
+# All grammars below are pinned to releases whose `tree-sitter` requirement
+# is `^0.24`, so cargo resolves a SINGLE tree-sitter runtime (0.24.7).
+# Verified against crates.io dependency metadata 2026-09-15.
+# DO NOT casually bump grammar versions: several latest releases require
+# tree-sitter ^0.25/^0.26 and would fork the runtime (ABI mismatch).
+tree-sitter = "0.24.7"
+tree-sitter-highlight = "0.24.7"   # requires tree-sitter ^0.24.5
+tree-sitter-rust = "=0.24.0"       # 0.24.1+ require tree-sitter ^0.25!
+tree-sitter-javascript = "0.23.1"
+tree-sitter-typescript = "0.23.2"  # provides both TS and TSX grammars
+tree-sitter-python = "0.23.6"
+tree-sitter-go = "0.23.4"
+tree-sitter-c = "0.23.4"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-bash = "0.23.3"
+tree-sitter-json = "0.24.8"
+tree-sitter-yaml = "=0.7.0"        # 0.7.1+ require tree-sitter ^0.25.4!
+tree-sitter-md = "=0.5.1"          # 0.5.2+ require tree-sitter ^0.26!
+tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar (^0.24); the
+                                   # original `tree-sitter-toml` is stuck at ^0.20
+
+# ── fuzzy matching (helm-style pickers) ────────────────────────────────────
+nucleo-matcher = "0.3.1"   # add `nucleo = "0.5"` later if streaming sources needed
+
+# ── search (embedded ripgrep) ───────────────────────────────────────────────
+ignore = "0.4.33"          # gitignore-aware parallel walk
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
+
+# ── git (magit subset) ──────────────────────────────────────────────────────
+git2 = "0.21"
+
+# ── file watching (live repo) ───────────────────────────────────────────────
+notify = "8.2"
+notify-debouncer-full = "0.7"  # requires notify ^8.2 — same family
+
+# ── config, errors, misc ────────────────────────────────────────────────────
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+dirs = "7.0"
+rayon = "1.12"
+
+[dev-dependencies]
+tempfile = "3.27"
+insta = "1.48"
