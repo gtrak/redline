@@ -47,7 +47,7 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
     let t = theme::current();
     element! {
         View(flex_grow: 1.0_f32, overflow: Overflow::Hidden) {
-            View(background_color: face_bg(t.view)) {
+            View(flex_direction: FlexDirection::Column, flex_grow: 1.0_f32, background_color: face_bg(t.view)) {
                 Text(
                     content: &props.title,
                     color: face_color(t.view_title),
@@ -238,5 +238,48 @@ mod tests {
         assert!(s.contains("fn target() {}"), "match line missing:\n{s}");
         assert!(s.contains("RET jump"), "help line missing:\n{s}");
         assert!(s.contains("*  *search*"), "status line view name missing:\n{s}");
+    }
+
+    /// Structural regression: the search results title and first row must
+    /// render on separate lines (not overprinted on the same row).
+    #[test]
+    fn results_view_title_and_rows_on_separate_lines() {
+        use crate::ui::root::Root;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn target() {}\ntarget();\n").unwrap();
+
+        let mut store = store(dir.path());
+        store.set_viewport_lines(24);
+        store.start_project_search("target".to_string());
+
+        let mut rx = store.search_rx().unwrap();
+        drain_search_to_finished(&mut store, &mut rx, std::time::Duration::from_secs(5));
+
+        let (rows, _, _, _) = store.search_view_info();
+        assert!(!rows.is_empty(), "expected non-empty search rows");
+
+        let title = store.search_title();
+
+        let mut app = element! {
+            ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
+                Root
+            }
+        };
+        let s = app.to_string();
+
+        let lines: Vec<&str> = s.lines().collect();
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains(&title))
+            .unwrap_or_else(|| panic!("title '{title}' line missing\n{s}"));
+        // The first row text must not be on the same line as the title.
+        let first_row_text = row_text(&rows[0]);
+        assert!(
+            !lines[title_idx].contains(&first_row_text),
+            "first search row '{first_row_text}' overprinted on title line:\n{s}"
+        );
     }
 }

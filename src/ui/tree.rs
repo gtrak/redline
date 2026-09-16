@@ -16,6 +16,62 @@ pub struct TreeSidebarProps {
     pub selected: usize,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::store::AppStore;
+    use std::sync::{Arc, Mutex};
+
+    /// Structural regression: the tree sidebar title and file rows must
+    /// render on separate lines (not overprinted on the same row).
+    #[test]
+    fn tree_title_and_rows_on_separate_lines() {
+        use crate::ui::root::Root;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# hello\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.toggle_tree();
+
+        let mut app = element! {
+            ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
+                Root
+            }
+        };
+        let s = app.to_string();
+
+        // The tree title "*tree*" must be on its own line.
+        let lines: Vec<&str> = s.lines().collect();
+        let title_line = lines
+            .iter()
+            .find(|l| l.contains("*tree*"))
+            .expect("tree title line missing");
+        // The title line should not also contain a file name.
+        assert!(
+            !title_line.contains("main.rs"),
+            "tree title overprinted with file row: {title_line:?}"
+        );
+        // A file row must be on a different line than the title.
+        let title_idx = lines.iter().position(|l| l.contains("*tree*")).unwrap();
+        let file_lines: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("main.rs"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !file_lines.contains(&title_idx),
+            "file row 'main.rs' overprinted on tree title line"
+        );
+    }
+}
+
 /// A fixed-width left column of indented file rows, the selected one
 /// highlighted (reverse-video cursor).
 #[component]
@@ -32,7 +88,7 @@ pub fn TreeSidebar(props: &TreeSidebarProps, mut _hooks: Hooks) -> impl Into<Any
         .take(8)
         .collect();
     element! {
-        View(width: 34, flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: face_bg(t.view)) {
+        View(width: 34, flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: face_bg(t.view), flex_direction: FlexDirection::Column) {
             Text(
                 content: "*tree*",
                 color: face_color(t.view_title),
