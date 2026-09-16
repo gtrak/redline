@@ -14,12 +14,11 @@ platform watcher; `notify-debouncer-full` coalesces rapid events (agent churn).
 
 ## Version
 
-- `notify = "8.2"` (8.2.0). `RecommendedWatcher` is a type alias for the
-  platform backend (inotify on Linux; `INotifyWatcher`, `PollWatcher`,
+- `notify = "8.2"` (8.2.0): `RecommendedWatcher` is a type alias for the
+  platform backend (inotify on Linux; `INotifyWatcher`/`PollWatcher`/
   `NullWatcher` re-exported at the crate root).
 - `notify-debouncer-full = "0.7"` (0.7.0), requires notify ^8.2; re-exports
-  `notify` and `file_id`; feature pass-throughs (`macos_fsevent`,
-  `crossbeam-channel`, `flume`, ...) are off by default.
+  `notify` + `file_id`; feature pass-throughs are off by default.
 
 ## Core API
 
@@ -28,9 +27,8 @@ platform watcher; `notify-debouncer-full` coalesces rapid events (agent churn).
 - `notify::recommended_watcher(event_handler) -> Result<RecommendedWatcher>`
   where `event_handler: F`, `F: EventHandler`.
 - `EventHandler: Send + 'static`, method
-  `fn handle_event(&mut self, event: Result<Event>)`. Blanket impl for
-  `FnMut(Result<Event>) + Send + 'static`; also for
-  `std::sync::mpsc::Sender<Result<Event>>` (crossbeam/flume via features).
+  `fn handle_event(&mut self, event: Result<Event>)`; blanket impl for
+  `FnMut(Result<Event>) + Send + 'static` and `std::sync::mpsc::Sender<Result<Event>>`.
 - `Watcher` trait (implemented by `RecommendedWatcher`):
   - `watch(&mut self, path: &Path, mode: RecursiveMode) -> Result<()>`
   - `unwatch(&mut self, path: &Path) -> Result<()>`
@@ -131,8 +129,7 @@ while let Ok(result) = rx.recv() {
 
 ## Usage in redline
 
-- `src/app/watcher.rs` — one `Debouncer` per open project:
-  `new_debouncer(~1s, None, tx)` + `watch(project_root, Recursive)`.
+- `src/app/watcher.rs` — one `Debouncer` per open project: `new_debouncer(~1s, None, tx)` + `watch(project_root, Recursive)`.
 - `src/app/events.rs` — receiver thread maps `DebouncedEvent` paths to
   project-change bus events; file views reload; git status (07) and symbol
   index (05) subscribe later.
@@ -147,8 +144,7 @@ while let Ok(result) = rx.recv() {
 - `DebouncedEvent` fields are `event` and `time`, not `paths`/`kind`
   directly (`ev.paths` works via `Deref`).
 - Some editors save as remove-then-create; the debouncer suppresses
-  `Modify` after `Create` and stitches renames, but a move out of the
-  watched tree can surface as `Remove`.
+  `Modify` after `Create` and stitches renames (moves out of the tree → `Remove`).
 - Inotify limits: recursive watches count every directory against
   `fs.inotify.max_user_watches`; failures arrive on `Err(DebounceEventResult)`.
 - `stop()` may block up to one tick_rate; use `stop_nonblocking()` from the UI thread.

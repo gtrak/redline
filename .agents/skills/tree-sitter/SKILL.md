@@ -35,13 +35,10 @@ API differs from pre-0.24 in several places (see Gotchas) — do not trust older
 | tree-sitter-md | =0.5.1 | 0.5.2+ require tree-sitter ^0.26! |
 | tree-sitter-toml-ng | 0.7.0 | maintained TOML (^0.24); original `tree-sitter-toml` stuck at ^0.20 |
 
-- All grammar pins resolve against a SINGLE tree-sitter runtime (0.24.7).
-  Bumping a grammar to a release requiring `^0.25`/`^0.26` pulls a second
-  runtime crate — two runtimes with incompatible ABIs is how you get silent
-  `set_language` failures or worse.
-- rust/yaml/md use exact `=` pins because their next release already moved to a newer
-  runtime requirement; other caret pins currently land on ^0.24 — re-check crates.io
-  dependency metadata before any bump.
+- All grammar pins resolve against a SINGLE tree-sitter runtime (0.24.7). Bumping a grammar to a release requiring
+  `^0.25`/`^0.26` pulls a second runtime crate — incompatible ABIs are how you get silent `set_language` failures.
+- rust/yaml/md use exact `=` pins because their next release already moved to a newer runtime requirement; other
+  caret pins currently land on ^0.24 — re-check crates.io dependency metadata before any bump.
 
 ## Core API
 
@@ -75,8 +72,8 @@ QueryMatch { pattern_index: usize, captures: &[QueryCapture] }    // !Send !Sync
 QueryCapture { node: Node<'tree>, index: u32 }                    // index into capture_names()
 ```
 
-Parser, Language, Tree, Query, QueryCursor, TreeCursor, Node are all `Send + Sync`;
-`QueryMatch`/`QueryCaptures` are **not** (they borrow the cursor) — extract `Node` (Copy)
+Parser, Language, Tree, Query, QueryCursor, TreeCursor, Node are all `Send + Sync`; `QueryMatch`/`QueryCaptures`
+are **not** (they borrow the cursor) — extract `Node` (Copy) and indices before crossing threads.
 
 Build + parse + incremental reparse:
 
@@ -148,9 +145,8 @@ for event in events {
 - `Highlighter::highlight<'a>(&'a mut self, &'a HighlightConfiguration,
   &'a [u8], Option<&'a AtomicUsize>, impl FnMut(&str) -> Option<&'a HighlightConfiguration> + 'a)`.
 - `Highlight(pub usize)` — an index into the list passed to `configure`.
-- `HighlightConfiguration` is `Send + Sync`, immutable after `configure` — build once
-  per language, share everywhere. `Highlighter` wraps a stateful `Parser` (public field
-  `parser`) — keep one per worker thread.
+- `HighlightConfiguration` is `Send + Sync`, immutable after `configure` — build once per language, share everywhere.
+  `Highlighter` wraps a stateful `Parser` (public field `parser`) — keep one per worker thread.
 - Per-language queries ship as `&'static str` constants in the grammar crates (table
   below). The injection callback (last `highlight` arg) enables embedded languages
   (Markdown/TOML); redline v1 passes `|_| None`.
@@ -176,12 +172,10 @@ All verified against docs.rs. Every crate exports a `LanguageFn` constant and
 | tree-sitter-toml-ng (0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
 
 - No crate exports a `language()` fn in these versions — the constant is the API (the `language()` calls in some crate doc examples are stale).
-- `TAGS_QUERY` (LSP-tag-style symbol queries) exists only for
-  rust/js/ts/python/go/c/cpp. bash/json/yaml/toml/md have none — write small
-  custom queries (e.g. JSON keys, YAML keys) in `src/syntax/` for those.
-- tree-sitter-md is special: a plain `Parser` + `LANGUAGE` parses block structure
-  only. Full markdown uses its `MarkdownParser`, which returns a `MarkdownTree`
-  (block tree + inline trees per block node).
+- `TAGS_QUERY` (LSP-tag-style symbol queries) exists only for rust/js/ts/python/go/c/cpp. bash/json/yaml/toml/md have
+  none — write small custom queries (e.g. JSON keys, YAML keys) in `src/syntax/` for those.
+- tree-sitter-md is special: a plain `Parser` + `LANGUAGE` parses block structure only. Full markdown uses its
+  `MarkdownParser`, which returns a `MarkdownTree` (block tree + inline trees per block node).
 
 ## Usage in redline
 
@@ -193,22 +187,19 @@ Maps to plan 001 issues 03/04/05:
 - Highlight pipeline: build one `HighlightConfiguration` per language at startup,
   `configure` with the recognized-name list from config, cache highlight events keyed by
   (path, mtime, theme). `Highlighter` per worker.
-- Symbol index (issue 05): shared `Query` per language (Send+Sync, built
-  once); each rayon thread owns a `QueryCursor` (stateful, not shared). Prefer
-  each crate's `TAGS_QUERY` where available; custom queries for bash/json/yaml/toml/md.
+- Symbol index (issue 05): shared `Query` per language (Send+Sync, built once); each rayon thread owns a `QueryCursor`
+  (stateful, not shared). Prefer each crate's `TAGS_QUERY` where available; custom queries for bash/json/yaml/toml/md.
 - File watching (issue 04): on external change, `Tree::edit(&InputEdit {..})`
   then `parse(new_text, Some(&old_tree))` for the incremental reparse.
 
 ## Gotchas
 
-- **`set_language` takes `&Language`, not `LanguageFn`.** Convert with
-  `Language::from(grammars::LANGUAGE)`. ABI mismatch returns `Err(LanguageError)` —
-  compare `Language::version()` against `LANGUAGE_VERSION` / `MIN_COMPATIBLE_LANGUAGE_VERSION`.
+- **`set_language` takes `&Language`, not `LanguageFn`.** Convert with `Language::from(grammars::LANGUAGE)`. ABI mismatch
+  returns `Err(LanguageError)` — compare `Language::version()` against `LANGUAGE_VERSION` / `MIN_COMPATIBLE_LANGUAGE_VERSION`.
 - **`QueryCapture.index`** (0.24) — older versions called this `name_index`.
 - **`Node::utf8_text(source)`** — the old `Node::text(source)` is gone.
-- **Query iterators are `StreamingIterator`, not std `Iterator`.**
-  `QueryCaptures`/`QueryMatches` come from the `streaming-iterator` crate;
-  need `use streaming_iterator::StreamingIterator;` for `.next()`. `QueryCaptures` yields
+- **Query iterators are `StreamingIterator`, not std `Iterator`.** `QueryCaptures`/`QueryMatches` come from the
+  `streaming-iterator` crate; need `use streaming_iterator::StreamingIterator;` for `.next()`. `QueryCaptures` yields
   `(QueryMatch, usize)`; `QueryMatch` is !Send/!Sync.
 - **`captures`/`matches` take a third `TextProvider` argument** (pass
   `source.as_bytes()`; the blanket impl covers `&[u8]`).
@@ -217,11 +208,9 @@ Maps to plan 001 issues 03/04/05:
 - **Highlight constant naming**: `HIGHLIGHT_QUERY` (js/c/cpp/bash) vs
   `HIGHLIGHTS_QUERY` (rust/ts/python/go/json/yaml/toml-ng). Don't guess.
 - **`Highlighter::highlight` takes `&[u8]`**, not `&str`.
-- The tree-sitter-highlight crate-level doc example (uses
-  `tree_sitter_javascript::language()`, older crate versions) is stale — don't
-  copy it verbatim. tree-sitter-c's doc prose also mentions a `language()` fn its item list does not expose.
+- The tree-sitter-highlight crate-level doc example (uses `tree_sitter_javascript::language()`, older crate versions)
+  is stale — don't copy it verbatim. tree-sitter-c's doc prose also mentions a `language()` fn its item list does not expose.
 - tree-sitter-md with a plain `Parser` gives block-level structure only —
   inline tokens (links, code spans) need `INLINE_LANGUAGE`/`MarkdownParser`.
-- Bumping a grammar crate silently changes the ABI if the new release requires
-  tree-sitter ^0.25+ (cargo pulls a second runtime). Keep the `=` pins on
-  rust/yaml/md and re-check crates.io metadata before any bump.
+- Bumping a grammar crate silently changes the ABI if the new release requires tree-sitter ^0.25+
+  (cargo pulls a second runtime). Keep the `=` pins on rust/yaml/md and re-check crates.io metadata before any bump.
