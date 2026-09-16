@@ -636,6 +636,16 @@ async fn test() {
 - `MockTerminalConfig::default()` - default 80x24 terminal
 - `MockTerminalConfig::with_events(stream)` - provide event stream
 
+> **Dependency note (verified 2026-09):** `with_events` is generic over
+> `futures_core::stream::Stream`, and collecting frames needs `StreamExt`
+> — both come from the `futures`/`futures-util` crates. iocraft does **not**
+> re-export `Stream`/`StreamExt` (its `iocraft::terminal` module, which holds
+> the `TerminalEvents` stream type, is private), and `futures` is not a
+> transitive-nameable dep. If your project doesn't list `futures` directly,
+> you cannot drive `mock_terminal_render_loop`; verify keypress behavior at
+> the app-state level and render frames statically (`element!(...).to_string()`
+> takes `&mut self` — bind with `let mut app = ...`).
+
 ## System Context and Lifecycle
 
 `SystemContext` is always available:
