@@ -89,6 +89,7 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       a bare folder): graceful fallback, no panic.
 - [ ] **U-A3 Startup in a 10k-file repo**: status line shows indexing
       progress; UI stays responsive while indexing (keys repaint immediately).
+- [ ] **U-A3b Index progress honesty**: counter advances during indexing; clears on completion; incremental refresh shows `indexing…` not fake totals.
 - [ ] **U-A4 Second instance** while first is running: no cache corruption
       (recents/registry still load in both).
 
@@ -241,6 +242,8 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
 - [ ] **U-J5 No-truecolor / 256-color**: colors degrade, nothing unreadable.
 - [ ] **U-J6 Multibyte & wide chars**: filenames and content render aligned;
       isearch over multibyte safe (fixed in 03 — regression watch).
+- [ ] **U-J8 Idle stability**: with no input and no file changes, zero repaints over 5 idle seconds (render counter/log).
+- [ ] **U-J9 Burst coalescing**: 50 rapid file writes -> bounded repaints, no sustained flashing; pane fills the terminal exactly at 100x30 and on resize.
 - [ ] **U-J7 Mouse**: click/scroll in fullscreen — either functional or
       silently ignored (document which); no escape-sequence garbage on screen.
 
