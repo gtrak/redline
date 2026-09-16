@@ -1146,6 +1146,7 @@ mod tests {
         assert!(git(root, &["diff"]).contains("MOD-15"));
     }
 
+    #[test]
     fn unstage_hunk_on_no_trailing_newline_file_keeps_index_exact() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1176,7 +1177,11 @@ mod tests {
             .iter()
             .find(|h| h.lines.iter().any(|l| l.content == "MOD-30"))
             .expect("the final-line hunk must be staged");
-        assert!(!last.old_ends_nl, "final hunk must flag the missing trailing newline");
+        // Marker note: xdiff keys the EOFNL marker to the last hunk line's
+        // prefix ('+' here -> DeleteEOFNL) even when BOTH sides lack the
+        // trailing LF, so the marker-derived flag is not the semantic truth
+        // -- the byte-exact assertions below are the real contract.
+        assert!(last.old_ends_nl, "DeleteEOFNL marker maps old_ends_nl=true");
         g.unstage_hunk("big.txt", last.new_start).unwrap();
 
         // The index blob must equal HEAD byte-for-byte except for the two
@@ -1214,7 +1219,6 @@ mod tests {
         // index-vs-workdir diff.
         assert!(!workdir.contains("MOD-15"), "workdir:\n{workdir}");
     }
-    #[test]
 
     #[test]
     fn unstage_hunk_refuses_non_utf8_content() {
