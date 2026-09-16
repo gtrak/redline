@@ -88,6 +88,14 @@ StatusEntry<'_>::path_bytes(&self) -> &[u8]
 StatusEntry<'_>::status(&self) -> Status              // bitflags
 StatusEntry<'_>::head_to_index(&self) -> Option<DiffDelta<'_>>
 StatusEntry<'_>::index_to_workdir(&self) -> Option<DiffDelta<'_>>
+
+⚠ **Rename entry path (verified in libgit2 1.9.7):** for a rename, the
+`StatusEntry::path()` is the **old** (head/index) path, NOT the new one —
+e.g. a staged `doc.txt → docs.txt` reports `path() == "doc.txt"` with
+`status() == INDEX_RENAMED`. The **new** path is
+`head_to_index().new_file().path()` and the pre-rename path is
+`head_to_index().old_file().path()`. Use the new-file path as the entry's
+canonical path; do not assume `path()` is the destination.
 ```
 
 `Status` bitflags (all `u32`; helpers `is_index_new()`, `is_wt_modified()`, … exist for each):
