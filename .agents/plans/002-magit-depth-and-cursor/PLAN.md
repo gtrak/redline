@@ -16,6 +16,25 @@ can see.
 
 ## What
 
+0. **LIVE-UX AUDIT (orchestrator, sized-pty drive of the shipped build)** —
+   findings that reshape this plan:
+   - **Layout collapse in canvas views** (magit, tree): row content
+     overprints the view title/section headers on identical rows — the same
+     missing `flex_direction: Column` + definite-height class FileView had.
+     Root cause of "magit isn't fleshed out" and buried cursors.
+   - **Editable-buffer key interception breaks multi-key sequences**: in the
+     notes buffer, printable keys self-insert BEFORE prefix continuation, so
+     `C-x g`, `C-c p f` etc. are dead while editing. Interception must let
+     pending-prefix tails through.
+   - **False conflict on self-created files**: opening notes flags
+     "changed on disk" (the watcher sees the app's own file creation).
+   - **Content coherence**: graft cache cards rank above real source in the
+     file finder and open as pseudo-source; demo/placeholder commands
+     (demo-message-1/2, insert-demo-text) pollute the palette's first
+     screen; bare `q` in the main view quits the whole app (one stray q
+     loses everything).
+   - Coherent (keep): M-x palette, finder preview + ranking for exact
+     names, dirty counts, help lines, C-g matrix, conflict system.
 1. **Magit depth (issue 01)**: bring the status buffer to daily-driver
    magit feel — inline diff hunks under files in the status buffer (not
    behind RET), a persistent section cursor with obvious highlighting,

@@ -9,6 +9,16 @@ field report is "magit isn't fleshed out yet".
 
 ## Key decisions
 
+- **Transient menus (user directive: "magit has a hydra tree, I want the
+  full functionality")**: the magit interaction model is its transient tree
+  -- `?`/`h` shows a menu at the bottom of the frame listing the view's
+  bindings (key + description, grouped by registry category); prefix keys
+  shown with an ellipsis expand into their submenu (the hydra tree);
+  pressing a listed leaf key executes it directly; C-g closes. Source of
+  truth: the view keymap x registry metadata.
+- **Missing verbs**: `k` discard at file/hunk level (destructive,
+  confirmation-gated per magit), `h` top-level dispatch. The full verb table
+  lives in .agents/skills/magit/SKILL.md.
 - Inline hunks: show staged/unstaged hunks under their files directly in the
   status buffer (fold state per file, TAB toggles), reusing the diff
   renderer. RET on a hunk still visits the file.
