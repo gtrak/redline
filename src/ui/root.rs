@@ -13,9 +13,13 @@ use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewLine, PickerCa
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::file_view::FileView;
+use crate::ui::blame_view::BlameView;
+use crate::ui::commit_editor::CommitEditorView;
+use crate::ui::log_view::LogView;
 use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
 use crate::ui::results_view::ResultsView;
+use crate::ui::rows_view::MagitRowsView;
 use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
 
@@ -88,6 +92,15 @@ struct Snapshot {
     total: usize,
     preview: String,
     magit_rows: Vec<MagitRow>,
+    // issue 08: log / blame / commit-diff / commit editor
+    log_title: String,
+    log_rows: Vec<MagitRow>,
+    blame_title: String,
+    blame_rows: Vec<MagitRow>,
+    commit_diff_title: String,
+    commit_diff_rows: Vec<MagitRow>,
+    commit_editor_title: String,
+    commit_editor_rows: Vec<MagitRow>,
     dirty: Option<DirtyCounts>,
     // File view (issue 03).
     file_view_lines: Vec<FileViewLine>,
@@ -239,6 +252,14 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             total: s.picker_count().1,
             preview: s.picker_preview().to_string(),
             magit_rows: s.magit_rows(),
+            log_title: s.log_title(),
+            log_rows: s.log_rows(),
+            blame_title: s.blame_title(),
+            blame_rows: s.blame_rows(),
+            commit_diff_title: s.commit_diff_title(),
+            commit_diff_rows: s.commit_diff_rows(),
+            commit_editor_title: s.commit_editor_title(),
+            commit_editor_rows: s.commit_editor_rows(),
             dirty: s.dirty_counts(),
             file_view_lines: s.file_view_lines(),
             file_view_title: s.view_name_display(),
@@ -284,6 +305,29 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .into()),
         ViewId::MagitStatus => Some(element! {
             MagitStatusView(rows: snap.magit_rows.clone())
+        }
+        .into()),
+        ViewId::Log => Some(element! {
+            LogView(title: snap.log_title.clone(), rows: snap.log_rows.clone())
+        }
+        .into()),
+        ViewId::Blame => Some(element! {
+            BlameView(title: snap.blame_title.clone(), rows: snap.blame_rows.clone())
+        }
+        .into()),
+        ViewId::CommitDiff => Some(element! {
+            MagitRowsView(
+                title: snap.commit_diff_title.clone(),
+                rows: snap.commit_diff_rows.clone(),
+                help: "commit diff (read-only) · q back".to_string(),
+            )
+        }
+        .into()),
+        ViewId::CommitEditor => Some(element! {
+            CommitEditorView(
+                title: snap.commit_editor_title.clone(),
+                rows: snap.commit_editor_rows.clone(),
+            )
         }
         .into()),
         ViewId::Search => Some(element! {
@@ -486,7 +530,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 56"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 69"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

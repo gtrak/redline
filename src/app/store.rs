@@ -16,6 +16,7 @@ use std::time::Duration;
 use nucleo_matcher::{
     Matcher, pattern::{CaseMatching, Normalization, Pattern},
 };
+use ropey::Rope;
 use tokio::sync::mpsc;
 
 use crate::app::command::{CommandRegistry, RegistryError};
@@ -23,13 +24,15 @@ use crate::app::config::Config;
 use crate::app::events::{ChangeBus, ProjectChange};
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, parse_sequence};
 use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
+use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffSide, FileDiff};
+use crate::git::log::{relative_time_from, LogEntry};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
 use crate::model::buffer::{load_file, BufferTable, SCRATCH_NAME};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
-use crate::model::sections::{MagitRow, SectionKind, StatusTree};
+use crate::model::sections::{MagitRow, RowRole, SectionKind, StatusTree};
 use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, IndexProgress, SymbolIndex};
 use crate::search::occur;
 use crate::search::references;
@@ -51,6 +54,15 @@ pub enum ViewId {
     MagitStatus,
     /// The search results view (issue 06): grouped, counted, jumpable.
     Search,
+    /// The magit log view (issue 08): paged commit list.
+    Log,
+    /// The blame view (issue 08): per-line commit/author/age prefix.
+    Blame,
+    /// A read-only full tree diff of one commit (issue 08, log `RET`).
+    CommitDiff,
+    /// The inline commit-message editor (issue 08, `c`): the first editable
+    /// buffer, `C-c C-c` commits / `C-c C-k` aborts.
+    CommitEditor,
 }
 
 impl ViewId {
@@ -60,6 +72,10 @@ impl ViewId {
             ViewId::BufferList => "buffer-list",
             ViewId::MagitStatus => "magit-status",
             ViewId::Search => "search",
+            ViewId::Log => "log",
+            ViewId::Blame => "blame",
+            ViewId::CommitDiff => "commit-diff",
+            ViewId::CommitEditor => "commit-editor",
         }
     }
 
@@ -138,6 +154,63 @@ impl ViewId {
                 km.bind(&[Key::ctrl_char('n')], "magit-next").unwrap();
                 km.bind(&[Key::char('p')], "magit-prev").unwrap();
                 km.bind(&[Key::ctrl_char('p')], "magit-prev").unwrap();
+                // Issue 08: the magit-status context keys (log/blame/commit/
+                // branch/stash) — redline's binding, documented as a
+                // deviation from real magit (where `b` is the branch
+                // transient and blame is a file-view prefix).
+                km.bind(&[Key::char('l')], "magit-log").unwrap();
+                km.bind(&[Key::char('b')], "magit-blame").unwrap();
+                km.bind(&[Key::char('c')], "magit-commit").unwrap();
+                km.bind(&[Key::char('y')], "branch-picker").unwrap();
+                km.bind(&[Key::char('z')], "stash-list").unwrap();
+                km
+            }
+            ViewId::Log => {
+                // Log (issue 08): n/p page the history, arrows move the
+                // in-page selection, RET opens the selected commit's diff,
+                // q closes.
+                let mut km = KeyMap::new();
+                km.bind(&[Key::char('q')], "close-view").unwrap();
+                km.bind(&[Key::char('n')], "log-next-page").unwrap();
+                km.bind(&[Key::char('p')], "log-prev-page").unwrap();
+                km.bind(&[Key::down()], "log-move-down").unwrap();
+                km.bind(&[Key::char('j')], "log-move-down").unwrap();
+                km.bind(&[Key::ctrl_char('n')], "log-move-down").unwrap();
+                km.bind(&[Key::up()], "log-move-up").unwrap();
+                km.bind(&[Key::char('k')], "log-move-up").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "log-move-up").unwrap();
+                km.bind(&[Key::enter()], "log-open-commit").unwrap();
+                km
+            }
+            ViewId::Blame => {
+                // Blame (issue 08): read-only; q closes.
+                let mut km = KeyMap::new();
+                km.bind(&[Key::char('q')], "close-view").unwrap();
+                km
+            }
+            ViewId::CommitDiff => {
+                // Read-only commit diff (issue 08): q closes back to log.
+                let mut km = KeyMap::new();
+                km.bind(&[Key::char('q')], "close-view").unwrap();
+                km
+            }
+            ViewId::CommitEditor => {
+                // Inline commit editor (issue 08). Printable/motion keys and
+                // the ESC/C-g aborts are intercepted in `key_event` before the
+                // keymap engine; only the C-c C-c / C-c C-k bindings resolve
+                // through the engine (so the `C-c` prefix pending state is
+                // visible in the status line). q is deliberately NOT bound:
+                // in the message buffer a bare q types "q" (matching magit's
+                // message buffer, where q is not a command).
+                let mut km = KeyMap::new();
+                km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('c')], "commit-editor-commit")
+                    .unwrap();
+                km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('k')], "commit-editor-abort")
+                    .unwrap();
+                km
+                    .bind(&[Key::new(KeyCode::Escape)], "commit-editor-abort")
+                    .unwrap();
+                km.bind(&[Key::ctrl_char('g')], "commit-editor-abort").unwrap();
                 km
             }
             ViewId::Search => {
@@ -186,6 +259,12 @@ pub enum PickerKind {
     Imenu,
     /// `C-c p s`: project-wide symbol picker.
     Symbols,
+    /// `y` in the magit-status context (issue 08): local branches; RET
+    /// checks out the selected branch.
+    Branch,
+    /// `z` in the magit-status context (issue 08): stash list; RET pops, `x`
+    /// drops the selected entry.
+    Stash,
 }
 
 /// One entry in the jump stack (issue 05): the buffer, line, and column
@@ -453,6 +532,60 @@ impl SearchPromptKind {
 /// `line` is the hit index to restore, `col` the scroll top).
 const SEARCH_JUMP_KEY: &str = "*search-results*";
 
+/// A page of the magit log (issue 08). `entries` is the current page;
+/// `selected` is the in-page cursor (for `RET`). `total` drives the paging
+/// indicator and the `n`/`p` bounds.
+#[derive(Debug)]
+pub struct LogState {
+    /// The branch being walked; `None` walks HEAD (the current branch or a
+    /// detached tip).
+    pub branch: Option<String>,
+    pub offset: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub entries: Vec<crate::git::log::LogEntry>,
+    pub selected: usize,
+}
+
+impl LogState {
+    /// The display name for the status line / log title (`HEAD` when walking
+    /// HEAD).
+    pub fn display(&self) -> &str {
+        self.branch.as_deref().unwrap_or("HEAD")
+    }
+}
+
+/// The read-only full tree diff of one commit (issue 08). `expanded` holds
+/// the file paths whose hunks are currently shown (all expanded by default
+/// is fine for v1; the set exists for future fold support).
+#[derive(Debug)]
+pub struct CommitDiffState {
+    pub diff: crate::git::log::CommitDiff,
+}
+
+/// The blame buffer for the current file (issue 08).
+#[derive(Debug)]
+pub struct BlameState {
+    pub path: String,
+    pub lines: Vec<crate::git::blame::BlameLine>,
+    pub selected: usize,
+}
+
+/// The inline commit-message editor (issue 08): the first editable buffer.
+/// `rope` is the message text (comment lines are `#`-prefixed); `cursor` is
+/// a byte offset into the rope. `staged` is the pre-filled staged-file list.
+/// `now` is a captured unix time so the pre-fill is deterministic-ish and the
+/// view can age the lines without re-querying the clock each render.
+#[derive(Debug)]
+pub struct CommitEditorState {
+    pub rope: ropey::Rope,
+    pub cursor: usize,
+    pub staged: Vec<String>,
+}
+
+/// Page size for the magit log.
+const LOG_PAGE: usize = 25;
+
 /// Preview size: a "first page" of the file, byte-capped so a huge
 /// file never stalls a selection move.
 const PREVIEW_LINES: usize = 32;
@@ -569,6 +702,17 @@ pub struct AppStore {
     /// The active search-query prompt (`C-c p s s` / `M-s o`), when one
     /// is on screen.
     search_prompt: Option<SearchPrompt>,
+    // ── issue 08: log / blame / commit / branches / stash ─────────
+    /// The magit log view state, when the log view is on the stack.
+    log: Option<LogState>,
+    /// The read-only commit-diff view state.
+    commit_diff: Option<CommitDiffState>,
+    /// The blame view state (for the file being blamed).
+    blame: Option<BlameState>,
+    /// The inline commit-editor state (the first editable buffer).
+    commit_editor: Option<CommitEditorState>,
+    /// The branch-create name prompt (`M-x` → `branch-create`), when active.
+    branch_create: Option<String>,
 }
 
 impl AppStore {
@@ -715,6 +859,11 @@ impl AppStore {
             search: SearchState::default(),
             search_generation: 0,
             search_prompt: None,
+            log: None,
+            commit_diff: None,
+            blame: None,
+            commit_editor: None,
+            branch_create: None,
         }
     }
 
@@ -757,6 +906,10 @@ impl AppStore {
                 .unwrap_or_else(|| SCRATCH_NAME.to_string()),
             ViewId::BufferList => "*list-buffers*".to_string(),
             ViewId::MagitStatus => "*magit-status*".to_string(),
+            ViewId::Log => "*log*".to_string(),
+            ViewId::Blame => "*blame*".to_string(),
+            ViewId::CommitDiff => "*commit-diff*".to_string(),
+            ViewId::CommitEditor => "*commit*".to_string(),
             ViewId::Search => "*search*".to_string(),
         }
     }
@@ -1092,7 +1245,7 @@ impl AppStore {
             .collect()
     }
 
-    fn candidates_for(&self, kind: PickerKind) -> Vec<PickerCandidate> {
+    fn candidates_for(&mut self, kind: PickerKind) -> Vec<PickerCandidate> {
         match kind {
             PickerKind::Palette => self.palette_candidates(),
             PickerKind::FindFile => self.find_file_candidates(),
@@ -1102,7 +1255,42 @@ impl AppStore {
             PickerKind::Xref => self.xref_candidates(),
             PickerKind::Imenu => self.imenu_candidates(),
             PickerKind::Symbols => self.symbol_candidates(),
+            PickerKind::Branch => self.branch_candidates(),
+            PickerKind::Stash => self.stash_candidates(),
         }
+    }
+
+    /// Candidates for the branch picker (`y`, issue 08): local branches with
+    /// the current (HEAD) one marked.
+    fn branch_candidates(&self) -> Vec<PickerCandidate> {
+        self.with_git(|g| g.branches())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| PickerCandidate {
+                name: b.name.clone(),
+                display: format!("{}{}", if b.current { "*" } else { " " }, b.name),
+                docs: if b.current {
+                    "current branch".to_string()
+                } else {
+                    String::new()
+                },
+                category: "branch".to_string(),
+            })
+            .collect()
+    }
+
+    /// Candidates for the stash list (`z`, issue 08).
+    fn stash_candidates(&mut self) -> Vec<PickerCandidate> {
+        self.with_git_mut(|g| g.stash_list())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| PickerCandidate {
+                name: s.index.to_string(),
+                display: format!("stash@{{{}}} {}", s.index, s.subject),
+                docs: String::new(),
+                category: "stash".to_string(),
+            })
+            .collect()
     }
 
     /// Candidates for the Xref picker (definition locations for the
@@ -1334,6 +1522,15 @@ impl AppStore {
                 })
                 .unwrap_or(0),
             Some(PickerKind::Symbols) => self.index.total(),
+            Some(PickerKind::Branch) => self
+                .with_git(|g| g.branches())
+                .map(|b| b.len())
+                .unwrap_or(0),
+            Some(PickerKind::Stash) => self
+                .picker
+                .as_ref()
+                .map(|p| p.filtered.len())
+                .unwrap_or(0),
         };
         let shown = self.picker.as_ref().map(|p| p.filtered.len()).unwrap_or(0);
         (shown, total)
@@ -1391,6 +1588,9 @@ impl AppStore {
             }
             // Imenu: preview the current file (the name is "symbol:line").
             PickerKind::Imenu => self.file_preview_current(),
+            // Branch / Stash: no preview pane (the candidate display is
+            // already self-describing).
+            PickerKind::Branch | PickerKind::Stash => String::new(),
         };
         if let Some(p) = self.picker.as_mut() {
             p.preview = preview;
@@ -1537,6 +1737,15 @@ impl AppStore {
                     self.set_scroll_top(line - 1);
                     self.ensure_highlight();
                     self.record_jump(&origin, "M-i");
+                }
+            }
+            // Issue 08: branch picker RET checks out; stash list RET pops.
+            PickerKind::Branch => self.checkout_branch(&name),
+            PickerKind::Stash => {
+                if let Ok(index) = name.parse::<usize>() {
+                    self.stash_pop(index);
+                } else {
+                    self.minibuffer_message("no stash selected");
                 }
             }
         }
@@ -2267,6 +2476,24 @@ impl AppStore {
         }
     }
 
+    /// Mutable variant of [`with_git`] (the git2 `stash_*` APIs take
+    /// `&mut Repository`).
+    fn with_git_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut GitRepo) -> Result<R, GitError>,
+    ) -> Result<R, GitError> {
+        match self.git.as_mut() {
+            Some(g) => f(g),
+            None => Err(GitError::NotARepository {
+                path: self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            }),
+        }
+    }
+
     /// Open (or keep) the cached git repo at `root`.
     fn ensure_git(&mut self, root: PathBuf) -> bool {
         if self.git.is_none() {
@@ -2339,6 +2566,589 @@ impl AppStore {
         });
         self.status_tree = Some(tree);
         true
+    }
+
+    // ── issue 08: log / blame / commit / branches / stash ────────────────
+
+    /// `l` in the magit-status context: open (or re-focus) the log for the
+    /// current branch (HEAD when detached/unborn).
+    pub fn open_log(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        let branch = self
+            .with_git(|g| g.branch())
+            .ok()
+            .and_then(|b| if !b.detached && !b.unborn { Some(b.name) } else { None });
+        let total = self
+            .with_git(|g| g.log_total(branch.as_deref()))
+            .unwrap_or(0);
+        let entries = self
+            .with_git(|g| g.log(branch.as_deref(), 0, LOG_PAGE))
+            .unwrap_or_default();
+        self.log = Some(LogState {
+            branch,
+            offset: 0,
+            limit: LOG_PAGE,
+            total,
+            entries,
+            selected: 0,
+        });
+        if self.top_view() != ViewId::Log {
+            self.push_view(ViewId::Log);
+        }
+        self.minibuffer_message(&format!("log: {} ({} commits)", self.log.as_ref().unwrap().display(), total));
+    }
+
+    /// `n` in the log: move to the next page.
+    pub fn log_next_page(&mut self) {
+        let Some(log) = self.log.as_ref() else { return };
+        if log.offset + log.entries.len() >= log.total {
+            self.minibuffer_message("end of log");
+            return;
+        }
+        self.log_offset_to(log.offset + log.limit);
+    }
+
+    /// `p` in the log: move to the previous page.
+    pub fn log_prev_page(&mut self) {
+        let Some(log) = self.log.as_ref() else { return };
+        if log.offset == 0 {
+            self.minibuffer_message("start of log");
+            return;
+        }
+        self.log_offset_to(log.offset.saturating_sub(log.limit));
+    }
+
+    fn log_offset_to(&mut self, offset: usize) {
+        let Some(log) = self.log.as_ref() else { return };
+        let branch = log.branch.clone();
+        let limit = log.limit;
+        let total = self.with_git(|g| g.log_total(branch.as_deref())).unwrap_or(0);
+        let entries = self
+            .with_git(|g| g.log(branch.as_deref(), offset, limit))
+            .unwrap_or_default();
+        if let Some(l) = self.log.as_mut() {
+            l.offset = offset;
+            l.total = total;
+            l.entries = entries;
+            l.selected = 0;
+        }
+    }
+
+    /// Move the in-page log selection down (arrows / j / C-n).
+    pub fn log_move_down(&mut self) {
+        if let Some(l) = self.log.as_mut() {
+            l.selected = (l.selected + 1).min(l.entries.len().saturating_sub(1));
+        }
+    }
+
+    /// Move the in-page log selection up (arrows / k / C-p).
+    pub fn log_move_up(&mut self) {
+        if let Some(l) = self.log.as_mut() {
+            l.selected = l.selected.saturating_sub(1);
+        }
+    }
+
+    /// `RET` in the log: open the selected commit's full tree diff read-only.
+    pub fn log_open_commit(&mut self) {
+        let Some(oid) = self
+            .log
+            .as_ref()
+            .and_then(|l| l.entries.get(l.selected))
+            .map(|e| e.short_id.clone())
+        else {
+            self.minibuffer_message("no commit at point");
+            return;
+        };
+        match self.with_git(|g| g.commit_diff(&oid)) {
+            Ok(diff) => {
+                self.commit_diff = Some(CommitDiffState { diff });
+                if self.top_view() != ViewId::CommitDiff {
+                    self.push_view(ViewId::CommitDiff);
+                }
+                self.minibuffer_message("commit diff");
+            }
+            Err(e) => self.minibuffer_message(&format!("commit diff failed: {e}")),
+        }
+    }
+
+    /// Rebuild the open log's current page (after a commit or branch switch).
+    fn refresh_log_page(&mut self) {
+        let Some(log) = self.log.as_ref() else { return };
+        let branch = log.branch.clone();
+        let offset = log.offset;
+        let limit = log.limit;
+        let total = self.with_git(|g| g.log_total(branch.as_deref())).unwrap_or(0);
+        let entries = self
+            .with_git(|g| g.log(branch.as_deref(), offset, limit))
+            .unwrap_or_default();
+        if let Some(l) = self.log.as_mut() {
+            l.total = total;
+            l.entries = entries;
+            l.selected = l.selected.min(l.entries.len().saturating_sub(1));
+        }
+    }
+
+    /// `b` in the magit-status context: blame the current buffer's file
+    /// (project-relative), one line per commit/author/age prefix.
+    pub fn open_blame(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            self.minibuffer_message("no file (scratch buffer)");
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        let Ok(rel) = path.strip_prefix(&project.root) else {
+            self.minibuffer_message("buffer not in project");
+            return;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        let root = project.root.clone();
+        if !self.ensure_git(root) {
+            return;
+        }
+        match self.with_git(|g| g.blame(&rel)) {
+            Ok(lines) => {
+                self.blame = Some(BlameState {
+                    path: rel.clone(),
+                    lines,
+                    selected: 0,
+                });
+                if self.top_view() != ViewId::Blame {
+                    self.push_view(ViewId::Blame);
+                }
+                self.minibuffer_message(&format!("blame: {rel}"));
+            }
+            Err(e) => self.minibuffer_message(&format!("blame failed: {e}")),
+        }
+    }
+
+    /// `c` in the magit-status context: open the inline commit editor, pre-
+    /// filled with a comment block listing the staged files.
+    pub fn open_commit_editor(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        let staged: Vec<(String, char)> = self
+            .git_status()
+            .unwrap_or_default()
+            .files
+            .into_iter()
+            .filter(|f| f.is_staged())
+            .map(|f| (f.path, f.staged.letter()))
+            .collect();
+        let (text, cursor) = prefill_commit_message(&staged);
+        let staged_paths: Vec<String> = staged.iter().map(|(p, _)| p.clone()).collect();
+        self.commit_editor = Some(CommitEditorState {
+            rope: Rope::from(text.as_str()),
+            cursor,
+            staged: staged_paths,
+        });
+        if self.top_view() != ViewId::CommitEditor {
+            self.push_view(ViewId::CommitEditor);
+        }
+        self.minibuffer_message("commit: C-c C-c commit · C-c C-k abort");
+    }
+
+    /// `C-c C-c` in the commit editor: extract the message (comment lines
+    /// stripped) and commit the staged changes.
+    pub fn commit_editor_commit(&mut self) {
+        let Some(ed) = self.commit_editor.as_ref() else { return };
+        let msg = extract_commit_message(&ed.rope);
+        if msg.trim().is_empty() {
+            self.minibuffer_message("empty commit message: add a line not starting with '#'");
+            return;
+        }
+        let msg = msg.to_string();
+        match self.with_git(move |g| g.commit(&msg)) {
+            Ok(oid) => {
+                let short: String = oid.chars().take(7).collect();
+                self.commit_editor = None;
+                if self.top_view() == ViewId::CommitEditor {
+                    self.close_view();
+                }
+                self.refresh_magit();
+                if self.log.is_some() {
+                    self.refresh_log_page();
+                }
+                self.minibuffer_message(&format!("committed {short}"));
+            }
+            Err(e) => self.minibuffer_message(&format!("commit failed: {e}")),
+        }
+    }
+
+    /// `C-c C-k` (and ESC / C-g) in the commit editor: discard the
+    /// buffer and touch nothing in the repository.
+    pub fn commit_editor_abort(&mut self) {
+        if self.commit_editor.take().is_some() {
+            if self.top_view() == ViewId::CommitEditor {
+                self.close_view();
+            }
+            self.pending.clear();
+            self.minibuffer_message("commit aborted (no changes made)");
+        } else {
+            self.minibuffer_message("no commit in progress");
+        }
+    }
+
+    /// Insert a printable character at the commit-editor cursor.
+    pub fn commit_editor_insert(&mut self, c: char) {
+        if let Some(ed) = self.commit_editor.as_mut() {
+            ed.rope.insert_char(ed.cursor, c);
+            ed.cursor += 1;
+        }
+    }
+
+    /// Backspace in the commit editor.
+    pub fn commit_editor_backspace(&mut self) {
+        if let Some(ed) = self.commit_editor.as_mut()
+            && ed.cursor > 0
+        {
+            ed.rope.remove(ed.cursor - 1..ed.cursor);
+            ed.cursor -= 1;
+        }
+    }
+
+    /// Insert a newline at the commit-editor cursor (RET in the editor).
+    pub fn commit_editor_newline(&mut self) {
+        if let Some(ed) = self.commit_editor.as_mut() {
+            ed.rope.insert_char(ed.cursor, '\n');
+            ed.cursor += 1;
+        }
+    }
+
+    /// Move the commit-editor cursor left / right / up / down.
+    fn commit_editor_move(&mut self, dir: EditorMove) {
+        let Some(ed) = self.commit_editor.as_mut() else { return };
+        match dir {
+            EditorMove::Left => ed.cursor = ed.cursor.saturating_sub(1),
+            EditorMove::Right => ed.cursor = (ed.cursor + 1).min(ed.rope.len_chars()),
+            EditorMove::Up => editor_cursor_line(ed, -1),
+            EditorMove::Down => editor_cursor_line(ed, 1),
+        }
+    }
+
+    /// The commit editor's rows (message + comment lines; the cursor line is
+    /// marked `selected` and carries a `←` marker).
+    pub fn commit_editor_rows(&self) -> Vec<MagitRow> {
+        let Some(ed) = self.commit_editor.as_ref() else { return Vec::new() };
+        let text = ed.rope.to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        let n_lines = ed.rope.len_lines();
+        let cursor_line = ed.rope.char_to_line(ed.cursor.min(ed.rope.len_chars()));
+        (0..n_lines)
+            .map(|i| {
+                let line = lines.get(i).copied().unwrap_or("");
+                let role = if line.trim_start().starts_with('#') {
+                    RowRole::Comment
+                } else {
+                    RowRole::Text
+                };
+                let selected = i == cursor_line;
+                let text = if selected {
+                    format!("{line} ←")
+                } else {
+                    line.to_string()
+                };
+                MagitRow { text, role, selected }
+            })
+            .collect()
+    }
+
+    /// `y` in the magit-status context: the local-branch picker (RET checks
+    /// out the selected branch).
+    pub fn open_branch_picker(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        let candidates = self.branch_candidates();
+        if candidates.is_empty() {
+            self.minibuffer_message("no local branches");
+            return;
+        }
+        self.open_picker(PickerKind::Branch, "Branch: ", candidates);
+    }
+
+    /// Check out the local branch `name`. On success, refreshes the magit
+    /// status (branch + dirty state), schedules a full symbol-index rebuild
+    /// (the wholesale change), and refreshes the open log. A dirty tree is
+    /// refused (`GitError::DirtyTree`) per magit's default.
+    pub fn checkout_branch(&mut self, name: &str) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        match self.with_git(|g| g.checkout_branch(name)) {
+            Ok(()) => {
+                self.refresh_magit();
+                // Wholesale change: full-rebuild the symbol index (05's
+                // start_indexing path). Bump the generation and clear pending
+                // changes (mirroring switch_project_root) so the full rebuild
+                // isn't silently skipped by start_indexing's single-flight
+                // guard when a current-generation job is already in flight.
+                self.index = SymbolIndex::new();
+                self.index_generation += 1;
+                self.pending_index_changes.clear();
+                self.start_indexing();
+                if self.log.is_some() {
+                    self.refresh_log_page();
+                }
+                self.minibuffer_message(&format!("checked out {name}"));
+            }
+            Err(e) => self.minibuffer_message(&format!("checkout failed: {e}")),
+        }
+    }
+
+    /// Create a new local branch at HEAD. `branch-create` (M-x) opens a name
+    /// prompt; this performs the creation.
+    pub fn create_branch_from_head(&mut self, name: &str) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        if name.trim().is_empty() {
+            self.minibuffer_message("empty branch name");
+            return;
+        }
+        match self.with_git(|g| g.create_branch_from_head(name)) {
+            Ok(()) => self.minibuffer_message(&format!("created branch {name} at HEAD")),
+            Err(e) => self.minibuffer_message(&format!("create branch failed: {e}")),
+        }
+    }
+
+    /// `z` in the magit-status context: the stash list (RET pops, `x` drops).
+    pub fn open_stash_picker(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        if !self.ensure_git(root) {
+            return;
+        }
+        let candidates = self.stash_candidates();
+        if candidates.is_empty() {
+            self.minibuffer_message("no stashes");
+            return;
+        }
+        self.open_picker(PickerKind::Stash, "Stash: ", candidates);
+    }
+
+    /// Pop (apply + drop) the stash at `index`, then refresh.
+    pub fn stash_pop(&mut self, index: usize) {
+        match self.with_git_mut(|g| g.stash_pop(index)) {
+            Ok(()) => {
+                self.refresh_magit();
+                self.minibuffer_message(&format!("popped stash@{{{index}}}"));
+            }
+            Err(e) => self.minibuffer_message(&format!("stash pop failed: {e}")),
+        }
+    }
+
+    /// Drop the stash at `index` (without applying it), then refresh.
+    pub fn stash_drop(&mut self, index: usize) {
+        match self.with_git_mut(|g| g.stash_drop(index)) {
+            Ok(()) => {
+                self.refresh_magit();
+                self.minibuffer_message(&format!("dropped stash@{{{index}}}"));
+            }
+            Err(e) => self.minibuffer_message(&format!("stash drop failed: {e}")),
+        }
+    }
+
+    /// Branch-create name prompt: start / append / backspace / confirm /
+    /// cancel (mirrors the search-prompt pattern).
+    pub fn branch_create_start(&mut self) {
+        self.branch_create = Some(String::new());
+        self.minibuffer_message("New branch name: ");
+    }
+
+    fn branch_create_char(&mut self, c: char) {
+        if let Some(name) = self.branch_create.as_mut() {
+            name.push(c);
+        }
+        if let Some(name) = self.branch_create.as_ref() {
+            self.minibuffer_message(&format!("New branch name: {name}"));
+        }
+    }
+
+    fn branch_create_backspace(&mut self) {
+        if let Some(name) = self.branch_create.as_mut() {
+            name.pop();
+        }
+        if let Some(name) = self.branch_create.as_ref() {
+            self.minibuffer_message(&format!("New branch name: {name}"));
+        }
+    }
+
+    fn branch_create_cancel(&mut self) {
+        self.branch_create.take();
+        self.minibuffer_message("cancel");
+    }
+
+    fn branch_create_confirm(&mut self) {
+        let Some(name) = self.branch_create.take() else { return };
+        if name.trim().is_empty() {
+            self.branch_create = Some(name);
+            self.minibuffer_message("empty branch name");
+            return;
+        }
+        self.create_branch_from_head(&name);
+    }
+
+    /// The log view's rows (header + one row per commit + paging indicator).
+    pub fn log_rows(&self) -> Vec<MagitRow> {
+        let Some(log) = self.log.as_ref() else { return Vec::new() };
+        let mut rows = vec![MagitRow {
+            text: format!("## log ({})", log.display()),
+            role: RowRole::Branch,
+            selected: false,
+        }];
+        for (i, e) in log.entries.iter().enumerate() {
+            rows.push(MagitRow {
+                text: log_entry_display(e),
+                role: RowRole::Commit,
+                selected: i == log.selected,
+            });
+        }
+        let start = log.offset.saturating_add(1);
+        let end = log.offset.saturating_add(log.entries.len());
+        rows.push(MagitRow {
+            text: format!("  ({}–{}/{}  ·  n next · p prev · RET diff · q back)", start, end, log.total),
+            role: RowRole::Comment,
+            selected: false,
+        });
+        rows
+    }
+
+    /// The blame view's rows (header + one aligned row per line).
+    pub fn blame_rows(&self) -> Vec<MagitRow> {
+        let Some(b) = self.blame.as_ref() else { return Vec::new() };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let author_w = b
+            .lines
+            .iter()
+            .map(|l| l.author.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+        let mut rows = vec![MagitRow {
+            text: format!("## blame: {}", b.path),
+            role: RowRole::Branch,
+            selected: false,
+        }];
+        for (i, l) in b.lines.iter().enumerate() {
+            rows.push(MagitRow {
+                text: blame_line_display(l, now, author_w),
+                role: RowRole::Blame,
+                selected: i == b.selected,
+            });
+        }
+        rows
+    }
+
+    /// The read-only commit-diff view's rows (header + diffstat + files +
+    /// hunks), reusing the diff `RowRole`s so `row_face` colors them.
+    pub fn commit_diff_rows(&self) -> Vec<MagitRow> {
+        let Some(cd) = self.commit_diff.as_ref() else { return Vec::new() };
+        let d = &cd.diff;
+        let mut rows = vec![
+            MagitRow {
+                text: format!("## {} {}", d.short_id, d.subject),
+                role: RowRole::Branch,
+                selected: false,
+            },
+            MagitRow {
+                text: format!(
+                    "  {} files changed, {} insertions(+), {} deletions(-)",
+                    d.files.len(),
+                    d.insertions,
+                    d.deletions
+                ),
+                role: RowRole::Comment,
+                selected: false,
+            },
+        ];
+        for f in &d.files {
+            rows.push(MagitRow {
+                text: format!("  {} {} (+{} -{})", f.path, if f.binary { "binary" } else { "" }, f.insertions, f.deletions),
+                role: RowRole::File,
+                selected: false,
+            });
+            for h in &f.hunks {
+                rows.push(MagitRow {
+                    text: format!("    {}", h.header),
+                    role: RowRole::HunkHeader,
+                    selected: false,
+                });
+                for l in &h.lines {
+                    let role = match l.origin {
+                        crate::git::diff::DiffOrigin::Addition => RowRole::DiffAdd,
+                        crate::git::diff::DiffOrigin::Deletion => RowRole::DiffDelete,
+                        _ => RowRole::DiffContext,
+                    };
+                    rows.push(MagitRow {
+                        text: format!("    {}{}", l.origin.marker(), l.content),
+                        role,
+                        selected: false,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    /// The log view's title (the branch name or "(detached HEAD)").
+    pub fn log_title(&self) -> String {
+        self.log.as_ref().map(|l| format!("log — {}", l.display())).unwrap_or_default()
+    }
+
+    /// The blame view's title (the file being blamed).
+    pub fn blame_title(&self) -> String {
+        self.blame.as_ref().map(|b| format!("blame: {}", b.path)).unwrap_or_default()
+    }
+
+    /// The commit-diff view's title (the commit's short id + subject).
+    pub fn commit_diff_title(&self) -> String {
+        self.commit_diff
+            .as_ref()
+            .map(|cd| format!("commit {} — {}", cd.diff.short_id, cd.diff.subject))
+            .unwrap_or_default()
+    }
+
+    /// The commit editor's title.
+    pub fn commit_editor_title(&self) -> String {
+        self.commit_editor
+            .as_ref()
+            .map(|ed| format!("commit ({} staged)", ed.staged.len()))
+            .unwrap_or_default()
     }
 
     // ── file watching (issue 04) ───────────────────────────────────────
@@ -3483,6 +4293,19 @@ impl AppStore {
         }
         if self.picker.is_some() {
             if let Some(c) = key.char_value() {
+                // Stash list: `x` drops the selected entry (magit's drop
+                // key) instead of extending the filter query.
+                if self.picker_kind() == Some(PickerKind::Stash) && c == 'x' {
+                    let idx = self
+                        .picker_filtered()
+                        .get(self.picker_selected())
+                        .map(|(cand, _)| cand.name.clone())
+                        .and_then(|n| n.parse::<usize>().ok());
+                    if let Some(idx) = idx {
+                        self.stash_drop(idx);
+                    }
+                    return;
+                }
                 self.picker_query_char(c);
                 return;
             }
@@ -3507,6 +4330,77 @@ impl AppStore {
             // Other keys fall through to the keymap engine; the
             // unbound-key echo is suppressed while the picker is open
             // (see dispatch_key).
+        }
+        // Commit editor (issue 08): printable / backspace / RET / arrow keys
+        // edit the message; ESC / C-g abort, and those are intercepted here,
+        // before the keymap engine. Only the C-c C-c / C-c C-k bindings reach
+        // the engine, so the `C-c` prefix pending state is visible in the
+        // status line. A bare q types "q" (it is not a command here). Edits
+        // clear any armed prefix; a bare `C-c` arms the prefix via the engine.
+        if self.top_view() == ViewId::CommitEditor {
+            if let Some(c) = key.char_value() {
+                self.commit_editor_insert(c);
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.commit_editor_backspace();
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.commit_editor_newline();
+                self.pending.clear();
+                return;
+            }
+            match key.code {
+                KeyCode::Left => self.commit_editor_move(EditorMove::Left),
+                KeyCode::Right => self.commit_editor_move(EditorMove::Right),
+                KeyCode::Up => self.commit_editor_move(EditorMove::Up),
+                KeyCode::Down => self.commit_editor_move(EditorMove::Down),
+                _ => {}
+            }
+            if key.code == KeyCode::Left || key.code == KeyCode::Right {
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Up || key.code == KeyCode::Down {
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Escape {
+                self.commit_editor_abort();
+                return;
+            }
+            if key == Key::ctrl_char('g') {
+                self.commit_editor_abort();
+                return;
+            }
+            // C-c … (and any other unintercepted key) goes through the engine.
+            self.dispatch_key(key);
+            return;
+        }
+        // Branch-create name prompt (issue 08): printable chars extend the
+        // name, RET creates, C-g / ESC cancels.
+        if self.branch_create.is_some() {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.branch_create_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.branch_create_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.branch_create_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.branch_create_char(c);
+                return;
+            }
+            // Other keys: swallow (no "unbound key" echo mid-prompt).
+            return;
         }
         // Isearch mode: printable chars extend the query, n/N navigate,
         // RET confirms, C-g cancels (restores pre-search position).
@@ -3688,6 +4582,90 @@ fn file_candidate(rel: &str) -> PickerCandidate {
         docs: String::new(),
         category: "file".to_string(),
     }
+}
+
+/// Cursor-move direction for the commit editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorMove {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Build the commit editor's pre-filled text (a magit-style comment block
+/// listing the staged files) and place the cursor at the end (on the trailing
+/// empty line, where the user types the message).
+fn prefill_commit_message(staged: &[(String, char)]) -> (String, usize) {
+    let mut s = String::new();
+    s.push_str("# Please enter the commit message for these changes.\n");
+    s.push_str("# Lines starting with '#' are ignored; C-c C-c commits, C-c C-k aborts.\n");
+    s.push_str("#\n");
+    s.push_str("# Staged changes:\n");
+    if staged.is_empty() {
+        s.push_str("#   (nothing staged)\n");
+    } else {
+        for (path, letter) in staged {
+            s.push_str(&format!("#   {letter} {path}\n"));
+        }
+    }
+    s.push_str("#\n");
+    let len = s.len();
+    (s, len)
+}
+
+/// Extract the commit message from the editor text: drop `#`-prefixed comment
+/// lines and trim leading/trailing blank lines. An empty result means the
+/// user typed no message.
+fn extract_commit_message(rope: &Rope) -> String {
+    let text = rope.to_string();
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| l.to_string())
+        .collect();
+    while !lines.is_empty() && lines.first().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        lines.remove(0);
+    }
+    while !lines.is_empty() && lines.last().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Move the commit-editor cursor to a neighbouring line, keeping the column
+/// (clamped to the target line's length).
+fn editor_cursor_line(ed: &mut CommitEditorState, delta: i32) {
+    let len = ed.rope.len_lines();
+    let line = ed.rope.char_to_line(ed.cursor.min(ed.rope.len_chars()));
+    let line_start = ed.rope.line_to_char(line);
+    let col = ed.cursor - line_start;
+    let target = line as i64 + delta as i64;
+    if target < 0 || target >= len as i64 {
+        return;
+    }
+    let target = target as usize;
+    let t_start = ed.rope.line_to_char(target);
+    let t_len = ed
+        .rope
+        .get_line(target)
+        .map(|l| l.len_chars())
+        .unwrap_or(0);
+    ed.cursor = t_start + col.min(t_len);
+}
+
+/// One log row: `<short_id> <subject>  <author>  <date>`.
+fn log_entry_display(e: &LogEntry) -> String {
+    format!("{} {}  {}  {}", e.short_id, e.subject, e.author, e.date)
+}
+
+/// One blame row: aligned `<hash> <author> <age>  <text>`.
+fn blame_line_display(line: &BlameLine, now: i64, author_w: usize) -> String {
+    let age = relative_time_from(line.time, now);
+    format!(
+        "{:<7} {:<author_w$} {:<5} {}",
+        line.short_id, line.author, age, line.text
+    )
 }
 
 impl Default for AppStore {
@@ -4250,7 +5228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 56);
+        assert_eq!(store.picker_count().0, 69);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -4268,13 +5246,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 55);
+        assert_eq!(store.picker_selected(), 68);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 54);
+        assert_eq!(store.picker_selected(), 67);
 
-        // RET runs the candidate at the selected index (54: search-cancel
+        // RET runs the candidate at the selected index (67: search-cancel
         // — idle, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
@@ -4307,7 +5285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 56);
+        assert_eq!(store.picker_count().0, 69);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -5553,6 +6531,305 @@ mod tests {
         };
         store.apply_search_event(&fresh);
         assert_eq!(store.search.hits.len(), 1, "current-generation hit applies");
+    }
+
+    // ── issue 08: commit editor tests ───────────────────────────────────────
+
+    /// Helper: create a tempdir git repo with one committed file and a
+    /// staged change, return the store rooted there.
+    fn git_store_with_staged(dir: &std::path::Path) -> AppStore {
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        git_cli(dir, &["init", "-q", "-b", "main"]);
+        git_cli(dir, &["config", "user.name", "Test"]);
+        git_cli(dir, &["config", "user.email", "test@example.com"]);
+        git_cli(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git_cli(dir, &["add", "a.txt"]);
+        git_cli(dir, &["commit", "-q", "-m", "init"]);
+        // Stage a change so the commit editor has a file list.
+        std::fs::write(dir.join("a.txt"), "a\nA\n").unwrap();
+        git_cli(dir, &["add", "a.txt"]);
+        let base = tempfile::tempdir().unwrap();
+        AppStore::at(dir, base.path().to_path_buf())
+    }
+
+    // ── issue 08: Finding 1 — checkout must trigger the full symbol-index
+    // rebuild even when a current-generation job is already in flight ──────
+
+    #[tokio::test]
+    async fn checkout_branch_bumps_generation_and_starts_full_rebuild() {
+        // A clean repo with a second branch so checkout succeeds (the
+        // dirty-tree guard requires a clean tree; the branch must exist).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_cli(&root, &["init", "-q", "-b", "main"]);
+        git_cli(&root, &["config", "user.name", "Test"]);
+        git_cli(&root, &["config", "user.email", "test@example.com"]);
+        git_cli(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git_cli(&root, &["add", "a.txt"]);
+        git_cli(&root, &["commit", "-q", "-m", "init"]);
+        git_cli(&root, &["branch", "feature"]);
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(&root, base.path().to_path_buf());
+        s.project = Some(Project::new(root.clone()));
+
+        // Build an initial index so start_indexing has files to index.
+        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let index = build_index(&root, &files_list.files, None);
+        s.set_index(index);
+
+        // The hole: a current-generation (gen 0) job is already in flight and
+        // there are pending changes. Without the fix, checkout's start_indexing
+        // would early-return on the single-flight guard and the full rebuild
+        // would be silently skipped.
+        s.indexing = Some((0, 1, 0));
+        s.pending_index_changes.insert(root.join("a.txt"));
+
+        s.checkout_branch("feature");
+
+        // The generation must be bumped so the in-flight gen-0 job is now stale
+        // (its event is discarded), and the pending set cleared.
+        assert_eq!(s.index_generation, 1, "generation bumped on checkout");
+        assert!(
+            s.pending_index_changes.is_empty(),
+            "pending changes cleared on checkout"
+        );
+        // A new full-rebuild job must be in flight for the new generation,
+        // proving the single-flight guard did NOT skip the rebuild.
+        let Some((_, _, job_gen)) = s.indexing else {
+            panic!("no index job in flight after checkout");
+        };
+        assert_eq!(job_gen, 1, "full-rebuild job started for the new generation");
+        // HEAD actually moved to the target branch.
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "feature",
+            "HEAD moved to feature"
+        );
+    }
+
+    #[test]
+    fn commit_editor_prefill_shows_staged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+        let ed = store.commit_editor.as_ref().unwrap();
+        let text = ed.rope.to_string();
+        assert!(text.starts_with("# Please enter the commit message"), "prefill: {text}");
+        assert!(text.contains("#   M a.txt"), "staged file listed: {text}");
+        assert!(text.contains("# Staged changes:"), "section header: {text}");
+        // Cursor is at end of prefill.
+        assert_eq!(ed.cursor, text.len());
+    }
+
+    #[test]
+    fn commit_editor_text_edits_land_in_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+        // Type a commit message after the prefill.
+        for c in "hello".chars() {
+            store.commit_editor_insert(c);
+        }
+        let ed = store.commit_editor.as_ref().unwrap();
+        let text = ed.rope.to_string();
+        assert!(text.ends_with("#\nhello"), "text: {text}");
+        // Backspace removes the last char.
+        store.commit_editor_backspace();
+        let text = store.commit_editor.as_ref().unwrap().rope.to_string();
+        assert!(text.ends_with("#\nhell"), "after backspace: {text}");
+    }
+
+    #[test]
+    fn commit_editor_cc_cc_extracts_message_and_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = git_store_with_staged(root);
+        store.open_commit_editor();
+        // Type the message.
+        for c in "my commit msg".chars() {
+            store.commit_editor_insert(c);
+        }
+        // C-c C-c through the keymap engine.
+        store.key_event(key("C-c"));
+        assert_eq!(store.pending.len(), 1, "C-c arms the prefix");
+        store.key_event(key("C-c"));
+        // The commit should have been made.
+        assert!(store.commit_editor.is_none(), "editor closed after commit");
+        assert!(store.message.contains("committed"), "message: {}", store.message);
+        // Verify via git CLI that the commit was created with the right message.
+        let out = std::process::Command::new("git")
+            .arg("-C").arg(root)
+            .args(["log", "-1", "--pretty=%s"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        let msg = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(msg.trim(), "my commit msg", "git log: {msg}");
+    }
+
+    #[test]
+    fn commit_editor_cc_k_discards() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = git_store_with_staged(root);
+        // Capture HEAD after repo creation.
+        let head_before = {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(root)
+                .args(["rev-parse", "HEAD"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        store.open_commit_editor();
+        for c in "should not commit".chars() {
+            store.commit_editor_insert(c);
+        }
+        // C-c C-k aborts.
+        store.key_event(key("C-c"));
+        store.key_event(key("C-k"));
+        assert!(store.commit_editor.is_none(), "editor closed after abort");
+        assert!(store.message.contains("aborted"), "message: {}", store.message);
+        // HEAD unchanged.
+        let out = std::process::Command::new("git")
+            .arg("-C").arg(root)
+            .args(["rev-parse", "HEAD"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        let head_after = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(head_before, head_after, "HEAD unchanged after abort");
+    }
+
+    #[test]
+    fn commit_editor_keybindings_resolve_through_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+        // C-c alone is a pending prefix (not a command by itself).
+        store.key_event(key("C-c"));
+        assert!(!store.pending.is_empty(), "C-c must be a pending prefix");
+        // C-k completes the abort sequence.
+        store.key_event(key("C-k"));
+        assert!(store.pending.is_empty(), "C-c C-k resolves");
+        assert!(store.commit_editor.is_none(), "editor closed by C-c C-k");
+        // Re-open and test C-c C-c.
+        // (We can't easily re-stage here, so just verify the engine accepts
+        // the prefix again without error.)
+        store.open_commit_editor();
+        assert!(store.commit_editor.is_some(), "editor re-opened");
+        store.key_event(key("C-c"));
+        assert!(!store.pending.is_empty(), "second C-c prefix");
+        store.key_event(key("C-c"));
+        // This will attempt to commit (message is empty after prefill only →
+        // the "empty commit message" guard fires, which is fine).
+        assert!(store.message.contains("empty commit"), "guard: {}", store.message);
+        store.commit_editor_abort();
+        assert!(store.commit_editor.is_none());
+    }
+
+    /// Regression (review round 3): arrow keys must clear an armed `C-c`
+    /// prefix. Old code let `C-c -> arrow -> C-c` resolve as the full
+    /// `commit-editor-commit` sequence -- an unintended commit from a
+    /// navigation reflex.
+    #[test]
+    fn commit_editor_arrow_clears_armed_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+        let head_before = store
+            .git
+            .as_ref()
+            .and_then(|g| g.log(None, 0, 1).ok())
+            .and_then(|l| l.into_iter().next())
+            .map(|e| e.short_id);
+
+        // Arm the C-c prefix.
+        store.key_event(key("C-c"));
+        assert!(!store.pending.is_empty(), "C-c arms the prefix");
+
+        // An arrow navigates the editor AND disarms the prefix.
+        store.key_event(key("DOWN"));
+        assert!(store.pending.is_empty(), "arrow must clear the armed prefix");
+        assert!(store.commit_editor.is_some(), "editor stays open");
+
+        // The next C-c only RE-ARMS; the commit must not fire.
+        store.key_event(key("C-c"));
+        assert!(!store.pending.is_empty(), "C-c re-arms after an arrow");
+        assert!(store.commit_editor.is_some(), "no commit fired");
+        let head_after = store
+            .git
+            .as_ref()
+            .and_then(|g| g.log(None, 0, 1).ok())
+            .and_then(|l| l.into_iter().next())
+            .map(|e| e.short_id);
+        assert_eq!(head_before, head_after, "HEAD must be unchanged");
+    }
+
+    // ── issue 08: snapshot tests ────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_log_entry_display() {
+        let entries = [
+            LogEntry { short_id: "abc1234".into(), subject: "fix: handle edge case".into(), author: "Alice".into(), time: 1_699_992_800, date: "2 hours ago".into() },
+            LogEntry { short_id: "def5678".into(), subject: "feat: add new module".into(), author: "Bob".into(), time: 1_699_734_400, date: "3 days ago".into() },
+        ];
+        let rows: Vec<String> = entries.iter().map(log_entry_display).collect();
+        insta::assert_debug_snapshot!(rows);
+    }
+
+    #[test]
+    fn snapshot_blame_line_display() {
+        let now = 1_700_000_000_i64;
+        let lines = [
+            BlameLine { line_no: 1, short_id: "aaa1111".into(), author: "Alice".into(), time: now - 7200, text: "fn main() {".into() },
+            BlameLine { line_no: 2, short_id: "bbb2222".into(), author: "Bob".into(), time: now - 86400, text: "    println!(\"hi\");".into() },
+            BlameLine { line_no: 3, short_id: "ccc3333".into(), author: "Alice".into(), time: now - 3600, text: "}".into() },
+        ];
+        let author_w = lines.iter().map(|l| l.author.chars().count()).max().unwrap_or(0).max(4);
+        let rows: Vec<String> = lines.iter().map(|l| blame_line_display(l, now, author_w)).collect();
+        insta::assert_debug_snapshot!(rows);
     }
 }
 

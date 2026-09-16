@@ -63,6 +63,10 @@ pub struct Theme {
     pub diff_delete: Face,
     pub diff_context: Face,
     pub diff_hunk_header: Face,
+    /// Log-entry rows (issue 08).
+    pub log_commit: Face,
+    /// Blame-row rows (issue 08): a dim prefix + text line.
+    pub blame: Face,
     /// One face per tree-sitter token category, indexed by
     /// `HIGHLIGHT_FACES`. See `Theme::syntax_face`.
     pub syntax_faces: Vec<Face>,
@@ -86,6 +90,8 @@ impl Default for Theme {
             diff_delete: Face::new(Color::Red, Color::Black, false),
             diff_context: Face::new(Color::DarkGrey, Color::Black, false),
             diff_hunk_header: Face::new(Color::Magenta, Color::Black, true),
+            log_commit: Face::new(Color::White, Color::Black, false),
+            blame: Face::new(Color::DarkGrey, Color::Black, false),
             syntax_faces: default_syntax_faces(),
         }
     }

@@ -38,6 +38,14 @@ pub enum RowRole {
     DiffContext,
     DiffAdd,
     DiffDelete,
+    /// A log entry row (issue 08).
+    Commit,
+    /// A blame row (issue 08).
+    Blame,
+    /// A commit-editor line that is a comment (prefilled, `#`-prefixed).
+    Comment,
+    /// A commit-editor line that is real message text.
+    Text,
 }
 
 /// One section: a heading plus optional children and body (diff lines).

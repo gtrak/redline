@@ -1,0 +1,9 @@
+---
+source: src/app/store.rs
+expression: rows
+---
+[
+    "aaa1111 Alice 2h    fn main() {",
+    "bbb2222 Bob   1d        println!(\"hi\");",
+    "ccc3333 Alice 1h    }",
+]

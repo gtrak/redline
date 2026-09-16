@@ -1,0 +1,8 @@
+---
+source: src/app/store.rs
+expression: rows
+---
+[
+    "abc1234 fix: handle edge case  Alice  2 hours ago",
+    "def5678 feat: add new module  Bob  3 days ago",
+]

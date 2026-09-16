@@ -373,6 +373,85 @@ impl CommandRegistry {
             "git",
             |store, _arg| store.magit_cursor_up(),
         ));
+        // ── issue 08: log / blame / commit / branches / stash ────
+        reg.register(Command::new(
+            "magit-log",
+            "Open the git log for the current branch (l in the status buffer)",
+            "git",
+            |store, _arg| store.open_log(),
+        ));
+        reg.register(Command::new(
+            "magit-blame",
+            "Blame the current file (b in the status buffer)",
+            "git",
+            |store, _arg| store.open_blame(),
+        ));
+        reg.register(Command::new(
+            "magit-commit",
+            "Open the inline commit editor for staged changes (c in the status buffer)",
+            "git",
+            |store, _arg| store.open_commit_editor(),
+        ));
+        reg.register(Command::new(
+            "branch-picker",
+            "Check out a local branch (y in the status buffer)",
+            "git",
+            |store, _arg| store.open_branch_picker(),
+        ));
+        reg.register(Command::new(
+            "stash-list",
+            "List stashes; RET pops, x drops (z in the status buffer)",
+            "git",
+            |store, _arg| store.open_stash_picker(),
+        ));
+        reg.register(Command::new(
+            "branch-create",
+            "Create a new local branch at HEAD (name prompt)",
+            "git",
+            |store, _arg| store.branch_create_start(),
+        ));
+        reg.register(Command::new(
+            "log-next-page",
+            "Next page of the log (n in the log view)",
+            "git",
+            |store, _arg| store.log_next_page(),
+        ));
+        reg.register(Command::new(
+            "log-prev-page",
+            "Previous page of the log (p in the log view)",
+            "git",
+            |store, _arg| store.log_prev_page(),
+        ));
+        reg.register(Command::new(
+            "log-move-down",
+            "Move the log selection down (j / C-n in the log view)",
+            "git",
+            |store, _arg| store.log_move_down(),
+        ));
+        reg.register(Command::new(
+            "log-move-up",
+            "Move the log selection up (k / C-p in the log view)",
+            "git",
+            |store, _arg| store.log_move_up(),
+        ));
+        reg.register(Command::new(
+            "log-open-commit",
+            "Open the selected commit's diff (RET in the log view)",
+            "git",
+            |store, _arg| store.log_open_commit(),
+        ));
+        reg.register(Command::new(
+            "commit-editor-commit",
+            "Commit the staged changes with the editor's message (C-c C-c)",
+            "git",
+            |store, _arg| store.commit_editor_commit(),
+        ));
+        reg.register(Command::new(
+            "commit-editor-abort",
+            "Discard the commit editor without touching the repo (C-c C-k)",
+            "git",
+            |store, _arg| store.commit_editor_abort(),
+        ));
         // ── issue 04: file watching ─────────────────────────────────
         reg.register(Command::new(
             "reload-buffer",
@@ -496,7 +575,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 56, "expected 56 seed commands: {names:?}");
+        assert_eq!(names.len(), 69, "expected 69 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -538,6 +617,19 @@ mod tests {
             "magit-refresh",
             "magit-next",
             "magit-prev",
+            "magit-log",
+            "magit-blame",
+            "magit-commit",
+            "branch-picker",
+            "stash-list",
+            "branch-create",
+            "log-next-page",
+            "log-prev-page",
+            "log-move-down",
+            "log-move-up",
+            "log-open-commit",
+            "commit-editor-commit",
+            "commit-editor-abort",
             "reload-buffer",
             "toggle-watcher",
             "xref-find-definitions",

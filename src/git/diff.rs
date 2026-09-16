@@ -147,6 +147,87 @@ pub(crate) fn extract(diff: &Diff, path: &str) -> FileDiff {
     file
 }
 
+/// Extract EVERY file's unified diff from a libgit2 `Diff` (used for the
+/// commit-diff view, issue 08). Unlike [`extract`], which is constrained to
+/// one pathspec'd file, this groups the patch stream by delta: each
+/// `FileHeader` line starts a new [`FileDiff`], and hunk/body lines attach to
+/// the current file. Returns the files in patch order.
+pub(crate) fn extract_commit(diff: &Diff) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let _ = diff.print(DiffFormat::Patch, |delta, hunk, line| {
+        match line.origin_value() {
+            DiffLineType::FileHeader => {
+                // A rename/copy reports the new path; a deletion only has the
+                // old path.
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                files.push(FileDiff {
+                    path,
+                    binary: false,
+                    insertions: 0,
+                    deletions: 0,
+                    hunks: Vec::new(),
+                });
+            }
+            DiffLineType::Binary => {
+                if let Some(f) = files.last_mut() {
+                    f.binary = true;
+                }
+            }
+            DiffLineType::HunkHeader => {
+                let Some(h) = hunk else { return true };
+                if let Some(f) = files.last_mut() {
+                    f.hunks.push(DiffHunk {
+                        header: strip_newline(line.content()),
+                        old_start: h.old_start(),
+                        old_lines: h.old_lines(),
+                        new_start: h.new_start(),
+                        new_lines: h.new_lines(),
+                        lines: Vec::new(),
+                        old_ends_nl: true,
+                    });
+                }
+            }
+            DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL => {
+                if matches!(line.origin_value(), DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL)
+                    && let Some(f) = files.last_mut()
+                    && let Some(h) = f.hunks.last_mut()
+                {
+                    h.old_ends_nl = false;
+                }
+            }
+            _ => {
+                let Some(f) = files.last_mut() else { return true };
+                let origin = match line.origin_value() {
+                    DiffLineType::Addition => {
+                        f.insertions += 1;
+                        DiffOrigin::Addition
+                    }
+                    DiffLineType::Deletion => {
+                        f.deletions += 1;
+                        DiffOrigin::Deletion
+                    }
+                    _ => DiffOrigin::Context,
+                };
+                if let Some(h) = f.hunks.last_mut() {
+                    h.lines.push(DiffLine {
+                        origin,
+                        content: strip_newline(line.content()),
+                        old_lineno: line.old_lineno(),
+                        new_lineno: line.new_lineno(),
+                    });
+                }
+            }
+        }
+        true
+    });
+    files
+}
+
 /// `git2` diff `content()` includes the trailing newline; strip a single
 /// `\n` so the stored line text is clean for display and snapshotting.
 fn strip_newline(bytes: &[u8]) -> String {

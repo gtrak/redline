@@ -14,7 +14,10 @@ use crate::git::status::{BranchInfo, FileStatus, RepoStatus, StatusKind};
 
 /// A thin wrapper around an open `git2::Repository`.
 pub struct GitRepo {
-    inner: git2::Repository,
+    /// The underlying libgit2 handle. `pub(crate)` so the sibling `src/git`
+    /// submodules (log/blame/commit/refs) can drive git2 without leaking its
+    /// types past this module tree.
+    pub(crate) inner: git2::Repository,
 }
 
 impl GitRepo {

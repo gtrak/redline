@@ -14,6 +14,29 @@ pub fn row_face(role: RowRole, selected: bool, t: &theme::Theme) -> theme::Face 
         RowRole::DiffAdd => t.diff_add,
         RowRole::DiffDelete => t.diff_delete,
         RowRole::HunkHeader => t.diff_hunk_header,
+        // Issue 08 view rows: log entries, blame lines, commit-editor lines.
+        RowRole::Commit => {
+            if selected {
+                t.section_heading_selected
+            } else {
+                t.log_commit
+            }
+        }
+        RowRole::Blame => {
+            if selected {
+                t.section_heading_selected
+            } else {
+                t.blame
+            }
+        }
+        RowRole::Comment => t.diff_context,
+        RowRole::Text => {
+            if selected {
+                t.section_heading_selected
+            } else {
+                t.view
+            }
+        }
         // Section headings (branch, group, file): highlight the one under
         // the cursor.
         _ => {
