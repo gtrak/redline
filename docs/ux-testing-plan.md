@@ -270,4 +270,5 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
 | Date | Flow | Env | Commit | Result | Notes / issue link |
 |---|---|---|---|---|---|
 | 2026-09-16 | U-A1/U-B1/U-K(all keys) | user terminal | pre-a617b72 tree | **FAIL** | App first-frame-frozen: no repaint ever; fixed by revision-tick (fix-live-input lane), pending review |
+| 2026-09-16 | U-A1/U-J3/U-C1/D(all) | user terminal | 413f843 | **FAIL (4 findings)** | (1) indexing indicator frozen at 0/N for whole build; (2) pane does not fill screen (no width on root View); (3) quick black flashing on churn; (4) arrows unbound in nav views, cursor visibility weak. All -> issue 09 PART A (spec .agents/tasks/issue-09-impl.md). Navigation directive: cursor visible, hunk/line oriented. |
 | 2026-09-16 | U-A1/B1/H2/K | sized-pty + user | 788b25f5 review | FIXED | Frozen-frame root cause: store mutations invisible to render loop; revision-tick + read + definite heights. Picker renders, C-g→q exits 0, watcher repaints. Search hits now deterministic (path,line,col). |
