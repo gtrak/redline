@@ -25,6 +25,13 @@ on 07's `src/git/` wrapper surface and UI patterns.
   make a minimal, factual correction to the relevant skill file so future
   agents are not misled. Never rewrite a skill file wholesale. List every
   skill-file edit in your report under "skill corrections".
+- **graft is available** (CLI on PATH, graph in `graft/`, kept fresh by the
+  orchestrator). Use it for cross-file orientation instead of grepping
+  blind: `graft map` (repo orientation), `graft ask "<query>"` (ranked
+  file:line), `graft callers <symbol>` / `--direction out` (who calls / what
+  it calls), `graft skeleton <file>` (API surface), `graft grep <pattern>`
+  (symbol-grouped search). Optional — use it when it answers faster than
+  grep; never let it replace the read-first list.
 
 ## Read first (in this order)
 
