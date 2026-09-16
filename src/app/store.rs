@@ -4199,12 +4199,13 @@ impl AppStore {
     /// reindex shows `indexing…` (PART A fix, item 2b — no misleading total).
     pub fn indexing_display(&self) -> String {
         match &self.indexing {
-            Some((done, total, _)) if *total > 0 => {
-                if self.indexing_incremental {
-                    "indexing…".to_string()
-                } else {
-                    format!("indexing {done}/{total}")
-                }
+            // Full builds are long enough to warrant the counter. Incremental
+            // refreshes finish in milliseconds; flashing "indexing…" per
+            // file-change batch on a busy repo is pure noise, so they render
+            // nothing (the single-flight state in `self.indexing` is
+            // unaffected -- this is display-only).
+            Some((done, total, _)) if *total > 0 && !self.indexing_incremental => {
+                format!("indexing {done}/{total}")
             }
             _ => String::new(),
         }
@@ -7531,13 +7532,16 @@ mod tests {
     }
 
     #[test]
-    fn indexing_display_incremental_shows_ellipsis() {
+    fn indexing_display_incremental_is_silent() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
-        // Simulate an incremental reindex.
+        // Incremental refreshes are fast; flashing an indicator per
+        // file-change batch on a busy repo is noise, so they render nothing.
         store.indexing = Some((3, 3, 1));
         store.indexing_incremental = true;
-        assert_eq!(store.indexing_display(), "indexing…");
+        assert_eq!(store.indexing_display(), "");
+        // The single-flight state is untouched by the display decision.
+        assert!(store.indexing.is_some());
     }
 
     #[test]
