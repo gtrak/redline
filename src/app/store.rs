@@ -83,13 +83,14 @@ impl ViewId {
         match self {
             ViewId::Buffer => {
                 let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "quit").unwrap();
+                // Bare `q` closes the view (issue 05, finding 5): consistent
+                // with the list views. When the main buffer view is the only
+                // view, `close-view` is a no-op — it does NOT quit the app
+                // (that is still `C-x C-c`).
+                km.bind(&[Key::char('q')], "close-view").unwrap();
                 km.bind(&[Key::alt_char('o')], "open-scratch").unwrap();
                 km
                     .bind(&[Key::ctrl_char('x'), Key::char('o')], "open-scratch")
-                    .unwrap();
-                km
-                    .bind(&[Key::ctrl_char('x'), Key::ctrl_char('i')], "insert-demo-text")
                     .unwrap();
                 // Motion (issue 03).
                 km.bind(&[Key::ctrl_char('n')], "scroll-line-down").unwrap();
@@ -832,6 +833,12 @@ pub struct AppStore {
     /// An armed destructive-discard confirmation (issue 002): `k` arms it,
     /// `y` executes, `n`/C-g/ESC cancel. Holds the target to discard.
     discard_confirm: Option<DiscardTarget>,
+    /// Buffer keys (absolute path strings) the app created itself this
+    /// session (e.g. `.redline-notes.md` on `C-x n`). The watcher's first
+    /// event for a just-created file is our own creation, not an external
+    /// change: its next matching event is ignored so we don't flag the
+    /// buffer "changed on disk" over our own write (issue 05, finding 2).
+    created_paths: HashSet<String>,
 }
 
 impl AppStore {
@@ -1009,6 +1016,7 @@ impl AppStore {
             },
             menu: TransientMenuState::default(),
             discard_confirm: None,
+            created_paths: HashSet::new(),
         }
     }
 
@@ -1159,8 +1167,9 @@ impl AppStore {
         self.engine = KeymapEngine::new(self.engine.global.clone(), view_km);
     }
 
-    /// Insert text into the current buffer (the `insert-demo-text`
-    /// demo command); false when no buffer is current or not editable.
+    /// Insert text at the end of the current buffer (the shared editing
+    /// primitive behind notes / scratch typing); false when no buffer is
+    /// current or the buffer is not editable.
     pub fn insert_text(&mut self, text: &str) -> bool {
         let Some(key) = self.buffers.current() else {
             return false;
@@ -1231,14 +1240,23 @@ impl AppStore {
             return;
         };
         let abs = project.root.join(NOTES_REL);
-        // Create the file if it doesn't exist yet.
-        if !abs.exists()
-            && std::fs::write(&abs, "# Notes\n").is_err()
-        {
-            self.minibuffer_message("open-notes: could not create notes file");
-            return;
-        }
+        // Create the file if it doesn't exist yet. Track whether WE created
+        // it: the watcher's first event for a just-created file is our own
+        // creation (not an external change), and it must not flag the buffer
+        // "changed on disk" (issue 05, finding 2).
+        let created_by_us = if abs.exists() {
+            false
+        } else {
+            if std::fs::write(&abs, "# Notes\n").is_err() {
+                self.minibuffer_message("open-notes: could not create notes file");
+                return;
+            }
+            true
+        };
         let key = abs.to_string_lossy().into_owned();
+        if created_by_us {
+            self.created_paths.insert(key.clone());
+        }
         if self.buffers.get(&key).is_none() {
             match load_file(&abs) {
                 Ok((rope, mtime)) => {
@@ -4028,6 +4046,14 @@ impl AppStore {
         let mut conflicts = 0usize;
         for path in &change.paths {
             let key = path.to_string_lossy().into_owned();
+            // The first watcher event for a file WE created (e.g. the notes
+            // file on `C-x n`) is our own creation, not an external change:
+            // consume the marker and ignore this event so it can't flag the
+            // buffer "changed on disk" (issue 05, finding 2). A later, genuine
+            // external edit is not marked and still conflicts.
+            if self.created_paths.remove(&key) {
+                continue;
+            }
             // Read the buffer's state without holding a borrow across the
             // mutable reload / conflict update below.
             let (matches, locally_owned) = match self.buffers.get(&key) {
@@ -5341,9 +5367,43 @@ impl AppStore {
         // buffer is editable (the notes buffer or any locally-owned file),
         // printable chars append and Backspace deletes. Bounded editing
         // (commit-editor precedent): no cursor movement in v1.
+        //
+        // Interception order (issue 05, finding 1): a key that completes or
+        // extends a bound sequence reaches the keymap engine FIRST (so
+        // `C-x g` / `C-c p f` dispatch while editing), mirroring the commit
+        // editor's careful order. Only a printable that binds nothing
+        // self-inserts; C-g keeps its global cancel (clears pending, does
+        // not close the notes buffer).
         if self.top_view() == ViewId::Buffer
             && self.buffers.current().and_then(|k| self.buffers.get(k).map(|b| b.editable && b.path.is_some())).unwrap_or(false)
         {
+            // C-g cancels pending / closes overlays from any state,
+            // including while editing (the advertised C-g matrix).
+            if key == Key::ctrl_char('g') {
+                self.cancel();
+                return;
+            }
+            let mut seq = self.pending.clone();
+            seq.push(key);
+            let extends_sequence = matches!(
+                self.engine.resolve(&seq),
+                Some(Lookup::Command(_)) | Some(Lookup::Pending)
+            );
+            // A printable that is a DEPTH-1 leaf command (g/j/k/q/G/n/p...)
+            // self-inserts while typing: firing view commands on plain
+            // letters destroyed unsaved notes text (g -> reload-buffer).
+            // Only chords (C-x, C-c, M-...) and prefix continuations reach
+            // the engine.
+            let printable_leaf_command = key.char_value().is_some()
+                && self.pending.is_empty()
+                && matches!(self.engine.resolve(&seq), Some(Lookup::Command(_)))
+                && !self.engine.prefix_exists(&seq);
+            if !self.pending.is_empty() || (extends_sequence && !printable_leaf_command) {
+                // A pending prefix (or a key that starts/continues a bound
+                // sequence) must reach the engine before any self-insert.
+                self.dispatch_key(key);
+                return;
+            }
             if let Some(c) = key.char_value() {
                 self.notes_insert_char(c);
                 return;
@@ -5660,16 +5720,28 @@ mod tests {
     }
 
     #[test]
-    fn per_view_q_beats_global_but_global_still_reaches() {
+    fn bare_q_in_buffer_view_closes_view_not_quit() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
+        // Bare `q` on the root buffer view: a no-op close-view, NOT a quit
+        // (issue 05, finding 5: one stray q must not lose the session).
         s.key_event(key("q"));
-        assert!(s.quit, "view-local `q` must bind quit");
+        assert!(!s.quit, "bare q must not quit the app");
+        assert_eq!(s.view_stack.len(), 1, "the buffer view must remain");
 
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = store(dir.path());
-        s.key_event(key("M-x"));
-        assert!(s.picker_open());
+        // `q` closes an overlay list view back to the buffer (consistent with
+        // the list views' `q`).
+        s.key_event(key("C-x"));
+        s.key_event(key("C-b")); // list-buffers
+        assert_eq!(s.top_view(), ViewId::BufferList);
+        s.key_event(key("q"));
+        assert_eq!(s.top_view(), ViewId::Buffer, "q must close the list view");
+        assert!(!s.quit);
+
+        // `C-x C-c` remains the quit.
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit, "C-x C-c must still quit");
     }
 
     #[test]
@@ -6125,7 +6197,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 75);
+        assert_eq!(store.picker_count().0, 71);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -6143,13 +6215,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 74);
+        assert_eq!(store.picker_selected(), 70);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 73);
+        assert_eq!(store.picker_selected(), 69);
 
-        // RET runs the candidate at the selected index (74: save-buffer —
+        // RET runs the candidate at the selected index (70: save-buffer —
         // *scratch* is not editable, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
@@ -6182,7 +6254,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 75);
+        assert_eq!(store.picker_count().0, 71);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -8517,6 +8589,117 @@ mod tests {
         assert!(s.discard_armed(), "confirmation must be armed");
         s.key_event(key("n"));
         assert!(!s.discard_armed());
+    }
+
+    // ── issue 05 (finding 1): editable-buffer key order ─────────────
+
+    #[test]
+    fn notes_printable_inserts_and_c_c_p_f_dispatches_while_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut s = store(dir.path());
+        s.open_notes();
+        let bkey = s.buffers.current().unwrap().to_string();
+
+        // A plain printable (not bound) self-inserts while editing.
+        s.key_event(key("l"));
+        assert!(
+            s.buffers.get(&bkey).unwrap().text().ends_with("l"),
+            "`l` must self-insert in the notes buffer"
+        );
+
+        // C-c p f (find-file) must open the finder while a notes buffer is
+        // current — a multi-key sequence ending in two printables.
+        s.key_event(key("C-c"));
+        s.key_event(key("p"));
+        s.key_event(key("f"));
+        assert!(s.picker_open(), "C-c p f must open the finder");
+        assert_eq!(s.picker_kind(), Some(PickerKind::FindFile));
+        assert!(
+            !s.buffers.get(&bkey).unwrap().text().contains("p f"),
+            "the prefix tail must not have been typed into notes"
+        );
+    }
+
+    #[test]
+    fn notes_c_x_g_dispatches_while_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = git_store(dir.path());
+        s.open_notes();
+        let bkey = s.buffers.current().unwrap().to_string();
+
+        // A plain printable (not bound) self-inserts while editing.
+        s.key_event(key("l"));
+        assert!(
+            s.buffers.get(&bkey).unwrap().text().ends_with("l"),
+            "`l` must self-insert in the notes buffer"
+        );
+
+        // C-x g (magit-status) must dispatch while a notes buffer is current:
+        // the pending prefix must reach the engine, not be self-inserted.
+        s.key_event(key("C-x"));
+        assert_eq!(s.pending_display(), "C-x", "C-x must arm the prefix");
+        s.key_event(key("g"));
+        assert_eq!(
+            s.top_view(),
+            ViewId::MagitStatus,
+            "C-x g must dispatch while editing notes"
+        );
+        assert!(
+            !s.buffers.get(&bkey).unwrap().text().contains("x g"),
+            "the prefix must not have been typed into notes"
+        );
+    }
+
+    #[test]
+    fn notes_c_g_clears_pending_only_not_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut s = store(dir.path());
+        s.open_notes();
+        s.key_event(key("C-x")); // arm a prefix
+        assert_eq!(s.pending_display(), "C-x");
+        s.key_event(key("C-g")); // global cancel
+        assert!(s.pending.is_empty(), "C-g must clear the pending prefix");
+        // The notes buffer stays current and open; the app is not quitting.
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        assert!(!s.quit, "C-g in notes must not quit");
+        // A printable now self-inserts (the prefix is gone).
+        s.key_event(key("a"));
+        assert!(s.buffers.current_buffer().unwrap().text().ends_with("a"));
+    }
+
+    // ── issue 05 (finding 2): notes self-creation is not a conflict ───
+
+    #[test]
+    fn notes_self_creation_event_is_ignored_then_real_edit_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let bkey = s.buffers.current().unwrap().to_string();
+        let notes_path = dir.path().join(".redline-notes.md");
+
+        // Type first, so the buffer is locally owned when the (late) watcher
+        // event for our own file creation lands.
+        s.key_event(key("a"));
+        assert!(s.buffers.get(&bkey).unwrap().locally_modified);
+
+        // The self-inflicted creation event must NOT flag a conflict.
+        s.apply_project_change(&change(vec![notes_path.clone()]));
+        assert!(
+            !s.buffers.get(&bkey).unwrap().changed_on_disk,
+            "our own file creation must not set changed_on_disk"
+        );
+        assert!(!s.current_buffer_changed_on_disk());
+
+        // A genuine external edit (a later, un-marked event) still conflicts.
+        s.apply_project_change(&change(vec![notes_path.clone()]));
+        assert!(
+            s.buffers.get(&bkey).unwrap().changed_on_disk,
+            "a genuine external edit must still set changed_on_disk"
+        );
+        assert!(s.current_buffer_changed_on_disk());
     }
 }
 

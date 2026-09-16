@@ -39,7 +39,14 @@ impl FileList {
         builder
             .hidden(true) // skip dotfiles/dotdirs
             .git_ignore(is_git_repo); // native gitignore handling in git repos
-        if !is_git_repo {
+        // Prune the `graft` cache directory at the walk level (issue 05,
+        // finding 3): graft cache cards are agent output, not project source,
+        // and must not pollute the file finder or the tree sidebar (the tree
+        // inherits the fix from this same walk). Grep keeps its own
+        // `.ignore`-based walk (a separate module) and still sees graft/.
+        if is_git_repo {
+            builder.filter_entry(|entry| !is_graft_dir(entry));
+        } else {
             attach_gitignore_filter(&mut builder, root);
         }
         let mut files = Vec::new();
@@ -68,6 +75,14 @@ impl FileList {
     }
 }
 
+/// True when `entry` is a `graft` directory (the agent cache) that the file
+/// finder / tree walk must prune (issue 05, finding 3). Pruning the directory
+/// also prunes its whole subtree; grep's separate `.ignore`-based walk is
+/// unaffected.
+fn is_graft_dir(entry: &ignore::DirEntry) -> bool {
+    entry.file_type().is_some_and(|ft| ft.is_dir()) && entry.file_name().to_str() == Some("graft")
+}
+
 /// Honor `.gitignore` files for non-git projects (the ignore crate
 /// skips them there): a depth-truncated stack of per-directory
 /// matchers — the root's matcher plus each subdirectory's — checked
@@ -89,6 +104,11 @@ pub(crate) fn attach_gitignore_filter(builder: &mut WalkBuilder, root: &Path) {
     };
     let stack: Mutex<Vec<Option<Gitignore>>> = Mutex::new(vec![root_matcher]);
     builder.filter_entry(move |entry: &ignore::DirEntry| {
+        // Prune the graft cache directory (issue 05, finding 3) before the
+        // gitignore stack logic.
+        if is_graft_dir(entry) {
+            return false;
+        }
         let mut stack = stack.lock().unwrap();
         let depth = entry.depth();
         if entry.file_type().is_some_and(|ft| ft.is_dir()) {
@@ -237,5 +257,36 @@ mod tests {
         let dir = project();
         let not_dir = dir.path().join("Cargo.toml");
         assert!(FileList::build(&not_dir).is_err());
+    }
+
+    #[test]
+    fn walk_prunes_graft_cache_directory() {
+        // The graft cache (agent output) must not appear in the file walk
+        // that feeds the finder and the tree sidebar (issue 05, finding 3).
+        let dir = project();
+        file(dir.path().join("src/main.rs"), "fn main() {}\n");
+        file(dir.path().join("graft/src/main.md"), "# graft card\n");
+        file(dir.path().join("graft/cache/other.md"), "cache\n");
+
+        let list = FileList::build(dir.path()).unwrap();
+        assert!(has(&list, "src/main.rs"));
+        // No graft path may survive the walk (the whole subtree is pruned).
+        assert!(
+            !list.files.iter().any(|f| f == "graft/src/main.md" || f.starts_with("graft/")),
+            "graft/ must be pruned from the file walk: {:?}",
+            list.files
+        );
+    }
+
+    #[test]
+    fn walk_prunes_graft_directory_inside_git_repo() {
+        let dir = project();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        file(dir.path().join("src/main.rs"), "fn main() {}\n");
+        file(dir.path().join("graft/card.md"), "# graft\n");
+
+        let list = FileList::build(dir.path()).unwrap();
+        assert!(has(&list, "src/main.rs"));
+        assert!(!has(&list, "graft/card.md"), "graft/ must be pruned");
     }
 }

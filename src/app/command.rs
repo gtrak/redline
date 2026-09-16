@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use crate::app::store::{AppStore, ViewId};
 
-/// Handler for a command. `arg` carries an optional argument (e.g. the
-/// text of a `message-echo <text>` demo). `Send + Sync` so the store
+/// Handler for a command. `arg` carries an optional argument (e.g. a
+/// project-relative path for a file command). `Send + Sync` so the store
 /// (which owns the registry) can cross threads into the render loop.
 pub type CommandHandler = Arc<dyn Fn(&mut AppStore, Option<String>) + Send + Sync>;
 
@@ -105,7 +105,7 @@ impl CommandRegistry {
         Ok(())
     }
 
-    /// The ~10 placeholder commands shipped with issue 01.
+    /// The command set shipped with issue 01 (and every issue since).
     pub fn seed() -> Self {
         let mut reg = Self::default();
         reg.register(Command::new(
@@ -152,36 +152,6 @@ impl CommandRegistry {
             "Switch to the *scratch* buffer",
             "buffers",
             |store, _arg| store.open_scratch(),
-        ));
-        reg.register(Command::new(
-            "message-echo",
-            "Echo its argument in the minibuffer (demo)",
-            "demo",
-            |store, arg| store.minibuffer_message(&arg.unwrap_or_default()),
-        ));
-        reg.register(Command::new(
-            "demo-message-1",
-            "Show demo message one (placeholder)",
-            "demo",
-            |store, _arg| store.minibuffer_message("hello from the command registry (1)"),
-        ));
-        reg.register(Command::new(
-            "demo-message-2",
-            "Show demo message two (placeholder)",
-            "demo",
-            |store, _arg| store.minibuffer_message("hello from the command registry (2)"),
-        ));
-        reg.register(Command::new(
-            "insert-demo-text",
-            "Insert demo text into the current buffer",
-            "demo",
-            |store, _arg| {
-                if store.insert_text("demo text\n") {
-                    store.minibuffer_message("inserted demo text");
-                } else {
-                    store.minibuffer_message("insert-demo-text: no buffer is current");
-                }
-            },
         ));
         // ── issue 02: browse layer ────────────────────────────────────────
         reg.register(Command::new(
@@ -612,7 +582,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 75, "expected 75 seed commands: {names:?}");
+        assert_eq!(names.len(), 71, "expected 71 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -620,10 +590,6 @@ mod tests {
             "cycle-view-next",
             "cycle-view-prev",
             "open-scratch",
-            "message-echo",
-            "demo-message-1",
-            "demo-message-2",
-            "insert-demo-text",
             "find-file",
             "switch-buffer",
             "list-buffers",
@@ -700,13 +666,8 @@ mod tests {
         assert!(store.quit);
 
         let mut store = new_store();
-        reg.dispatch_by_name(&mut store, "demo-message-1", None).unwrap();
-        assert!(store.message.contains("hello"));
-
-        let mut store = new_store();
-        reg.dispatch_by_name(&mut store, "message-echo", Some("hi there".into()))
-            .unwrap();
-        assert_eq!(store.message, "hi there");
+        reg.dispatch_by_name(&mut store, "open-scratch", None).unwrap();
+        assert_eq!(store.view_name_display(), "*scratch*");
 
         // In-app path: dispatch through the store's own registry.
         let mut store = new_store();
@@ -734,8 +695,8 @@ mod tests {
         reg.dispatch_by_name(&mut store, "open-scratch", None).unwrap();
         assert_eq!(store.view_name_display(), "*scratch*");
 
-        reg.dispatch_by_name(&mut store, "insert-demo-text", None).unwrap();
-        assert!(store.buffer_text().contains("demo text"));
+        reg.dispatch_by_name(&mut store, "list-buffers", None).unwrap();
+        assert_eq!(store.top_view(), ViewId::BufferList);
     }
 
     /// Issue 09 step 7: the README keymap table must only document commands

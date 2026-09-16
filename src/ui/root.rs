@@ -634,7 +634,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 75"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 71"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }
@@ -771,7 +771,9 @@ mod tests {
     /// The five live checks that exercise the tick mechanism end-to-end:
     /// (a) C-x C-f opens the file picker (frame shows prompt + candidates)
     /// (b) typing filters and RET opens a real file (frame shows content)
-    /// (c) q quits before timeout with exit 0 (NOT exit 124)
+    /// (c) C-x C-c quits before timeout with exit 0 (NOT exit 124); bare `q`
+    ///     no longer quits (issue 05, finding 5 — it is now a no-op
+    ///     close-view on the root buffer view)
     /// (d) touching a viewed file on disk repaints the frame (watcher path)
     /// (e) M-x opens the palette (frame shows prompt + commands)
     ///
@@ -792,7 +794,7 @@ mod tests {
     ///     time.sleep(0.5)
     ///     os.write(fd, b'\r')       # RET opens file
     ///     time.sleep(1)
-    ///     os.write(fd, b'q')        # quit
+    ///     os.write(fd, b'\x18\x03')  # C-x C-c quit (`q` no longer quits)
     /// ```
     #[ignore]
     #[test]

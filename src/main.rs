@@ -125,7 +125,8 @@ async fn main() -> anyhow::Result<()> {
     // iocraft's fullscreen loop exits on Ctrl+C by default -- which would
     // swallow every C-c-prefixed binding (C-c p ..., the commit editor's
     // C-c C-c/C-c C-k) before the keymap ever sees the key. Opt out: C-c is
-    // ours (a mode prefix), q / C-x C-c remain the quit paths.
+    // ours (a mode prefix); C-x C-c is the quit path (bare `q` is a no-op
+    // close-view on the root buffer view, issue 05 finding 5).
     app.fullscreen().ignore_ctrl_c().await?;
     // Clean watcher shutdown: take the watcher out (brief lock) and await its
     // teardown WITHOUT holding the store lock across the await (the runtime

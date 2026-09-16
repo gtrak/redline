@@ -373,6 +373,19 @@ impl KeyMap {
         self.root.lookup(keys)
     }
 
+    /// True when `keys` walks to a trie node that has children (i.e. the
+    /// sequence is a strict prefix of some longer binding).
+    pub fn is_prefix(&self, keys: &[Key]) -> bool {
+        let mut cur = Some(&self.root);
+        for k in keys {
+            cur = cur.and_then(|node| node.next.get(k));
+            if cur.is_none() {
+                return false;
+            }
+        }
+        cur.map(|node| !node.next.is_empty()).unwrap_or(false)
+    }
+
     /// Every (sequence, command) leaf binding in this map, sorted by the
     /// sequence's display string then the command name (deterministic; the
     /// trie's `HashMap` order is not). Used to derive the transient menu
@@ -423,6 +436,11 @@ impl KeymapEngine {
             Some(l) => Some(l),
             None => self.global.lookup(keys),
         }
+    }
+
+    /// True when `keys` walks to a prefix node in either map (view first).
+    pub fn prefix_exists(&self, keys: &[Key]) -> bool {
+        self.view.is_prefix(keys) || self.global.is_prefix(keys)
     }
 }
 
