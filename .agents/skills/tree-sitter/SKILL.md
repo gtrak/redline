@@ -104,14 +104,20 @@ use streaming_iterator::StreamingIterator; use tree_sitter::{Query, QueryCursor}
 
 let query = Query::new(&language, "(function_item name: (identifier) @def)").unwrap();
 let mut cursor = QueryCursor::new();
-let captures = cursor.captures(&query, tree.root_node(), source.as_bytes()); // source: &str
-while let Some((m, _)) = captures.next() {          // Item = (QueryMatch, usize)
+let matches = cursor.matches(&query, tree.root_node(), source.as_bytes()); // source: &str
+while let Some(m) = matches.next() {           // Item = &QueryMatch (one per definition, not per capture)
     for cap in m.captures {
         let name = query.capture_names()[cap.index as usize]; // "def"
         let node = cap.node; // Copy: kind(), start_byte(), utf8_text(source.as_bytes())
     }
 }
 ```
+
+- **Use `matches()`, not `captures()`, for multi-capture patterns.** `captures()`
+  yields one item *per capture*, so a match capturing `@name` + `@item` would emit
+  the same symbol twice. `matches()` yields one `&QueryMatch` per definition with
+  all its captures in `m.captures`. For a single-capture query either works; for
+  two captures (name + enclosing-item extent) `matches()` is required.
 
 ## Highlighting
 
@@ -200,7 +206,10 @@ Maps to plan 001 issues 03/04/05:
 - **`Node::utf8_text(source)`** — the old `Node::text(source)` is gone.
 - **Query iterators are `StreamingIterator`, not std `Iterator`.** `QueryCaptures`/`QueryMatches` come from the
   `streaming-iterator` crate; need `use streaming_iterator::StreamingIterator;` for `.next()`. `QueryCaptures` yields
-  `(QueryMatch, usize)`; `QueryMatch` is !Send/!Sync.
+- **`QueryMatches` vs `QueryCaptures` item types differ** (0.24.7): `captures().next()`
+  yields `(QueryMatch, usize)` (a tuple, per capture); `matches().next()` yields
+  `&QueryMatch` (a reference, per match) — use `matches()` for definition queries
+  that capture a name and its enclosing item (see "Run a query"). `QueryMatch` is !Send/!Sync.
 - **`captures`/`matches` take a third `TextProvider` argument** (pass
   `source.as_bytes()`; the blanket impl covers `&[u8]`).
 - **`parse` returns `Option<Tree>`**, not `Result` — `None` on timeout,
