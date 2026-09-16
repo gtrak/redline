@@ -85,6 +85,10 @@ impl Key {
         Self::new(KeyCode::Enter)
     }
 
+    pub fn tab() -> Self {
+        Self::new(KeyCode::Tab)
+    }
+
     pub fn up() -> Self {
         Self::new(KeyCode::Up)
     }

@@ -16,9 +16,13 @@ use nucleo_matcher::{
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, parse_sequence};
+use crate::git::diff::{DiffSide, FileDiff};
+use crate::git::status::{RepoStatus, Side};
+use crate::git::{GitError, GitRepo};
 use crate::model::buffer::{BufferTable, SCRATCH_NAME};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
+use crate::model::sections::{MagitRow, SectionKind, StatusTree};
 use crate::theme::Theme;
 
 /// A view on the stack. The top of the stack is what the main view
@@ -29,6 +33,8 @@ pub enum ViewId {
     Buffer,
     /// The `C-x C-b` list-buffers view.
     BufferList,
+    /// The `C-x g` magit status view (issue 07).
+    MagitStatus,
 }
 
 impl ViewId {
@@ -36,6 +42,7 @@ impl ViewId {
         match self {
             ViewId::Buffer => "buffer",
             ViewId::BufferList => "buffer-list",
+            ViewId::MagitStatus => "magit-status",
         }
     }
 
@@ -61,6 +68,22 @@ impl ViewId {
                 km.bind(&[Key::ctrl_char('n')], "buffer-list-next").unwrap();
                 km.bind(&[Key::up()], "buffer-list-prev").unwrap();
                 km.bind(&[Key::ctrl_char('p')], "buffer-list-prev").unwrap();
+                km
+            }
+            ViewId::MagitStatus => {
+                // Magit dwim keys (issue 07): the section under the cursor
+                // determines what `s`/`u`/`RET` do.
+                let mut km = KeyMap::new();
+                km.bind(&[Key::char('q')], "close-view").unwrap();
+                km.bind(&[Key::char('s')], "magit-stage").unwrap();
+                km.bind(&[Key::char('u')], "magit-unstage").unwrap();
+                km.bind(&[Key::tab()], "magit-fold").unwrap();
+                km.bind(&[Key::enter()], "magit-visit-file").unwrap();
+                km.bind(&[Key::char('g')], "magit-refresh").unwrap();
+                km.bind(&[Key::char('n')], "magit-next").unwrap();
+                km.bind(&[Key::ctrl_char('n')], "magit-next").unwrap();
+                km.bind(&[Key::char('p')], "magit-prev").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "magit-prev").unwrap();
                 km
             }
         }
@@ -119,6 +142,15 @@ pub struct BufferRow {
     pub lines: u64,
 }
 
+/// Live dirty counts for the status line: staged (index vs HEAD),
+/// unstaged (workdir vs index), and untracked file counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirtyCounts {
+    pub staged: usize,
+    pub unstaged: usize,
+    pub untracked: usize,
+}
+
 /// Preview size: a "first page" of the file, byte-capped so a huge
 /// file never stalls a selection move.
 const PREVIEW_LINES: usize = 32;
@@ -156,6 +188,14 @@ pub struct AppStore {
     /// gets path bonuses for file-picking.
     matcher: Matcher,
     file_matcher: Matcher,
+    /// The open git repository (lazily discovered from the project root),
+    /// cached so status/staging ops don't re-open it every time.
+    git: Option<GitRepo>,
+    /// The magit status section tree (issue 07), when built.
+    status_tree: Option<StatusTree>,
+    /// Live dirty counts for the status line, updated on each magit
+    /// refresh (watcher-driven live refresh is issue 04).
+    dirty: Option<DirtyCounts>,
 }
 
 impl AppStore {
@@ -195,6 +235,10 @@ impl AppStore {
             .unwrap();
         global
             .bind(&[Key::ctrl_char('x'), Key::char('k')], "kill-buffer")
+            .unwrap();
+        // Magit status (issue 07).
+        global
+            .bind(&[Key::ctrl_char('x'), Key::char('g')], "magit-status")
             .unwrap();
         // Projectile prefix (C-c p …): verified projectile-ux keys.
         global
@@ -250,6 +294,9 @@ impl AppStore {
             picker: None,
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
             file_matcher: Matcher::new(nucleo_matcher::Config::DEFAULT.match_paths()),
+            git: None,
+            status_tree: None,
+            dirty: None,
         }
     }
 
@@ -289,6 +336,7 @@ impl AppStore {
                 .map(|key| self.buffer_display(key))
                 .unwrap_or_else(|| SCRATCH_NAME.to_string()),
             ViewId::BufferList => "*list-buffers*".to_string(),
+            ViewId::MagitStatus => "*magit-status*".to_string(),
         }
     }
 
@@ -855,6 +903,12 @@ impl AppStore {
         let project = Project::new(root_path.clone());
         let name = project.name.clone();
         self.project = Some(project);
+        // Invalidate the cached git repo and magit state: they belong to
+        // the previous project root and would otherwise be used against
+        // the wrong repository after the switch.
+        self.git = None;
+        self.status_tree = None;
+        self.dirty = None;
         self.project_store.registry.upsert(&root_path);
         let _ = self.project_store.save_registry();
         self.ensure_files();
@@ -919,6 +973,246 @@ impl AppStore {
         if n > 0 {
             self.buffer_list_selected = (self.buffer_list_selected + n - 1) % n;
         }
+    }
+
+    // ── magit status (issue 07) ─────────────────────────────────────────
+
+    /// Open (or re-focus) the magit status buffer: ensure the repo is
+    /// open, refresh the section tree, and push the view if needed.
+    pub fn open_magit_status(&mut self) {
+        let Some(project) = self.project.clone() else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        if !self.ensure_git(project.root) {
+            return;
+        }
+        if !self.refresh_magit() {
+            return;
+        }
+        if self.top_view() != ViewId::MagitStatus {
+            self.push_view(ViewId::MagitStatus);
+        }
+    }
+
+    /// `g`: manually refresh the status (watcher-driven auto-refresh is
+    /// issue 04; the watcher bus will subscribe here).
+    pub fn magit_refresh(&mut self) {
+        if self.refresh_magit() {
+            self.minibuffer_message("status refreshed");
+        }
+    }
+
+    /// `TAB`: fold/unfold the section under the cursor.
+    pub fn magit_toggle_fold(&mut self) {
+        if let Some(t) = self.status_tree.as_mut() {
+            t.toggle_fold();
+        }
+    }
+
+    /// `n` / `C-n`: move the cursor to the next visible section.
+    pub fn magit_cursor_down(&mut self) {
+        if let Some(t) = self.status_tree.as_mut() {
+            t.move_down();
+        }
+    }
+
+    /// `p` / `C-p`: move the cursor to the previous visible section.
+    pub fn magit_cursor_up(&mut self) {
+        if let Some(t) = self.status_tree.as_mut() {
+            t.move_up();
+        }
+    }
+
+    /// `RET`: visit the file under the cursor through the buffer model
+    /// (issue 02) at the file level, then return to the buffer view.
+    /// TODO(issue 03): jump to the hunk offset once FileView lands.
+    pub fn magit_visit_file(&mut self) {
+        let path = match self
+            .status_tree
+            .as_ref()
+            .and_then(|t| t.cursor_target())
+            .and_then(|t| t.path)
+        {
+            Some(p) => p,
+            None => {
+                self.minibuffer_message("no file under point");
+                return;
+            }
+        };
+        self.open_path(&path);
+        if self.top_view() == ViewId::MagitStatus {
+            self.close_view();
+        }
+    }
+
+    /// `s`: stage the change at point (file or hunk on the unstaged side,
+    /// or an untracked file), then refresh.
+    pub fn magit_stage(&mut self) {
+        let Some(target) = self.status_tree.as_ref().and_then(|t| t.cursor_target()) else {
+            self.minibuffer_message("no section under point");
+            return;
+        };
+        let Some(path) = target.path else {
+            self.minibuffer_message("no file under point");
+            return;
+        };
+        let result = match (target.kind, target.side) {
+            (SectionKind::File, Some(Side::Unstaged) | Some(Side::Untracked)) => {
+                self.with_git(move |g| g.stage_file(&path))
+            }
+            (SectionKind::Hunk, Some(Side::Unstaged)) => {
+                let start = target.hunk_new_start.unwrap_or(0);
+                self.with_git(move |g| g.stage_hunk(&path, start))
+            }
+            _ => {
+                self.minibuffer_message("nothing to stage at point");
+                return;
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_magit();
+            }
+            Err(e) => self.minibuffer_message(&format!("stage failed: {e}")),
+        }
+    }
+
+    /// `u`: unstage the change at point (file or hunk on the staged side),
+    /// then refresh.
+    pub fn magit_unstage(&mut self) {
+        let Some(target) = self.status_tree.as_ref().and_then(|t| t.cursor_target()) else {
+            self.minibuffer_message("no section under point");
+            return;
+        };
+        let Some(path) = target.path else {
+            self.minibuffer_message("no file under point");
+            return;
+        };
+        let result = match (target.kind, target.side) {
+            (SectionKind::File, Some(Side::Staged)) => {
+                let orig = target.orig.clone();
+                self.with_git(move |g| g.unstage_file(&path, orig.as_deref()))
+            }
+            (SectionKind::Hunk, Some(Side::Staged)) => {
+                let start = target.hunk_new_start.unwrap_or(0);
+                self.with_git(move |g| g.unstage_hunk(&path, start))
+            }
+            _ => {
+                self.minibuffer_message("nothing to unstage at point");
+                return;
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_magit();
+            }
+            Err(e) => self.minibuffer_message(&format!("unstage failed: {e}")),
+        }
+    }
+
+    /// The magit status rows for the current fold state (empty when the
+    /// tree has not been built).
+    pub fn magit_rows(&self) -> Vec<MagitRow> {
+        self.status_tree
+            .as_ref()
+            .map(|t| t.visible_rows())
+            .unwrap_or_default()
+    }
+
+    /// Live dirty counts for the status line (`None` until the first
+    /// refresh).
+    pub fn dirty_counts(&self) -> Option<DirtyCounts> {
+        self.dirty
+    }
+
+    /// Run `f` against the cached repo, opening a `NotARepository` error
+    /// when none is open.
+    fn with_git<R>(&self, f: impl FnOnce(&GitRepo) -> Result<R, GitError>) -> Result<R, GitError> {
+        match self.git.as_ref() {
+            Some(g) => f(g),
+            None => Err(GitError::NotARepository {
+                path: self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            }),
+        }
+    }
+
+    /// Open (or keep) the cached git repo at `root`.
+    fn ensure_git(&mut self, root: PathBuf) -> bool {
+        if self.git.is_none() {
+            match GitRepo::discover(&root) {
+                Ok(g) => self.git = Some(g),
+                Err(e) => {
+                    self.minibuffer_message(&e.to_string());
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn git_status(&self) -> Result<RepoStatus, GitError> {
+        match self.git.as_ref() {
+            Some(g) => g.status(),
+            None => Err(GitError::NotARepository {
+                path: self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            }),
+        }
+    }
+
+    /// Fetch per-file diffs for every changed file (staged and unstaged
+    /// sides). Untracked files have no diff.
+    fn collect_diffs(&self, status: &RepoStatus) -> (HashMap<String, FileDiff>, HashMap<String, FileDiff>) {
+        let git = match self.git.as_ref() {
+            Some(g) => g,
+            None => return (HashMap::new(), HashMap::new()),
+        };
+        let mut staged = HashMap::new();
+        let mut unstaged = HashMap::new();
+        for f in &status.files {
+            if f.is_staged()
+                && let Ok(d) = git.diff(DiffSide::Staged, &f.path)
+            {
+                staged.insert(f.path.clone(), d);
+            }
+            if f.is_unstaged()
+                && let Ok(d) = git.diff(DiffSide::Unstaged, &f.path)
+            {
+                unstaged.insert(f.path.clone(), d);
+            }
+        }
+        (staged, unstaged)
+    }
+
+    /// Rebuild the status section tree (preserving fold + cursor) and the
+    /// dirty counts from a fresh status. Returns false (and sets the
+    /// minibuffer) on a git error.
+    fn refresh_magit(&mut self) -> bool {
+        let status = match self.git_status() {
+            Ok(s) => s,
+            Err(e) => {
+                self.minibuffer_message(&format!("git status failed: {e}"));
+                return false;
+            }
+        };
+        let (staged, unstaged) = self.collect_diffs(&status);
+        let prev = self.status_tree.clone();
+        let tree = StatusTree::build(&status, &staged, &unstaged, prev.as_ref());
+        self.dirty = Some(DirtyCounts {
+            staged: status.staged_count(),
+            unstaged: status.unstaged_count(),
+            untracked: status.untracked_count(),
+        });
+        self.status_tree = Some(tree);
+        true
     }
 
     // ── keys & dispatch (unchanged skeleton from issue 01) ──────────────
@@ -1596,7 +1890,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 21);
+        assert_eq!(store.picker_count().0, 29);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -1614,13 +1908,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 20);
+        assert_eq!(store.picker_selected(), 28);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 19);
+        assert_eq!(store.picker_selected(), 27);
 
-        // RET runs the candidate at the selected index (19: buffer-list-next).
+        // RET runs the candidate at the selected index (27: magit-next).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -1652,7 +1946,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 21);
+        assert_eq!(store.picker_count().0, 29);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

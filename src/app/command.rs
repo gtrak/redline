@@ -253,6 +253,55 @@ impl CommandRegistry {
             "buffers",
             |store, _arg| store.buffer_list_prev(),
         ));
+        // ── issue 07: magit status & staging ───────────────────────────
+        reg.register(Command::new(
+            "magit-status",
+            "Show/refresh the git status buffer (C-x g)",
+            "git",
+            |store, _arg| store.open_magit_status(),
+        ));
+        reg.register(Command::new(
+            "magit-stage",
+            "Stage the file or hunk at point (s)",
+            "git",
+            |store, _arg| store.magit_stage(),
+        ));
+        reg.register(Command::new(
+            "magit-unstage",
+            "Unstage the file or hunk at point (u)",
+            "git",
+            |store, _arg| store.magit_unstage(),
+        ));
+        reg.register(Command::new(
+            "magit-fold",
+            "Fold/unfold the section at point (TAB)",
+            "git",
+            |store, _arg| store.magit_toggle_fold(),
+        ));
+        reg.register(Command::new(
+            "magit-visit-file",
+            "Visit the file at point in the buffer view (RET)",
+            "git",
+            |store, _arg| store.magit_visit_file(),
+        ));
+        reg.register(Command::new(
+            "magit-refresh",
+            "Manually refresh the git status buffer (g)",
+            "git",
+            |store, _arg| store.magit_refresh(),
+        ));
+        reg.register(Command::new(
+            "magit-next",
+            "Move to the next section in the status buffer (n / C-n)",
+            "git",
+            |store, _arg| store.magit_cursor_down(),
+        ));
+        reg.register(Command::new(
+            "magit-prev",
+            "Move to the previous section in the status buffer (p / C-p)",
+            "git",
+            |store, _arg| store.magit_cursor_up(),
+        ));
         reg
     }
 }
@@ -273,7 +322,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 21, "expected 21 seed commands: {names:?}");
+        assert_eq!(names.len(), 29, "expected 29 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -296,6 +345,14 @@ mod tests {
             "open-buffer-list-selected",
             "buffer-list-next",
             "buffer-list-prev",
+            "magit-status",
+            "magit-stage",
+            "magit-unstage",
+            "magit-fold",
+            "magit-visit-file",
+            "magit-refresh",
+            "magit-next",
+            "magit-prev",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

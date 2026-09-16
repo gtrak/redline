@@ -10,6 +10,7 @@
 //! iocraft components; this file only starts/stops the render loop.
 
 mod app;
+mod git;
 mod model;
 mod theme;
 mod ui;

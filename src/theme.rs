@@ -52,6 +52,13 @@ pub struct Theme {
     pub view: Face,
     pub view_title: Face,
     pub preview: Face,
+    // Magit / diff faces (issue 07).
+    pub section_heading: Face,
+    pub section_heading_selected: Face,
+    pub diff_add: Face,
+    pub diff_delete: Face,
+    pub diff_context: Face,
+    pub diff_hunk_header: Face,
 }
 
 impl Default for Theme {
@@ -66,6 +73,12 @@ impl Default for Theme {
             view: Face::new(Color::White, Color::Black, false),
             view_title: Face::new(Color::Cyan, Color::Black, true),
             preview: Face::new(Color::Grey, Color::Black, false),
+            section_heading: Face::new(Color::Cyan, Color::Black, true),
+            section_heading_selected: Face::new(Color::White, Color::Blue, true),
+            diff_add: Face::new(Color::Green, Color::Black, false),
+            diff_delete: Face::new(Color::Red, Color::Black, false),
+            diff_context: Face::new(Color::DarkGrey, Color::Black, false),
+            diff_hunk_header: Face::new(Color::Magenta, Color::Black, true),
         }
     }
 }

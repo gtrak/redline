@@ -1,0 +1,21 @@
+---
+source: src/model/sections.rs
+expression: rows_text(&tree)
+---
+[
+    "Branch | ## main | sel=false",
+    "Group | Staged changes | sel=false",
+    "File |   M src/a.rs (+1 -1) | sel=true",
+    "HunkHeader |     @@ -4,3 +4,3 @@ | sel=false",
+    "DiffContext |        fn f() { | sel=false",
+    "DiffDelete |       -    old | sel=false",
+    "DiffAdd |       +    new | sel=false",
+    "DiffContext |        } | sel=false",
+    "File |   M src/c.rs (+1 -0) | sel=false",
+    "File |   R src/renamed.rs (was src/old.rs) (+1 -1) | sel=false",
+    "Group | Unstaged changes | sel=false",
+    "File |   M src/b.rs (+1 -1) | sel=false",
+    "File |   M src/c.rs (+1 -1) | sel=false",
+    "Group | Untracked files | sel=false",
+    "File |   ? new.txt | sel=false",
+]

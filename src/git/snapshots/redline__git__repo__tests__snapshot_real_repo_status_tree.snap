@@ -1,0 +1,12 @@
+---
+source: src/git/repo.rs
+expression: rows
+---
+[
+    "Branch | ## main",
+    "Group | Staged changes",
+    "File |   M app.rs (+3 -1)",
+    "Group | Unstaged changes",
+    "Group | Untracked files",
+    "File |   ? scratch.txt",
+]

@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 
 use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
-use crate::app::store::{AppStore, BufferRow, PickerCandidate, ViewId};
+use crate::app::store::{AppStore, BufferRow, DirtyCounts, PickerCandidate, ViewId};
+use crate::model::sections::MagitRow;
 use crate::theme;
+use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
 use crate::ui::views::buffer::{BufferListView, BufferView};
 use crate::ui::{face_bg, face_color, face_weight};
@@ -80,6 +82,8 @@ struct Snapshot {
     candidates: Vec<PickerCandidate>,
     total: usize,
     preview: String,
+    magit_rows: Vec<MagitRow>,
+    dirty: Option<DirtyCounts>,
 }
 
 #[component]
@@ -127,6 +131,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect(),
             total: s.picker_count().1,
             preview: s.picker_preview().to_string(),
+            magit_rows: s.magit_rows(),
+            dirty: s.dirty_counts(),
         }
     };
 
@@ -144,6 +150,10 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 rows: snap.buffer_rows.clone(),
                 selected: snap.buffer_list_selected,
             )
+        }
+        .into()),
+        ViewId::MagitStatus => Some(element! {
+            MagitStatusView(rows: snap.magit_rows.clone())
         }
         .into()),
     };
@@ -171,6 +181,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 view: snap.view_name,
                 pending: snap.pending,
                 activity: snap.activity,
+                dirty: snap.dirty,
             )
         }
     }
@@ -206,6 +217,7 @@ struct StatusLineProps {
     pub view: String,
     pub pending: String,
     pub activity: String,
+    pub dirty: Option<DirtyCounts>,
 }
 
 #[component]
@@ -220,6 +232,13 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     let mut text = format!("* {} *  {}", props.project, props.view);
     if !props.pending.is_empty() {
         text.push_str(&format!("  [{}]", props.pending));
+    }
+    if let Some(d) = props.dirty
+        && d.staged + d.unstaged + d.untracked > 0
+    {
+        // `+` staged (index vs HEAD), `~` unstaged (workdir vs index),
+        // `?` untracked.
+        text.push_str(&format!("  +{} ~{} ?{}", d.staged, d.unstaged, d.untracked));
     }
     if !props.activity.is_empty() {
         text.push_str(&format!("  *{}", props.activity));
@@ -310,7 +329,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 21"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 29"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }
