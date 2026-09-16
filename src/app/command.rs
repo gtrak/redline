@@ -307,6 +307,12 @@ impl CommandRegistry {
             |store, _arg| store.close_view(),
         ));
         reg.register(Command::new(
+            "open-transient-menu",
+            "Open this view's command menu (?; h in magit views)",
+            "navigation",
+            |store, _arg| store.open_menu(),
+        ));
+        reg.register(Command::new(
             "open-buffer-list-selected",
             "Open the buffer-list selection and close the list (RET)",
             "buffers",
@@ -342,6 +348,12 @@ impl CommandRegistry {
             "Unstage the file or hunk at point (u)",
             "git",
             |store, _arg| store.magit_unstage(),
+        ));
+        reg.register(Command::new(
+            "magit-discard",
+            "Discard the file or hunk change at point; confirmation-gated (k)",
+            "git",
+            |store, _arg| store.magit_discard(),
         ));
         reg.register(Command::new(
             "magit-fold",
@@ -600,7 +612,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 73, "expected 73 seed commands: {names:?}");
+        assert_eq!(names.len(), 75, "expected 75 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -631,12 +643,14 @@ mod tests {
             "isearch-forward",
             "isearch-backward",
             "close-view",
+            "open-transient-menu",
             "open-buffer-list-selected",
             "buffer-list-next",
             "buffer-list-prev",
             "magit-status",
             "magit-stage",
             "magit-unstage",
+            "magit-discard",
             "magit-fold",
             "magit-visit-file",
             "magit-refresh",

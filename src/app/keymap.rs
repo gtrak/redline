@@ -372,6 +372,34 @@ impl KeyMap {
     pub fn lookup(&self, keys: &[Key]) -> Option<Lookup<'_>> {
         self.root.lookup(keys)
     }
+
+    /// Every (sequence, command) leaf binding in this map, sorted by the
+    /// sequence's display string then the command name (deterministic; the
+    /// trie's `HashMap` order is not). Used to derive the transient menu
+    /// (issue 002) from the keymap rather than a hand-written table.
+    pub fn command_pairs(&self) -> Vec<(KeySeq, String)> {
+        let mut out: Vec<(KeySeq, String)> = Vec::new();
+        let mut prefix: KeySeq = Vec::new();
+        collect_command_pairs(&self.root, &mut prefix, &mut out);
+        out.sort_by(|a, b| {
+            let da: String = a.0.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" ");
+            let db: String = b.0.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" ");
+            da.cmp(&db).then_with(|| a.1.cmp(&b.1))
+        });
+        out
+    }
+}
+
+/// Recursively collect every leaf (sequence, command) binding under `node`.
+fn collect_command_pairs(node: &Node, prefix: &mut KeySeq, out: &mut Vec<(KeySeq, String)>) {
+    for (k, child) in &node.next {
+        prefix.push(*k);
+        if let Some(cmd) = &child.command {
+            out.push((prefix.clone(), cmd.clone()));
+        }
+        collect_command_pairs(child, prefix, out);
+        prefix.pop();
+    }
 }
 
 /// Global + per-view keymaps. The view's map is tried first; on a dead
@@ -540,5 +568,33 @@ mod tests {
             engine.resolve(&seq("C-x C-c")),
             Some(Lookup::Command("quit"))
         );
+    }
+
+    #[test]
+    fn command_pairs_enumerates_all_leaves_deterministically() {
+        let mut km = KeyMap::new();
+        km.bind(&seq("q"), "quit").unwrap();
+        km.bind(&seq("C-x C-f"), "find-file").unwrap();
+        km.bind(&seq("C-x o"), "open-scratch").unwrap();
+        km.bind(&seq("C-c p f"), "project-find").unwrap();
+        let pairs = km.command_pairs();
+        // Every leaf binding is present exactly once (as a set of names).
+        let names: std::collections::HashSet<&str> =
+            pairs.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(
+            names,
+            ["quit", "find-file", "open-scratch", "project-find"]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "all leaf commands must be enumerated"
+        );
+        assert_eq!(pairs.len(), 4, "no duplicates: {pairs:?}");
+        // Deterministic: two enumerations agree.
+        assert_eq!(km.command_pairs(), pairs);
+        // The right command sits under the right sequence.
+        let by_seq = |s: &str| pairs.iter().find(|(seq, _)| seq == &parse_sequence(s).unwrap());
+        assert_eq!(by_seq("q").unwrap().1, "quit");
+        assert_eq!(by_seq("C-x o").unwrap().1, "open-scratch");
+        assert_eq!(by_seq("C-c p f").unwrap().1, "project-find");
     }
 }

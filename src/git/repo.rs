@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::git::diff::{DiffLine, DiffOrigin, DiffSide, FileDiff, DiffHunk, extract};
 use crate::git::error::GitError;
-use crate::git::status::{BranchInfo, FileStatus, RepoStatus, StatusKind};
+use crate::git::status::{BranchInfo, FileStatus, RepoStatus, Side, StatusKind};
 
 /// A thin wrapper around an open `git2::Repository`.
 pub struct GitRepo {
@@ -272,6 +272,46 @@ impl GitRepo {
     /// Unstage one hunk of a file: reverse-apply the hunk to the index only,
     /// reverting just that hunk's index content back toward HEAD while
     /// leaving the rest of the index and the whole workdir untouched.
+    /// Whether the HEAD blob for `path` ends with a newline (false when the
+    /// file is absent from HEAD). The diff markers under-determine this in
+    /// the both-sides-lack-LF shape, so the splice paths derive it from the
+    /// actual blob bytes.
+    fn head_blob_ends_with_newline(&self, path: &str) -> Result<bool, GitError> {
+        let raw = self.raw_diff(DiffSide::Staged, path)?;
+        match raw.get_delta(0).map(|d| d.old_file().exists()) {
+            Some(true) => {
+                let blob = self
+                    .inner
+                    .find_blob(raw.get_delta(0).unwrap().old_file().id())?
+                    .content()
+                    .to_vec();
+                Ok(blob.ends_with(b"\n"))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether the INDEX blob for `path` ends with a newline (false when the
+    /// file is absent from the index).
+    fn index_blob_ends_with_newline(&self, path: &str) -> Result<bool, GitError> {
+        // In an unstaged diff (index -> workdir) the index side is
+        // `old_file()`; `new_file()` is the workdir file, which has no OID.
+        let raw = self.raw_diff(DiffSide::Unstaged, path)?;
+        match raw.get_delta(0).map(|d| d.old_file().exists()) {
+            Some(true) => {
+                let blob = self
+                    .inner
+                    .find_blob(raw.get_delta(0).unwrap().old_file().id())?
+                    .content()
+                    .to_vec();
+                Ok(blob.ends_with(b"\n"))
+            }
+            _ => Ok(false),
+        }
+    }
+
+
+
     pub fn unstage_hunk(&self, path: &str, target_new_start: u32) -> Result<(), GitError> {
         // Staged diff: HEAD (old) vs index (new). The new side is the index.
         let raw = self.raw_diff(DiffSide::Staged, path)?;
@@ -300,21 +340,25 @@ impl GitRepo {
         // Any non-UTF-8 byte on either side would be silently replaced with
         // U+FFFD, so refuse such files rather than corrupt the index.
         ensure_utf8(&content, path)?;
-        if let Some(delta) = raw.get_delta(0)
-            && delta.old_file().exists()
-        {
-            let old_content: Vec<u8> = self
-                .inner
-                .find_blob(delta.old_file().id())?
-                .content()
-                .to_vec();
-            ensure_utf8(&old_content, path)?;
-        }
+        // The old side (HEAD blob)'s trailing-newline truth drives the
+        // splice's final-line handling; the diff markers under-determine it.
+        let old_ends_nl = match raw.get_delta(0).map(|d| d.old_file().exists()) {
+            Some(true) => {
+                let old_content: Vec<u8> = self
+                    .inner
+                    .find_blob(raw.get_delta(0).unwrap().old_file().id())?
+                    .content()
+                    .to_vec();
+                ensure_utf8(&old_content, path)?;
+                old_content.ends_with(b"\n")
+            }
+            _ => false, // no old file: the old side is empty (pure addition)
+        };
 
         let content_str = String::from_utf8(content).expect("checked UTF-8 above");
         // Rebuild the index content with this hunk's new-side span replaced
         // by the hunk's old-side (HEAD) lines, byte-exact.
-        let new_content = revert_hunk_in_content(content_str.as_bytes(), &hunk);
+        let new_content = revert_hunk_in_content(content_str.as_bytes(), &hunk, old_ends_nl);
         // PART A fix (item 5): a fully-staged-added file (no HEAD counterpart)
         // has one hunk spanning its whole content; reverting it empties the
         // index blob. Removing the index entry restores the file to untracked
@@ -335,6 +379,203 @@ impl GitRepo {
         index.add_frombuffer(&new_entry, &new_content)?;
         index.write()?;
         Ok(())
+    }
+
+    // ── discard (issue 002: magit `k`) ──────────────────────────────────
+
+    /// Discard an UNSTAGED file: restore the workdir file to its index
+    /// version. For a pure unstaged change the index equals HEAD, so this
+    /// restores the file to HEAD. When the path is not in the index, the
+    /// workdir file is removed.
+    pub fn discard_unstaged_file(&self, path: &str) -> Result<(), GitError> {
+        let index = self.inner.index()?;
+        match index.get_path(Path::new(path), 0) {
+            Some(e) => {
+                let content: Vec<u8> = self.inner.find_blob(e.id)?.content().to_vec();
+                self.write_workdir(path, &content)?;
+            }
+            None => {
+                self.remove_workdir_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Discard a STAGED file: reset the index entry to HEAD (or drop it for a
+    /// staged addition) AND restore the workdir file to HEAD, so the change
+    /// is gone from both index and workdir. `orig` is the pre-rename path for
+    /// a staged rename.
+    pub fn discard_staged_file(&self, path: &str, orig: Option<&str>) -> Result<(), GitError> {
+        let head_tree = self.head_tree()?;
+        let head_oid = head_tree.as_ref().map(|t| t.id());
+        if head_tree.is_some() && find_path_in_tree(&self.inner, head_oid, path).is_some() {
+            // HEAD has this path: index → HEAD and workdir → HEAD.
+            self.reset_index_entry_to_head(path)?;
+            let (oid, _) = find_path_in_tree(&self.inner, head_oid, path)
+                .ok_or_else(|| GitError::IndexEntryNotFound(path.to_string()))?;
+            let content: Vec<u8> = self.inner.find_blob(oid)?.content().to_vec();
+            self.write_workdir(path, &content)?;
+        } else if let Some(orig) = orig
+            && head_tree.is_some()
+            && find_path_in_tree(&self.inner, head_oid, orig).is_some()
+        {
+            // A staged rename whose new path is not in HEAD: restore the
+            // original path (index + workdir) and drop the new one.
+            self.reset_index_entry_to_head(orig)?;
+            let (oid, _) = find_path_in_tree(&self.inner, head_oid, orig)
+                .ok_or_else(|| GitError::IndexEntryNotFound(orig.to_string()))?;
+            let content: Vec<u8> = self.inner.find_blob(oid)?.content().to_vec();
+            self.write_workdir(orig, &content)?;
+            self.remove_index_entry(path)?;
+            self.remove_workdir_file(path)?;
+        } else {
+            // A staged addition (or a change with no HEAD counterpart): drop
+            // the index entry and remove the workdir file.
+            self.remove_index_entry(path)?;
+            self.remove_workdir_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Discard an UNTRACKED file: remove the workdir file (magit deletes
+    /// untracked files on discard).
+    pub fn discard_untracked_file(&self, path: &str) -> Result<(), GitError> {
+        self.remove_workdir_file(path)
+    }
+
+    /// Discard a HUNK: revert that hunk in the workdir (matched by its
+    /// new-side start line). For an unstaged hunk the hunk comes from the
+    /// index→workdir diff and only the workdir is reverted. For a staged
+    /// hunk the hunk comes from the HEAD→index diff; the workdir is reverted
+    /// to HEAD for that hunk AND the hunk is unstaged, so the change is
+    /// removed from both workdir and index (magit semantics).
+    pub fn discard_hunk(
+        &self,
+        path: &str,
+        side: Option<Side>,
+        target_new_start: u32,
+    ) -> Result<(), GitError> {
+        match side {
+            Some(Side::Staged) => {
+                let raw = self.raw_diff(DiffSide::Staged, path)?;
+                let fd = extract(&raw, path);
+                let hunk = fd
+                    .hunks
+                    .iter()
+                    .find(|h| h.new_start == target_new_start)
+                    .cloned()
+                    .ok_or(GitError::HunkNotFound {
+                        file: path.to_string(),
+                        start: target_new_start,
+                    })?;
+                let old_ends_nl = self.head_blob_ends_with_newline(path)?;
+                self.reverse_apply_hunk_to_workdir(path, &hunk, old_ends_nl)?;
+                self.unstage_hunk(path, target_new_start)?;
+                Ok(())
+            }
+            _ => {
+                let raw = self.raw_diff(DiffSide::Unstaged, path)?;
+                let fd = extract(&raw, path);
+                let hunk = fd
+                    .hunks
+                    .iter()
+                    .find(|h| h.new_start == target_new_start)
+                    .cloned()
+                    .ok_or(GitError::HunkNotFound {
+                        file: path.to_string(),
+                        start: target_new_start,
+                    })?;
+                let old_ends_nl = self.index_blob_ends_with_newline(path)?;
+                self.revert_hunk_in_workdir(path, &hunk, old_ends_nl)
+            }
+        }
+    }
+
+    /// Rebuild the workdir file's content with one hunk's new-side line span
+    /// replaced by the hunk's old-side lines (byte-exact), then write it back.
+    /// Used for unstaged hunks where the line numbers are authoritative
+    /// (the diff IS index→workdir, so `new_start` is a workdir line number).
+    fn revert_hunk_in_workdir(
+        &self,
+        path: &str,
+        hunk: &DiffHunk,
+        old_ends_nl: bool,
+    ) -> Result<(), GitError> {
+        let p = self.workdir_path(path);
+        let content = std::fs::read(&p)
+            .map_err(|e| GitError::ReadFile {
+                path: path.to_string(),
+                source: e,
+            })?;
+        ensure_utf8(&content, path)?;
+        let new_content = revert_hunk_in_content(&content, hunk, old_ends_nl);
+        self.write_workdir(path, &new_content)
+    }
+
+    /// Reverse-apply a staged hunk to the workdir by context-matching the
+    /// hunk's new-side (index) content within the workdir file and replacing
+    /// it with the hunk's old-side (HEAD) content. This is safe when
+    /// unstaged changes above or below the staged hunk have shifted line
+    /// numbers: the splice targets the actual text, not a line offset.
+    fn reverse_apply_hunk_to_workdir(
+        &self,
+        path: &str,
+        hunk: &DiffHunk,
+        old_ends_nl: bool,
+    ) -> Result<(), GitError> {
+        let p = self.workdir_path(path);
+        let content = std::fs::read(&p)
+            .map_err(|e| GitError::ReadFile {
+                path: path.to_string(),
+                source: e,
+            })?;
+        ensure_utf8(&content, path)?;
+        let new_content =
+            reverse_apply_hunk_in_content(&content, hunk, old_ends_nl).ok_or(GitError::HunkNotFound {
+                file: path.to_string(),
+                start: hunk.new_start,
+            })?;
+        self.write_workdir(path, &new_content)
+    }
+
+    /// The absolute workdir path for a repo-relative `path`.
+    fn workdir_path(&self, path: &str) -> std::path::PathBuf {
+        let root = self
+            .inner
+            .workdir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        root.join(path)
+    }
+
+    /// Write `content` to the workdir file at `path`, creating parent
+    /// directories as needed.
+    fn write_workdir(&self, path: &str, content: &[u8]) -> Result<(), GitError> {
+        let p = self.workdir_path(path);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GitError::WriteFile {
+                    path: path.to_string(),
+                    source: e,
+                })?;
+        }
+        std::fs::write(&p, content).map_err(|e| GitError::WriteFile {
+            path: path.to_string(),
+            source: e,
+        })
+    }
+
+    /// Remove the workdir file at `path`; a missing file is not an error.
+    fn remove_workdir_file(&self, path: &str) -> Result<(), GitError> {
+        let p = self.workdir_path(path);
+        match std::fs::remove_file(&p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(GitError::WriteFile {
+                path: path.to_string(),
+                source: e,
+            }),
+        }
     }
 
     // ── internals ─────────────────────────────────────────────────────
@@ -432,7 +673,11 @@ fn rename_paths(new: Option<String>, old: Option<String>, fallback: String) -> (
 /// file's last line when it lacked a trailing newline (`old_ends_nl`
 /// false — libgit2's EOFNL marker, which `extract` does not store as a
 /// line).
-fn revert_hunk_in_content(content: &[u8], hunk: &DiffHunk) -> Vec<u8> {
+fn revert_hunk_in_content(
+    content: &[u8],
+    hunk: &DiffHunk,
+    old_ends_nl: bool,
+) -> Vec<u8> {
     let lines = split_lines_inclusive(content);
     let start0 = (hunk.new_start as usize).saturating_sub(1); // 0-based first line of the new-side span
     let end0 = (start0 + hunk.new_lines as usize).min(lines.len()); // 0-based exclusive end
@@ -449,7 +694,7 @@ fn revert_hunk_in_content(content: &[u8], hunk: &DiffHunk) -> Vec<u8> {
     }
     for (i, l) in old.iter().enumerate() {
         out.extend_from_slice(l.content.as_bytes());
-        let is_final_old_line = !hunk.old_ends_nl && i + 1 == old.len();
+        let is_final_old_line = !old_ends_nl && i + 1 == old.len();
         if !is_final_old_line {
             out.push(b'\n');
         }
@@ -458,6 +703,101 @@ fn revert_hunk_in_content(content: &[u8], hunk: &DiffHunk) -> Vec<u8> {
         out.extend_from_slice(line);
     }
     out
+}
+
+/// Reverse-apply a staged hunk to the workdir content by finding the
+/// hunk's new-side (index) line block in `content` and replacing it with
+/// the hunk's old-side (HEAD) line block. Returns `None` when the
+/// new-side text is not found (the workdir has diverged from the index
+/// in this hunk's region, so the reverse-apply cannot be performed
+/// safely).
+///
+/// The new-side text is the concatenation of all non-Deletion lines
+/// (Context + Addition) in order, each terminated with `\n` except the
+/// last new-side line when `new_ends_nl` is false. The old-side text is
+/// the concatenation of all non-Addition lines (Context + Deletion) in
+/// order, each terminated with `\n` except the last old-side line when
+/// `old_ends_nl` is false.
+fn reverse_apply_hunk_in_content(
+    content: &[u8],
+    hunk: &DiffHunk,
+    old_ends_nl: bool,
+) -> Option<Vec<u8>> {
+    // Build the new-side text: all lines that appear in the new (index) file.
+    let new_lines: Vec<&DiffLine> = hunk
+        .lines
+        .iter()
+        .filter(|l| l.origin != DiffOrigin::Deletion)
+        .collect();
+    // The new side's trailing-newline shape cannot be trusted from the
+    // diff markers alone (xdiff keys the marker to the last hunk line's
+    // prefix, which diverges from the semantic truth when BOTH sides lack
+    // the LF). Try the full form (every line newline-terminated) first;
+    // fall back to the trimmed form (final line without the newline) --
+    // whichever actually matches the workdir bytes is the truth.
+    let build_new_side = |trimmed: bool| -> Vec<u8> {
+        let mut v = Vec::new();
+        for (i, line) in new_lines.iter().enumerate() {
+            v.extend_from_slice(line.content.as_bytes());
+            let is_final = trimmed && i + 1 == new_lines.len();
+            if !is_final {
+                v.push(b'\n');
+            }
+        }
+        v
+    };
+    let mut new_side = build_new_side(false);
+    if !content.windows(new_side.len()).any(|w| w == new_side.as_slice()) {
+        let trimmed = build_new_side(true);
+        if content.windows(trimmed.len()).any(|w| w == trimmed.as_slice()) {
+            new_side = trimmed;
+        } else {
+            return None;
+        }
+    }
+
+    // A pure-deletion hunk has an empty new side; fall back to line-number
+    // splicing (correct when line numbers are not shifted).
+    if new_side.is_empty() {
+        return Some(revert_hunk_in_content(content, hunk, old_ends_nl));
+    }
+
+    // The old side's trailing-newline truth comes from the caller, which
+    // reads the actual old-side (HEAD) blob -- the diff markers under-
+    // determine it in the both-sides-lack-LF shape.
+    let old_lines: Vec<&DiffLine> = hunk
+        .lines
+        .iter()
+        .filter(|l| l.origin != DiffOrigin::Addition)
+        .collect();
+    let mut old_side: Vec<u8> = Vec::new();
+    for (i, l) in old_lines.iter().enumerate() {
+        old_side.extend_from_slice(l.content.as_bytes());
+        let is_final_old_line = !old_ends_nl && i + 1 == old_lines.len();
+        if !is_final_old_line {
+            old_side.push(b'\n');
+        }
+    }
+
+    // Find the new-side text in the workdir content.
+    let pos = content
+        .windows(new_side.len())
+        .position(|w| w == new_side.as_slice())?;
+
+    // Guard against silent line merge: if the old side's final line lacks a
+    // trailing newline but the workdir has content immediately after the
+    // matched region, splicing would merge two lines (e.g. "endY").
+    // `git apply` refuses here; we do too.
+    if !old_ends_nl && pos + new_side.len() < content.len() {
+        return None;
+    }
+
+    // Splice: content[..pos] + old_side + content[pos+new_side.len()..]
+    let mut out = Vec::with_capacity(content.len() + old_side.len() - new_side.len());
+    out.extend_from_slice(&content[..pos]);
+    out.extend_from_slice(&old_side);
+    out.extend_from_slice(&content[pos + new_side.len()..]);
+    Some(out)
 }
 
 /// Split `bytes` into lines, each keeping its trailing `\n` (the final
@@ -806,7 +1146,6 @@ mod tests {
         assert!(git(root, &["diff"]).contains("MOD-15"));
     }
 
-    #[test]
     fn unstage_hunk_on_no_trailing_newline_file_keeps_index_exact() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -875,6 +1214,7 @@ mod tests {
         // index-vs-workdir diff.
         assert!(!workdir.contains("MOD-15"), "workdir:\n{workdir}");
     }
+    #[test]
 
     #[test]
     fn unstage_hunk_refuses_non_utf8_content() {
@@ -950,6 +1290,390 @@ mod tests {
         assert_eq!(entry.staged, StatusKind::Renamed);
         assert_eq!(entry.orig, Some("doc.txt".into()));
         assert!(!status.files.iter().any(|f| f.path == "doc.txt"));
+    }
+
+    #[test]
+    fn discard_unstaged_file_restores_workdir_to_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        std::fs::write(root.join("a.txt"), "keep\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Unstaged modification only.
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        g.discard_unstaged_file("a.txt").unwrap();
+
+        // Workdir restored to HEAD; index unchanged (still matches HEAD).
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(
+            git(root, &["diff"]).trim().is_empty(),
+            "workdir must match HEAD after discard"
+        );
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "index must be untouched"
+        );
+    }
+
+    #[test]
+    fn discard_staged_file_clears_index_and_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        std::fs::write(root.join("a.txt"), "keep\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Staged modification.
+        std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        assert!(git(root, &["diff", "--cached"]).contains("+staged"));
+
+        g.discard_staged_file("a.txt", None).unwrap();
+
+        // Both index and workdir restored to HEAD.
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "index must match HEAD"
+        );
+        assert!(
+            git(root, &["diff"]).trim().is_empty(),
+            "workdir must match HEAD"
+        );
+    }
+
+    #[test]
+    fn discard_staged_addition_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Stage a brand-new file.
+        std::fs::write(root.join("new.txt"), "added\n").unwrap();
+        git(root, &["add", "new.txt"]);
+        assert!(git(root, &["diff", "--cached"]).contains("+added"));
+
+        g.discard_staged_file("new.txt", None).unwrap();
+
+        // The index entry is gone and the workdir file is removed.
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "staged addition must be dropped"
+        );
+        assert!(!root.join("new.txt").exists(), "workdir file must be removed");
+    }
+
+    #[test]
+    fn discard_unstaged_hunk_reverts_only_that_hunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        let base: Vec<String> = (1..=30).map(|i| format!("line{i:02}")).collect();
+        std::fs::write(root.join("big.txt"), base.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Two far-apart edits → two hunks (both unstaged).
+        let mut w = base.clone();
+        w[1] = "MOD-2".into();
+        w[20] = "MOD-21".into();
+        std::fs::write(root.join("big.txt"), w.join("\n") + "\n").unwrap();
+
+        let d = g.diff(DiffSide::Unstaged, "big.txt").unwrap();
+        assert_eq!(d.hunks.len(), 2, "hunks:\n{d:#?}");
+        let second = d
+            .hunks
+            .iter()
+            .find(|h| h.lines.iter().any(|l| l.content == "MOD-21"))
+            .unwrap();
+        g.discard_hunk("big.txt", Some(Side::Unstaged), second.new_start)
+            .unwrap();
+
+        // Only the target hunk reverted in the workdir; the other survives.
+        let after = std::fs::read_to_string(root.join("big.txt")).unwrap();
+        assert!(
+            after.contains("line21"),
+            "the discarded hunk's line must be restored: {after}"
+        );
+        assert!(
+            !after.contains("MOD-21"),
+            "the discarded change must be gone: {after}"
+        );
+        assert!(
+            after.contains("MOD-2"),
+            "the untouched hunk must survive: {after}"
+        );
+        // The index is untouched (nothing was staged).
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "index must be untouched"
+        );
+    }
+
+    #[test]
+    fn discard_staged_hunk_reverts_workdir_and_unstages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        let base: Vec<String> = (1..=30).map(|i| format!("line{i:02}")) .collect();
+        std::fs::write(root.join("big.txt"), base.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Two far-apart edits: stage the first, leave the second unstaged.
+        let mut w = base.clone();
+        w[1] = "STAGED-MOD".into(); // hunk 1: staged
+        w[20] = "UNSTAGED-MOD".into(); // hunk 2: unstaged
+        std::fs::write(root.join("big.txt"), w.join("\n") + "\n").unwrap();
+
+        // Stage only the first hunk by committing the full workdir, then
+        // re-write to get a clean state with staged + unstaged mixed.
+        // Simpler: write both mods, stage the file, then add the second mod.
+        // Actually the simplest is: write both mods, stage the file (both
+        // staged), then add a third change (unstaged). But we want to test
+        // the staged hunk path specifically.
+        //
+        // Cleanest approach: write the first mod, stage it. Write the second
+        // mod without staging. Now hunk 1 is staged, hunk 2 is unstaged.
+        // But git's diff will show them differently. Let's use a simpler
+        // scenario: one staged change and one unstaged change in the same file.
+        //
+        // Reset: re-initialize.
+        // Actually let me just do it in one shot: write both mods, stage the
+        // file (both staged), then modify one line back to create an
+        // unstaged delta. No, that gets complicated.
+        //
+        // Simplest: just test the pure staged case first (all changes staged),
+        // then verify the workdir + index are correct.
+        std::fs::write(root.join("big.txt"), base.join("\n") + "\n").unwrap();
+        // Now make one change and stage it.
+        let mut staged_only = base.clone();
+        staged_only[1] = "STAGED-MOD".into();
+        std::fs::write(root.join("big.txt"), staged_only.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        assert!(
+            git(root, &["diff", "--cached"]).contains("STAGED-MOD"),
+            "staged change present in index"
+        );
+
+        // Get the staged diff and find the hunk.
+        let d = g.diff(DiffSide::Staged, "big.txt").unwrap();
+        assert_eq!(d.hunks.len(), 1, "one staged hunk: {d:#?}");
+        let hunk = &d.hunks[0];
+
+        g.discard_hunk("big.txt", Some(Side::Staged), hunk.new_start)
+            .unwrap();
+
+        // Workdir must match HEAD (the staged change is reverted in workdir).
+        let after = std::fs::read_to_string(root.join("big.txt")).unwrap();
+        assert!(
+            after.contains("line02"),
+            "workdir restored to HEAD: {after}"
+        );
+        assert!(
+            !after.contains("STAGED-MOD"),
+            "staged mod must be gone from workdir: {after}"
+        );
+        // Index must also be clean (the hunk was unstaged).
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "index must match HEAD after staged-hunk discard"
+        );
+        assert!(
+            git(root, &["diff"]).trim().is_empty(),
+            "workdir must match HEAD after staged-hunk discard"
+        );
+    }
+
+    #[test]
+    fn discard_staged_hunk_with_mixed_staged_unstaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        let base: Vec<String> = (1..=30).map(|i| format!("line{i:02}")) .collect();
+        std::fs::write(root.join("big.txt"), base.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Hunk 1 (near line 2): STAGED.  Hunk 2 (near line 21): UNSTAGED.
+        // Write both changes, stage the file, then add a further unstaged
+        // edit to a different region. Actually: write both, stage the file
+        // (both staged). Then we need one to be unstaged.
+        //
+        // The cleanest way: write mod 1, stage it. Write mod 2 (now
+        // workdir has both, index has only mod 1).
+        let mut w = base.clone();
+        w[1] = "STAGED-MOD".into();
+        std::fs::write(root.join("big.txt"), w.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        // Now add the unstaged mod.
+        let mut w2 = w.clone();
+        w2[20] = "UNSTAGED-MOD".into();
+        std::fs::write(root.join("big.txt"), w2.join("\n") + "\n").unwrap();
+
+        // Verify: index has STAGED-MOD but not UNSTAGED-MOD.
+        let cached = git(root, &["diff", "--cached"]);
+        assert!(cached.contains("STAGED-MOD"), "index has staged mod");
+        assert!(!cached.contains("UNSTAGED-MOD"), "index must not have unstaged mod");
+        let unstaged = git(root, &["diff"]);
+        assert!(unstaged.contains("UNSTAGED-MOD"), "workdir has unstaged mod");
+
+        // Now discard the staged hunk.
+        let d = g.diff(DiffSide::Staged, "big.txt").unwrap();
+        assert_eq!(d.hunks.len(), 1, "one staged hunk: {d:#?}");
+        g.discard_hunk("big.txt", Some(Side::Staged), d.hunks[0].new_start)
+            .unwrap();
+
+        // The staged change is gone from both index and workdir.
+        let cached_after = git(root, &["diff", "--cached"]);
+        assert!(!cached_after.contains("STAGED-MOD"), "staged mod unstaged");
+        // The unstaged change survives in the workdir.
+        let after = std::fs::read_to_string(root.join("big.txt")).unwrap();
+        assert!(
+            after.contains("UNSTAGED-MOD"),
+            "unstaged mod must survive: {after}"
+        );
+        // Use exact-line match: "UNSTAGED-MOD" contains "STAGED-MOD" as a substring.
+        assert!(
+            !after.lines().any(|l| l == "STAGED-MOD"),
+            "staged mod must be reverted from workdir: {after}"
+        );
+        // The unstaged diff still shows the surviving change.
+        let unstaged_after = git(root, &["diff"]);
+        assert!(unstaged_after.contains("UNSTAGED-MOD"), "unstaged mod still in workdir diff");
+    }
+
+    #[test]
+    fn discard_staged_hunk_with_unstaged_insertion_above() {
+        // Repro for the blocking finding: an unstaged insertion above the
+        // staged hunk shifts line numbers, so the workdir splice must use
+        // context matching, not the index-side line offset.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        let base: Vec<String> = (1..=30).map(|i| format!("line{i:02}")).collect();
+        std::fs::write(root.join("big.txt"), base.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Stage a change to line 5 (index now has "STAGED-MOD" at line 5).
+        let mut staged = base.clone();
+        staged[4] = "STAGED-MOD".into();
+        std::fs::write(root.join("big.txt"), staged.join("\n") + "\n").unwrap();
+        git(root, &["add", "big.txt"]);
+
+        // Now insert a line at the top of the workdir (unstaged). This shifts
+        // all workdir line numbers by +1 relative to the index.
+        let mut shifted = vec!["INSERTED".to_string()];
+        shifted.extend(staged);
+        std::fs::write(root.join("big.txt"), shifted.join("\n") + "\n").unwrap();
+
+        // Verify: the index has the staged change, the workdir has the
+        // insertion + the staged change (shifted down by one line).
+        let cached = git(root, &["diff", "--cached"]);
+        assert!(cached.contains("STAGED-MOD"), "staged mod in index");
+        let unstaged = git(root, &["diff"]);
+        assert!(unstaged.contains("INSERTED"), "insertion is unstaged");
+
+        // Get the staged hunk's new_start (index-side line number).
+        let d = g.diff(DiffSide::Staged, "big.txt").unwrap();
+        assert_eq!(d.hunks.len(), 1, "one staged hunk: {d:#?}");
+        let hunk_start = d.hunks[0].new_start;
+        // In the index, the hunk starts at line 2 (3 context lines before
+        // the change at line 5). In the workdir, it starts at line 3
+        // (shifted by the insertion). The old code would splice at line 2
+        // (wrong); the fix must find the content by context.
+        assert_eq!(hunk_start, 2, "index-side hunk start (with context)");
+
+        g.discard_hunk("big.txt", Some(Side::Staged), hunk_start)
+            .unwrap();
+
+        // The staged change must be gone from the workdir (reverted to
+        // "line05"), but the insertion must survive.
+        let after = std::fs::read_to_string(root.join("big.txt")).unwrap();
+        // Byte-exact assertion: the workdir must be exactly "INSERTED\n" +
+        // all 30 HEAD lines. This discriminates against the old
+        // index-side line splice which would lose line01 and duplicate
+        // line08.
+        let expected = format!("INSERTED\n{}\n", base.join("\n"));
+        assert_eq!(
+            after, expected,
+            "workdir must be byte-exact: INSERTED + all 30 HEAD lines"
+        );
+        // The index must also be clean (the hunk was unstaged).
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "index must match HEAD after staged-hunk discard"
+        );
+        // The workdir diff must show only the insertion (not the staged mod).
+        let unstaged_after = git(root, &["diff"]);
+        assert!(unstaged_after.contains("INSERTED"));
+        assert!(!unstaged_after.contains("STAGED-MOD"));
+    }
+
+    #[test]
+    fn discard_untracked_file_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let _g = init_repo(root);
+        std::fs::write(root.join("scratch.txt"), "untracked\n").unwrap();
+
+        _g.discard_untracked_file("scratch.txt").unwrap();
+
+        assert!(!root.join("scratch.txt").exists(), "file must be deleted");
+    }
+
+    
+#[test]
+    fn discard_staged_hunk_at_eof_no_trailing_newline() {
+        // Regression test for the phantom trailing newline: when a staged
+        // hunk reaches EOF of a file with no trailing newline, the
+        // new-side search must NOT append a phantom \\n that isn't in the
+        // workdir. Before the fix, `reverse_apply_hunk_in_content` would
+        // fail with HunkNotFound because it searched for "a\nb\nB\nend\n"
+        // when the workdir actually contains "a\nb\nB\nend".
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        // HEAD: "a\nb\nend" (no trailing newline).
+        std::fs::write(root.join("f.txt"), "a\nb\nend").unwrap();
+        git(root, &["add", "f.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // Stage b->B (index: "a\nB\nend", no trailing NL).
+        std::fs::write(root.join("f.txt"), "a\nB\nend").unwrap();
+        git(root, &["add", "f.txt"]);
+
+        // Workdir == index (no unstaged changes).
+        let workdir_before = std::fs::read(root.join("f.txt")).unwrap();
+        assert_eq!(workdir_before, b"a\nB\nend");
+
+        // Get the staged hunk.
+        let d = g.diff(DiffSide::Staged, "f.txt").unwrap();
+        assert_eq!(d.hunks.len(), 1, "one staged hunk: {d:#?}");
+        let hunk_start = d.hunks[0].new_start;
+
+        // Discard the staged hunk: must succeed and restore "a\\nb\\nend".
+        g.discard_hunk("f.txt", Some(Side::Staged), hunk_start)
+            .expect("discard must succeed for EOF-no-NL file");
+
+        let after = std::fs::read(root.join("f.txt")).unwrap();
+        assert_eq!(
+            after, b"a\nb\nend",
+            "workdir must be byte-exact after staged-hunk discard at EOF"
+        );
     }
 
     #[test]

@@ -177,6 +177,11 @@ impl ViewId {
                 km.bind(&[Key::char('c')], "magit-commit").unwrap();
                 km.bind(&[Key::char('y')], "branch-picker").unwrap();
                 km.bind(&[Key::char('z')], "stash-list").unwrap();
+                // Issue 002: `h` is magit's top-level dispatch menu (the
+                // same component as `?`), and `k` discards the file/hunk at
+                // point (confirmation-gated).
+                km.bind(&[Key::char('h')], "open-transient-menu").unwrap();
+                km.bind(&[Key::char('k')], "magit-discard").unwrap();
                 km
             }
             ViewId::Log => {
@@ -224,10 +229,6 @@ impl ViewId {
                     .unwrap();
                 km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('k')], "commit-editor-abort")
                     .unwrap();
-                km
-                    .bind(&[Key::new(KeyCode::Escape)], "commit-editor-abort")
-                    .unwrap();
-                km.bind(&[Key::ctrl_char('g')], "commit-editor-abort").unwrap();
                 km
             }
             ViewId::Search => {
@@ -346,7 +347,8 @@ impl JumpStack {
 
     /// `C-i`: move forward one entry. Returns the entry to restore.
     pub fn forward(&mut self) -> Option<&JumpEntry> {
-        if self.pos >= self.history.len() - 1 {
+        // `pos + 1` (never `len() - 1`): an empty history must not underflow.
+        if self.pos + 1 >= self.history.len() {
             return None;
         }
         self.pos += 1;
@@ -388,6 +390,57 @@ struct Picker {
     filtered: Vec<(PickerCandidate, u32)>,
     /// Preview-pane text for the selected candidate (multi-line).
     preview: String,
+}
+
+/// The transient menu (issue 002): a bottom-of-frame overlay listing the
+/// active view's bindings (`keymap` × `registry`), magit's hydra tree.
+/// `open` mirrors the picker's open/closed; `path` is the current submenu
+/// (empty at the top level). The menu is a pure renderer over this state.
+#[derive(Debug, Default)]
+struct TransientMenuState {
+    open: bool,
+    /// The current submenu path (the prefix keys pressed so far).
+    path: KeySeq,
+}
+
+/// A menu entry (one key at the current submenu level). A leaf has a
+/// `command` (+ registry docs/category); a prefix opens a submenu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransientMenuEntry {
+    pub key: Key,
+    /// The full sequence including the current path (e.g. `"C-c p"`).
+    pub key_display: String,
+    /// Some(command name) for a leaf, None for a prefix.
+    pub command: Option<String>,
+    pub is_prefix: bool,
+    /// Registry docs (leaf only).
+    pub docs: String,
+    /// Registry category (leaf only).
+    pub category: String,
+}
+
+/// A display row of the transient menu (grouped + sorted in the store).
+/// A header row marks a category (or the submenus group).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransientMenuRow {
+    pub is_header: bool,
+    /// The key sequence (`""` for header rows).
+    pub key_display: String,
+    /// The description (leaf) or category name (header). Prefix rows carry
+    /// an empty label (rendered as `…`).
+    pub label: String,
+    pub is_prefix: bool,
+}
+
+/// The target of an armed destructive-discard confirmation (issue 002):
+/// `k` captures the cursor's file/hunk; `y` executes it, `n`/C-g/ESC cancel.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscardTarget {
+    pub path: String,
+    pub kind: SectionKind,
+    pub side: Option<Side>,
+    pub orig: Option<String>,
+    pub hunk_new_start: Option<u32>,
 }
 
 /// One row of the buffer-list view.
@@ -621,7 +674,7 @@ pub struct BlameState {
 
 /// The inline commit-message editor (issue 08): the first editable buffer.
 /// `rope` is the message text (comment lines are `#`-prefixed); `cursor` is
-/// a byte offset into the rope. `staged` is the pre-filled staged-file list.
+/// a char index into the rope. `staged` is the pre-filled staged-file list.
 /// `now` is a captured unix time so the pre-fill is deterministic-ish and the
 /// view can age the lines without re-querying the clock each render.
 #[derive(Debug)]
@@ -773,6 +826,12 @@ pub struct AppStore {
     /// The project file-tree sidebar state (issue 09): toggle + navigate +
     /// `RET` opens. Rows are built from the ignore-aware walk on first use.
     tree: TreeState,
+    /// The transient menu (issue 002): bottom-of-frame overlay listing the
+    /// active view's bindings (keymap × registry).
+    menu: TransientMenuState,
+    /// An armed destructive-discard confirmation (issue 002): `k` arms it,
+    /// `y` executes, `n`/C-g/ESC cancel. Holds the target to discard.
+    discard_confirm: Option<DiscardTarget>,
 }
 
 impl AppStore {
@@ -825,6 +884,9 @@ impl AppStore {
         global
             .bind(&[Key::ctrl_char('x'), Key::char('g')], "magit-status")
             .unwrap();
+        // Transient menu (issue 002): `?` opens this view's command menu in
+        // any view (magit's hydra tree; `h` does the same in magit views).
+        global.bind(&[Key::char('?')], "open-transient-menu").unwrap();
         // Isearch (issue 03).
         global.bind(&[Key::ctrl_char('s')], "isearch-forward").unwrap();
         global.bind(&[Key::ctrl_char('r')], "isearch-backward").unwrap();
@@ -945,6 +1007,8 @@ impl AppStore {
                 selected: 0,
                 follow: false,
             },
+            menu: TransientMenuState::default(),
+            discard_confirm: None,
         }
     }
 
@@ -2971,6 +3035,297 @@ impl AppStore {
         true
     }
 
+    // ── transient menu (issue 002) ────────────────────────────────────
+
+    /// Whether the transient menu overlay is open.
+    pub fn menu_open(&self) -> bool {
+        self.menu.open
+    }
+
+    /// The current submenu path (empty at the top level).
+    #[allow(dead_code)] // used by the menu tests; public accessor for future UI
+    pub fn menu_path(&self) -> &KeySeq {
+        &self.menu.path
+    }
+
+    /// `?` (any view) / `h` (magit views): open the transient menu at the top
+    /// level.
+    pub fn open_menu(&mut self) {
+        self.menu.open = true;
+        self.menu.path.clear();
+        self.pending.clear();
+    }
+
+    fn close_menu(&mut self) {
+        self.menu.open = false;
+        self.menu.path.clear();
+    }
+
+    /// The active view's effective bindings: the view map plus the global
+    /// map, with the view map winning on a shared sequence (mirroring
+    /// `KeymapEngine::resolve`). Source of truth for the menu — no
+    /// hand-written table, so the menu cannot drift from the keymap.
+    fn menu_bindings(&self) -> Vec<(KeySeq, String)> {
+        let mut map: std::collections::HashMap<Vec<Key>, String> = self
+            .engine
+            .global
+            .command_pairs()
+            .into_iter()
+            .collect();
+        for (s, c) in self.engine.view.command_pairs() {
+            map.insert(s, c);
+        }
+        map.into_iter().collect()
+    }
+
+    /// The menu entries at `path`: each is the next key and either a leaf
+    /// (a full binding) or a prefix (a strict prefix of a longer binding).
+    pub fn menu_entries_for_path(&self, path: &KeySeq) -> Vec<TransientMenuEntry> {
+        let bindings = self.menu_bindings();
+        let mut entries: Vec<(Key, Option<String>)> = Vec::new();
+        for (seq, cmd) in &bindings {
+            if seq.len() > path.len() && seq[..path.len()] == *path {
+                let next = seq[path.len()];
+                // A node is either a command or a prefix, never both: a
+                // one-key extension is a leaf, a longer one a prefix.
+                let is_leaf = seq.len() == path.len() + 1;
+                entries.push((next, if is_leaf { Some(cmd.clone()) } else { None }));
+            }
+        }
+        // Deterministic order + leaf-wins on a key that is both a leaf and a
+        // prefix (the engine resolves the view's leaf first).
+        entries.sort_by(|a, b| {
+            a.0.to_string().cmp(&b.0.to_string()).then(a.1.is_none().cmp(&b.1.is_none()))
+        });
+        entries.dedup_by(|a, b| a.0 == b.0);
+        entries
+            .into_iter()
+            .map(|(key, cmd)| {
+                let mut key_display = path
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !key_display.is_empty() {
+                    key_display.push(' ');
+                }
+                key_display.push_str(&key.to_string());
+                match cmd {
+                    Some(name) => {
+                        let meta = self.registry.get(&name);
+                        TransientMenuEntry {
+                            key,
+                            key_display,
+                            command: Some(name.clone()),
+                            is_prefix: false,
+                            docs: meta.map(|m| m.docs.to_string()).unwrap_or_default(),
+                            category: meta.map(|m| m.category.to_string()).unwrap_or_default(),
+                        }
+                    }
+                    None => TransientMenuEntry {
+                        key,
+                        key_display,
+                        command: None,
+                        is_prefix: true,
+                        docs: String::new(),
+                        category: String::new(),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// The menu entries at the current submenu path.
+    #[allow(dead_code)] // used by the menu tests; public accessor for future UI
+    pub fn menu_entries(&self) -> Vec<TransientMenuEntry> {
+        self.menu_entries_for_path(&self.menu.path)
+    }
+
+    /// The menu's display rows for the current path: prefix (submenu) entries
+    /// first, then leaf commands grouped by registry category and sorted
+    /// within each group. A header row marks each group.
+    pub fn menu_rows(&self) -> Vec<TransientMenuRow> {
+        let entries = self.menu_entries_for_path(&self.menu.path);
+        let mut rows = Vec::new();
+
+        // Submenus (prefix keys) come first, as `KEY …` rows.
+        let prefixes: Vec<&TransientMenuEntry> =
+            entries.iter().filter(|e| e.is_prefix).collect();
+        if !prefixes.is_empty() {
+            rows.push(TransientMenuRow {
+                is_header: true,
+                key_display: String::new(),
+                label: "submenus".into(),
+                is_prefix: false,
+            });
+            for e in &prefixes {
+                rows.push(TransientMenuRow {
+                    is_header: false,
+                    key_display: e.key_display.clone(),
+                    label: String::new(),
+                    is_prefix: true,
+                });
+            }
+        }
+
+        // Leaf commands grouped by registry category (sorted), then sorted by
+        // key within each group.
+        let mut by_cat: std::collections::BTreeMap<String, Vec<&TransientMenuEntry>> =
+            std::collections::BTreeMap::new();
+        for e in &entries {
+            if !e.is_prefix {
+                by_cat.entry(e.category.clone()).or_default().push(e);
+            }
+        }
+        for (cat, mut es) in by_cat {
+            es.sort_by(|a, b| a.key_display.cmp(&b.key_display));
+            rows.push(TransientMenuRow {
+                is_header: true,
+                key_display: String::new(),
+                label: cat,
+                is_prefix: false,
+            });
+            for e in es {
+                rows.push(TransientMenuRow {
+                    is_header: false,
+                    key_display: e.key_display.clone(),
+                    label: e.docs.clone(),
+                    is_prefix: false,
+                });
+            }
+        }
+        rows
+    }
+
+    /// The overlay's row budget: the menu's row count (title + rows), capped
+    /// at the viewport height so the menu never exceeds the frame.
+    pub fn menu_height(&self) -> u32 {
+        (self.menu_rows().len() + 1).min(self.viewport_lines) as u32
+    }
+
+    /// Handle a key while the menu is open: C-g closes; a listed leaf closes
+    /// the menu and runs its command; a listed prefix descends; anything else
+    /// is swallowed (the menu ignores non-listed keys).
+    fn menu_key_event(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') {
+            self.close_menu();
+            self.minibuffer_message("cancel");
+            return;
+        }
+        let entries = self.menu_entries_for_path(&self.menu.path);
+        if let Some(entry) = entries.iter().find(|e| e.key == key) {
+            match &entry.command {
+                Some(cmd) => {
+                    let cmd = cmd.clone();
+                    self.close_menu();
+                    let _ = self.dispatch(&cmd, None);
+                }
+                None => {
+                    self.menu.path.push(key);
+                }
+            }
+        }
+        // else: swallowed (ignored).
+    }
+
+    // ── discard (issue 002: magit `k`) ───────────────────────────────────
+
+    /// `k`: arm a destructive-discard confirmation for the file/hunk under the
+    /// cursor. The actual discard runs only on `y` (magit gates discards with
+    /// a confirmation); `n`/C-g/ESC cancel.
+    pub fn magit_discard(&mut self) {
+        let Some(target) = self
+            .status_tree
+            .as_ref()
+            .and_then(|t| t.cursor_target())
+        else {
+            self.minibuffer_message("no section under point");
+            return;
+        };
+        let Some(path) = target.path.clone() else {
+            self.minibuffer_message("no file under point");
+            return;
+        };
+        if !matches!(target.kind, SectionKind::File | SectionKind::Hunk) {
+            self.minibuffer_message("nothing to discard at point");
+            return;
+        }
+        let what = match target.kind {
+            SectionKind::Hunk => format!("hunk of {path}"),
+            _ => path.clone(),
+        };
+        self.discard_confirm = Some(DiscardTarget {
+            path: path.clone(),
+            kind: target.kind,
+            side: target.side,
+            orig: target.orig.clone(),
+            hunk_new_start: target.hunk_new_start,
+        });
+        self.minibuffer_message(&format!("discard {what}? y/n"));
+    }
+
+    /// Handle a key while a discard confirmation is armed: `y` executes the
+    /// discard, `n`/C-g/ESC cancel; other keys are swallowed.
+    fn discard_key_event(&mut self, key: Key) {
+        if key == Key::char('y') {
+            self.confirm_discard();
+            return;
+        }
+        if key == Key::char('n')
+            || key == Key::ctrl_char('g')
+            || key.code == crate::app::keymap::KeyCode::Escape
+        {
+            self.discard_confirm = None;
+            self.minibuffer_message("discard cancelled");
+        }
+        // else: swallowed (ignored).
+    }
+
+    /// Whether a destructive-discard confirmation is currently armed.
+    pub fn discard_armed(&self) -> bool {
+        self.discard_confirm.is_some()
+    }
+
+    /// `y`: run the armed discard, then refresh.
+    fn confirm_discard(&mut self) {
+        let Some(target) = self.discard_confirm.take() else {
+            return;
+        };
+        match self.execute_discard(&target) {
+            Ok(()) => {
+                self.refresh_magit();
+                self.minibuffer_message(&format!("discarded {}", target.path));
+            }
+            Err(e) => self.minibuffer_message(&format!("discard failed: {e}")),
+        }
+    }
+
+    /// Run the git operation for a discard target (no confirmation here —
+    /// the caller has already confirmed).
+    fn execute_discard(&self, target: &DiscardTarget) -> Result<(), GitError> {
+        match target.kind {
+            SectionKind::Hunk => {
+                let start = target.hunk_new_start.unwrap_or(0);
+                self.with_git(|g| g.discard_hunk(&target.path, target.side, start))
+            }
+            SectionKind::File => match target.side {
+                Some(Side::Untracked) => {
+                    self.with_git(|g| g.discard_untracked_file(&target.path))
+                }
+                Some(Side::Staged) => self
+                    .with_git(|g| g.discard_staged_file(&target.path, target.orig.as_deref())),
+                _ => self.with_git(|g| g.discard_unstaged_file(&target.path)),
+            },
+            _ => Err(GitError::NotARepository {
+                path: self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_default(),
+            }),
+        }
+    }
+
     // ── issue 08: log / blame / commit / branches / stash ────────────────
 
     /// `l` in the magit-status context: open (or re-focus) the log for the
@@ -3177,6 +3532,19 @@ impl AppStore {
             self.minibuffer_message("empty commit message: add a line not starting with '#'");
             return;
         }
+        // Refuse to commit when nothing is staged (magit convention: a
+        // commit with no staged changes is an error, not a no-op).
+        let staged = self
+            .git_status()
+            .unwrap_or_default()
+            .files
+            .iter()
+            .filter(|f| f.is_staged())
+            .count();
+        if staged == 0 {
+            self.minibuffer_message("nothing staged to commit");
+            return;
+        }
         let msg = msg.to_string();
         match self.with_git(move |g| g.commit(&msg)) {
             Ok(oid) => {
@@ -3195,7 +3563,7 @@ impl AppStore {
         }
     }
 
-    /// `C-c C-k` (and ESC / C-g) in the commit editor: discard the
+    /// `C-c C-k` (and ESC) in the commit editor: discard the
     /// buffer and touch nothing in the repository.
     pub fn commit_editor_abort(&mut self) {
         if self.commit_editor.take().is_some() {
@@ -4756,6 +5124,19 @@ impl AppStore {
         if self.quit {
             return;
         }
+        // Transient menu (issue 002): topmost overlay. When open it swallows
+        // every key except C-g: a listed leaf closes the menu and runs its
+        // command, a listed prefix descends, and non-listed keys are ignored.
+        if self.menu_open() {
+            self.menu_key_event(key);
+            return;
+        }
+        // Armed discard confirmation (issue 002): `y` executes, `n`/C-g/ESC
+        // cancel; other keys are swallowed.
+        if self.discard_armed() {
+            self.discard_key_event(key);
+            return;
+        }
         if self.picker.is_some() {
             if let Some(c) = key.char_value() {
                 // Stash list: `x` drops the selected entry (magit's drop
@@ -4797,11 +5178,13 @@ impl AppStore {
             // (see dispatch_key).
         }
         // Commit editor (issue 08): printable / backspace / RET / arrow keys
-        // edit the message; ESC / C-g abort, and those are intercepted here,
-        // before the keymap engine. Only the C-c C-c / C-c C-k bindings reach
-        // the engine, so the `C-c` prefix pending state is visible in the
-        // status line. A bare q types "q" (it is not a command here). Edits
-        // clear any armed prefix; a bare `C-c` arms the prefix via the engine.
+        // edit the message; ESC aborts, and that is intercepted here,
+        // before the keymap engine. C-g clears an armed prefix only (Emacs
+        // convention), not the whole buffer. Only the C-c C-c / C-c C-k
+        // bindings reach the engine, so the `C-c` prefix pending state is
+        // visible in the status line. A bare q types "q" (it is not a
+        // command here). Edits clear any armed prefix; a bare `C-c` arms the
+        // prefix via the engine.
         if self.top_view() == ViewId::CommitEditor {
             if let Some(c) = key.char_value() {
                 self.commit_editor_insert(c);
@@ -4838,7 +5221,7 @@ impl AppStore {
                 return;
             }
             if key == Key::ctrl_char('g') {
-                self.commit_editor_abort();
+                self.pending.clear();
                 return;
             }
             // C-c … (and any other unintercepted key) goes through the engine.
@@ -5742,7 +6125,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 73);
+        assert_eq!(store.picker_count().0, 75);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -5760,13 +6143,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 72);
+        assert_eq!(store.picker_selected(), 74);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 71);
+        assert_eq!(store.picker_selected(), 73);
 
-        // RET runs the candidate at the selected index (72: save-buffer —
+        // RET runs the candidate at the selected index (74: save-buffer —
         // *scratch* is not editable, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
@@ -5799,7 +6182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 73);
+        assert_eq!(store.picker_count().0, 75);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -7343,6 +7726,79 @@ mod tests {
         assert_eq!(head_before, head_after, "HEAD must be unchanged");
     }
 
+    #[test]
+    fn commit_editor_refuses_when_nothing_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A repo with a committed file but nothing staged.
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        git_cli(root, &["init", "-q", "-b", "main"]);
+        git_cli(root, &["config", "user.name", "Test"]);
+        git_cli(root, &["config", "user.email", "test@example.com"]);
+        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git_cli(root, &["add", "a.txt"]);
+        git_cli(root, &["commit", "-q", "-m", "init"]);
+
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(
+            root,
+            base.path().to_path_buf(),
+        );
+        // Ensure git is initialized in the store.
+        store.open_commit_editor();
+        // Unstage everything (should be nothing staged anyway).
+        // Type a message.
+        for c in "try to commit".chars() {
+            store.commit_editor_insert(c);
+        }
+        // C-c C-c attempts the commit.
+        store.key_event(key("C-c"));
+        store.key_event(key("C-c"));
+        // The editor must still be open (commit refused).
+        assert!(store.commit_editor.is_some(), "editor must stay open");
+        assert!(
+            store.message.contains("nothing staged"),
+            "message should say nothing staged: {}", store.message
+        );
+    }
+
+    #[test]
+    fn commit_editor_cg_clears_armed_prefix_not_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+
+        // Type some text.
+        for c in "my msg".chars() {
+            store.commit_editor_insert(c);
+        }
+
+        // Arm the C-c prefix.
+        store.key_event(key("C-c"));
+        assert!(!store.pending.is_empty(), "C-c arms the prefix");
+
+        // C-g must clear the pending prefix, NOT abort the editor.
+        store.key_event(key("C-g"));
+        assert!(store.pending.is_empty(), "C-g must clear the armed prefix");
+        assert!(store.commit_editor.is_some(), "C-g must NOT abort the editor");
+        // The text is preserved.
+        let text = store.commit_editor.as_ref().unwrap().rope.to_string();
+        assert!(text.contains("my msg"), "text preserved after C-g: {text}");
+    }
+
     // ── issue 08: snapshot tests ────────────────────────────────────────────
 
     #[test]
@@ -7752,6 +8208,315 @@ mod tests {
         assert_eq!(event.done, PROGRESS_STEP);
         assert_eq!(event.total, 100);
         assert_eq!(event.generation, 42);
+    }
+
+    // ── issue 002: transient menu + discard ──────────────────────────────
+
+    /// Walk the whole menu tree from `path`, collecting every reachable leaf
+    /// command name (descending into prefixes).
+    fn collect_menu_leaves(
+        store: &AppStore,
+        path: &crate::app::keymap::KeySeq,
+    ) -> std::collections::HashSet<String> {
+        let mut set = std::collections::HashSet::new();
+        for e in store.menu_entries_for_path(path) {
+            match &e.command {
+                Some(cmd) => {
+                    set.insert(cmd.clone());
+                }
+                None => {
+                    let mut child = path.clone();
+                    child.push(e.key);
+                    set.extend(collect_menu_leaves(store, &child));
+                }
+            }
+        }
+        set
+    }
+
+    #[test]
+    fn menu_derives_exactly_the_view_bindings() {
+        // Anti-drift: the menu's reachable leaf commands == the view+global
+        // bindings' commands (derived, not hand-written; nothing dropped).
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path()); // Buffer view
+        let bound: std::collections::HashSet<String> = s
+            .menu_bindings()
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect();
+        let menu_leaves = collect_menu_leaves(&s, s.menu_path());
+        assert_eq!(
+            menu_leaves, bound,
+            "menu leaves must exactly equal the keymap × registry bindings"
+        );
+    }
+
+    #[test]
+    fn menu_root_lists_buffer_leaves_and_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        let entries = s.menu_entries();
+        // A single-key leaf: j → scroll-line-down (Buffer view).
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("j") && e.command.as_deref() == Some("scroll-line-down")),
+            "j leaf missing: {entries:?}"
+        );
+        // A prefix: C-c (the projectile family) is a prefix, not a leaf.
+        assert!(
+            entries.iter().any(|e| e.key == key("C-c") && e.is_prefix),
+            "C-c prefix missing: {entries:?}"
+        );
+        // The menu's own opener ? is a leaf (open-transient-menu).
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("?") && e.command.as_deref() == Some("open-transient-menu")),
+            "? leaf missing: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn menu_prefix_descent_into_projectile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        // Descend into C-c p (projectile family).
+        let path: crate::app::keymap::KeySeq = vec![key("C-c"), key("p")];
+        let entries = s.menu_entries_for_path(&path);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("f") && e.command.as_deref() == Some("find-file")),
+            "C-c p f missing: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("p") && e.command.as_deref() == Some("switch-project")),
+            "C-c p p missing: {entries:?}"
+        );
+        // s is a prefix here (C-c p s s).
+        assert!(
+            entries.iter().any(|e| e.key == key("s") && e.is_prefix),
+            "C-c p s prefix missing: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn menu_leaf_executes_and_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        assert!(s.menu_open());
+        // M-x is a leaf (open-palette) at the root.
+        s.key_event(key("M-x"));
+        assert!(!s.menu_open(), "leaf must close the menu");
+        assert!(s.picker_open(), "M-x must open the palette");
+    }
+
+    #[test]
+    fn menu_prefix_key_descends_not_executes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        s.key_event(key("C-c"));
+        assert!(s.menu_open(), "prefix keeps the menu open");
+        assert_eq!(s.menu_path().len(), 1, "path descends by one");
+        assert_eq!(s.menu_path()[0], key("C-c"));
+    }
+
+    #[test]
+    fn menu_c_g_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        s.key_event(key("C-g"));
+        assert!(!s.menu_open());
+        assert_eq!(s.message, "cancel");
+    }
+
+    #[test]
+    fn menu_swallows_non_listed_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.open_menu();
+        // z is not bound in the Buffer view nor global → not in the menu.
+        s.key_event(key("z"));
+        assert!(s.menu_open(), "non-listed key must not close the menu");
+        assert!(
+            s.message.is_empty(),
+            "no unbound-key echo: got `{}`",
+            s.message
+        );
+    }
+
+    #[test]
+    fn menu_h_opens_in_magit_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.push_view(ViewId::MagitStatus);
+        s.key_event(key("h"));
+        assert!(s.menu_open(), "h must open the menu in magit views");
+        let entries = s.menu_entries();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("k") && e.command.as_deref() == Some("magit-discard")),
+            "k leaf missing in magit menu: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == key("s") && e.command.as_deref() == Some("magit-stage")),
+            "s leaf missing in magit menu: {entries:?}"
+        );
+    }
+
+    /// A store rooted in a fresh single-commit git repo (a.txt committed),
+    /// with the project set so the git ops resolve the repo.
+    fn git_store(dir: &std::path::Path) -> AppStore {
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_cli(dir, &["init", "-q", "-b", "main"]);
+        git_cli(dir, &["config", "user.name", "Test"]);
+        git_cli(dir, &["config", "user.email", "test@example.com"]);
+        git_cli(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "keep\n").unwrap();
+        git_cli(dir, &["add", "a.txt"]);
+        git_cli(dir, &["commit", "-q", "-m", "init"]);
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir, base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));
+        s
+    }
+
+    #[test]
+    fn discard_unstaged_file_confirmation_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = git_store(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        s.open_magit_status();
+        assert_eq!(s.top_view(), ViewId::MagitStatus);
+        // k arms the confirmation.
+        s.key_event(key("k"));
+        assert!(s.discard_armed());
+        assert_eq!(s.message, "discard a.txt? y/n");
+        // n cancels — nothing changes.
+        s.key_event(key("n"));
+        assert!(!s.discard_armed());
+        assert_eq!(s.message, "discard cancelled");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "changed\n"
+        );
+        // C-g also cancels — nothing changes.
+        s.key_event(key("k"));
+        assert!(s.discard_armed());
+        s.key_event(key("C-g"));
+        assert!(!s.discard_armed());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "changed\n"
+        );
+        // y confirms — the file is restored to HEAD.
+        s.key_event(key("k"));
+        assert!(s.discard_armed());
+        s.key_event(key("y"));
+        assert!(!s.discard_armed());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(
+            s.message.contains("discarded a.txt"),
+            "got `{}`",
+            s.message
+        );
+    }
+
+    #[test]
+    fn discard_acts_on_cursor_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_cli(root, &["init", "-q", "-b", "main"]);
+        git_cli(root, &["config", "user.name", "Test"]);
+        git_cli(root, &["config", "user.email", "test@example.com"]);
+        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("a.txt"), "A\n").unwrap();
+        std::fs::write(root.join("b.txt"), "B\n").unwrap();
+        git_cli(root, &["add", "a.txt", "b.txt"]);
+        git_cli(root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("a.txt"), "A2\n").unwrap();
+        std::fs::write(root.join("b.txt"), "B2\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(root, base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(root.to_path_buf()));
+        s.open_magit_status();
+        // Cursor starts on a.txt (first unstaged file). Move to b.txt.
+        s.key_event(key("n"));
+        s.key_event(key("k"));
+        assert!(s.discard_armed());
+        assert!(s.message.contains("b.txt"), "got `{}`", s.message);
+        s.key_event(key("y"));
+        // b.txt restored; a.txt untouched.
+        assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "B\n");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "A2\n");
+    }
+
+    #[test]
+    fn discard_menu_leaf_arms_confirmation() {
+        // k pressed FROM the open menu closes the menu and arms the gate.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = git_store(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        s.open_magit_status();
+        s.key_event(key("h")); // open the menu (magit dispatch)
+        assert!(s.menu_open());
+        s.key_event(key("k")); // k is a menu leaf → magit-discard
+        assert!(!s.menu_open(), "menu must close on the leaf");
+        assert!(s.discard_armed(), "confirmation must be armed");
+        s.key_event(key("n"));
+        assert!(!s.discard_armed());
     }
 }
 

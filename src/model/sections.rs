@@ -469,6 +469,7 @@ mod tests {
                 .count() as u32,
             lines,
             old_ends_nl: true,
+            new_ends_nl: true,
         }
     }
 
@@ -696,6 +697,33 @@ mod tests {
         assert_eq!(tree.cursor.as_deref(), Some("unstaged")); // group heading
         tree.move_up();
         assert_eq!(tree.cursor.as_deref(), Some("staged:src/renamed.rs"));
+    }
+
+    /// Inline hunks (issue 002): unfolding a file reveals its hunk rows
+    /// (header + diff body) directly under it; the cursor can move onto the
+    /// hunk, which is then addressable (dwim) with its path + new_start.
+    #[test]
+    fn unfold_file_cursor_lands_on_addressable_hunk() {
+        let mut tree = build();
+        // Cursor starts on the folded staged:src/a.rs. Unfold it.
+        tree.toggle_fold();
+        // Move down into the now-visible hunk.
+        tree.move_down();
+        let target = tree.cursor_target().expect("cursor on a section");
+        assert_eq!(target.kind, SectionKind::Hunk, "cursor must be on the hunk");
+        assert_eq!(target.path, Some("src/a.rs".into()));
+        assert_eq!(target.side, Some(Side::Staged));
+        assert_eq!(target.hunk_new_start, Some(4));
+        // The hunk's inline diff body lines are present in the rendered rows.
+        let rows = tree.visible_rows();
+        assert!(
+            rows.iter().any(|r| r.role == RowRole::DiffAdd && r.text.contains("new")),
+            "inline added line missing: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.role == RowRole::DiffDelete && r.text.contains("old")),
+            "inline deleted line missing: {rows:?}"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod results_view;
 pub mod root;
 pub mod rows_view;
 pub mod tree;
+pub mod transient_menu;
 pub mod views;
 
 use iocraft::prelude::*;

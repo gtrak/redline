@@ -62,6 +62,10 @@ pub struct DiffHunk {
     /// `ContextEOFNL`/`DeleteEOFNL` marker line; the marker is not a
     /// content line and is not stored in `lines`.
     pub old_ends_nl: bool,
+    /// Whether the new (index) file's last line — when it falls in this
+    /// hunk — ends with a trailing newline. libgit2 flags the opposite
+    /// with an `AddEOFNL` marker line.
+    pub new_ends_nl: bool,
 }
 
 /// The unified diff of a single file on one side (staged or unstaged).
@@ -104,18 +108,33 @@ pub(crate) fn extract(diff: &Diff, path: &str) -> FileDiff {
                     new_lines: h.new_lines(),
                     lines: Vec::new(),
                     old_ends_nl: true,
+                    new_ends_nl: true,
                 });
             }
             DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL => {
                 // "No newline at end of file" marker: the affected side's
                 // last line in this hunk lacks a trailing newline. It is
-                // not a content line — record the fact for the old side
-                // (the reverse-apply in `revert_hunk_in_content` needs it)
-                // and skip the marker itself.
-                if matches!(line.origin_value(), DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL)
-                    && let Some(target) = file.hunks.last_mut()
-                {
-                    target.old_ends_nl = false;
+                // not a content line — record the fact for both sides and
+                // skip the marker itself.
+                if let Some(target) = file.hunks.last_mut() {
+                    // libgit2 diff.h:627-629: AddEOFNL = old lacks LF /
+                    // new has it; DeleteEOFNL = old has LF / new lacks it;
+                    // ContextEOFNL = neither has a trailing LF.
+                    match line.origin_value() {
+                        DiffLineType::AddEOFNL => {
+                            target.old_ends_nl = false;
+                            target.new_ends_nl = true;
+                        }
+                        DiffLineType::DeleteEOFNL => {
+                            target.old_ends_nl = true;
+                            target.new_ends_nl = false;
+                        }
+                        DiffLineType::ContextEOFNL => {
+                            target.old_ends_nl = false;
+                            target.new_ends_nl = false;
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {
@@ -189,15 +208,30 @@ pub(crate) fn extract_commit(diff: &Diff) -> Vec<FileDiff> {
                         new_lines: h.new_lines(),
                         lines: Vec::new(),
                         old_ends_nl: true,
+                        new_ends_nl: true,
                     });
                 }
             }
             DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL => {
-                if matches!(line.origin_value(), DiffLineType::DeleteEOFNL | DiffLineType::ContextEOFNL)
-                    && let Some(f) = files.last_mut()
+                if let Some(f) = files.last_mut()
                     && let Some(h) = f.hunks.last_mut()
                 {
-                    h.old_ends_nl = false;
+                    // Same libgit2 semantics as `extract` (see above).
+                    match line.origin_value() {
+                        DiffLineType::AddEOFNL => {
+                            h.old_ends_nl = false;
+                            h.new_ends_nl = true;
+                        }
+                        DiffLineType::DeleteEOFNL => {
+                            h.old_ends_nl = true;
+                            h.new_ends_nl = false;
+                        }
+                        DiffLineType::ContextEOFNL => {
+                            h.old_ends_nl = false;
+                            h.new_ends_nl = false;
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {

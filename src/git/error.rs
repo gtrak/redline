@@ -55,4 +55,9 @@ pub enum GitError {
         path: String,
         source: std::io::Error,
     },
+
+    /// A working-directory file could not be written or removed (discard
+    /// restore/delete, issue 002).
+    #[error("cannot update workdir file `{path}`: {source}")]
+    WriteFile { path: String, source: std::io::Error },
 }

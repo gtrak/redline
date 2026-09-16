@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 
 use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
-use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewLine, PickerCandidate, ResultRow, ViewId};
+use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewLine, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::file_view::FileView;
@@ -20,6 +20,7 @@ use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
 use crate::ui::results_view::ResultsView;
 use crate::ui::rows_view::MagitRowsView;
+use crate::ui::transient_menu::TransientMenuView;
 use crate::ui::tree::TreeSidebar;
 use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
@@ -93,6 +94,10 @@ struct Snapshot {
     total: usize,
     preview: String,
     magit_rows: Vec<MagitRow>,
+    // issue 002: transient menu overlay
+    menu_open: bool,
+    menu_rows: Vec<TransientMenuRow>,
+    menu_height: u32,
     // issue 08: log / blame / commit-diff / commit editor
     log_title: String,
     log_rows: Vec<MagitRow>,
@@ -321,6 +326,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             total: s.picker_count().1,
             preview: s.picker_preview().to_string(),
             magit_rows: s.magit_rows(),
+            menu_open: s.menu_open(),
+            menu_rows: s.menu_rows(),
+            menu_height: s.menu_height(),
             log_title: s.log_title(),
             log_rows: s.log_rows(),
             blame_title: s.blame_title(),
@@ -440,6 +448,16 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 candidates: snap.candidates.clone(),
                                 total: snap.total,
                                 preview: snap.preview,
+                            )
+                        })
+                    } else {
+                        None
+                    })
+                    #(if snap.menu_open && !snap.picker {
+                        Some(element! {
+                            TransientMenuView(
+                                rows: snap.menu_rows.clone(),
+                                height: snap.menu_height,
                             )
                         })
                     } else {
@@ -616,7 +634,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 73"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 75"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

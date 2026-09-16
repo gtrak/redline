@@ -1,0 +1,151 @@
+# Redline
+
+A read-focused TUI code browser for the terminal. Emacs/helm/magit-flavored,
+built in Rust with iocraft.
+
+## What it does
+
+- Instant navigation in any repo: files, symbols, definitions, references, grep
+- Git surface: magit-status subset (stage, unstage, commit, log, blame)
+- Live views: files agents write on disk appear immediately
+- Light editing: commit messages, per-project notes (no undo in v1)
+- Tree sidebar, 2 built-in themes (dark/light), config-remappable keybindings
+
+## Install
+
+```sh
+cargo install --path .
+# or for development:
+cargo build --release
+# binary at target/release/redline
+```
+
+## Quick start
+
+```sh
+cd your/repo
+redline
+```
+
+Redline auto-detects the project root (git repo or marker file). The status
+line shows the project name and current view.
+
+## Keymap cheat sheet
+
+Generated from the command registry. The `M-x` palette lists all commands.
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `C-x C-f` / `C-c p f` | find-file | Find a file in the project |
+| `C-x b` | switch-buffer | Switch to an open buffer |
+| `C-x C-b` | list-buffers | List open buffers |
+| `C-x k` | kill-buffer | Kill the selected buffer |
+| `C-x n` | open-notes | Open the per-project notes buffer |
+| `C-x C-s` | save-buffer | Save the current buffer to disk |
+| `C-x C-c` | quit | Quit redline |
+| `C-x g` | magit-status | Show/refresh git status |
+| `C-c p p` | switch-project | Switch project (projectile) |
+| `C-c p e` | recent-files | Open a recently visited file |
+| `C-c p i` | re-walk | Re-walk the project file list |
+| `C-c p s s` | project-search | Project-wide literal search |
+| `C-c p t` | toggle-tree | Toggle the file-tree sidebar |
+| `M-x` | toggle-tree-follow | Toggle tree buffer-follow (off by default) |
+| `M-x` | open-palette | Command palette |
+| `M-.` | xref-find-definitions | Jump to definition under point |
+| `M-,` | jump-back | Pop back in the jump stack |
+| `C-i` / `Tab` | jump-forward | Walk forward in the jump stack |
+| `M-i` | imenu | Open the imenu outline |
+| `M-?` | references-at-point | References to the symbol under point |
+| `M-s o` | occur | Regex occurrences in the current buffer |
+| `C-s` | isearch-forward | Incremental search forward |
+| `C-r` | isearch-backward | Incremental search backward |
+| `M-g g` | goto-line | Jump to a line number |
+| `C-v` / `PageDown` | scroll-page-down | Scroll down one page |
+| `M-v` / `PageUp` | scroll-page-up | Scroll up one page |
+| `j` / `C-n` / `↓` | scroll-line-down | Scroll down one line |
+| `k` / `C-p` / `↑` | scroll-line-up | Scroll up one line |
+| `g` | reload-buffer | Force-reload the current file |
+| `G` / `M->` | scroll-bottom | Scroll to the bottom |
+| `M-<` | scroll-top | Scroll to the top |
+| `C-g` | cancel | Cancel a pending key sequence |
+
+### Magit status view (C-x g)
+
+| Key | Command |
+|-----|---------|
+| `s` | Stage the file/hunk at point |
+| `u` | Unstage the file/hunk at point |
+| `k` | Discard the file/hunk at point (confirmation-gated: y/n) |
+| `TAB` | Fold/unfold the section |
+| `RET` | Visit the file at point |
+| `g` | Refresh |
+| `n` / `C-n` / `↓` | Next section |
+| `p` / `C-p` / `↑` | Previous section |
+| `h` | Open the transient command menu (magit dispatch) |
+| `?` | Open the transient command menu |
+| `l` | Open git log |
+| `b` | Blame the current file |
+| `c` | Open the commit editor |
+| `y` | Branch picker |
+| `z` | Stash list |
+| `q` | Close |
+
+### Commit editor (c in magit-status)
+
+| Key | Command |
+|-----|---------|
+| `C-c C-c` | Commit with the editor's message |
+| `C-c C-k` / `ESC` / `C-g` | Abort |
+| Printable | Type the message |
+| `Backspace` | Delete |
+
+### Mouse (best-effort)
+
+- Wheel scroll: scrolls the current view (file, magit, search, buffer list)
+- Left click in the file view: positions the cursor at the clicked line
+- Limitations: no drag-select, no click in pickers/menus (v1)
+
+## Configuration
+
+`~/.config/redline/config.toml`:
+
+```toml
+# Theme: "dark" (default) or "light"
+theme = "dark"
+
+# Live file watching (default true)
+auto_reload = true
+
+# Key bindings: command = "sequence"
+[key-bindings]
+# find-file = "C-x C-f"
+# quit = "C-x C-c"
+```
+
+## Performance
+
+Measured on a 500-file Rust repo (each ~50 lines):
+
+| Metric | Debug | Release |
+|--------|-------|---------|
+| Cold start (store init) | ~50 ms | ~15 ms |
+| Index (500 files) | ~200 ms | ~50 ms |
+| Index throughput | ~2500 files/s | ~10000 files/s |
+| Search first-hit | ~5 ms | ~1 ms |
+
+(Numbers vary by hardware; recorded on a mid-range laptop, 2025.)
+
+## Architecture
+
+- `src/app/` — store, command registry, keymap engine, watcher
+- `src/model/` — project, buffer (ropey), file walk
+- `src/nav/` — symbol index (tree-sitter, rayon-parallel)
+- `src/search/` — ripgrep-embedded, references, occur
+- `src/git/` — git2 wrapper: status, staging, log, blame, commit
+- `src/syntax/` — tree-sitter grammars, highlight cache
+- `src/ui/` — iocraft components: file view, magit, picker, tree, log
+- `src/theme.rs` — dark/light themes
+
+## License
+
+MIT
