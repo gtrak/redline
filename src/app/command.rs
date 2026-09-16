@@ -386,6 +386,37 @@ impl CommandRegistry {
             "watching",
             |store, _arg| store.toggle_watcher(),
         ));
+        // ── issue 05: symbol navigation ─────────────────────────────
+        reg.register(Command::new(
+            "xref-find-definitions",
+            "Jump to the definition of the symbol under point (M-.)",
+            "navigation",
+            |store, _arg| store.xref_find_definitions(),
+        ));
+        reg.register(Command::new(
+            "jump-back",
+            "Pop back to the prior position in the jump stack (M-,)",
+            "navigation",
+            |store, _arg| store.jump_back(),
+        ));
+        reg.register(Command::new(
+            "jump-forward",
+            "Walk forward in the jump stack (C-i)",
+            "navigation",
+            |store, _arg| store.jump_forward(),
+        ));
+        reg.register(Command::new(
+            "imenu",
+            "Open the imenu outline of the current file (M-i)",
+            "navigation",
+            |store, _arg| store.open_imenu(),
+        ));
+        reg.register(Command::new(
+            "open-symbol-picker",
+            "Open the project-wide symbol picker (C-c p s)",
+            "navigation",
+            |store, _arg| store.open_symbol_picker(),
+        ));
         reg
     }
 }
@@ -406,7 +437,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 42, "expected 42 seed commands: {names:?}");
+        assert_eq!(names.len(), 47, "expected 47 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -450,6 +481,11 @@ mod tests {
             "magit-prev",
             "reload-buffer",
             "toggle-watcher",
+            "xref-find-definitions",
+            "jump-back",
+            "jump-forward",
+            "imenu",
+            "open-symbol-picker",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

@@ -7,7 +7,7 @@
 //! Subscribers:
 //! - `FileView` auto-reload (`AppStore::apply_project_change`, this issue).
 //! - git status `refresh()` (issue 07's seam, wired in this issue).
-//! - symbol index (issue 05 — a stub only for now).
+//! - symbol index (issue 05 — incremental refresh on watcher events).
 //!
 //! Subscription pattern (documented for the later consumers):
 //! ```ignore

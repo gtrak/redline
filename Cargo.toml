@@ -25,6 +25,11 @@ ropey = "1.6.1"
 # tree-sitter ^0.25/^0.26 and would fork the runtime (ABI mismatch).
 tree-sitter = "0.24.7"
 tree-sitter-highlight = "0.24.7"   # requires tree-sitter ^0.24.5
+# Query-iterator adapter (tree-sitter's QueryCaptures/QueryMatches implement
+# streaming-iterator::StreamingIterator, not std Iterator). Already in the
+# lock as a transitive dep of tree-sitter; named here so symbol queries
+# (issue 05) can iterate captures. Exact pin = no version change / no refetch.
+streaming-iterator = "=0.1.9"
 tree-sitter-rust = "0.23.3"       # 0.24.0 grammar ABI is 15 > runtime 14; 0.23.3 is ABI 14 — verified by test
 tree-sitter-javascript = "0.23.1"
 tree-sitter-typescript = "0.23.2"  # provides both TS and TSX grammars

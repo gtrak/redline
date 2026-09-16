@@ -6,7 +6,7 @@
 //! set (ropey-backed), the highlight cache, per-buffer scroll state,
 //! isearch state, and goto-line state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +27,7 @@ use crate::model::buffer::{load_file, BufferTable, SCRATCH_NAME};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
 use crate::model::sections::{MagitRow, SectionKind, StatusTree};
+use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, IndexProgress, SymbolIndex};
 use crate::syntax::cache::{CacheKey, HighlightCache};
 use crate::syntax::highlight::{self, HighlightResult};
 use crate::syntax::registry::GrammarRegistry;
@@ -87,6 +88,21 @@ impl ViewId {
                 km
                     .bind(&[Key::alt_char('>')], "scroll-bottom")
                     .unwrap();
+                // Navigation (issue 05).
+                km
+                    .bind(&[Key::alt_char('.')], "xref-find-definitions")
+                    .unwrap();
+                km
+                    .bind(&[Key::alt_char(',')], "jump-back")
+                    .unwrap();
+                km
+                    .bind(&[Key::ctrl_char('i')], "jump-forward")
+                    .unwrap();
+                // C-i (Ctrl+I) arrives as Tab from crossterm: bind Tab too.
+                km.bind(&[Key::tab()], "jump-forward").unwrap();
+                km
+                    .bind(&[Key::alt_char('i')], "imenu")
+                    .unwrap();
                 km
             }
             ViewId::BufferList => {
@@ -136,6 +152,90 @@ pub enum PickerKind {
     /// `C-c p p`: switch to the selected project, then land in that
     /// project's file picker (projectile's default switch action).
     Projects,
+    /// `M-.` ambiguous: jump to the selected definition location.
+    Xref,
+    /// `M-i`: imenu outline of the current file.
+    Imenu,
+    /// `C-c p s`: project-wide symbol picker.
+    Symbols,
+}
+
+/// One entry in the jump stack (issue 05): the buffer, line, and column
+/// to restore, plus a short label for diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JumpEntry {
+    /// Buffer key (absolute path string, or `*scratch*`).
+    pub buffer_key: String,
+    /// Line (0-based).
+    pub line: usize,
+    /// Column (byte offset within the line; 0 when unknown).
+    pub col: usize,
+    /// Short label (e.g. the command that triggered the jump).
+    pub label: String,
+}
+
+/// Bounded jump stack (emacs convention: 256 entries max).
+/// `history` holds the full sequence of visited positions (the initial
+/// position plus every jump destination). `pos` is the index into
+/// `history` of the current position (always `pos < history.len()`
+/// when the stack is non-empty).
+#[derive(Clone, Debug, Default)]
+pub struct JumpStack {
+    history: Vec<JumpEntry>,
+    pos: usize,
+}
+
+impl JumpStack {
+    const MAX: usize = 256;
+
+    /// Record a jump from `origin` to `destination`. Truncates forward
+    /// history (a new jump invalidates the forward list). When the stack
+    /// is empty, `origin` is recorded as the first position.
+    pub fn record_jump(&mut self, origin: &JumpEntry, destination: &JumpEntry) {
+        // Truncate forward history (keep up to and including the current
+        // position, which is the origin of this jump).
+        self.history.truncate(self.pos + 1);
+        // If the stack is empty, the origin is the first visited position.
+        if self.history.is_empty() {
+            self.history.push(origin.clone());
+        }
+        self.history.push(destination.clone());
+        if self.history.len() > Self::MAX {
+            self.history.remove(0);
+            // Adjust pos: removing from the front shifts indices down by 1.
+            // The destination is now at the end, so pos = len - 1.
+        }
+        self.pos = self.history.len() - 1;
+    }
+
+    /// `M-,`: move back one entry. Returns the entry to restore.
+    pub fn back(&mut self) -> Option<&JumpEntry> {
+        if self.pos == 0 {
+            return None;
+        }
+        self.pos -= 1;
+        self.history.get(self.pos)
+    }
+
+    /// `C-i`: move forward one entry. Returns the entry to restore.
+    pub fn forward(&mut self) -> Option<&JumpEntry> {
+        if self.pos >= self.history.len() - 1 {
+            return None;
+        }
+        self.pos += 1;
+        self.history.get(self.pos)
+    }
+
+    #[allow(dead_code)] // used by tests and future UI wiring
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    /// Number of entries in the stack (for tests).
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.history.len()
+    }
 }
 
 /// One candidate in the picker. `name` is the value RET acts on
@@ -297,6 +397,32 @@ pub struct AppStore {
     /// Runtime suspend state for the watcher (`M-x toggle-watcher`);
     /// independent of the `auto_reload` config default.
     watch_suspended: bool,
+    /// Jump stack (issue 05): bounded history of (buffer, line, col) for
+    /// `M-,` / `C-i` navigation.
+    jump_stack: JumpStack,
+    /// The installed symbol index snapshot (issue 05). Updated by the
+    /// IndexBus drain in the UI layer.
+    index: SymbolIndex,
+    /// The index-result bus: the background indexer publishes here; the
+    /// UI drains it into `index`.
+    pub index_bus: IndexBus,
+    /// Indexing state: `Some((done, total, generation))` when a background
+    /// index job is in progress; `None` when idle. The generation tag
+    /// identifies which project's job this is, so stale events (from a
+    /// previous project's job) can be discarded. Drives the status-line
+    /// indicator.
+    indexing: Option<(usize, usize, usize)>,
+    /// Generation counter for index jobs: bumped on every project switch so
+    /// that events from a previous project's in-flight job can be identified
+    /// and discarded by `apply_index_event`.
+    index_generation: usize,
+    /// Changed paths accumulated while an index job is in flight. When the
+    /// flight clears, these are coalesced into one incremental job so that
+    /// no watcher event is dropped during a job.
+    pending_index_changes: HashSet<PathBuf>,
+    /// The symbol name being looked up by the Xref picker (set by
+    /// `xref_find_definitions` when the lookup is ambiguous).
+    xref_lookup_name: String,
 }
 
 impl AppStore {
@@ -369,6 +495,12 @@ impl AppStore {
                 "re-walk",
             )
             .unwrap();
+        global
+            .bind(
+                &[Key::ctrl_char('c'), Key::char('p'), Key::char('s')],
+                "open-symbol-picker",
+            )
+            .unwrap();
 
         let view = ViewId::Buffer.keymap();
         let engine = KeymapEngine::new(global, view);
@@ -412,6 +544,13 @@ impl AppStore {
             watcher: None,
             auto_reload: true,
             watch_suspended: false,
+            jump_stack: JumpStack::default(),
+            index: SymbolIndex::new(),
+            index_bus: IndexBus::new(),
+            indexing: None,
+            index_generation: 0,
+            pending_index_changes: HashSet::new(),
+            xref_lookup_name: String::new(),
         }
     }
 
@@ -794,7 +933,70 @@ impl AppStore {
             PickerKind::RecentFiles => self.recent_file_candidates(),
             PickerKind::Buffers | PickerKind::KillBuffer => self.buffer_candidates(),
             PickerKind::Projects => self.project_candidates(),
+            PickerKind::Xref => self.xref_candidates(),
+            PickerKind::Imenu => self.imenu_candidates(),
+            PickerKind::Symbols => self.symbol_candidates(),
         }
+    }
+
+    /// Candidates for the Xref picker (definition locations for the
+    /// current lookup name).
+    fn xref_candidates(&self) -> Vec<PickerCandidate> {
+        let name = &self.xref_lookup_name;
+        self.index
+            .definitions_of(name)
+            .into_iter()
+            .map(|d| PickerCandidate {
+                name: format!("{}:{}", d.file, d.symbol.line + 1),
+                display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
+                docs: String::new(),
+                category: "xref".to_string(),
+            })
+            .collect()
+    }
+
+    /// Candidates for the Imenu picker (current file's outline).
+    fn imenu_candidates(&self) -> Vec<PickerCandidate> {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return Vec::new();
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return Vec::new();
+        };
+        let Some(path) = buf.path.as_ref() else {
+            return Vec::new();
+        };
+        let Some(project) = self.project.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(rel) = path.strip_prefix(&project.root) else {
+            return Vec::new();
+        };
+        let rel = rel.to_string_lossy();
+        self.index
+            .outline(&rel)
+            .iter()
+            .map(|s| PickerCandidate {
+                name: format!("{}:{}", s.name, s.line + 1),
+                display: format!("{}  [{}]", s.name, s.kind.tag()),
+                docs: String::new(),
+                category: "imenu".to_string(),
+            })
+            .collect()
+    }
+
+    /// Candidates for the project-wide symbol picker (all index symbols).
+    fn symbol_candidates(&self) -> Vec<PickerCandidate> {
+        self.index
+            .all_locations()
+            .into_iter()
+            .map(|loc| PickerCandidate {
+                name: format!("{}:{}", loc.file, loc.symbol.line + 1),
+                display: format!("{}  [{}]  {}", loc.symbol.name, loc.symbol.kind.tag(), loc.file),
+                docs: String::new(),
+                category: "symbol".to_string(),
+            })
+            .collect()
     }
 
     // ── picker: open per command ────────────────────────────────────────
@@ -948,6 +1150,24 @@ impl AppStore {
                 .unwrap_or(0),
             Some(PickerKind::Buffers | PickerKind::KillBuffer) => self.buffers.len(),
             Some(PickerKind::Projects) => self.project_store.registry.len(),
+            Some(PickerKind::Xref) => self
+                .index
+                .definitions_of(&self.xref_lookup_name)
+                .len(),
+            Some(PickerKind::Imenu) => self
+                .buffers
+                .current()
+                .and_then(|key| self.buffers.get(key))
+                .and_then(|b| b.path.as_ref())
+                .and_then(|path| {
+                    self.project.as_ref().and_then(|p| {
+                        path.strip_prefix(&p.root).ok().map(|r| {
+                            self.index.outline(&r.to_string_lossy()).len()
+                        })
+                    })
+                })
+                .unwrap_or(0),
+            Some(PickerKind::Symbols) => self.index.total(),
         };
         let shown = self.picker.as_ref().map(|p| p.filtered.len()).unwrap_or(0);
         (shown, total)
@@ -991,6 +1211,20 @@ impl AppStore {
             PickerKind::Palette | PickerKind::Projects => docs,
             PickerKind::FindFile | PickerKind::RecentFiles => self.file_preview(&name),
             PickerKind::Buffers | PickerKind::KillBuffer => self.buffer_preview(&name),
+            // Xref and Symbols: preview the file at the definition location.
+            // The name is "file:line" (1-based). Show a window around the
+            // definition line, not the file's first page.
+            PickerKind::Xref | PickerKind::Symbols => {
+                if let Some((file, line_str)) = name.rsplit_once(':')
+                    && let Ok(line) = line_str.parse::<usize>()
+                {
+                    self.file_preview_at_line(file, line - 1)
+                } else {
+                    String::new()
+                }
+            }
+            // Imenu: preview the current file (the name is "symbol:line").
+            PickerKind::Imenu => self.file_preview_current(),
         };
         if let Some(p) = self.picker.as_mut() {
             p.preview = preview;
@@ -1027,9 +1261,58 @@ impl AppStore {
             .join("\n")
     }
 
+    /// Preview of a file centred on a 0-based line: a window of
+    /// `PREVIEW_LINES` total lines around `line` (the definition context).
+    fn file_preview_at_line(&self, rel: &str, line: usize) -> String {
+        let Some(project) = self.project.as_ref() else {
+            return String::new();
+        };
+        let abs = project.root.join(rel);
+        let key = abs.to_string_lossy().into_owned();
+        let text = if let Some(buf) = self.buffers.get(&key) {
+            buf.text()
+        } else {
+            let mut file = match std::fs::File::open(&abs) {
+                Ok(f) => f,
+                Err(e) => return format!("(cannot read: {e})"),
+            };
+            let mut bytes = Vec::new();
+            match Read::take(&mut file, PREVIEW_MAX_BYTES as u64).read_to_end(&mut bytes) {
+                Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => return format!("(cannot read: {e})"),
+            }
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        // Window: up to 8 lines before, the rest after (32 total).
+        const BEFORE: usize = 8;
+        let start = line.saturating_sub(BEFORE);
+        let end = (start + PREVIEW_LINES).min(lines.len());
+        if start >= end {
+            return String::new();
+        }
+        lines[start..end].join("\n")
+    }
+
     fn buffer_preview(&self, key: &str) -> String {
         self.buffers
             .get(key)
+            .map(|b| {
+                b.text()
+                    .lines()
+                    .take(PREVIEW_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Preview of the current buffer's text (for the Imenu picker).
+    fn file_preview_current(&self) -> String {
+        self.buffers
+            .current_buffer()
             .map(|b| {
                 b.text()
                     .lines()
@@ -1063,6 +1346,33 @@ impl AppStore {
             PickerKind::Buffers => self.buffers.set_current(&name),
             PickerKind::KillBuffer => self.kill_buffer(&name),
             PickerKind::Projects => self.switch_project_root(&name),
+            PickerKind::Xref | PickerKind::Symbols => {
+                // name is "file:line" (1-based line number).
+                if let Some((file, line_str)) = name.rsplit_once(':')
+                    && let Ok(line) = line_str.parse::<usize>()
+                {
+                    let origin = self.current_jump_entry();
+                    self.open_path(file);
+                    let key = self.buffers.current().map(String::from).unwrap_or_default();
+                    self.set_scroll_top(line - 1);
+                    self.ensure_highlight();
+                    let _ = key;
+                    self.record_jump(&origin, "M-.");
+                    self.minibuffer_message(&format!("jumped to {file}:{line}"));
+                }
+            }
+            PickerKind::Imenu => {
+                // name is "symbol:line" (1-based line number); the file is
+                // the current buffer, so just scroll to the line.
+                if let Some(line_str) = name.rsplit_once(':').map(|(_, l)| l)
+                    && let Ok(line) = line_str.parse::<usize>()
+                {
+                    let origin = self.current_jump_entry();
+                    self.set_scroll_top(line - 1);
+                    self.ensure_highlight();
+                    self.record_jump(&origin, "M-i");
+                }
+            }
         }
     }
 
@@ -1084,6 +1394,17 @@ impl AppStore {
         // one for the new root (exactly one at a time). No-op in plain unit
         // tests (no runtime).
         self.start_watcher();
+        // Rebuild the symbol index for the new project (full rebuild, not
+        // incremental: the old index belongs to the previous project).
+        // Bump the generation so that any in-flight job from the previous
+        // project is tagged stale and its event discarded by
+        // `apply_index_event`. `start_indexing` will start a new job even
+        // if the old project's job is still in flight (generation-aware
+        // single-flight).
+        self.index = SymbolIndex::new();
+        self.index_generation += 1;
+        self.pending_index_changes.clear();
+        self.start_indexing();
         self.project_store.registry.upsert(&root_path);
         let _ = self.project_store.save_registry();
         self.ensure_files();
@@ -1983,6 +2304,9 @@ impl AppStore {
             // The user should know their edit conflicts with a disk change.
             self.minibuffer_message("changed on disk — press g to reload");
         }
+        // Incremental symbol-index refresh (issue 05): reparse only the
+        // changed files (O(changed files), not a full rebuild).
+        self.refresh_index(&change.paths);
     }
 
     /// Re-read the file buffer at `path` from disk, preserving the scroll
@@ -2059,6 +2383,398 @@ impl AppStore {
             .current_buffer()
             .map(|b| b.changed_on_disk)
             .unwrap_or(false)
+    }
+
+    // ── symbol navigation (issue 05) ─────────────────────────────────
+
+    /// Capture the current position as a `JumpEntry` (for use as the
+    /// origin or destination in `record_jump`).
+    fn current_jump_entry(&self) -> JumpEntry {
+        let key = self.buffers.current().map(String::from).unwrap_or_else(|| SCRATCH_NAME.to_string());
+        let line = self.scroll_top();
+        JumpEntry {
+            buffer_key: key,
+            line,
+            col: 0,
+            label: String::new(),
+        }
+    }
+
+    /// Record a jump from the current position (captured as `origin` before
+    /// navigation) to the new position (captured as `destination` after
+    /// navigation). Truncates forward history.
+    fn record_jump(&mut self, origin: &JumpEntry, label: &str) {
+        let dest = self.current_jump_entry();
+        let mut dest = dest;
+        dest.label = label.to_string();
+        self.jump_stack.record_jump(origin, &dest);
+    }
+
+    /// `M-,`: pop back to the prior position (line + column).
+    pub fn jump_back(&mut self) {
+        let entry = self.jump_stack.back().cloned();
+        match entry {
+            Some(entry) => self.navigate_to_entry(&entry),
+            None => self.minibuffer_message("no jump-back"),
+        }
+    }
+
+    /// `C-i`: walk forward in the jump stack.
+    pub fn jump_forward(&mut self) {
+        let entry = self.jump_stack.forward().cloned();
+        match entry {
+            Some(entry) => self.navigate_to_entry(&entry),
+            None => self.minibuffer_message("no jump-forward"),
+        }
+    }
+
+    /// Navigate to a jump entry: open the buffer (if needed) and scroll to
+    /// the entry's line.
+    fn navigate_to_entry(&mut self, entry: &JumpEntry) {
+        // If the buffer is not open, try to open it by key.
+        if self.buffers.get(&entry.buffer_key).is_none() {
+            // The buffer was killed or was never open: just scroll scratch.
+            self.open_scratch();
+            return;
+        }
+        self.buffers.set_current(&entry.buffer_key);
+        self.set_scroll_top(entry.line);
+        self.ensure_highlight();
+    }
+
+    /// Start the initial background index build (issue 05). Builds the full
+    /// symbol index over the project's file list using a rayon-parallel
+    /// tree-sitter parse on a background thread. No-op when there's no
+    /// project, no tokio runtime (plain unit tests), or a job for the
+    /// *current* generation is already in flight. If a job from a stale
+    /// generation (previous project) is in flight, a new job is started
+    /// (the stale job's event will be discarded by `apply_index_event`).
+    pub fn start_indexing(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
+        if self.ensure_files().is_none() {
+            return;
+        }
+        let files = self.files.get(&root).map(|f| f.files.clone()).unwrap_or_default();
+        if files.is_empty() {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        // Single-flight per generation: don't start a new job if a job for
+        // the current generation is already in flight. A stale-generation
+        // job (previous project) is superseded.
+        if let Some((_, _, inflight_gen)) = self.indexing
+            && inflight_gen == self.index_generation
+        {
+            return;
+        }
+        self.indexing = Some((0, files.len(), self.index_generation));
+        let bus = self.index_bus.clone();
+        let root_clone = root.clone();
+        let generation = self.index_generation;
+        tokio::task::spawn_blocking(move || {
+            let progress = IndexProgress::new(files.len());
+            let index = build_index(&root_clone, &files, Some(&progress));
+            bus.send(IndexEvent {
+                index,
+                indexing: false,
+                done: files.len(),
+                total: files.len(),
+                generation,
+            });
+        });
+    }
+
+    /// Spawn a background incremental reindex for the changed paths
+    /// (issue 05). Reparses only the changed files (O(changed files)).
+    /// No-op when no project or no tokio runtime. If a job for the
+    /// *current* generation is in flight, the changed paths are accumulated
+    /// in the pending set and coalesced into one incremental job when the
+    /// flight clears (no dropped events). If a job from a stale generation
+    /// (previous project) is in flight, a new job is started to supersede it.
+    fn refresh_index(&mut self, changed: &[PathBuf]) {
+        if changed.is_empty() {
+            return;
+        }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        // Single-flight per generation: if a job for the current generation
+        // is in flight, accumulate the changed paths in the pending set so
+        // they are coalesced into one job when the flight clears. A job from
+        // a stale generation (previous project) is superseded.
+        if let Some((_, _, inflight_gen)) = self.indexing
+            && inflight_gen == self.index_generation
+        {
+            for p in changed {
+                self.pending_index_changes.insert(p.clone());
+            }
+            return;
+        }
+        self.indexing = Some((0, changed.len(), self.index_generation));
+        let bus = self.index_bus.clone();
+        let index = self.index.clone();
+        let root_clone = root.clone();
+        let changed = changed.to_vec();
+        let generation = self.index_generation;
+        tokio::task::spawn_blocking(move || {
+            let mut idx = index;
+            let touched = refresh_in_place(&root_clone, &changed, &mut idx);
+            bus.send(IndexEvent {
+                index: idx,
+                indexing: false,
+                done: touched.len(),
+                total: touched.len(),
+                generation,
+            });
+        });
+    }
+
+    /// `M-.`: find the definition of the symbol under point.
+    /// Extracts identifiers from the current line and looks them up in the
+    /// cross-file index. If exactly one definition is found, jumps directly;
+    /// if multiple, opens the Picker. Falls back to the enclosing symbol
+    /// when no identifier on the line is a known definition.
+    pub fn xref_find_definitions(&mut self) {
+        // Get the current file's project-relative path.
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(path) = buf.path.as_ref() else {
+            self.minibuffer_message("no file (scratch buffer)");
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        let Ok(rel) = path.strip_prefix(&project.root) else {
+            self.minibuffer_message("buffer not in project");
+            return;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+
+        let line = self.scroll_top();
+
+        // Step 1: try to find an identifier on the current line that is a
+        // known definition in the index (the "symbol under point").
+        let line_text = buf.line_text(line).unwrap_or_default();
+        let identifiers: Vec<&str> = line_text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|w| !w.is_empty() && w.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+
+        let mut all_defs: Vec<crate::nav::index::Location> = Vec::new();
+        for id in &identifiers {
+            let defs = self.index.definitions_of(id);
+            // Exclude definitions in the current file: the user is at a call
+            // site and wants to jump to the *callee* (cross-file), not the
+            // enclosing definition (same file). Same-file jumps use imenu.
+            let cross_file: Vec<_> = defs
+                .into_iter()
+                .filter(|d| d.file != rel)
+                .collect();
+            all_defs.extend(cross_file);
+        }
+
+        // Deduplicate by (file, line) so the same definition isn't listed
+        // twice if two identifiers on the line resolve to it.
+        all_defs.sort_by(|a, b| (a.file.as_str(), a.symbol.line, &a.symbol.name).cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name)));
+        all_defs.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+
+        let lookup_name: String;
+        let defs: Vec<crate::nav::index::Location> = if !all_defs.is_empty() {
+            // Use the first identifier that has a cross-file definition.
+            lookup_name = all_defs[0].symbol.name.clone();
+            all_defs
+        } else {
+            // Fall back to the enclosing symbol (by line).
+            let outline = self.index.outline(&rel);
+            let Some(sym) = crate::nav::index::enclosing_symbol(outline, line) else {
+                self.minibuffer_message("no symbol under point");
+                return;
+            };
+            lookup_name = sym.name.clone();
+            self.index.definitions_of(&lookup_name)
+        };
+
+        if defs.is_empty() {
+            self.minibuffer_message(&format!("no definition for `{lookup_name}`"));
+            return;
+        }
+
+        if defs.len() == 1 {
+            // Unique: capture origin, navigate, record jump.
+            let origin = self.current_jump_entry();
+            let def = &defs[0];
+            self.open_path(&def.file);
+            // Scroll to the definition's line.
+            let new_key = self.buffers.current().map(String::from).unwrap_or_default();
+            self.set_scroll_top(def.symbol.line);
+            let _ = new_key;
+            self.ensure_highlight();
+            self.record_jump(&origin, "M-.");
+            self.minibuffer_message(&format!("jumped to {}:{}", def.file, def.symbol.line + 1));
+        } else {
+            // Ambiguous: open the Xref picker. The jump entry is recorded
+            // when the user selects a candidate (run_selected for Xref).
+            self.xref_lookup_name = lookup_name;
+            let candidates: Vec<PickerCandidate> = defs
+                .iter()
+                .map(|d| PickerCandidate {
+                    name: format!("{}:{}", d.file, d.symbol.line + 1),
+                    display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
+                    docs: String::new(),
+                    category: "xref".to_string(),
+                })
+                .collect();
+            self.open_picker(PickerKind::Xref, "Definition: ", candidates);
+        }
+    }
+
+    /// `M-i`: imenu — open a picker over the current file's outline.
+    pub fn open_imenu(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(path) = buf.path.as_ref() else {
+            self.minibuffer_message("no file (scratch buffer)");
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        let Ok(rel) = path.strip_prefix(&project.root) else {
+            self.minibuffer_message("buffer not in project");
+            return;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        let outline = self.index.outline(&rel).to_vec();
+        if outline.is_empty() {
+            self.minibuffer_message("no symbols in current file");
+            return;
+        }
+        let candidates: Vec<PickerCandidate> = outline
+            .iter()
+            .map(|s| PickerCandidate {
+                name: format!("{}:{}", s.name, s.line + 1),
+                display: format!("{}  [{}]", s.name, s.kind.tag()),
+                docs: String::new(),
+                category: "imenu".to_string(),
+            })
+            .collect();
+        self.open_picker(PickerKind::Imenu, "Imenu: ", candidates);
+    }
+
+    /// `C-c p s`: project-wide symbol picker (fuzzy over all index symbols).
+    pub fn open_symbol_picker(&mut self) {
+        if self.project.is_none() {
+            self.minibuffer_message("no project");
+            return;
+        }
+        if self.index.total() == 0 {
+            self.minibuffer_message("no symbols indexed yet");
+            return;
+        }
+        let candidates: Vec<PickerCandidate> = self
+            .index
+            .all_locations()
+            .into_iter()
+            .map(|loc| PickerCandidate {
+                name: format!("{}:{}", loc.file, loc.symbol.line + 1),
+                display: format!("{}  [{}]  {}", loc.symbol.name, loc.symbol.kind.tag(), loc.file),
+                docs: String::new(),
+                category: "symbol".to_string(),
+            })
+            .collect();
+        self.open_picker(PickerKind::Symbols, "Symbol: ", candidates);
+    }
+
+    /// Install an index event into the store (called by the UI's IndexBus
+    /// drain). Discards events from a stale generation (previous project's
+    /// job). Replaces the index snapshot and updates the indexing state.
+    /// When the flight clears, any accumulated pending paths are coalesced
+    /// into one incremental job so no watcher event is dropped.
+    pub fn apply_index_event(&mut self, event: &IndexEvent) {
+        // Discard events from a stale generation (previous project).
+        if event.generation != self.index_generation {
+            return;
+        }
+        self.index = event.index.clone();
+        if event.indexing {
+            self.indexing = Some((event.done, event.total, event.generation));
+        } else {
+            self.indexing = None;
+            // Coalesce pending paths into one incremental job now that the
+            // flight has cleared (Finding 1: no dropped events during flight).
+            if !self.pending_index_changes.is_empty() {
+                let pending: Vec<PathBuf> = self.pending_index_changes.drain().collect();
+                self.refresh_index(&pending);
+            }
+        }
+    }
+
+    /// The enclosing symbol name for the current buffer's cursor line,
+    /// for the status-line which-function display.
+    pub fn which_function(&self) -> String {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return String::new();
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return String::new();
+        };
+        let Some(path) = buf.path.as_ref() else {
+            return String::new();
+        };
+        let Some(project) = self.project.as_ref() else {
+            return String::new();
+        };
+        let Ok(rel) = path.strip_prefix(&project.root) else {
+            return String::new();
+        };
+        let rel = rel.to_string_lossy();
+        let line = self.scroll_top();
+        let outline = self.index.outline(&rel);
+        crate::nav::index::enclosing_symbol(outline, line)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// The indexing indicator for the activity display (empty when idle).
+    pub fn indexing_display(&self) -> String {
+        match &self.indexing {
+            Some((done, total, _)) if *total > 0 => format!("indexing {}/{total}", done),
+            _ => String::new(),
+        }
+    }
+
+    /// Set the index directly (for tests; bypasses the background thread).
+    #[allow(dead_code)]
+    pub fn set_index(&mut self, index: SymbolIndex) {
+        self.index = index;
+    }
+
+    /// The current symbol index (for tests and the UI).
+    #[allow(dead_code)]
+    pub fn index(&self) -> &SymbolIndex {
+        &self.index
     }
 
     // ── keys & dispatch (unchanged skeleton from issue 01) ──────────────
@@ -2809,7 +3525,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 42);
+        assert_eq!(store.picker_count().0, 47);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -2827,13 +3543,13 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 41);
+        assert_eq!(store.picker_selected(), 46);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 40);
+        assert_eq!(store.picker_selected(), 45);
 
-        // RET runs the candidate at the selected index (40: reload-buffer).
+        // RET runs the candidate at the selected index (45: jump-forward).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -2865,7 +3581,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 42);
+        assert_eq!(store.picker_count().0, 47);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -3341,6 +4057,372 @@ mod tests {
             "anchor line must vanish: n_after={n_after}, top_before={top_before}"
         );
         assert_eq!(s.scroll_top(), n_after - 1, "clamped to last line");
+    }
+
+    // ── issue 05: jump stack tests (finding #3) ────────────────────────
+
+    fn jump_entry(buffer_key: &str, line: usize) -> JumpEntry {
+        JumpEntry {
+            buffer_key: buffer_key.to_string(),
+            line,
+            col: 0,
+            label: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn jump_stack_back_forward_round_trip() {
+        let mut stack = JumpStack::default();
+        let p0 = jump_entry("a.rs", 0);
+        let d1 = jump_entry("b.rs", 10);
+        let d2 = jump_entry("c.rs", 20);
+
+        // First jump: P0 → D1.
+        stack.record_jump(&p0, &d1);
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack.back().unwrap().line, 0, "back: P0");
+        assert_eq!(stack.forward().unwrap().line, 10, "forward: D1");
+
+        // Second jump: D1 → D2 (from D1, which is the current position).
+        // We need to simulate being at D1: pos is now 1 (after forward).
+        // record_jump truncates to pos+1 = 2, so it keeps [P0, D1] and adds D2.
+        stack.record_jump(&d1, &d2);
+        assert_eq!(stack.len(), 3);
+
+        // Back twice: D1, then P0.
+        assert_eq!(stack.back().unwrap().line, 10, "back: D1");
+        assert_eq!(stack.back().unwrap().line, 0, "back: P0");
+
+        // Forward twice: D1, then D2.
+        assert_eq!(stack.forward().unwrap().line, 10, "forward: D1");
+        assert_eq!(stack.forward().unwrap().line, 20, "forward: D2");
+
+        // At the end: forward is None.
+        assert!(stack.forward().is_none());
+    }
+
+    #[test]
+    fn jump_stack_back_at_start_returns_none() {
+        let mut stack = JumpStack::default();
+        let p0 = jump_entry("a.rs", 0);
+        let d1 = jump_entry("b.rs", 10);
+        stack.record_jump(&p0, &d1);
+        // Go back to the start.
+        stack.back();
+        assert!(stack.back().is_none(), "no further back");
+    }
+
+    #[test]
+    fn jump_stack_new_jump_truncates_forward_history() {
+        let mut stack = JumpStack::default();
+        let p0 = jump_entry("a.rs", 0);
+        let d1 = jump_entry("b.rs", 10);
+        let d2 = jump_entry("c.rs", 20);
+        let d3 = jump_entry("d.rs", 30);
+
+        // P0 → D1 → D2.
+        stack.record_jump(&p0, &d1);
+        // Now at D1 (pos=1). Jump D1 → D2.
+        stack.record_jump(&d1, &d2);
+        assert_eq!(stack.len(), 3);
+
+        // Go back to D1 (pos=1).
+        stack.back();
+        // New jump from D1: D1 → D3. Truncates D2 from forward history.
+        stack.record_jump(&d1, &d3);
+        assert_eq!(stack.len(), 3, "D2 was truncated: [P0, D1, D3]");
+
+        // Back: D1, then P0.
+        assert_eq!(stack.back().unwrap().line, 10);
+        assert_eq!(stack.back().unwrap().line, 0);
+        // Forward: D1, then D3 (not D2).
+        assert_eq!(stack.forward().unwrap().line, 10);
+        assert_eq!(stack.forward().unwrap().line, 30);
+    }
+
+    // ── issue 05: xref tests (finding #2) ─────────────────────────────
+
+    fn store_with_index(files: &[(&str, &str)]) -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        for (rel, content) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        // Build the index synchronously (no tokio runtime in unit tests).
+        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        let root = dir.path().to_path_buf();
+        let index = build_index(&root, &files_list.files, None);
+        s.set_index(index);
+        (s, dir)
+    }
+
+    #[test]
+    fn xref_cross_file_definition_jumps_directly() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "mod lib {\n    pub fn target() {}\n}\nfn main() { lib::target(); }\n"),
+            ("src/lib.rs", "pub fn target() {}\npub fn other() {}\n"),
+        ]);
+        // Open main.rs and scroll to the call site line (line 3).
+        s.open_path("src/main.rs");
+        s.set_scroll_top(3);
+        // `target` is defined in main.rs (same file, excluded) and lib.rs
+        // (cross-file). Only the cross-file definition is considered →
+        // unique → jump directly to src/lib.rs.
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique cross-file: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.scroll_top(), 0, "target is at line 0 in lib.rs");
+    }
+
+    #[test]
+    fn xref_ambiguous_cross_file_opens_picker() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { target(); }\n"),
+            ("src/a.rs", "pub fn target() {}\n"),
+            ("src/b.rs", "pub fn target() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_scroll_top(0);
+        // `target` is defined in a.rs and b.rs (both cross-file) → ambiguous.
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "ambiguous: picker should be open");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(s.picker_filtered().len(), 2, "two candidates");
+    }
+
+    #[test]
+    fn xref_single_definition_jumps_cross_file() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { other(); }\n"),
+            ("src/lib.rs", "pub fn other() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_scroll_top(0);
+        // `other` is only defined in lib.rs: unique → jump directly.
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn xref_no_symbol_under_point_falls_back_to_enclosing() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() {\n    let x = 1;\n}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 1: "    let x = 1;" — no known definition on this line.
+        // Fall back to enclosing symbol: `main`.
+        s.set_scroll_top(1);
+        s.xref_find_definitions();
+        // `main` is defined only in main.rs: unique → jump to main's definition (line 0).
+        assert!(!s.picker_open());
+        assert_eq!(s.scroll_top(), 0, "jumped to main's definition");
+    }
+
+    // ── issue 05: which-function test (finding: enclosing-symbol) ──────
+
+    #[test]
+    fn which_function_enclosing_symbol_nested() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "mod outer {\n    fn f() {\n        g()\n    }\n}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 2 ("        g()"): inside fn f, inside mod outer.
+        // The innermost enclosing symbol is `f`.
+        s.set_scroll_top(2);
+        assert_eq!(s.which_function(), "f");
+        // Line 0 ("mod outer {"): inside mod outer, outside fn f.
+        s.set_scroll_top(0);
+        assert_eq!(s.which_function(), "outer");
+        // Line 99: outside everything.
+        s.set_scroll_top(99);
+        assert_eq!(s.which_function(), "");
+    }
+
+    // ── issue 05: apply_index_event test ──────────────────────────────
+
+    #[test]
+    fn apply_index_event_updates_index_and_clears_indexing() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/a.rs", "fn a() {}\n"),
+        ]);
+        // Simulate an indexing event.
+        let mut new_index = SymbolIndex::new();
+        new_index.set_file(
+            "src/b.rs",
+            vec![crate::syntax::queries::Symbol {
+                name: "b".into(),
+                kind: crate::syntax::queries::SymbolKind::Function,
+                line: 0,
+                start_byte: 3,
+                end_byte: 4,
+                end_line: 0,
+            }],
+        );
+        let event = IndexEvent {
+            index: new_index,
+            indexing: false,
+            done: 1,
+            total: 1,
+            generation: 0,
+        };
+        s.indexing = Some((0, 1, 0)); // simulate in-flight (gen=0)
+        s.apply_index_event(&event);
+        assert!(s.indexing.is_none(), "indexing cleared after event");
+        assert_eq!(s.index().total(), 1);
+        assert!(s.index().has("src/b.rs"));
+    }
+
+    // ── issue 05: Finding 1 — pending changes coalesced on flight clear ──
+
+    #[tokio::test]
+    async fn refresh_index_coalesces_pending_changes_during_flight() {
+        // Set up a project with P1 and P2.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(root.join("src/p1.rs"), "fn p1() {}\n").unwrap();
+        std::fs::write(root.join("src/p2.rs"), "fn p2() {}\n").unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(&root, base.path().to_path_buf());
+        s.project = Some(Project::new(root.clone()));
+
+        // Build the initial index synchronously.
+        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let index = build_index(&root, &files_list.files, None);
+        s.set_index(index);
+
+        // Start an incremental refresh for P1.
+        let p1 = root.join("src/p1.rs");
+        s.refresh_index(std::slice::from_ref(&p1));
+        // The job is now in flight (gen=0, the default).
+        assert!(s.indexing.is_some(), "job is in flight after refresh_index(P1)");
+
+        // While the job is in flight, call refresh_index with P2.
+        let p2 = root.join("src/p2.rs");
+        s.refresh_index(std::slice::from_ref(&p2));
+        // P2 should be accumulated in the pending set (not dropped).
+        assert!(
+            s.pending_index_changes.contains(&p2),
+            "P2 accumulated in pending set during flight"
+        );
+
+        // Drive apply_index_event to completion (the in-flight job's event).
+        let event = IndexEvent {
+            index: s.index.clone(),
+            indexing: false,
+            done: 1,
+            total: 1,
+            generation: 0,
+        };
+        s.apply_index_event(&event);
+
+        // The pending set should be drained (P2 coalesced into a new job).
+        assert!(
+            s.pending_index_changes.is_empty(),
+            "pending set drained after flight clear"
+        );
+        // A new job for P2 should now be in flight (the pending changes were
+        // coalesced into one incremental job — single-flight maintained).
+        assert!(
+            s.indexing.is_some(),
+            "new job in flight for coalesced pending changes"
+        );
+    }
+
+    // ── issue 05: Finding 2 — stale-generation events discarded ──────────
+
+    #[test]
+    fn switch_project_root_discards_stale_index_events() {
+        // Create two distinct project roots.
+        let dir_a = tempfile::tempdir().unwrap();
+        let root_a = dir_a.path().to_path_buf();
+        std::fs::create_dir_all(root_a.join("src")).unwrap();
+        std::fs::write(root_a.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(root_a.join("src/a.rs"), "fn a() {}\n").unwrap();
+
+        let dir_b = tempfile::tempdir().unwrap();
+        let root_b = dir_b.path().to_path_buf();
+        std::fs::create_dir_all(root_b.join("src")).unwrap();
+        std::fs::write(root_b.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(root_b.join("src/b.rs"), "fn b() {}\n").unwrap();
+
+        // Create a store rooted at project A.
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(&root_a, base.path().to_path_buf());
+        s.project = Some(Project::new(root_a.clone()));
+
+        // Simulate A's index job in flight (gen=0).
+        s.indexing = Some((0, 1, 0));
+
+        // Switch to project B: generation is bumped, index reset.
+        s.switch_project_root(root_b.to_str().unwrap());
+        assert_eq!(s.index_generation, 1, "generation bumped on project switch");
+        assert_eq!(s.index().total(), 0, "index reset on project switch");
+
+        // Simulate A's job completing (stale event, gen=0).
+        let mut a_index = SymbolIndex::new();
+        a_index.set_file(
+            "src/a.rs",
+            vec![crate::syntax::queries::Symbol {
+                name: "a".into(),
+                kind: crate::syntax::queries::SymbolKind::Function,
+                line: 0,
+                start_byte: 3,
+                end_byte: 4,
+                end_line: 0,
+            }],
+        );
+        let stale_event = IndexEvent {
+            index: a_index,
+            indexing: false,
+            done: 1,
+            total: 1,
+            generation: 0, // stale: from project A
+        };
+        s.apply_index_event(&stale_event);
+        // The stale event must be discarded: index stays empty.
+        assert_eq!(
+            s.index().total(),
+            0,
+            "stale event from project A discarded"
+        );
+
+        // Simulate B's job completing (current event, gen=1).
+        let mut b_index = SymbolIndex::new();
+        b_index.set_file(
+            "src/b.rs",
+            vec![crate::syntax::queries::Symbol {
+                name: "b".into(),
+                kind: crate::syntax::queries::SymbolKind::Function,
+                line: 0,
+                start_byte: 3,
+                end_byte: 4,
+                end_line: 0,
+            }],
+        );
+        let b_event = IndexEvent {
+            index: b_index,
+            indexing: false,
+            done: 1,
+            total: 1,
+            generation: 1, // current: from project B
+        };
+        s.apply_index_event(&b_event);
+        // B's event must be applied: index contains B's symbols, not A's.
+        assert_eq!(s.index().total(), 1, "B's event applied");
+        assert!(s.index().has("src/b.rs"), "B's index contains B's file");
+        assert!(!s.index().has("src/a.rs"), "A's file not in B's index");
     }
 }
 

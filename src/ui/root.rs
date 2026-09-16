@@ -97,6 +97,9 @@ struct Snapshot {
     // File watching (issue 04): the current buffer's "changed on disk"
     // conflict marker.
     file_view_changed_on_disk: bool,
+    // Symbol navigation (issue 05): which-function and indexing indicator.
+    which_function: String,
+    indexing: String,
 }
 
 #[component]
@@ -143,6 +146,22 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // Symbol index drain (issue 05): subscribe to the IndexBus and install
+    // each result into the store. The concurrency contract runs at most one
+    // in-flight index job per generation; changed paths arriving during a
+    // flight are accumulated in a pending set and coalesced into one job
+    // when the flight clears. Events from a stale generation (previous
+    // project) are discarded by `apply_index_event`.
+    let idx_store = store.clone();
+    let idx_rx = idx_store.lock().unwrap().index_bus.subscribe();
+    hooks.use_future(async move {
+        let mut rx = idx_rx;
+        while let Ok(()) = rx.changed().await {
+            let event = rx.borrow_and_update().clone();
+            idx_store.lock().unwrap().apply_index_event(&event);
+        }
+    });
+
     let snap = {
         let s = store.lock().unwrap();
         let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
@@ -175,6 +194,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_total_lines: total_lines,
             file_view_viewport_lines: viewport_lines,
             file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
+            which_function: s.which_function(),
+            indexing: s.indexing_display(),
         }
     };
 
@@ -231,6 +252,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 pending: snap.pending,
                 activity: snap.activity,
                 dirty: snap.dirty,
+                which_function: snap.which_function,
+                indexing: snap.indexing,
             )
         }
     }
@@ -267,6 +290,8 @@ struct StatusLineProps {
     pub pending: String,
     pub activity: String,
     pub dirty: Option<DirtyCounts>,
+    pub which_function: String,
+    pub indexing: String,
 }
 
 #[component]
@@ -289,8 +314,14 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
         // `?` untracked.
         text.push_str(&format!("  +{} ~{} ?{}", d.staged, d.unstaged, d.untracked));
     }
+    if !props.which_function.is_empty() {
+        text.push_str(&format!("  ({})", props.which_function));
+    }
     if !props.activity.is_empty() {
         text.push_str(&format!("  *{}", props.activity));
+    }
+    if !props.indexing.is_empty() {
+        text.push_str(&format!("  *{}", props.indexing));
     }
     element! {
         View(flex_shrink: 0.0, background_color: face_bg(face)) {
@@ -378,7 +409,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 42"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 47"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

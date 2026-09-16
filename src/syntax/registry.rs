@@ -140,6 +140,24 @@ pub fn file_extension(path: &str) -> Option<&str> {
     }
 }
 
+/// Extension → language, resolved from the shared static map (no registry
+/// instance needed). Used by the symbol indexer, which maps a file path to
+/// its language without holding a `GrammarRegistry`.
+fn ext_map_static() -> &'static HashMap<&'static str, LanguageId> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<&'static str, LanguageId>> = OnceLock::new();
+    MAP.get_or_init(ext_map)
+}
+
+/// The language for a file path (extension lookup, plain fallback) as a
+/// free function (the registry's `language_for` uses the same map).
+pub fn resolve_language(path: &str) -> LanguageId {
+    file_extension(path)
+        .and_then(|ext| ext_map_static().get(ext))
+        .copied()
+        .unwrap_or(LanguageId::Plain)
+}
+
 /// The full grammar registry: one `HighlightConfiguration` per language,
 /// plus the extension→language map. Built once at startup; the
 /// `HighlightConfiguration` is `Send + Sync` and immutable after

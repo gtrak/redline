@@ -12,6 +12,7 @@
 mod app;
 mod git;
 mod model;
+mod nav;
 mod syntax;
 mod theme;
 mod ui;
@@ -99,6 +100,11 @@ async fn main() -> anyhow::Result<()> {
     // FileView / git-status subscribers consume. Stops cleanly on quit (the
     // store's Drop signals the watcher to tear down).
     store.start_watcher();
+
+    // Start the background symbol index build (issue 05). Runs on a
+    // rayon thread via spawn_blocking; the UI drain installs each result
+    // into the store. No-op in plain unit tests (no runtime).
+    store.start_indexing();
 
     // The store lives in the element context; the root component reads and
     // updates it there. Keep a handle so we can stop the watcher cleanly at
