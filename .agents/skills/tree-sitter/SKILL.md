@@ -22,7 +22,7 @@ API differs from pre-0.24 in several places (see Gotchas) — do not trust older
 | tree-sitter | 0.24.7 | runtime; ABI check at `set_language` |
 | tree-sitter-highlight | 0.24.7 | requires tree-sitter ^0.24.5 |
 | tree-sitter-language | 0.1.8 (lock) | `LanguageFn` — ABI bridge; shared by runtime + all grammars |
-| tree-sitter-rust | =0.24.0 | 0.24.1+ require tree-sitter ^0.25! |
+| tree-sitter-rust | 0.23.3 | 0.24.0 grammar ABI is 15 > runtime 0.24.7 max 14; 0.24.1+ also require tree-sitter ^0.25 |
 | tree-sitter-javascript | 0.23.1 | |
 | tree-sitter-typescript | 0.23.2 | both TS and TSX grammars |
 | tree-sitter-python | 0.23.6 | |
@@ -32,7 +32,7 @@ API differs from pre-0.24 in several places (see Gotchas) — do not trust older
 | tree-sitter-bash | 0.23.3 | |
 | tree-sitter-json | 0.24.8 | |
 | tree-sitter-yaml | =0.7.0 | 0.7.1+ require tree-sitter ^0.25.4! |
-| tree-sitter-md | =0.5.1 | 0.5.2+ require tree-sitter ^0.26! |
+| tree-sitter-md | 0.3.2 | 0.5.1 grammar ABI is 15 > runtime 0.24.7 max 14; 0.5.2+ require tree-sitter ^0.26 |
 | tree-sitter-toml-ng | 0.7.0 | maintained TOML (^0.24); original `tree-sitter-toml` stuck at ^0.20 |
 
 - All grammar pins resolve against a SINGLE tree-sitter runtime (0.24.7). Bumping a grammar to a release requiring
@@ -158,7 +158,7 @@ All verified against docs.rs. Every crate exports a `LanguageFn` constant and
 
 | Crate (pin) | Language constant(s) | Highlight query | Also exports |
 |---|---|---|---|
-| tree-sitter-rust (=0.24.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `TAGS_QUERY` |
+| tree-sitter-rust (0.23.3) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `TAGS_QUERY` |
 | tree-sitter-javascript (0.23.1) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `INJECTIONS_QUERY`, `LOCALS_QUERY`, `JSX_HIGHLIGHT_QUERY`, `TAGS_QUERY` |
 | tree-sitter-typescript (0.23.2) | `LANGUAGE_TYPESCRIPT`, `LANGUAGE_TSX` | `HIGHLIGHTS_QUERY` (TS only) | `LOCALS_QUERY`, `TAGS_QUERY`, `TYPESCRIPT_NODE_TYPES`, `TSX_NODE_TYPES` |
 | tree-sitter-python (0.23.6) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
@@ -168,7 +168,7 @@ All verified against docs.rs. Every crate exports a `LanguageFn` constant and
 | tree-sitter-bash (0.23.3) | `LANGUAGE` | `HIGHLIGHT_QUERY` | — (no TAGS_QUERY) |
 | tree-sitter-json (0.24.8) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
 | tree-sitter-yaml (=0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
-| tree-sitter-md (=0.5.1) | `LANGUAGE` (block) + `INLINE_LANGUAGE` | `HIGHLIGHT_QUERY_BLOCK` / `HIGHLIGHT_QUERY_INLINE` | `INJECTION_QUERY_BLOCK`, `INJECTION_QUERY_INLINE`, `NODE_TYPES_BLOCK`, `NODE_TYPES_INLINE`, `MarkdownParser`, `MarkdownTree`, `MarkdownCursor` |
+| tree-sitter-md (0.3.2) | `LANGUAGE` (block) + `INLINE_LANGUAGE` | `HIGHLIGHT_QUERY_BLOCK` / `HIGHLIGHT_QUERY_INLINE` | `INJECTION_QUERY_BLOCK`, `INJECTION_QUERY_INLINE`, `NODE_TYPES_BLOCK`, `NODE_TYPES_INLINE`, `MarkdownParser`, `MarkdownTree`, `MarkdownCursor` |
 | tree-sitter-toml-ng (0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
 
 - No crate exports a `language()` fn in these versions — the constant is the API (the `language()` calls in some crate doc examples are stale).
