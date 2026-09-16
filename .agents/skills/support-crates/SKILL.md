@@ -41,8 +41,10 @@ API facts verified against docs.rs for the pinned versions.
   Array, Table; `value.as_str()` etc.
 - vs 0.8 (checked against 0.8.23 docs): 0.8's `Table` lacked `Serialize`
   and `Deserialize` impls (1.x has both); 0.8 has no `from_slice`; 1.x
-  makes serde an optional (default-on) feature and `Datetime` is toml's
-  own `toml::value::Datetime` (0.8 re-exported the `toml_datetime` type).
+  makes serde an optional (default-on) feature.
+- `Datetime` is NOT toml's own type: 1.x still re-exports the
+  `toml_datetime` crate's type as `toml::value::Datetime`, now with
+  public `Option`-typed `date`/`time`/`offset` fields.
 
 ### anyhow 1.0.104
 
