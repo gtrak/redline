@@ -726,6 +726,12 @@ Feature flags:
 
 3. **Async runtime required:** `render_loop()` and `fullscreen()` return futures that must be awaited. Use `smol::block_on`, `tokio::main`, etc.
 
+4. **Fullscreen exits on Ctrl+C by default.** The fullscreen render loop
+   intercepts Ctrl+C and terminates the app UNLESS `.ignore_ctrl_c()` is
+   called on the future (`fullscreen()` and `render_loop()` share
+   `RenderLoopFuture`). Any app that binds C-c-prefixed key sequences MUST
+   opt out, or the leading C-c kills the app before event handlers run.
+   Verified against 0.9.1 `element.rs` (`RenderLoopFutureState.ignore_ctrl_c`).
 4. **Terminal raw mode:** For interactive apps, call `hooks.use_terminal_events(|_| {})` even if you don't need events, so Ctrl+C is captured and terminal is restored properly on exit.
 
 5. **Props references:** Props structs can contain borrowed data (`&'a str`, `&'a Vec<T>`) to avoid cloning. The `Props` derive checks covariance.
