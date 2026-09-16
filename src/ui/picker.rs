@@ -1,8 +1,11 @@
 //! Picker (helm-style) component: a prompt line, a nucleo-filtered
-//! candidate list, and a preview stub pane. The first consumer is the
-//! `M-x` command palette whose candidates come from the command
-//! registry (name + docs). The store owns the picker state (query,
-//! filtered list, selection); this component only renders it.
+//! candidate list, and a live preview pane (helm follow-mode, always
+//! on in redline v1). Consumers: the `M-x` command palette, the file
+//! pickers (find-file / recent-files — preview is the file's first
+//! page as plain text), the buffer pickers (switch/kill — preview is
+//! the buffer's head), and the project switcher (preview is the root
+//! path). The store owns the picker state (query, filtered list,
+//! selection, preview); this component only renders it.
 //!
 //! The list is drawn with a canvas component: element! `Text` children
 //! are flex-positioned, and we need exact row/column placement for the
@@ -21,16 +24,18 @@ struct PickerCanvasProps {
     pub selected: usize,
     pub candidates: Vec<PickerCandidate>,
     pub total: usize,
+    pub preview: String,
 }
 
 /// Canvas-backed picker surface: prompt row, candidate list rows,
-/// preview column, and a count row.
+/// preview column (selected candidate), and a count row.
 struct PickerCanvas {
     prompt: String,
     query: String,
     selected: usize,
     candidates: Vec<PickerCandidate>,
     total: usize,
+    preview: String,
 }
 
 impl PickerCanvas {
@@ -41,6 +46,7 @@ impl PickerCanvas {
             selected: props.selected,
             candidates: props.candidates.clone(),
             total: props.total,
+            preview: props.preview.clone(),
         }
     }
 }
@@ -62,7 +68,7 @@ impl Component for PickerCanvas {
         updater.set_layout_style(iocraft::taffy::style::Style {
             size: iocraft::taffy::geometry::Size {
                 width: iocraft::taffy::style::Dimension::Percent(1.0),
-                height: iocraft::taffy::style::Dimension::Length(9.0),
+                height: iocraft::taffy::style::Dimension::Length(12.0),
             },
             ..Default::default()
         });
@@ -78,8 +84,8 @@ impl Component for PickerCanvas {
         // Row 0: prompt + query.
         let prompt = format!("{}{}", self.prompt, self.query);
         canvas.set_text(0, 0, &truncate(&prompt, w), text_style(t.prompt.foreground, true));
-        // Rows 1..h-2: candidate list (selection highlighted), with a
-        // preview column on the right for the selected candidate.
+        // Rows 1..h-2: candidate list (left) + preview (right) for the
+        // selected candidate; last row: count.
         let list_h = h.saturating_sub(2);
         if list_h > 0 {
             let win = list_h.min(self.candidates.len());
@@ -95,25 +101,25 @@ impl Component for PickerCanvas {
                     } else {
                         t.list_item
                     };
-                    let label = truncate(&candidate.name, split as usize);
+                    let label = truncate(&candidate.display, split as usize);
                     canvas.set_text(
                         1,
                         1 + row as isize,
                         &label,
                         text_style(face.foreground, selected),
                     );
-                    if selected && preview_w > 1 {
-                        let preview = truncate(
-                            &format!("{} — {} · {}", candidate.name, candidate.docs, candidate.category),
-                            preview_w as usize,
-                        );
-                        canvas.set_text(
-                            preview_x,
-                            1 + row as isize,
-                            &preview,
-                            text_style(t.preview.foreground, false),
-                        );
-                    }
+                }
+            }
+            // Preview pane: the selected candidate's preview text, one
+            // line per row (clipped to the visible rows).
+            if preview_w > 1 {
+                for (row, line) in self.preview.lines().take(list_h).enumerate() {
+                    canvas.set_text(
+                        preview_x,
+                        1 + row as isize,
+                        &truncate(line, preview_w as usize),
+                        text_style(t.preview.foreground, false),
+                    );
                 }
             }
         }
@@ -155,6 +161,7 @@ pub struct PickerProps {
     pub selected: usize,
     pub candidates: Vec<PickerCandidate>,
     pub total: usize,
+    pub preview: String,
 }
 
 /// Renders the picker overlay from the store's picker state.
@@ -172,6 +179,7 @@ pub fn Picker(props: &PickerProps, mut _hooks: Hooks) -> impl Into<AnyElement<'s
                 selected: props.selected,
                 candidates: props.candidates.clone(),
                 total: props.total,
+                preview: props.preview.clone(),
             )
         }
     }

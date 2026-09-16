@@ -5,10 +5,12 @@
 //! the terminal cleanly on every exit path including panics.
 //!
 //! Module layout: `app/` is plain Rust (store, registry, keymap,
-//! config) with zero iocraft/tokio dependencies; `ui/` holds all
+//! config) with zero iocraft/tokio dependencies; `model/` holds the
+//! headless data models (project, files, buffers); `ui/` holds all
 //! iocraft components; this file only starts/stops the render loop.
 
 mod app;
+mod model;
 mod theme;
 mod ui;
 

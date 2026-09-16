@@ -182,6 +182,11 @@ something = true
         assert_eq!(config.theme, ThemeChoice::DefaultTheme);
     }
 
+    fn test_store() -> AppStore {
+        let dir = tempfile::tempdir().unwrap();
+        AppStore::at(dir.path(), dir.path().to_path_buf())
+    }
+
     #[test]
     fn override_application_rebinds_global_keymap() {
         let config = parse(
@@ -190,7 +195,7 @@ something = true
 quit = "C-q"
 "#,
         );
-        let mut store = AppStore::new();
+        let mut store = test_store();
         store.apply_config(&config).expect("override applies");
         let seq = crate::app::keymap::parse_sequence("C-q").unwrap();
         assert_eq!(
@@ -207,7 +212,7 @@ quit = "C-q"
 quit = "C-FOO"
 "#,
         );
-        let mut store = AppStore::new();
+        let mut store = test_store();
         let err = store.apply_config(&config).unwrap_err();
         assert!(err.contains("quit"), "{err}");
     }
@@ -221,7 +226,7 @@ quit = "C-FOO"
 cancel = "C-x"
 "#,
         );
-        let mut store = AppStore::new();
+        let mut store = test_store();
         let err = store.apply_config(&config).unwrap_err();
         assert!(err.contains("C-x"), "{err}");
     }

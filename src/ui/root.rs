@@ -9,41 +9,44 @@ use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 
 use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
-use crate::app::store::{AppStore, PickerCandidate};
+use crate::app::store::{AppStore, BufferRow, PickerCandidate, ViewId};
 use crate::theme;
 use crate::ui::picker::Picker;
-use crate::ui::views::scratch::ScratchView;
+use crate::ui::views::buffer::{BufferListView, BufferView};
 use crate::ui::{face_bg, face_color, face_weight};
 
 /// iocraft key codes to app key codes (the ui layer owns this
-/// conversion; `app/` has no iocraft dependency).
-impl From<iocraft::KeyCode> for AppKeyCode {
-    fn from(k: iocraft::KeyCode) -> Self {
-        use iocraft::KeyCode as K;
-        match k {
-            K::Char(c) => AppKeyCode::Char(c),
-            K::Enter => AppKeyCode::Enter,
-            K::Backspace => AppKeyCode::Backspace,
-            K::Delete => AppKeyCode::Delete,
-            K::Home => AppKeyCode::Home,
-            K::End => AppKeyCode::End,
-            K::PageUp => AppKeyCode::PageUp,
-            K::PageDown => AppKeyCode::PageDown,
-            K::Up => AppKeyCode::Up,
-            K::Down => AppKeyCode::Down,
-            K::Left => AppKeyCode::Left,
-            K::Right => AppKeyCode::Right,
-            K::Tab => AppKeyCode::Tab,
-            K::BackTab => AppKeyCode::BackTab,
-            K::Esc => AppKeyCode::Escape,
-            _ => AppKeyCode::Space,
-        }
-    }
+/// conversion; `app/` has no iocraft dependency). Codes with no app
+/// equivalent (`F(*)`, `Insert`, `Null`, `CapsLock`, `ScrollLock`,
+/// `NumLock`, `PrintScreen`, `Pause`, `Menu`, `KeypadBegin`,
+/// `Media(*)`, `Modifier(*)`) map to `None` so the event is dropped
+/// instead of fabricating a keypress.
+fn code_to_app_code(code: iocraft::KeyCode) -> Option<AppKeyCode> {
+    use iocraft::KeyCode as K;
+    Some(match code {
+        K::Char(c) => AppKeyCode::Char(c),
+        K::Enter => AppKeyCode::Enter,
+        K::Backspace => AppKeyCode::Backspace,
+        K::Delete => AppKeyCode::Delete,
+        K::Home => AppKeyCode::Home,
+        K::End => AppKeyCode::End,
+        K::PageUp => AppKeyCode::PageUp,
+        K::PageDown => AppKeyCode::PageDown,
+        K::Up => AppKeyCode::Up,
+        K::Down => AppKeyCode::Down,
+        K::Left => AppKeyCode::Left,
+        K::Right => AppKeyCode::Right,
+        K::Tab => AppKeyCode::Tab,
+        K::BackTab => AppKeyCode::BackTab,
+        K::Esc => AppKeyCode::Escape,
+        _ => return None,
+    })
 }
 
-/// Convert an iocraft key event (crossterm-shaped) to an app key.
+/// Convert an iocraft key event (crossterm-shaped) to an app key;
+/// `None` drops the event (unmapped code).
 pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
-    let code = AppKeyCode::from(key.code);
+    let code = code_to_app_code(key.code)?;
     let mut app_key = match code {
         AppKeyCode::Enter => AppKey::enter(),
         AppKeyCode::Up => AppKey::up(),
@@ -62,17 +65,21 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
 struct Snapshot {
     quit: bool,
     project: String,
-    view: String,
+    view: ViewId,
+    view_name: String,
     pending: String,
     activity: String,
     message: String,
     text: String,
+    buffer_rows: Vec<BufferRow>,
+    buffer_list_selected: usize,
     picker: bool,
     prompt: String,
     query: String,
     selected: usize,
     candidates: Vec<PickerCandidate>,
     total: usize,
+    preview: String,
 }
 
 #[component]
@@ -98,16 +105,18 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let snap = {
         let s = store.lock().unwrap();
-        let picker = s.picker_open();
         Snapshot {
             quit: s.quit,
             project: s.project_display().to_string(),
-            view: s.view_name_display(),
+            view: s.top_view(),
+            view_name: s.view_name_display(),
             pending: s.pending_display(),
             activity: s.activity_display(),
             message: s.message.clone(),
-            text: s.current_text(),
-            picker,
+            text: s.buffer_text(),
+            buffer_rows: s.buffer_rows(),
+            buffer_list_selected: s.buffer_list_selected(),
+            picker: s.picker_open(),
             prompt: s.picker_prompt().to_string(),
             query: s.picker_query().to_string(),
             selected: s.picker_selected(),
@@ -117,6 +126,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .map(|(c, _)| c.clone())
                 .collect(),
             total: s.picker_count().1,
+            preview: s.picker_preview().to_string(),
         }
     };
 
@@ -124,9 +134,23 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         system.exit();
     }
 
+    let main_view: Option<AnyElement<'static>> = match snap.view {
+        ViewId::Buffer => Some(element! {
+            BufferView(title: snap.view_name.clone(), text: snap.text.clone())
+        }
+        .into()),
+        ViewId::BufferList => Some(element! {
+            BufferListView(
+                rows: snap.buffer_rows.clone(),
+                selected: snap.buffer_list_selected,
+            )
+        }
+        .into()),
+    };
+
     element! {
         View(flex_direction: FlexDirection::Column) {
-            ScratchView(text: snap.text)
+            #(main_view)
             #(if snap.picker {
                 Some(element! {
                     Picker(
@@ -135,6 +159,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         selected: snap.selected,
                         candidates: snap.candidates,
                         total: snap.total,
+                        preview: snap.preview,
                     )
                 })
             } else {
@@ -143,7 +168,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Minibuffer(message: snap.message)
             StatusLine(
                 project: snap.project,
-                view: snap.view,
+                view: snap.view_name,
                 pending: snap.pending,
                 activity: snap.activity,
             )
@@ -218,6 +243,14 @@ mod tests {
         KeyEvent::new(KeyEventKind::Press, code)
     }
 
+    /// A store rooted in a temp project (never touches the real cache
+    /// dir; the persistence base is a throwaway sibling so the walk
+    /// never sees the persistence files).
+    fn store(dir: &std::path::Path) -> AppStore {
+        let base = tempfile::tempdir().unwrap();
+        AppStore::at(dir, base.path().to_path_buf())
+    }
+
     /// Render one frame from a store (static render, no event loop).
     ///
     /// The issue-01 constraint forbids adding dependencies, and
@@ -236,37 +269,89 @@ mod tests {
         app.to_string()
     }
 
-    /// The initial frame shows the scratch view, the status line (project
-    /// placeholder + view name), and the ready-state minibuffer.
+    fn project_with_files(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# readme\n").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+    }
+
+    /// The initial frame shows the buffer view (scratch), the status line
+    /// (project name + view name), and the ready-state minibuffer.
     #[test]
-    fn root_initial_frame_renders_scratch() {
-        let store = AppStore::new();
+    fn root_initial_frame_renders_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
         let s = render_frame(store);
         assert!(s.contains("*scratch*"), "{s:?}");
-        assert!(s.contains("no project"), "{s:?}");
         assert!(s.contains("ready"), "{s:?}");
+    }
+
+    /// The status line shows the detected project name (not the old
+    /// "no project" placeholder) when rooted in a project.
+    #[test]
+    fn status_line_shows_project_name() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        let s = render_frame(store(dir.path()));
+        assert!(s.contains(&format!("* {name} *")), "project name missing:\n{s}");
     }
 
     /// M-x palette: the prompt + typed query, the surviving nucleo
     /// candidate, and the picker's count line are all in the frame.
     #[test]
     fn root_palette_renders_prompt_query_and_count() {
-        let mut store = AppStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
         store.key_event(crate::app::keymap::Key::alt_char('x'));
         store.key_event(crate::app::keymap::Key::char('q'));
         store.key_event(crate::app::keymap::Key::char('u'));
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("1 of 10"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 21"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
+    }
+
+    /// Find-file picker: prompt, candidate, count, and the preview pane
+    /// showing the selected file's first page (plain text).
+    #[test]
+    fn root_find_file_renders_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_find_file();
+        // Select src/main.rs so its contents preview.
+        store.key_event(crate::app::keymap::Key::char('m'));
+        let s = render_frame(store);
+        assert!(s.contains("Find file: m"), "prompt+query missing:\n{s}");
+        assert!(s.contains("src/main.rs"), "candidate missing:\n{s}");
+        assert!(s.contains("fn main()"), "preview missing:\n{s}");
+    }
+
+    /// The buffer-list view renders open buffers with the current one
+    /// marked, and the status line names the view.
+    #[test]
+    fn root_buffer_list_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_path("src/main.rs");
+        store.push_view(ViewId::BufferList);
+        let s = render_frame(store);
+        assert!(s.contains("*list-buffers*"), "view title missing:\n{s}");
+        assert!(s.contains("*src/main.rs"), "current buffer row missing:\n{s}");
+        assert!(s.contains(" *scratch*"), "scratch row missing:\n{s}");
+        assert!(s.contains("*  *list-buffers*"), "status line view name missing:\n{s}");
     }
 
     /// Unknown keys echo in the minibuffer.
     #[test]
     fn root_unknown_key_echoes_in_minibuffer() {
-        let mut store = AppStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
         store.key_event(crate::app::keymap::Key::char('z'));
         let s = render_frame(store);
         assert!(s.contains("unbound key: z"), "{s}");
@@ -287,5 +372,31 @@ mod tests {
 
         let app_key = to_app_key(&press(KeyCode::Down)).unwrap();
         assert_eq!(app_key, crate::app::keymap::Key::down());
+    }
+
+    /// Carry-over #1: unmapped iocraft key codes are dropped (None)
+    /// instead of fabricating a `Space` keypress.
+    #[test]
+    fn unmapped_key_codes_are_dropped() {
+        for code in [
+            KeyCode::Insert,
+            KeyCode::F(1),
+            KeyCode::F(20),
+            KeyCode::Null,
+            KeyCode::CapsLock,
+            KeyCode::ScrollLock,
+            KeyCode::NumLock,
+            KeyCode::PrintScreen,
+            KeyCode::Pause,
+            KeyCode::Menu,
+            KeyCode::KeypadBegin,
+            KeyCode::Media(iocraft::MediaKeyCode::Play),
+            KeyCode::Modifier(iocraft::ModifierKeyCode::LeftShift),
+        ] {
+            assert!(to_app_key(&press(code)).is_none(), "{code:?} must drop");
+        }
+        // Mapped codes still convert.
+        assert!(to_app_key(&press(KeyCode::Esc)).is_some());
+        assert!(to_app_key(&press(KeyCode::Char('a'))).is_some());
     }
 }

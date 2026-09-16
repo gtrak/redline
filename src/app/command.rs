@@ -149,12 +149,9 @@ impl CommandRegistry {
         ));
         reg.register(Command::new(
             "open-scratch",
-            "Open the scratch view (demo: view push)",
-            "view",
-            |store, _arg| {
-                store.push_view(ViewId::Scratch);
-                store.minibuffer_message("Opened *scratch*");
-            },
+            "Switch to the *scratch* buffer",
+            "buffers",
+            |store, _arg| store.open_scratch(),
         ));
         reg.register(Command::new(
             "message-echo",
@@ -176,15 +173,85 @@ impl CommandRegistry {
         ));
         reg.register(Command::new(
             "insert-demo-text",
-            "Insert demo text into the scratch view",
-            "scratch",
+            "Insert demo text into the current buffer",
+            "demo",
             |store, _arg| {
                 if store.insert_text("demo text\n") {
                     store.minibuffer_message("inserted demo text");
                 } else {
-                    store.minibuffer_message("insert-demo-text: no scratch view on top");
+                    store.minibuffer_message("insert-demo-text: no buffer is current");
                 }
             },
+        ));
+        // ── issue 02: browse layer ────────────────────────────────────────
+        reg.register(Command::new(
+            "find-file",
+            "Find a file in the project (C-x C-f)",
+            "files",
+            |store, _arg| store.open_find_file(),
+        ));
+        reg.register(Command::new(
+            "switch-buffer",
+            "Switch to an open buffer (C-x b)",
+            "buffers",
+            |store, _arg| store.open_switch_buffer(),
+        ));
+        reg.register(Command::new(
+            "list-buffers",
+            "List open buffers (C-x C-b)",
+            "buffers",
+            |store, _arg| {
+                store.push_view(ViewId::BufferList);
+                store.minibuffer_message("buffer list");
+            },
+        ));
+        reg.register(Command::new(
+            "kill-buffer",
+            "Kill a buffer (C-x k)",
+            "buffers",
+            |store, _arg| store.open_kill_buffer(),
+        ));
+        reg.register(Command::new(
+            "switch-project",
+            "Switch to another known project (C-c p p)",
+            "project",
+            |store, _arg| store.open_switch_project(),
+        ));
+        reg.register(Command::new(
+            "recent-files",
+            "Open a recently visited file (C-c p e)",
+            "files",
+            |store, _arg| store.open_recent_files(),
+        ));
+        reg.register(Command::new(
+            "re-walk",
+            "Re-walk the project's file list (C-c p i)",
+            "files",
+            |store, _arg| store.re_walk(),
+        ));
+        reg.register(Command::new(
+            "close-view",
+            "Close the top view (q in list views)",
+            "navigation",
+            |store, _arg| store.close_view(),
+        ));
+        reg.register(Command::new(
+            "open-buffer-list-selected",
+            "Open the buffer-list selection and close the list (RET)",
+            "buffers",
+            |store, _arg| store.open_buffer_list_selected(),
+        ));
+        reg.register(Command::new(
+            "buffer-list-next",
+            "Move the buffer-list selection down",
+            "buffers",
+            |store, _arg| store.buffer_list_next(),
+        ));
+        reg.register(Command::new(
+            "buffer-list-prev",
+            "Move the buffer-list selection up",
+            "buffers",
+            |store, _arg| store.buffer_list_prev(),
         ));
         reg
     }
@@ -195,14 +262,18 @@ mod tests {
     use super::*;
 
     fn new_store() -> AppStore {
-        AppStore::new()
+        // Everything the store needs is loaded/copied during `at`, so
+        // the temp base may drop with this function (later persistence
+        // writes in these tests are best-effort no-ops on a gone dir).
+        let dir = tempfile::tempdir().unwrap();
+        AppStore::at(dir.path(), dir.path().to_path_buf())
     }
 
     #[test]
-    fn registry_has_the_placeholder_commands() {
+    fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 10, "expected 10 seed commands: {names:?}");
+        assert_eq!(names.len(), 21, "expected 21 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -214,6 +285,17 @@ mod tests {
             "demo-message-1",
             "demo-message-2",
             "insert-demo-text",
+            "find-file",
+            "switch-buffer",
+            "list-buffers",
+            "kill-buffer",
+            "switch-project",
+            "recent-files",
+            "re-walk",
+            "close-view",
+            "open-buffer-list-selected",
+            "buffer-list-next",
+            "buffer-list-prev",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }
@@ -256,12 +338,12 @@ mod tests {
     #[test]
     fn view_commands_work() {
         let reg = CommandRegistry::seed();
-        let mut store = new_store();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), dir.path().to_path_buf());
         reg.dispatch_by_name(&mut store, "open-scratch", None).unwrap();
-        assert_eq!(store.view_stack.len(), 2);
-        assert_eq!(store.top_view(), ViewId::Scratch);
+        assert_eq!(store.view_name_display(), "*scratch*");
 
         reg.dispatch_by_name(&mut store, "insert-demo-text", None).unwrap();
-        assert!(store.current_text().contains("demo text"));
+        assert!(store.buffer_text().contains("demo text"));
     }
 }
