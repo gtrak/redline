@@ -47,6 +47,8 @@ impl Face {
 /// All faces the ui can ask for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Theme {
+    /// The theme's display name (config-derived; used in the cache key).
+    pub name: String,
     pub status_line: Face,
     pub status_line_active: Face,
     pub minibuffer: Face,
@@ -74,13 +76,21 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
+        Self::dark("default")
+    }
+}
+
+impl Theme {
+    /// Build the dark theme (the default palette) with the given name.
+    pub fn dark(name: &str) -> Self {
         Self {
+            name: name.to_string(),
             status_line: Face::new(Color::Grey, Color::Blue, true),
             status_line_active: Face::new(Color::White, Color::Blue, true),
             minibuffer: Face::new(Color::Grey, Color::Black, false),
             prompt: Face::new(Color::Yellow, Color::Black, true),
             list_item: Face::new(Color::White, Color::Black, false),
-            list_item_selected: Face::new(Color::Black, Color::Grey, true),
+            list_item_selected: Face::new(Color::White, Color::Blue, true),
             view: Face::new(Color::White, Color::Black, false),
             view_title: Face::new(Color::Cyan, Color::Black, true),
             preview: Face::new(Color::Grey, Color::Black, false),
@@ -92,7 +102,34 @@ impl Default for Theme {
             diff_hunk_header: Face::new(Color::Magenta, Color::Black, true),
             log_commit: Face::new(Color::White, Color::Black, false),
             blame: Face::new(Color::DarkGrey, Color::Black, false),
-            syntax_faces: default_syntax_faces(),
+            syntax_faces: dark_syntax_faces(),
+        }
+    }
+
+    /// Build the light theme (light background, dark text).
+    pub fn light(name: &str) -> Self {
+        let bg = Color::White;
+        let fg = Color::Black;
+        Self {
+            name: name.to_string(),
+            status_line: Face::new(Color::Black, Color::Grey, true),
+            status_line_active: Face::new(Color::Black, Color::Blue, true),
+            minibuffer: Face::new(Color::Black, bg, false),
+            prompt: Face::new(Color::Magenta, bg, true),
+            list_item: Face::new(fg, bg, false),
+            list_item_selected: Face::new(Color::White, Color::Blue, true),
+            view: Face::new(fg, bg, false),
+            view_title: Face::new(Color::Blue, bg, true),
+            preview: Face::new(Color::DarkGrey, bg, false),
+            section_heading: Face::new(Color::Blue, bg, true),
+            section_heading_selected: Face::new(Color::White, Color::Blue, true),
+            diff_add: Face::new(Color::Green, bg, false),
+            diff_delete: Face::new(Color::Red, bg, false),
+            diff_context: Face::new(Color::DarkGrey, bg, false),
+            diff_hunk_header: Face::new(Color::Magenta, bg, true),
+            log_commit: Face::new(fg, bg, false),
+            blame: Face::new(Color::DarkGrey, bg, false),
+            syntax_faces: light_syntax_faces(),
         }
     }
 }
@@ -110,13 +147,13 @@ impl Theme {
 
     /// The theme's display name (used in the cache key).
     pub fn name(&self) -> &str {
-        "default"
+        &self.name
     }
 }
 
 /// Default syntax faces: one `Face` per entry in `HIGHLIGHT_FACES`.
 /// A dark-theme palette tuned for terminal readability.
-fn default_syntax_faces() -> Vec<Face> {
+fn dark_syntax_faces() -> Vec<Face> {
     let bg = Color::Black;
     HIGHLIGHT_FACES
         .iter()
@@ -146,6 +183,41 @@ fn default_syntax_faces() -> Vec<Face> {
             "special" | "embedded" => Face::new(Color::Cyan, bg, true),
             "error" => Face::new(Color::Red, bg, true),
             _ => Face::new(Color::White, bg, false),
+        })
+        .collect()
+}
+
+/// Light-theme syntax faces.
+fn light_syntax_faces() -> Vec<Face> {
+    let bg = Color::White;
+    HIGHLIGHT_FACES
+        .iter()
+        .map(|name| match *name {
+            "comment" => Face::new(Color::DarkGrey, bg, false),
+            "string" | "string.quote" => Face::new(Color::Magenta, bg, false),
+            "function" | "function.builtin" => Face::new(Color::Blue, bg, false),
+            "keyword" => Face::new(Color::Magenta, bg, true),
+            "type" | "type.builtin" => Face::new(Color::Cyan, bg, false),
+            "variable" | "variable.builtin" | "variable.other" => {
+                Face::new(Color::Black, bg, false)
+            }
+            "number" | "constant" | "constant.builtin" => {
+                Face::new(Color::Magenta, bg, false)
+            }
+            "operator" => Face::new(Color::DarkGrey, bg, false),
+            "punctuation" => Face::new(Color::DarkGrey, bg, false),
+            "label" => Face::new(Color::Blue, bg, true),
+            "attribute" | "constructor" | "namespace" => Face::new(
+                Color::Magenta,
+                bg,
+                false,
+            ),
+            "property" | "property.builtin" => Face::new(Color::Black, bg, false),
+            "tag" | "tag.builtin" => Face::new(Color::Red, bg, false),
+            "regex" => Face::new(Color::Magenta, bg, false),
+            "special" | "embedded" => Face::new(Color::Blue, bg, true),
+            "error" => Face::new(Color::Red, bg, true),
+            _ => Face::new(Color::Black, bg, false),
         })
         .collect()
 }

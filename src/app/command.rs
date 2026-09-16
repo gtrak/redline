@@ -555,6 +555,31 @@ impl CommandRegistry {
             "search",
             |store, _arg| store.search_close(),
         ));
+        // ── issue 09: tree sidebar ────────────────────────────────────────
+        reg.register(Command::new(
+            "toggle-tree",
+            "Toggle the project file-tree sidebar (C-c p t)",
+            "files",
+            |store, _arg| store.toggle_tree(),
+        ));
+        reg.register(Command::new(
+            "toggle-tree-follow",
+            "Toggle tree buffer-follow: opening a file moves the tree cursor (off by default)",
+            "files",
+            |store, _arg| store.toggle_tree_follow(),
+        ));
+        reg.register(Command::new(
+            "open-notes",
+            "Open the per-project notes buffer (C-x n)",
+            "buffers",
+            |store, _arg| store.open_notes(),
+        ));
+        reg.register(Command::new(
+            "save-buffer",
+            "Save the current buffer to its file (C-x C-s)",
+            "buffers",
+            |store, _arg| store.save_buffer(),
+        ));
         reg
     }
 }
@@ -575,7 +600,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 69, "expected 69 seed commands: {names:?}");
+        assert_eq!(names.len(), 73, "expected 73 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -646,6 +671,8 @@ mod tests {
             "search-rerun",
             "search-cancel",
             "close-search-view",
+            "save-buffer",
+            "toggle-tree-follow",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }
@@ -695,5 +722,61 @@ mod tests {
 
         reg.dispatch_by_name(&mut store, "insert-demo-text", None).unwrap();
         assert!(store.buffer_text().contains("demo text"));
+    }
+
+    /// Issue 09 step 7: the README keymap table must only document commands
+    /// that exist in the registry. Parses the `| key | command |` rows from
+    /// README.md and asserts each command name is registered.
+    #[test]
+    fn readme_keymap_table_matches_registry() {
+        let readme = std::fs::read_to_string("README.md")
+            .expect("README.md must exist at the repo root");
+        let reg = CommandRegistry::seed();
+        let registry_names: std::collections::HashSet<&str> =
+            reg.list().map(|c| c.name).collect();
+        // Parse the keymap table: lines starting with `|` that have a
+        // second cell (the command name) in backticks.
+        let mut documented: Vec<&str> = Vec::new();
+        for line in readme.lines() {
+            let line = line.trim();
+            if !line.starts_with('|') {
+                continue;
+            }
+            let cells: Vec<&str> = line.split('|').collect();
+            // Only process 3-column tables (Key | Command | Description):
+            // splitting by '|' gives 5 parts. Skip 2-column tables (4 parts)
+            // like the magit-status keymap where the second cell is a
+            // description, not a command name.
+            if cells.len() < 5 {
+                continue;
+            }
+            // Only process rows where the key cell contains backticks
+            // (all keymap rows use backticks for key sequences; this
+            // skips the performance table and other non-keymap tables).
+            let key_cell = cells[1].trim();
+            let cmd_cell = cells[2].trim();
+            if !key_cell.contains('`') {
+                continue;
+            }
+            // Extract the command name: from backticks if present, otherwise
+            // the trimmed cell (the README uses plain text for command names).
+            let cmd = if let Some(start) = cmd_cell.find('`')
+                && let Some(end) = cmd_cell[start + 1..].find('`')
+            {
+                &cmd_cell[start + 1..start + 1 + end]
+            } else {
+                cmd_cell
+            };
+            if !cmd.is_empty() && !cmd.starts_with('-') {
+                documented.push(cmd);
+            }
+        }
+        assert!(!documented.is_empty(), "keymap table must have entries");
+        for cmd in &documented {
+            assert!(
+                registry_names.contains(*cmd),
+                "README documents `{cmd}` but it is not in the command registry"
+            );
+        }
     }
 }

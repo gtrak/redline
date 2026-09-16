@@ -161,6 +161,31 @@ impl GitRepo {
         Ok(RepoStatus { branch, files })
     }
 
+    /// Cheap pre-filter (PART A fix, item 3): `true` when at least one of the
+    /// (absolute) `paths` is a TRACKED file (present in the git index). Used
+    /// to skip the expensive `refresh_magit` (git status + per-file diffs)
+    /// when a watcher batch touches only untracked / ignored files, which do
+    /// not appear in the magit status's tracked-file sections. Repo-relative
+    /// resolution via `root` (the workdir). A fresh untracked file is NOT
+    /// tracked, so an all-untracked batch is skipped (re-run on the next
+    /// tracked change or a manual `g`).
+    pub fn any_tracked(&self, paths: &[std::path::PathBuf], root: &Path) -> bool {
+        let Ok(index) = self.inner.index() else {
+            return false;
+        };
+        for abs in paths {
+            if let Ok(rel) = abs.strip_prefix(root) {
+                // Skip empty relative paths (a changed path that IS the root,
+                // or a directory) — `index.get_path("")` errors with
+                // "repo path should not be empty".
+                if !rel.as_os_str().is_empty() && index.get_path(rel, 0).is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// A single file's unified diff on one side (staged or unstaged).
     /// An empty diff (no change on that side) yields an empty `FileDiff`.
     pub fn diff(&self, side: DiffSide, path: &str) -> Result<FileDiff, GitError> {
@@ -290,6 +315,19 @@ impl GitRepo {
         // Rebuild the index content with this hunk's new-side span replaced
         // by the hunk's old-side (HEAD) lines, byte-exact.
         let new_content = revert_hunk_in_content(content_str.as_bytes(), &hunk);
+        // PART A fix (item 5): a fully-staged-added file (no HEAD counterpart)
+        // has one hunk spanning its whole content; reverting it empties the
+        // index blob. Removing the index entry restores the file to untracked
+        // (matching `git reset HEAD <file>`) instead of writing an empty blob.
+        let old_exists = raw
+            .get_delta(0)
+            .map(|d| d.old_file().exists())
+            .unwrap_or(false);
+        if new_content.is_empty() && !old_exists {
+            index.remove_path(Path::new(path))?;
+            index.write()?;
+            return Ok(());
+        }
         let new_oid = self.inner.blob(&new_content)?;
 
         let mut new_entry = existing;

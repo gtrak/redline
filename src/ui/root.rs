@@ -20,6 +20,7 @@ use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
 use crate::ui::results_view::ResultsView;
 use crate::ui::rows_view::MagitRowsView;
+use crate::ui::tree::TreeSidebar;
 use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
 
@@ -111,6 +112,10 @@ struct Snapshot {
     // File watching (issue 04): the current buffer's "changed on disk"
     // conflict marker.
     file_view_changed_on_disk: bool,
+    // Tree sidebar (issue 09).
+    tree_visible: bool,
+    tree_rows: Vec<crate::app::store::TreeRow>,
+    tree_selected: usize,
     // Symbol navigation (issue 05): which-function and indexing indicator.
     which_function: String,
     indexing: String,
@@ -133,10 +138,24 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let store_handle = hooks.use_context::<Arc<Mutex<AppStore>>>();
     let store: Arc<Mutex<AppStore>> = (*store_handle).clone();
     let mut system = hooks.use_context_mut::<SystemContext>();
-    // Terminal dimensions (drives the root View's height so flexbox can
-    // distribute space to children; also re-renders on resize). In the
-    // static render path (tests) the size is 0; fall back to 24 rows.
-    let (_tw, term_h_raw) = hooks.use_terminal_size();
+    // Terminal dimensions (drives the root View's width + height so the pane
+    // fills the screen; also re-renders on resize). In the static render path
+    // (tests) the size is 0; fall back to 80x24. Both are set explicitly
+    // (PART A fix: the root View previously set only `height`, so the pane
+    // was content-sized horizontally and did not fill the terminal).
+    //
+    // The width is only set when the runtime reports a real terminal size
+    // (`tw_raw > 0`). In the static `.to_string()` render path the terminal
+    // size is 0 and iocraft renders at its own (narrower) default width, so
+    // forcing an 80-wide root there would clip/garble the layout — leave the
+    // width unset there (content-sized) so the static tests keep working.
+    let (tw_raw, term_h_raw) = hooks.use_terminal_size();
+    use iocraft::Size;
+    let term_w: Size = if tw_raw > 0 {
+        Size::Length(tw_raw as u32)
+    } else {
+        Size::Auto // static render path: content-sized (no terminal width)
+    };
     let term_h: u32 = (term_h_raw as u32).max(24);
 
     // Revision tick: bumping this State after every store mutation (event
@@ -164,6 +183,33 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             event_store.lock().unwrap().key_event(app_key);
             tick.set(tick.get() + 1);
         }
+        // Mouse support (issue 09, step 4: best-effort). Wheel scroll in
+        // all list views; click-to-position in the file view (Buffer).
+        // Limitations: no drag-select, no click in pickers/menus, no
+        // click-to-position in list views (v1).
+        if let TerminalEvent::FullscreenMouse(mouse) = &event {
+            use iocraft::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    event_store.lock().unwrap().mouse_scroll_up();
+                    tick.set(tick.get() + 1);
+                }
+                MouseEventKind::ScrollDown => {
+                    event_store.lock().unwrap().mouse_scroll_down();
+                    tick.set(tick.get() + 1);
+                }
+                MouseEventKind::Down(iocraft::MouseButton::Left) => {
+                    // Click-to-position: the file view's content area starts
+                    // at terminal row 0 (the title is part of the view's
+                    // first line). The row is 0-based from the top.
+                    // Subtract 1 for the title line offset.
+                    let row = (mouse.row as usize).saturating_sub(1);
+                    event_store.lock().unwrap().mouse_click_position(row);
+                    tick.set(tick.get() + 1);
+                }
+                _ => {}
+            }
+        }
     });
 
     // Live file watching (issue 04): subscribe to the project-change bus and
@@ -178,8 +224,18 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Latest-value-wins: `changed` is cancellation-safe, so no change is
         // lost on re-poll. Loop until the publisher (the store) is dropped.
         while let Ok(()) = rx.changed().await {
-            let change = rx.borrow_and_update().clone();
-            bus_store.lock().unwrap().apply_project_change(&change);
+            // Coalesce (PART A fix): after each wake, drain ALL
+            // immediately-available changes before bumping the tick once —
+            // one repaint per burst, not one per event (the churn flashing
+            // fix). `borrow_and_update` consumes the latest value; if another
+            // publish lands while we apply, `has_changed` catches it.
+            loop {
+                let change = rx.borrow_and_update().clone();
+                bus_store.lock().unwrap().apply_project_change(&change);
+                if !rx.has_changed().unwrap_or(false) {
+                    break;
+                }
+            }
             tick.set(tick.get() + 1);
         }
     });
@@ -191,12 +247,19 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // when the flight clears. Events from a stale generation (previous
     // project) are discarded by `apply_index_event`.
     let idx_store = store.clone();
-    let idx_rx = idx_store.lock().unwrap().index_bus.subscribe();
+    let idx_rx = idx_store.lock().unwrap().take_index_rx();
     hooks.use_future(async move {
         let mut rx = idx_rx;
         while let Ok(()) = rx.changed().await {
-            let event = rx.borrow_and_update().clone();
-            idx_store.lock().unwrap().apply_index_event(&event);
+            // Coalesce (PART A fix): drain all immediately-available index
+            // events (progress + final) before one repaint.
+            loop {
+                let event = rx.borrow_and_update().clone();
+                idx_store.lock().unwrap().apply_index_event(&event);
+                if !rx.has_changed().unwrap_or(false) {
+                    break;
+                }
+            }
             tick.set(tick.get() + 1);
         }
     });
@@ -215,6 +278,12 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         };
         while let Some(event) = rx.recv().await {
             search_store.lock().unwrap().apply_search_event(&event);
+            // Coalesce (PART A fix): a search streams many events (first hit,
+            // per-file counts, finished) in a burst — drain all queued events
+            // before bumping the tick once (one repaint per burst).
+            while let Ok(event) = rx.try_recv() {
+                search_store.lock().unwrap().apply_search_event(&event);
+            }
             tick.set(tick.get() + 1);
         }
     });
@@ -267,6 +336,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_total_lines: total_lines,
             file_view_viewport_lines: viewport_lines,
             file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
+            tree_visible: s.tree_visible(),
+            tree_rows: s.tree_rows(),
+            tree_selected: s.tree_selected(),
             which_function: s.which_function(),
             indexing: s.indexing_display(),
             search_title: s.search_title(),
@@ -345,22 +417,36 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     element! {
-        View(flex_direction: FlexDirection::Column, height: term_h) {
-            #(main_view)
-            #(if snap.picker {
-                Some(element! {
-                    Picker(
-                        prompt: snap.prompt,
-                        query: snap.query,
-                        selected: snap.selected,
-                        candidates: snap.candidates,
-                        total: snap.total,
-                        preview: snap.preview,
-                    )
+        View(flex_direction: FlexDirection::Column, width: term_w, height: term_h) {
+            View(flex_direction: FlexDirection::Row, flex_grow: 1.0f32) {
+                #(if snap.tree_visible {
+                    Some(element! {
+                        TreeSidebar(
+                            rows: snap.tree_rows.clone(),
+                            selected: snap.tree_selected,
+                        )
+                    })
+                } else {
+                    None
                 })
-            } else {
-                None
-            })
+                View(flex_direction: FlexDirection::Column, flex_grow: 1.0f32) {
+                    #(main_view)
+                    #(if snap.picker {
+                        Some(element! {
+                            Picker(
+                                prompt: snap.prompt,
+                                query: snap.query,
+                                selected: snap.selected,
+                                candidates: snap.candidates.clone(),
+                                total: snap.total,
+                                preview: snap.preview,
+                            )
+                        })
+                    } else {
+                        None
+                    })
+                }
+            }
             Minibuffer(message: snap.message)
             StatusLine(
                 project: snap.project,
@@ -530,7 +616,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 69"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 73"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

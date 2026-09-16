@@ -38,6 +38,7 @@ pub fn MagitStatusView(
                             key: i.to_string(),
                             content: &row.text,
                             color: face_color(face),
+                            invert: row.selected,
                             weight: face_weight(face),
                         )
                     }

@@ -105,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
     // Start the background symbol index build (issue 05). Runs on a
     // rayon thread via spawn_blocking; the UI drain installs each result
     // into the store. No-op in plain unit tests (no runtime).
+    // Capture the index-bus receiver BEFORE the job starts: a tokio watch
+    // send with zero receivers discards the event, which would lose the full
+    // index result and leave the status line stuck at "indexing 0/N" forever.
+    let index_rx = store.index_bus.subscribe();
+    store.set_index_rx(index_rx);
     store.start_indexing();
 
     // The store lives in the element context; the root component reads and
@@ -117,7 +122,11 @@ async fn main() -> anyhow::Result<()> {
             Root
         }
     };
-    app.fullscreen().await?;
+    // iocraft's fullscreen loop exits on Ctrl+C by default -- which would
+    // swallow every C-c-prefixed binding (C-c p ..., the commit editor's
+    // C-c C-c/C-c C-k) before the keymap ever sees the key. Opt out: C-c is
+    // ours (a mode prefix), q / C-x C-c remain the quit paths.
+    app.fullscreen().ignore_ctrl_c().await?;
     // Clean watcher shutdown: take the watcher out (brief lock) and await its
     // teardown WITHOUT holding the store lock across the await (the runtime
     // must not block on a std Mutex while a task is running).

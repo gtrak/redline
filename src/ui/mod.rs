@@ -12,6 +12,7 @@ pub mod picker;
 pub mod results_view;
 pub mod root;
 pub mod rows_view;
+pub mod tree;
 pub mod views;
 
 use iocraft::prelude::*;

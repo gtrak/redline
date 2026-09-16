@@ -181,12 +181,23 @@ impl SymbolIndex {
 /// A cheap shared progress counter for a background index job: the number of
 /// files parsed so far (`done`) of `total`. The app reads it to render a
 /// status-line progress indicator while a job is in flight.
+///
+/// When constructed with a publisher (bus + generation), each file parse also
+/// publishes a coarse progress event to the bus every `PROGRESS_STEP` files
+/// (PART A fix, item 2: an honest `indexing N/M` that advances, instead of a
+/// frozen `0/N` for the whole build). The FINAL event is still published by
+/// the caller after the build completes (unchanged generation contract).
 #[derive(Clone, Default, Debug)]
 #[allow(dead_code)] // used by the background index thread (future wiring)
 pub struct IndexProgress {
     done: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
+    bus: Option<IndexBus>,
+    generation: usize,
 }
+
+/// Publish a progress event every this many parsed files (PART A fix, item 2).
+pub const PROGRESS_STEP: usize = 25;
 
 #[allow(dead_code)] // used by tests and future background wiring
 impl IndexProgress {
@@ -194,12 +205,43 @@ impl IndexProgress {
         Self {
             done: Arc::new(AtomicUsize::new(0)),
             total: Arc::new(AtomicUsize::new(total)),
+            bus: None,
+            generation: 0,
         }
     }
 
-    /// Mark one more file parsed (called by each rayon worker).
+    /// Attach a result bus + generation so progress is published (every
+    /// `PROGRESS_STEP` files) as the build runs. The caller still publishes
+    /// the final event itself.
+    pub fn with_publisher(mut self, bus: IndexBus, generation: usize) -> Self {
+        self.bus = Some(bus);
+        self.generation = generation;
+        self
+    }
+
+    /// Mark one more file parsed (called by each rayon worker). Pure counter
+    /// bump (no bus publish) — used when no publisher is attached.
     pub fn mark_done(&self) {
         self.done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark one file parsed AND, when a publisher is attached and this file
+    /// completes a `PROGRESS_STEP` window, publish a coarse progress event.
+    /// `done % PROGRESS_STEP == 0` is hit by exactly one worker (the one that
+    /// made `done` reach that value), so no extra synchronization is needed.
+    pub fn note_file_done(&self) {
+        let done = self.done.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(bus) = &self.bus
+            && done.is_multiple_of(PROGRESS_STEP)
+        {
+            bus.send(IndexEvent {
+                index: SymbolIndex::new(), // partial; the app keeps its index on progress
+                indexing: true,
+                done,
+                total: self.total(),
+                generation: self.generation,
+            });
+        }
     }
 
     pub fn done(&self) -> usize {
@@ -242,7 +284,7 @@ pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgres
         .map(|rel| {
             let syms = extract_file(root, rel);
             if let Some(p) = progress {
-                p.mark_done();
+                p.note_file_done();
             }
             (rel.clone(), syms)
         })

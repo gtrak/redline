@@ -83,7 +83,7 @@ impl Component for PickerCanvas {
 
         // Row 0: prompt + query.
         let prompt = format!("{}{}", self.prompt, self.query);
-        canvas.set_text(0, 0, &truncate(&prompt, w), text_style(t.prompt.foreground, true));
+        canvas.set_text(0, 0, &truncate(&prompt, w), text_style(t.prompt.foreground, false, true));
         // Rows 1..h-2: candidate list (left) + preview (right) for the
         // selected candidate; last row: count.
         let list_h = h.saturating_sub(2);
@@ -106,7 +106,7 @@ impl Component for PickerCanvas {
                         1,
                         1 + row as isize,
                         &label,
-                        text_style(face.foreground, selected),
+                        text_style(face.foreground, selected, selected),
                     );
                 }
             }
@@ -118,7 +118,7 @@ impl Component for PickerCanvas {
                         preview_x,
                         1 + row as isize,
                         &truncate(line, preview_w as usize),
-                        text_style(t.preview.foreground, false),
+                        text_style(t.preview.foreground, false, false),
                     );
                 }
             }
@@ -128,14 +128,21 @@ impl Component for PickerCanvas {
         if h > 2 {
             let count = format!("{} of {}", self.candidates.len(), self.total);
             let x = (w as i32).saturating_sub(count.len() as i32 + 1) as isize;
-            canvas.set_text(x, h as isize - 1, &count, text_style(t.minibuffer.foreground, false));
+            canvas.set_text(x, h as isize - 1, &count, text_style(t.minibuffer.foreground, false, false));
         }
     }
 }
 
-fn text_style(foreground: theme::Color, bold: bool) -> CanvasTextStyle {
+/// One canvas text style. `invert` (reverse-video) is the picker's cursor
+/// highlight: it swaps the face's foreground (which becomes the bar) with
+/// the parent background (which becomes the text color), so a bright
+/// foreground face yields a bright, clearly-visible selection bar.
+fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextStyle {
     let mut style = CanvasTextStyle::default();
     style.color = Some(color(foreground));
+    if invert {
+        style.invert = true;
+    }
     if bold {
         style.weight = Weight::Bold;
     }

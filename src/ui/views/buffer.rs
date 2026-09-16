@@ -37,6 +37,7 @@ pub fn BufferListView(props: &BufferListViewProps, mut _hooks: Hooks) -> impl In
                             key: format!("{i}"),
                             content: format!("{marker}{} ({} lines)", row.name, row.lines),
                             color: face_color(face),
+                            invert: i == props.selected,
                             weight: face_weight(face),
                         )
                     }

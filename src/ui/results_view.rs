@@ -92,6 +92,7 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
                             key: i.to_string(),
                             content: row_text(row),
                             color: face_color(face),
+                            invert: selected,
                             weight: face_weight(face),
                         )
                     }

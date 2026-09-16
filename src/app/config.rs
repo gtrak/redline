@@ -17,13 +17,16 @@ pub enum ThemeChoice {
     DefaultTheme,
     /// Dark theme (stub in issue 01; both map to the same stub values).
     Dark,
+    /// Light theme (light background, dark text).
+    Light,
 }
 
 impl From<ThemeChoice> for Theme {
     fn from(c: ThemeChoice) -> Self {
-        // Issue 01: both choices resolve to the same stub theme.
         match c {
-            ThemeChoice::DefaultTheme | ThemeChoice::Dark => Theme::default(),
+            ThemeChoice::DefaultTheme => Theme::dark("default"),
+            ThemeChoice::Dark => Theme::dark("dark"),
+            ThemeChoice::Light => Theme::light("light"),
         }
     }
 }
