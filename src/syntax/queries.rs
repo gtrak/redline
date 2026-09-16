@@ -179,7 +179,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
 }
 
 /// The `Language` (grammar) for a language id.
-fn language_for(lang: LanguageId) -> Option<Language> {
+pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
     Some(match lang {
         LanguageId::Rust => Language::from(tree_sitter_rust::LANGUAGE),
         LanguageId::TypeScript => Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),

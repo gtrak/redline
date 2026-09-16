@@ -53,8 +53,9 @@ impl Component for FileViewCanvas {
         updater.set_layout_style(iocraft::taffy::style::Style {
             size: iocraft::taffy::geometry::Size {
                 width: iocraft::taffy::style::Dimension::Percent(1.0),
-                height: iocraft::taffy::style::Dimension::Percent(1.0),
+                height: iocraft::taffy::style::Dimension::Length(0.0),
             },
+            flex_grow: 1.0,
             ..Default::default()
         });
     }
@@ -220,7 +221,11 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     let t = theme::current();
     element! {
         View(flex_grow: 1.0_f32, overflow: Overflow::Hidden) {
-            View(flex_direction: FlexDirection::Column, background_color: crate::ui::face_bg(t.view)) {
+            View(
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0_f32,
+                background_color: crate::ui::face_bg(t.view),
+            ) {
                 Text(
                     content: &props.title,
                     color: crate::ui::face_color(t.view_title),

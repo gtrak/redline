@@ -309,6 +309,30 @@ impl GrammarRegistry {
     }
 }
 
+/// The highlight query string for a language (the same `&'static str`
+/// constants `build` uses for the `HighlightConfiguration`s); `None` for
+/// plain text. Used by issue 06's reference filtering to build a
+/// token-class (comment/string) byte-range query without re-pinning the
+/// grammar constants a second time.
+pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
+    Some(match lang {
+        LanguageId::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY,
+        LanguageId::TypeScript => tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        LanguageId::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
+        LanguageId::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
+        LanguageId::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
+        LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
+        LanguageId::Cpp => tree_sitter_cpp::HIGHLIGHT_QUERY,
+        LanguageId::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        LanguageId::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
+        LanguageId::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
+        LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
+        LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        LanguageId::Plain => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

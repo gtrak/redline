@@ -13,6 +13,7 @@ mod app;
 mod git;
 mod model;
 mod nav;
+mod search;
 mod syntax;
 mod theme;
 mod ui;
@@ -107,8 +108,9 @@ async fn main() -> anyhow::Result<()> {
     store.start_indexing();
 
     // The store lives in the element context; the root component reads and
-    // updates it there. Keep a handle so we can stop the watcher cleanly at
-    // shutdown (before the runtime tears down).
+    // updates it there (including the SearchBus drain, issue 06). Keep a
+    // handle so we can stop the watcher cleanly at shutdown (before the
+    // runtime tears down).
     let store_handle = std::sync::Arc::new(std::sync::Mutex::new(store));
     let mut app = element! {
         ContextProvider(value: Context::owned(std::sync::Arc::clone(&store_handle))) {

@@ -6,6 +6,7 @@ pub mod diff_view;
 pub mod file_view;
 pub mod magit_status;
 pub mod picker;
+pub mod results_view;
 pub mod root;
 pub mod views;
 

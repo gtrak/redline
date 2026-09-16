@@ -413,9 +413,68 @@ impl CommandRegistry {
         ));
         reg.register(Command::new(
             "open-symbol-picker",
-            "Open the project-wide symbol picker (C-c p s)",
+            "Open the project-wide symbol picker (M-x)",
             "navigation",
             |store, _arg| store.open_symbol_picker(),
+        ));
+        // ── issue 06: search & references ───────────────────────────
+        reg.register(Command::new(
+            "project-search",
+            "Project-wide literal search with a prompt (C-c p s s)",
+            "search",
+            |store, _arg| {
+                store.search_prompt_start(crate::app::store::SearchPromptKind::Project);
+            },
+        ));
+        reg.register(Command::new(
+            "references-at-point",
+            "References to the symbol under point (M-?)",
+            "search",
+            |store, _arg| store.references_at_point(),
+        ));
+        reg.register(Command::new(
+            "occur",
+            "Occurrences of a regex in the current buffer (M-s o)",
+            "search",
+            |store, _arg| {
+                store.search_prompt_start(crate::app::store::SearchPromptKind::Occur);
+            },
+        ));
+        reg.register(Command::new(
+            "search-next",
+            "Move to the next match in the search results (n)",
+            "search",
+            |store, _arg| store.search_next(),
+        ));
+        reg.register(Command::new(
+            "search-prev",
+            "Move to the previous match in the search results (p)",
+            "search",
+            |store, _arg| store.search_prev(),
+        ));
+        reg.register(Command::new(
+            "search-jump",
+            "Jump to the match under the cursor (RET in the results view); M-, returns",
+            "search",
+            |store, _arg| store.search_jump(),
+        ));
+        reg.register(Command::new(
+            "search-rerun",
+            "Re-run the current search (g in the results view)",
+            "search",
+            |store, _arg| store.search_rerun(),
+        ));
+        reg.register(Command::new(
+            "search-cancel",
+            "Cancel the in-flight search (C-g in the results view)",
+            "search",
+            |store, _arg| store.search_cancel(),
+        ));
+        reg.register(Command::new(
+            "close-search-view",
+            "Cancel and close the search results view (q / ESC)",
+            "search",
+            |store, _arg| store.search_close(),
         ));
         reg
     }
@@ -437,7 +496,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 47, "expected 47 seed commands: {names:?}");
+        assert_eq!(names.len(), 56, "expected 56 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -486,6 +545,15 @@ mod tests {
             "jump-forward",
             "imenu",
             "open-symbol-picker",
+            "project-search",
+            "references-at-point",
+            "occur",
+            "search-next",
+            "search-prev",
+            "search-jump",
+            "search-rerun",
+            "search-cancel",
+            "close-search-view",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

@@ -2,9 +2,10 @@
 //! parsing, the project-change bus, and the per-project file watcher.
 //!
 //! Most of this layer is plain Rust (unit-testable in isolation; all
-//! rendering lives in `ui/`). `events` and `watcher` are the two
-//! modules that reach for `tokio` + `notify` (plan decision #7: file
-//! watching is first-class). They stay free of iocraft.
+//! rendering lives in `ui/`). The `events` and `watcher` modules reach
+//! for `tokio` + `notify` (plan decision #7: file watching is
+//! first-class), and the store touches tokio for the index and search
+//! bus drains (issues 05 and 06). All of them stay free of iocraft.
 
 pub mod command;
 pub mod config;

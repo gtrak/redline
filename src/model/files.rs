@@ -72,7 +72,15 @@ impl FileList {
 /// skips them there): a depth-truncated stack of per-directory
 /// matchers — the root's matcher plus each subdirectory's — checked
 /// for every file entry against its ancestor chain.
-fn attach_gitignore_filter(builder: &mut WalkBuilder, root: &Path) {
+///
+/// Used only by this (sequential) file-list walk: the stack is shared
+/// mutable state that is only safe with a single-threaded walk. The
+/// search pipeline (issue 06, `src/search/rg.rs`) runs a PARALLEL walk,
+/// where a shared per-directory stack is unsound, so it implements the
+/// same per-entry ancestor-chain semantics independently
+/// (`attach_entry_filters` / `git_ignored_by_ancestors`, with a
+/// per-directory memo cache instead of the shared stack).
+pub(crate) fn attach_gitignore_filter(builder: &mut WalkBuilder, root: &Path) {
     // The root entry is not passed through `filter_entry`, so seed the
     // stack with the root's own `.gitignore` matcher (depth 0).
     let root_matcher = match Gitignore::new(root.join(".gitignore")) {

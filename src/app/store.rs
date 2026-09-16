@@ -9,11 +9,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use nucleo_matcher::{
     Matcher, pattern::{CaseMatching, Normalization, Pattern},
 };
+use tokio::sync::mpsc;
 
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
@@ -28,6 +31,9 @@ use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
 use crate::model::sections::{MagitRow, SectionKind, StatusTree};
 use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, IndexProgress, SymbolIndex};
+use crate::search::occur;
+use crate::search::references;
+use crate::search::rg::{self, Hit, SearchBus, SearchConfig, SearchEvent};
 use crate::syntax::cache::{CacheKey, HighlightCache};
 use crate::syntax::highlight::{self, HighlightResult};
 use crate::syntax::registry::GrammarRegistry;
@@ -43,6 +49,8 @@ pub enum ViewId {
     BufferList,
     /// The `C-x g` magit status view (issue 07).
     MagitStatus,
+    /// The search results view (issue 06): grouped, counted, jumpable.
+    Search,
 }
 
 impl ViewId {
@@ -51,6 +59,7 @@ impl ViewId {
             ViewId::Buffer => "buffer",
             ViewId::BufferList => "buffer-list",
             ViewId::MagitStatus => "magit-status",
+            ViewId::Search => "search",
         }
     }
 
@@ -129,6 +138,25 @@ impl ViewId {
                 km.bind(&[Key::ctrl_char('n')], "magit-next").unwrap();
                 km.bind(&[Key::char('p')], "magit-prev").unwrap();
                 km.bind(&[Key::ctrl_char('p')], "magit-prev").unwrap();
+                km
+            }
+            ViewId::Search => {
+                // Results view (issue 06): n/p between matches, RET jump
+                // (records a jump-stack entry so M-, returns), g re-run,
+                // q/ESC close (cancelling an in-flight search), C-g
+                // cancels the search without closing.
+                let mut km = KeyMap::new();
+                km.bind(&[Key::char('q')], "close-search-view").unwrap();
+                km.bind(&[Key::new(KeyCode::Escape)], "close-search-view").unwrap();
+                km.bind(&[Key::enter()], "search-jump").unwrap();
+                km.bind(&[Key::char('n')], "search-next").unwrap();
+                km.bind(&[Key::ctrl_char('n')], "search-next").unwrap();
+                km.bind(&[Key::char('p')], "search-prev").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "search-prev").unwrap();
+                km.bind(&[Key::down()], "search-next").unwrap();
+                km.bind(&[Key::up()], "search-prev").unwrap();
+                km.bind(&[Key::char('g')], "search-rerun").unwrap();
+                km.bind(&[Key::ctrl_char('g')], "search-cancel").unwrap();
                 km
             }
         }
@@ -325,6 +353,106 @@ pub struct DirtyCounts {
     pub untracked: usize,
 }
 
+/// What produced the current search results (drives the view title, the
+/// `g` re-run, and the prompt's label).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchKind {
+    /// `C-c p s s`: project-wide literal search.
+    #[default]
+    Project,
+    /// `M-?`: references to the symbol under point (word-boundary +
+    /// token-class filtering).
+    References,
+    /// `M-s o`: regex occurrences in the current buffer.
+    Occur,
+}
+
+impl SearchKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchKind::Project => "Search",
+            SearchKind::References => "References",
+            SearchKind::Occur => "Occur",
+        }
+    }
+}
+
+/// One row of the search results view (store-owned; the view renders).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResultRow {
+    /// A file group header: the (project-relative or buffer) file name
+    /// and its live hit count (`final_count` once its `FileDone` event
+    /// has arrived).
+    Header { file: String, count: u64, final_count: bool },
+    /// A match line: the hit itself plus its flat index in the result
+    /// set (`selected` indexes into the flat hit list).
+    Hit {
+        hit: crate::search::rg::Hit,
+        hit_index: usize,
+    },
+}
+
+/// The search-job state owned by the store (issue 06). Hits and rows
+/// stream in through `apply_search_event` (the UI's SearchBus drain);
+/// the results view is a view over `rows`/`hits`.
+#[derive(Debug, Default)]
+pub struct SearchState {
+    pub kind: SearchKind,
+    pub query: String,
+    pub running: bool,
+    pub cancelled: bool,
+    pub error: Option<String>,
+    /// The generation this state belongs to (events from older jobs are
+    /// discarded).
+    pub generation: usize,
+    /// Flat hits in arrival order; `selected` indexes into this.
+    pub hits: Vec<crate::search::rg::Hit>,
+    /// Display rows (headers + hits), in arrival order.
+    pub rows: Vec<ResultRow>,
+    /// Hit index → its row index (selection/scroll math).
+    pub hit_rows: Vec<usize>,
+    /// File name → its header row index.
+    pub file_row: HashMap<String, usize>,
+    /// The selected hit (index into `hits`).
+    pub selected: usize,
+    /// The results-view scroll top (row index).
+    pub scroll: usize,
+    /// The in-flight job's cancel flag (`None` when idle).
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+/// The search query prompt (issue 06): typed characters extend the
+/// query; RET starts the search, C-g/ESC cancel.
+#[derive(Debug)]
+pub struct SearchPrompt {
+    /// Project search (`C-c p s s`) or buffer occur (`M-s o`).
+    pub kind: SearchPromptKind,
+    pub query: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchPromptKind {
+    /// `C-c p s s`: project-wide literal search (smart case).
+    Project,
+    /// `M-s o`: regex occurrences in the current buffer.
+    Occur,
+}
+
+impl SearchPromptKind {
+    fn label(self) -> &'static str {
+        match self {
+            SearchPromptKind::Project => "Search: ",
+            SearchPromptKind::Occur => "Occur: ",
+        }
+    }
+}
+
+/// The jump-stack sentinel for the results view: a `JumpEntry` whose
+/// `buffer_key` is this never-a-real-buffer value means "return to the
+/// search results view" (the view has no buffer of its own; the entry's
+/// `line` is the hit index to restore, `col` the scroll top).
+const SEARCH_JUMP_KEY: &str = "*search-results*";
+
 /// Preview size: a "first page" of the file, byte-capped so a huge
 /// file never stalls a selection move.
 const PREVIEW_LINES: usize = 32;
@@ -423,6 +551,24 @@ pub struct AppStore {
     /// The symbol name being looked up by the Xref picker (set by
     /// `xref_find_definitions` when the lookup is ambiguous).
     xref_lookup_name: String,
+    /// The search-event bus (issue 06): the store keeps the sender side
+    /// for its lifetime; each search job clones a sender for its worker
+    /// thread. The receiver is kept in the store and handed out exactly
+    /// once (`search_rx`) to the `use_future` drain in `Root` (the
+    /// issue-04/05 bus precedent: the store owns the bus; the UI layer
+    /// applies events to the store — and runs inside the render loop, so
+    /// each event re-renders).
+    pub search_bus: SearchBus,
+    search_rx: Option<mpsc::UnboundedReceiver<SearchEvent>>,
+    /// The current search job's results state (issue 06).
+    search: SearchState,
+    /// Generation counter for search jobs: bumped on every new search
+    /// (and project switch) so events from an in-flight job of an older
+    /// generation are discarded by `apply_search_event`.
+    search_generation: usize,
+    /// The active search-query prompt (`C-c p s s` / `M-s o`), when one
+    /// is on screen.
+    search_prompt: Option<SearchPrompt>,
 }
 
 impl AppStore {
@@ -448,8 +594,10 @@ impl AppStore {
         global
             .bind(&[Key::ctrl_char('x'), Key::ctrl_char('c')], "quit")
             .unwrap();
-        global.bind(&[Key::alt_char('s')], "cycle-view-next").unwrap();
-        global.bind(&[Key::alt_char('p')], "cycle-view-prev").unwrap();
+        // View cycling (issue 01) was M-s / M-p, but issue 06's `M-s o`
+        // (occur) needs the M-s prefix; the engine forbids a command on a
+        // strict prefix of a longer binding, so cycling is now M-x only
+        // (`cycle-view-next` / `cycle-view-prev`).
         // Browse layer (issue 02).
         global
             .bind(&[Key::ctrl_char('x'), Key::ctrl_char('f')], "find-file")
@@ -497,9 +645,14 @@ impl AppStore {
             .unwrap();
         global
             .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('s')],
-                "open-symbol-picker",
+                &[Key::ctrl_char('c'), Key::char('p'), Key::char('s'), Key::char('s')],
+                "project-search",
             )
+            .unwrap();
+        // Search & references (issue 06).
+        global.bind(&[Key::alt_char('?')], "references-at-point").unwrap();
+        global
+            .bind(&[Key::alt_char('s'), Key::char('o')], "occur")
             .unwrap();
 
         let view = ViewId::Buffer.keymap();
@@ -512,6 +665,12 @@ impl AppStore {
             project_store.registry.upsert(&p.root);
             let _ = project_store.save_registry();
         }
+
+        // Search bus (issue 06): the store keeps the sender side for its
+        // lifetime; the receiver stays in the store until Root's
+        // `use_future` drain takes it (exactly once).
+        let (search_bus, search_rx) = SearchBus::new();
+        let search_rx = Some(search_rx);
 
         Self {
             theme: Theme::default(),
@@ -551,6 +710,11 @@ impl AppStore {
             index_generation: 0,
             pending_index_changes: HashSet::new(),
             xref_lookup_name: String::new(),
+            search_bus,
+            search_rx,
+            search: SearchState::default(),
+            search_generation: 0,
+            search_prompt: None,
         }
     }
 
@@ -582,7 +746,8 @@ impl AppStore {
     }
 
     /// Status-line view name: the current buffer's display name (or
-    /// `*list-buffers*` in the buffer-list view).
+    /// `*list-buffers*` in the buffer-list view, `*magit-status*`,
+    /// `*search*`).
     pub fn view_name_display(&self) -> String {
         match self.top_view() {
             ViewId::Buffer => self
@@ -592,6 +757,7 @@ impl AppStore {
                 .unwrap_or_else(|| SCRATCH_NAME.to_string()),
             ViewId::BufferList => "*list-buffers*".to_string(),
             ViewId::MagitStatus => "*magit-status*".to_string(),
+            ViewId::Search => "*search*".to_string(),
         }
     }
 
@@ -1404,6 +1570,13 @@ impl AppStore {
         self.index = SymbolIndex::new();
         self.index_generation += 1;
         self.pending_index_changes.clear();
+        // Invalidate any in-flight search job (its root was the previous
+        // project): bump the generation so its events are discarded, and
+        // stop it. Results belong to the old project.
+        self.cancel_search_job();
+        self.search_generation += 1;
+        self.search = SearchState::default();
+        self.search.generation = self.search_generation;
         self.start_indexing();
         self.project_store.registry.upsert(&root_path);
         let _ = self.project_store.save_registry();
@@ -2429,8 +2602,19 @@ impl AppStore {
     }
 
     /// Navigate to a jump entry: open the buffer (if needed) and scroll to
-    /// the entry's line.
+    /// the entry's line. The results-view sentinel (recorded by `RET` in
+    /// the search view) returns to the results view instead: its `line`
+    /// is the hit index to restore, `col` the scroll top.
     fn navigate_to_entry(&mut self, entry: &JumpEntry) {
+        if entry.buffer_key == SEARCH_JUMP_KEY {
+            let hits = self.search.hits.len();
+            self.search.selected = entry.line.min(hits.saturating_sub(1));
+            self.search.scroll = entry.col;
+            if self.top_view() != ViewId::Search {
+                self.push_view(ViewId::Search);
+            }
+            return;
+        }
         // If the buffer is not open, try to open it by key.
         if self.buffers.get(&entry.buffer_key).is_none() {
             // The buffer was killed or was never open: just scroll scratch.
@@ -2777,6 +2961,509 @@ impl AppStore {
         &self.index
     }
 
+    // ── search & references (issue 06) ──────────────────────────────
+
+    /// Hand the SearchBus receiver to the UI's drain task (issue 06: the
+    /// `use_future` in `Root`) — exactly once per store; `None` when
+    /// already taken.
+    pub fn search_rx(&mut self) -> Option<mpsc::UnboundedReceiver<SearchEvent>> {
+        self.search_rx.take()
+    }
+
+    /// Stop the in-flight search job (no-op when idle).
+    fn cancel_search_job(&mut self) {
+        if let Some(flag) = self.search.cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// `C-g` in the results view: cancel the in-flight search (the view
+    /// stays open on the partial results).
+    pub fn search_cancel(&mut self) {
+        if self.search.running {
+            self.cancel_search_job();
+            self.minibuffer_message("search cancelled");
+        } else {
+            self.minibuffer_message("nothing to cancel");
+        }
+    }
+
+    /// `q` / `ESC` in the results view: cancel any in-flight search and
+    /// close the view.
+    pub fn search_close(&mut self) {
+        if self.search.running {
+            self.cancel_search_job();
+        }
+        if self.top_view() == ViewId::Search {
+            self.close_view();
+        }
+    }
+
+    /// `g` in the results view: re-run the current search with the same
+    /// query.
+    pub fn search_rerun(&mut self) {
+        let query = self.search.query.clone();
+        match self.search.kind {
+            SearchKind::Project => self.start_project_search(query),
+            SearchKind::References => self.start_references_search(query),
+            SearchKind::Occur => self.start_occur(query),
+        }
+    }
+
+    /// `n` in the results view: move to the next match (wraps).
+    pub fn search_next(&mut self) {
+        let n = self.search.hits.len();
+        if n == 0 {
+            self.minibuffer_message("no matches");
+            return;
+        }
+        self.search.selected = (self.search.selected + 1) % n;
+        self.search_keep_visible();
+    }
+
+    /// `p` in the results view: move to the previous match (wraps).
+    pub fn search_prev(&mut self) {
+        let n = self.search.hits.len();
+        if n == 0 {
+            self.minibuffer_message("no matches");
+            return;
+        }
+        self.search.selected = (self.search.selected + n - 1) % n;
+        self.search_keep_visible();
+    }
+
+    /// Keep the selected hit's row inside the visible window.
+    fn search_keep_visible(&mut self) {
+        let viewport = self.viewport_lines.max(1);
+        let Some(&row) = self.search.hit_rows.get(self.search.selected) else {
+            return;
+        };
+        let scroll = &mut self.search.scroll;
+        if row < *scroll {
+            *scroll = row;
+        } else if row >= *scroll + viewport {
+            *scroll = row - viewport + 1;
+        }
+    }
+
+    /// `RET` in the results view: jump to the match under the cursor.
+    /// Records the jump-stack origin as the results-view sentinel, so
+    /// `M-,` returns to the results (with the selection restored) and
+    /// the file position becomes the forward entry.
+    pub fn search_jump(&mut self) {
+        let Some(hit) = self.search.hits.get(self.search.selected).cloned() else {
+            self.minibuffer_message("no match at point");
+            return;
+        };
+        let sel = self.search.selected;
+        let origin = JumpEntry {
+            buffer_key: SEARCH_JUMP_KEY.to_string(),
+            line: sel, // the hit index to restore on M-,.
+            col: self.search.scroll,
+            label: "*search*".to_string(),
+        };
+        let file = hit.file.clone();
+        let line_no = hit.line_no as usize;
+        self.open_path(&file);
+        self.set_scroll_top(line_no.saturating_sub(1));
+        self.ensure_highlight();
+        // Leave the results view so the jumped file is what's on screen;
+        // `M-,` (the sentinel entry) pushes the results back on top.
+        if self.top_view() == ViewId::Search {
+            self.close_view();
+        }
+        let dest = JumpEntry {
+            buffer_key: self.buffers.current().map(String::from).unwrap_or_default(),
+            line: line_no.saturating_sub(1),
+            col: hit.col.unwrap_or(0) as usize,
+            label: "search-RET".to_string(),
+        };
+        self.jump_stack.record_jump(&origin, &dest);
+        self.minibuffer_message(&format!("jumped to {file}:{line_no}"));
+    }
+
+    /// The visible window of results-view rows, pre-computed for the UI:
+    /// (rows, scroll top, total rows, selected hit's row relative to the
+    /// window). The window keeps the selected hit visible.
+    pub fn search_view_info(&self) -> (Vec<ResultRow>, usize, usize, Option<usize>) {
+        let s = &self.search;
+        let total = s.rows.len();
+        let viewport = self.viewport_lines.max(1);
+        let mut scroll = s.scroll.min(total.saturating_sub(1));
+        if let Some(&row) = s.hit_rows.get(s.selected) {
+            if row < scroll {
+                scroll = row;
+            } else if row >= scroll + viewport {
+                scroll = row - viewport + 1;
+            }
+            scroll = scroll.min(total.saturating_sub(1));
+        }
+        if total == 0 {
+            return (Vec::new(), 0, 0, None);
+        }
+        let end = (scroll + viewport).min(total);
+        let rows = s.rows[scroll..end].to_vec();
+        let selected_row = s
+            .hit_rows
+            .get(s.selected)
+            .copied()
+            .filter(|r| *r >= scroll && *r < end)
+            .map(|r| r - scroll);
+        (rows, scroll, total, selected_row)
+    }
+
+    /// The results-view title: kind, query, running counts.
+    pub fn search_title(&self) -> String {
+        let s = &self.search;
+        let files = s.file_row.len();
+        let running = if s.running { " (searching…)" } else { "" };
+        if s.cancelled {
+            format!(
+                "{}: '{}' — {} matches in {} files (cancelled){}",
+                s.kind.label(),
+                s.query,
+                s.hits.len(),
+                files,
+                running
+            )
+        } else {
+            format!(
+                "{}: '{}' — {} matches in {} files{}",
+                s.kind.label(),
+                s.query,
+                s.hits.len(),
+                files,
+                running
+            )
+        }
+    }
+
+    /// The status-line search indicator (empty when no search is
+    /// running) — the async-activity slot from issue 01.
+    pub fn search_display(&self) -> String {
+        if self.search.running {
+            "searching".to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// True while a search job is in flight.
+    pub fn search_running(&self) -> bool {
+        self.search.running
+    }
+
+    /// The last search error (when the most recent job failed to start).
+    pub fn search_error(&self) -> Option<String> {
+        self.search.error.clone()
+    }
+
+    /// `C-c p s s` (project search) / `M-s o` (occur): enter the query
+    /// prompt mode (the minibuffer echoes the growing query).
+    pub fn search_prompt_start(&mut self, kind: SearchPromptKind) {
+        self.search_prompt = Some(SearchPrompt {
+            kind,
+            query: String::new(),
+        });
+        self.minibuffer_message(kind.label());
+    }
+
+    fn search_prompt_char(&mut self, c: char) {
+        let msg = match self.search_prompt.as_mut() {
+            Some(p) => {
+                p.query.push(c);
+                format!("{}{}", p.kind.label(), p.query)
+            }
+            None => return,
+        };
+        self.minibuffer_message(&msg);
+    }
+
+    fn search_prompt_backspace(&mut self) {
+        let msg = match self.search_prompt.as_mut() {
+            Some(p) => {
+                p.query.pop();
+                format!("{}{}", p.kind.label(), p.query)
+            }
+            None => return,
+        };
+        self.minibuffer_message(&msg);
+    }
+
+    fn search_prompt_cancel(&mut self) {
+        self.search_prompt.take();
+        self.minibuffer_message("cancel");
+    }
+
+    fn search_prompt_confirm(&mut self) {
+        let Some(p) = self.search_prompt.take() else {
+            return;
+        };
+        if p.query.is_empty() {
+            self.search_prompt = Some(p);
+            self.minibuffer_message("empty search");
+            return;
+        }
+        match p.kind {
+            SearchPromptKind::Project => self.start_project_search(p.query),
+            SearchPromptKind::Occur => self.start_occur(p.query),
+        }
+    }
+
+    /// Begin a new search job: cancel the previous job, bump the
+    /// generation, reset the results state, spawn, and land in the
+    /// results view (unless it is already on top).
+    fn begin_search(&mut self, kind: SearchKind, query: String, spawn: impl FnOnce(&SearchBus, usize, Arc<AtomicBool>)) {
+        self.cancel_search_job();
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search = SearchState {
+            kind,
+            query,
+            running: true,
+            cancelled: false,
+            error: None,
+            generation,
+            hits: Vec::new(),
+            rows: Vec::new(),
+            hit_rows: Vec::new(),
+            file_row: HashMap::new(),
+            selected: 0,
+            scroll: 0,
+            cancel: Some(cancel.clone()),
+        };
+        let bus = self.search_bus.clone();
+        spawn(&bus, generation, cancel);
+        if self.top_view() != ViewId::Search {
+            self.push_view(ViewId::Search);
+        }
+    }
+
+    /// `C-c p s s`: project-wide search. The query is a LITERAL with
+    /// smart case (redline's keymap has no prefix-arg mechanism, so
+    /// projectile's "prefix = regexp" is not available; the pipeline's
+    /// regex mode is used by `M-s o` and `M-?`).
+    pub fn start_project_search(&mut self, query: String) {
+        let Some(project) = self.project.clone() else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        let root = project.root.clone();
+        let msg = format!("search: {query}");
+        self.begin_search(SearchKind::Project, query.clone(), move |bus, generation, cancel| {
+            let cfg = SearchConfig {
+                root,
+                pattern: query,
+                word: false,
+                fixed: true,
+                case_smart: true,
+                case_insensitive: false,
+                glob: None,
+                file_type: None,
+                filter: None,
+                cancel,
+            };
+            rg::spawn(cfg, bus, generation);
+        });
+        self.minibuffer_message(&msg);
+    }
+
+    /// `M-?`: references to the symbol under point. The buffer model has
+    /// no column cursor yet, so point's column is 0; `symbol_under_point`
+    /// takes the column and prefers the identifier at/preceding it.
+    pub fn references_at_point(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        if buf.path.is_none() {
+            self.minibuffer_message("no file (scratch buffer)");
+            return;
+        }
+        if self.project.is_none() {
+            self.minibuffer_message("no project");
+            return;
+        }
+        let line = self.scroll_top();
+        let col = 0; // no column cursor yet (see the method's note)
+        let line_text = buf.line_text(line).unwrap_or_default().to_string();
+        let index = &self.index;
+        let known = move |id: &str| !index.definitions_of(id).is_empty();
+        let Some(symbol) = references::symbol_under_point(&line_text, col, known) else {
+            self.minibuffer_message("no symbol under point");
+            return;
+        };
+        self.start_references_search(symbol.to_string());
+    }
+
+    /// Start a references search for `symbol` (word-boundary, fixed,
+    /// case-sensitive, token-class filtered via `references_filter`).
+    pub fn start_references_search(&mut self, symbol: String) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.minibuffer_message("no project: start redline inside a project directory");
+            return;
+        };
+        let msg = format!("references: {symbol}");
+        self.begin_search(SearchKind::References, symbol.clone(), move |bus, generation, cancel| {
+            let mut cfg = references::references_config(root, symbol);
+            cfg.cancel = cancel;
+            references::spawn_references(cfg, bus, generation);
+        });
+        self.minibuffer_message(&msg);
+    }
+
+    /// `M-s o`: occurrences of `query` (a regex, smart case) in the
+    /// current buffer — the pipeline scoped to the buffer's text.
+    pub fn start_occur(&mut self, query: String) {
+        let key = self
+            .buffers
+            .current()
+            .map(String::from)
+            .unwrap_or_else(|| SCRATCH_NAME.to_string());
+        let Some(buf) = self.buffers.get(&key) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let display = self.buffer_display(&key);
+        let text = buf.text();
+        let msg = format!("occur: {query}");
+        self.begin_search(SearchKind::Occur, query.clone(), move |bus, generation, cancel| {
+            occur::spawn_occur(display, text, query, cancel, bus.sender(), generation);
+        });
+        self.minibuffer_message(&msg);
+    }
+
+    /// Install a search event into the store (called by the UI's
+    /// SearchBus drain). Events from a stale generation (a superseded
+    /// job, or a project switch) are discarded.
+    pub fn apply_search_event(&mut self, event: &SearchEvent) {
+        if event.generation() != self.search.generation {
+            return; // stale job
+        }
+        match event {
+            SearchEvent::Hit { file, line_no, col, line, .. } => {
+                let s = &mut self.search;
+                if !s.file_row.contains_key(file) {
+                    let row_idx = s.rows.len();
+                    s.rows.push(ResultRow::Header {
+                        file: file.clone(),
+                        count: 0,
+                        final_count: false,
+                    });
+                    s.file_row.insert(file.clone(), row_idx);
+                }
+                let hit = Hit {
+                    file: file.clone(),
+                    line_no: *line_no,
+                    col: *col,
+                    line: line.clone(),
+                };
+                let hit_index = s.hits.len();
+                let row_idx = s.rows.len();
+                s.rows.push(ResultRow::Hit { hit: hit.clone(), hit_index });
+                s.hit_rows.push(row_idx);
+                s.hits.push(hit);
+                if let Some(&hr) = s.file_row.get(file)
+                    && let ResultRow::Header { count, .. } = &mut s.rows[hr]
+                {
+                    *count += 1;
+                }
+            }
+            SearchEvent::FileDone { file, hits, .. } => {
+                let s = &mut self.search;
+                if let Some(&hr) = s.file_row.get(file)
+                    && let ResultRow::Header { count, final_count, .. } = &mut s.rows[hr]
+                {
+                    *count = *hits; // the authoritative final count
+                    *final_count = true;
+                }
+            }
+            SearchEvent::Finished { cancelled, .. } => {
+                self.search.running = false;
+                self.search.cancelled = *cancelled;
+                self.search.cancel = None;
+                // The parallel walk delivers hits in completion order;
+                // normalize to a deterministic (path, line, col) order so
+                // the results view is stable between runs. Streaming order
+                // before Finished stays as-arrived (live feedback), the
+                // final view is sorted.
+                if !*cancelled {
+                    self.search_sort_hits();
+                }
+                let n = self.search.hits.len();
+                let m = self.search.file_row.len();
+                if *cancelled {
+                    self.minibuffer_message(&format!("search cancelled ({} matches so far)", n));
+                } else {
+                    self.minibuffer_message(&format!("{} matches in {} files", n, m));
+                }
+            }
+            SearchEvent::Error { message, .. } => {
+                self.search.running = false;
+                self.search.error = Some(message.clone());
+                self.search.cancel = None;
+                self.minibuffer_message(&format!("search error: {message}"));
+            }
+        }
+    }
+
+    /// Reorder hits + display rows into deterministic (path, line, col)
+    /// order. Preserves per-file counts and header positions; the selection
+    /// resets to the first hit in display order (a fresh result set presents
+    /// its first result, not the arrival-order artifact).
+    fn search_sort_hits(&mut self) {
+        let s = &mut self.search;
+        if s.hits.len() < 2 {
+            return;
+        }
+        s.hits.sort_by(|a, b| {
+            a.file
+                .cmp(&b.file)
+                .then(a.line_no.cmp(&b.line_no))
+                .then(a.col.cmp(&b.col))
+        });
+
+        // Rebuild rows: group by file in the new order, reusing the header
+        // metadata (counts, final_count) from the old file_row table.
+        let old_file_row = s.file_row.clone();
+        let mut header_of: HashMap<String, (u64, bool)> = HashMap::new();
+        for (file, &row) in &old_file_row {
+            if let ResultRow::Header { count, final_count, .. } = &s.rows[row] {
+                header_of.insert(file.clone(), (*count, *final_count));
+            }
+        }
+        s.rows.clear();
+        s.file_row.clear();
+        s.hit_rows.clear();
+        let mut last_file: Option<String> = None;
+        for (hit_idx, hit) in s.hits.iter().enumerate() {
+            if last_file.as_deref() != Some(hit.file.as_str()) {
+                let (count, final_count) =
+                    header_of.get(&hit.file).cloned().unwrap_or((0, false));
+                s.file_row.insert(hit.file.clone(), s.rows.len());
+                s.rows.push(ResultRow::Header {
+                    file: hit.file.clone(),
+                    count,
+                    final_count,
+                });
+                last_file = Some(hit.file.clone());
+            }
+            s.hit_rows.push(s.rows.len());
+            s.rows.push(ResultRow::Hit { hit: hit.clone(), hit_index: hit_idx });
+        }
+        // A fresh result set selects the first hit in display order.
+        s.selected = 0;
+        // Clamp the scroll anchor into the new range.
+        if s.scroll >= s.rows.len() {
+            s.scroll = s.rows.len().saturating_sub(1);
+        }
+    }
+
     // ── keys & dispatch (unchanged skeleton from issue 01) ──────────────
 
     /// Feed one keypress from the terminal. While the picker is open,
@@ -2786,7 +3473,10 @@ impl AppStore {
     /// engine. While isearch is active, printable characters extend the
     /// query, n/N navigate, RET confirms, C-g cancels. While goto-line
     /// is active, digits build the line number, RET confirms, C-g
-    /// cancels.
+    /// cancels. While the search-query prompt is active, printable
+    /// characters extend the query, RET confirms, C-g/ESC cancel. With
+    /// the results view on top (no picker), C-g cancels the in-flight
+    /// search without closing the view.
     pub fn key_event(&mut self, key: Key) {
         if self.quit {
             return;
@@ -2870,6 +3560,41 @@ impl AppStore {
                 return;
             }
             // Other keys: swallow.
+            return;
+        }
+        // Search-query prompt mode (C-c p s s / M-s o): printable chars
+        // extend the query, Backspace/C-h edit it, RET starts the search,
+        // C-g/ESC cancel.
+        if self.search_prompt.is_some() {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.search_prompt_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.search_prompt_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.search_prompt_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.search_prompt_char(c);
+                return;
+            }
+            // Other keys: swallow (don't echo "unbound key" mid-prompt).
+            return;
+        }
+        // C-g in the results view cancels the in-flight search (the view
+        // stays open on the partial results) — intercepted before the
+        // global C-g so the advertised `C-g cancel search` works. The
+        // picker guard keeps C-g closing an open palette (the global
+        // intercept) instead of cancelling the search underneath it.
+        if key == Key::ctrl_char('g')
+            && self.top_view() == ViewId::Search
+            && self.picker.is_none()
+        {
+            self.search_cancel();
             return;
         }
         // C-g aborts from any state: it clears the pending sequence and
@@ -3525,7 +4250,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 47);
+        assert_eq!(store.picker_count().0, 56);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -3543,13 +4268,14 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 46);
+        assert_eq!(store.picker_selected(), 55);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 45);
+        assert_eq!(store.picker_selected(), 54);
 
-        // RET runs the candidate at the selected index (45: jump-forward).
+        // RET runs the candidate at the selected index (54: search-cancel
+        // — idle, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -3581,7 +4307,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 47);
+        assert_eq!(store.picker_count().0, 56);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -4423,6 +5149,410 @@ mod tests {
         assert_eq!(s.index().total(), 1, "B's event applied");
         assert!(s.index().has("src/b.rs"), "B's index contains B's file");
         assert!(!s.index().has("src/a.rs"), "A's file not in B's index");
+    }
+
+    // ── search & references (issue 06) ───────────────────────────────
+
+    /// A store rooted in a project with known search content.
+    fn search_project() -> (tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/main.rs"),
+            "fn target() {}\nfn main() { target(); }\ntarget();\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let store = AppStore::at(dir.path(), base.path().to_path_buf());
+        (dir, store)
+    }
+
+    /// Drain the search bus into the store until `Finished` (bounded).
+    fn drain_search_finished(
+        store: &mut AppStore,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::search::rg::SearchEvent>,
+    ) {
+        let start = std::time::Instant::now();
+        loop {
+            let mut finished = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, crate::search::rg::SearchEvent::Finished { .. }) {
+                    store.apply_search_event(&ev);
+                    finished = true;
+                    break;
+                }
+                store.apply_search_event(&ev);
+            }
+            if finished {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "search did not finish in 5s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The command registry carries the issue 06 commands, and the
+    /// keymap resolves the plan's keys (and the freed `C-c p s` prefix).
+    #[test]
+    fn search_keybindings_resolve() {
+        let (_dir, store) = search_project();
+        for name in [
+            "project-search",
+            "references-at-point",
+            "occur",
+            "search-next",
+            "search-prev",
+            "search-jump",
+            "search-rerun",
+            "search-cancel",
+            "close-search-view",
+        ] {
+            assert!(store.registry.get(name).is_some(), "missing `{name}`");
+        }
+        let resolve = |seq: &[crate::app::keymap::Key]| {
+            store
+                .engine
+                .resolve(seq)
+                .and_then(|l| match l {
+                    crate::app::keymap::Lookup::Command(c) => Some(c.to_string()),
+                    _ => None,
+                })
+        };
+        use crate::app::keymap::Key;
+        assert_eq!(
+            resolve(&[Key::ctrl_char('c'), Key::char('p'), Key::char('s'), Key::char('s')]),
+            Some("project-search".into())
+        );
+        assert_eq!(resolve(&[Key::alt_char('?')]), Some("references-at-point".into()));
+        assert_eq!(
+            resolve(&[Key::alt_char('s'), Key::char('o')]),
+            Some("occur".into())
+        );
+        // The strict prefix `C-c p s` is freed for the longer binding.
+        assert_eq!(
+            resolve(&[Key::ctrl_char('c'), Key::char('p'), Key::char('s')]),
+            None
+        );
+    }
+
+    /// `C-c p s s` opens the prompt; typing + RET runs the search and
+    /// lands in the results view with grouped, counted rows.
+    #[test]
+    fn search_prompt_flow_and_grouped_results() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+
+        store.key_event(key("C-c"));
+        store.key_event(key("p"));
+        store.key_event(key("s"));
+        store.key_event(key("s"));
+        // Prompt is active: the minibuffer echoes "Search: ".
+        assert_eq!(store.message, "Search: ");
+        store.key_event(key("t"));
+        store.key_event(key("a"));
+        store.key_event(key("r"));
+        store.key_event(key("g"));
+        store.key_event(key("e"));
+        store.key_event(key("t"));
+        assert_eq!(store.message, "Search: target");
+        store.key_event(key("RET"));
+
+        assert_eq!(store.top_view(), ViewId::Search);
+        assert!(store.search_running(), "the search must be running");
+        drain_search_finished(&mut store, &mut rx);
+        assert!(!store.search_running());
+
+        // 4 hits in 2 files: src/main.rs (3) and src/lib.rs (1).
+        let (rows, _top, _total, _sel) = store.search_view_info();
+        let headers: Vec<&crate::app::store::ResultRow> = rows
+            .iter()
+            .filter(|r| matches!(r, crate::app::store::ResultRow::Header { .. }))
+            .collect();
+        assert_eq!(headers.len(), 2, "two file groups: {rows:?}");
+        let counts: Vec<u64> = headers
+            .iter()
+            .map(|h| match h {
+                crate::app::store::ResultRow::Header { count, final_count, .. } => {
+                    assert!(*final_count);
+                    *count
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(counts.contains(&3) && counts.contains(&1), "per-file counts: {counts:?}");
+        assert!(store.search_title().contains("4 matches in 2 files"));
+    }
+
+    /// n/p move between matches (wrapping); the selection indexes the
+    /// flat hit list.
+    #[test]
+    fn search_next_prev_move_selection() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.selected, 0);
+
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 1);
+        // Wrap from the last hit back to the first.
+        store.search.selected = 3;
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 0);
+        store.key_event(key("p"));
+        assert_eq!(store.search.selected, 3);
+    }
+
+    /// RET jumps to the match (exact line + column recorded on the jump
+    /// stack) and `M-,` returns to the results view with the selection
+    /// restored.
+    #[test]
+    fn search_ret_jump_and_mcomma_returns_to_results() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+
+        // Hits are sorted deterministically on Finished: (path, line, col).
+        // "src/lib.rs" < "src/main.rs", so the first hit is lib.rs:1
+        // ("pub fn target() {}", "target" at col 7).
+        let first = store.search.hits[0].clone();
+        assert_eq!(first.file, "src/lib.rs");
+        assert_eq!(first.line_no, 1);
+        assert_eq!(first.col, Some(7));
+
+        store.key_event(key("RET"));
+        // Landed in the buffer view on the hit's file/line.
+        assert_eq!(store.top_view(), ViewId::Buffer);
+        assert_eq!(store.view_name_display(), "src/lib.rs");
+        assert_eq!(store.scroll_top(), 0); // line 1 (0-based)
+
+        // `M-,` returns to the results view, selection restored.
+        store.key_event(key("M-,"));
+        assert_eq!(store.top_view(), ViewId::Search, "M-, must return to the results");
+        assert_eq!(store.search.selected, 0);
+        // The stack is [Buffer, Search] again: q closes back to the buffer.
+        store.key_event(key("q"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+    }
+
+    /// `g` re-runs the search: results reset, a new generation streams
+    /// in, and the same hits reappear.
+    #[test]
+    fn search_rerun_restarts_the_search() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        let old_gen = store.search.generation;
+
+        store.key_event(key("g"));
+        assert_eq!(store.search.generation, old_gen + 1, "re-run bumps the generation");
+        assert!(store.search_running(), "the re-run must be running");
+        drain_search_finished(&mut store, &mut rx);
+        let n = store.search.hits.len();
+        assert_eq!(n, 4, "the same 4 hits reappear: {n}");
+    }
+
+    /// `q` closes the results view (and cancels the in-flight job); the
+    /// terminal event reports a cancelled finish.
+    #[test]
+    fn search_close_cancels_and_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // Enough files that the walk takes real time.
+        for i in 0..300 {
+            std::fs::write(dir.path().join(format!("f{i:03}.txt")), "needle\n").unwrap();
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("needle".into());
+
+        // Close mid-flight.
+        store.key_event(key("q"));
+        assert_ne!(store.top_view(), ViewId::Search, "q must close the results view");
+        // The job's terminal event must report a cancelled finish.
+        let start = std::time::Instant::now();
+        loop {
+            let mut done = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, crate::search::rg::SearchEvent::Finished { cancelled: true, .. }) {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `C-g` in the results view cancels the in-flight job WITHOUT
+    /// closing the view (the partial results stay on screen); the
+    /// terminal event reports a cancelled finish and `search_running`
+    /// flips.
+    #[test]
+    fn search_c_g_cancels_without_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // Enough files that the walk takes real time.
+        for i in 0..300 {
+            std::fs::write(dir.path().join(format!("f{i:03}.txt")), "needle\n").unwrap();
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("needle".into());
+        assert!(store.search_running(), "the search must be in flight");
+
+        // C-g cancels mid-flight: the view stays open, the job stops.
+        store.key_event(key("C-g"));
+        assert_eq!(store.top_view(), ViewId::Search, "C-g must keep the results view open");
+        assert_eq!(store.message, "search cancelled");
+
+        // The worker's terminal event must report a cancelled finish.
+        let start = std::time::Instant::now();
+        loop {
+            let mut done = false;
+            while let Ok(ev) = rx.try_recv() {
+                store.apply_search_event(&ev);
+                if matches!(ev, crate::search::rg::SearchEvent::Finished { cancelled: true, .. }) {
+                    done = true;
+                }
+            }
+            if done {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(5), "cancel not observed in 5s");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!store.search_running(), "the job must be stopped");
+    }
+
+    /// `C-g` while a picker is open over the results view still closes
+    /// the picker (the global intercept), not cancel the search.
+    #[test]
+    fn search_c_g_with_picker_open_closes_the_picker() {
+        let (_dir, mut store) = search_project();
+        let _rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        assert_eq!(store.top_view(), ViewId::Search);
+
+        store.open_palette();
+        assert!(store.picker_open());
+        store.key_event(key("C-g"));
+        assert!(!store.picker_open(), "C-g must close the palette");
+        // The search itself is untouched (still running or already
+        // finished — either way C-g did not cancel it: the message is
+        // the generic "cancel", not "search cancelled").
+        assert_eq!(store.message, "cancel");
+        assert_eq!(store.top_view(), ViewId::Search);
+    }
+
+    /// `M-s o` (the two-key sequence) opens the occur prompt; RET runs
+    /// the in-buffer regex search, grouped under the buffer's display
+    /// name, with the per-file (group) count.
+    #[test]
+    fn occur_prompt_flow_lists_in_file_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo world\nbar foo\nfoo again\nbaz\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = store.search_rx().unwrap();
+        store.open_path("a.txt");
+
+        store.key_event(key("M-s"));
+        store.key_event(key("o"));
+        assert_eq!(store.message, "Occur: ");
+        store.key_event(key("f"));
+        store.key_event(key("o"));
+        store.key_event(key("o"));
+        store.key_event(key("RET"));
+
+        assert_eq!(store.top_view(), ViewId::Search);
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.hits.len(), 3, "all in-file matches");
+        // One group, named after the buffer's display name.
+        let (rows, _, _, _) = store.search_view_info();
+        let headers: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::app::store::ResultRow::Header { file, count, .. } => {
+                    Some((file.clone(), *count))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec![("a.txt".to_string(), 3)],
+            "one group named after the buffer: {headers:?}");
+    }
+
+    /// `M-?` searches the identifier under point (line-level point; col 0
+    /// until the buffer model has a column cursor).
+    #[test]
+    fn references_at_point_searches_the_symbol() {
+        let (dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        // A plain-text file whose line 1 starts with the symbol (col 0 is
+        // on it, so no known-identifier fallback is needed).
+        std::fs::write(dir.path().join("src/plain.txt"), "target alpha\n").unwrap();
+        store.open_path("src/plain.txt");
+
+        store.key_event(key("M-?"));
+        assert_eq!(store.top_view(), ViewId::Search);
+        assert_eq!(store.search.query, "target");
+        assert_eq!(store.search.kind, crate::app::store::SearchKind::References);
+        drain_search_finished(&mut store, &mut rx);
+        // The plain-text hit is kept (fallback: .txt has no grammar);
+        // the .rs code hits survive the token filter.
+        assert!(
+            store.search.hits.iter().any(|h| h.file == "src/plain.txt"),
+            "the plain-text hit must be kept: {:?}",
+            store.search.hits
+        );
+    }
+
+    /// Events from a stale generation (a superseded job) are discarded;
+    /// events from the current generation apply.
+    #[test]
+    fn search_stale_generation_events_discarded() {
+        let (_dir, mut store) = search_project();
+        store.start_project_search("one".into());
+        let stale_gen = store.search.generation;
+        store.start_project_search("two".into());
+        let cur_gen = store.search.generation;
+        assert_eq!(cur_gen, stale_gen + 1);
+
+        let stale = crate::search::rg::SearchEvent::Hit {
+            file: "stale.txt".into(),
+            line_no: 1,
+            col: None,
+            line: "stale".into(),
+            generation: stale_gen,
+        };
+        store.apply_search_event(&stale);
+        assert!(store.search.hits.is_empty(), "stale hit must be discarded");
+
+        let fresh = crate::search::rg::SearchEvent::Hit {
+            file: "fresh.txt".into(),
+            line_no: 1,
+            col: None,
+            line: "fresh".into(),
+            generation: cur_gen,
+        };
+        store.apply_search_event(&fresh);
+        assert_eq!(store.search.hits.len(), 1, "current-generation hit applies");
     }
 }
 

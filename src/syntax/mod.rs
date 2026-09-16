@@ -5,3 +5,4 @@ pub mod cache;
 pub mod highlight;
 pub mod queries;
 pub mod registry;
+pub mod tokens;
