@@ -150,6 +150,12 @@ Semantics:
   receivers via `Sender::subscribe(&self) -> Receiver<T>`.
 - **`Sender::send(&self, value: T) -> Result<(), SendError<T>>` is sync**
   (also `send_modify`, `send_replace`).
+- **The value is retained only while at least one receiver is alive**: with
+  no live receiver, `send` returns `SendError` and the value is *not* stored
+  (so `Sender::borrow()` stays at the initial value). If you read the latest
+  via `borrow()`/`current()` while no consumer is subscribed, keep a keeper
+  receiver alive (verified: a watcher bus published with zero subscribers
+  left `borrow()` at the initial value).
 - `Receiver::changed(&mut self) -> Result<(), RecvError>` (async) — awaits
   until the value changes, then `borrow_and_update(&mut self) -> Ref<'_, T>`
   or `borrow(&self) -> Ref<'_, T>` (sync, no update). `has_changed()` is a
