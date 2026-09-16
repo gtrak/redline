@@ -122,7 +122,7 @@ element! {
         gap: 1,
         column_gap: 2,
         row_gap: 1,
-        overflow: Overflow::Hidden,  // Visible, Hidden, Scroll, Auto
+        overflow: Overflow::Hidden,  // Visible, Clip, Hidden, Scroll
         position: Position::Relative,  // Relative, Absolute
         top: 0, left: 0, right: 0, bottom: 0,  // for absolute positioning
     ) {
@@ -183,6 +183,7 @@ Props:
 - `has_focus: bool` - whether to process keyboard input
 - `on_change: HandlerMut<'static, String>` - callback when value changes
 - `multiline: bool` - enables multiline with Enter key
+- `auto_grow: bool` - with `multiline`, auto-grow height to fit wrapped content
 - `cursor_color: Option<Color>`
 - `handle: Option<Ref<TextInputHandle>>` - imperative control handle
 
@@ -208,6 +209,15 @@ element! {
 ```
 
 Triggered by: mouse click (fullscreen mode), Enter key, or Space key when focused.
+
+### `Checkbox`
+
+A controlled component for toggling a boolean value. New in iocraft 0.9.x (not present in 0.8).
+
+Props:
+- `checked: bool` - current checked state
+- `on_change: HandlerMut<'static, bool>` - called with the new (toggled) value
+- `has_focus: bool` - process keyboard input (Enter/Space)
 
 ### `ScrollView`
 
@@ -282,6 +292,14 @@ element! {
 ### `MixedText`
 
 Renders text with mixed styling segments.
+
+### 0.9.1 Additions
+
+- `Checkbox` component (see above).
+- `Text` has a new `hyperlink: Option<String>` prop (OSC 8 hyperlink target).
+- `TextInput` has a new `auto_grow: bool` prop (requires `multiline`) and accepts text style props (`color`, `weight`, `decoration`, `italic`, `invert`).
+- `Color` and the event types (`KeyEvent`, `KeyCode`, `KeyModifiers`, `KeyEventKind`, `MouseButton`, `MouseEventKind`) are now owned by iocraft (mirroring crossterm's model) rather than re-exports; `From`/`Into` conversions to `crossterm::event`/`crossterm::style` types are provided when the `crossterm` feature is enabled.
+- New variants: `Color::Reset`, `Overflow::Clip`, `MouseEventKind::ScrollLeft`/`ScrollRight`.
 
 ## Hooks
 
@@ -365,13 +383,13 @@ hooks.use_terminal_events(move |event| {
 
 `use_local_terminal_events` is similar but only receives events within the component's bounds (and translates mouse coordinates to local space).
 
-Terminal event types:
-- `KeyEvent { code, modifiers, kind, state }`
+Terminal event types (owned by iocraft in 0.9.x — they mirror crossterm's model, with `From`/`Into` conversions to crossterm types when the `crossterm` feature is enabled):
+- `KeyEvent { code, modifiers, kind }` — constructible via `KeyEvent::new(kind, code)`
   - `KeyCode::Char(c)`, `KeyCode::Up/Down/Left/Right`, `KeyCode::Enter`, `KeyCode::Backspace`, `KeyCode::Delete`, `KeyCode::Home`, `KeyCode::End`, `KeyCode::PageUp`, `KeyCode::PageDown`, `KeyCode::Tab`, `KeyCode::BackTab`, `KeyCode::Esc`, etc.
   - `KeyEventKind::Press`, `Release`, `Repeat`
   - `KeyModifiers::CONTROL`, `SHIFT`, `ALT`, etc.
 - `FullscreenMouseEvent { kind, row, column, modifiers }`
-  - `MouseEventKind::Down(button)`, `Up(button)`, `Drag(button)`, `Moved`, `ScrollUp`, `ScrollDown`
+  - `MouseEventKind::Down(button)`, `Up(button)`, `Drag(button)`, `Moved`, `ScrollUp`, `ScrollDown`, `ScrollLeft`, `ScrollRight`
   - `MouseButton::Left`, `Right`, `Middle`
 
 ### `use_terminal_size`
@@ -385,10 +403,10 @@ Returns terminal dimensions as `(u16, u16)`.
 ### `use_component_rect`
 
 ```rust
-let (position, size) = hooks.use_component_rect();
+let rect: Option<taffy::Rect<i32>> = hooks.use_component_rect();
 ```
 
-Gets the component's layout position and size.
+Gets the component's canvas position and size as a `taffy::Rect<i32>` (`left`/`top`/`right`/`bottom`), or `None` on the first frame. Note that using this hook causes an immediate second render, or a re-render whenever the rect changes.
 
 ### `use_memo`
 
@@ -402,11 +420,12 @@ let computed = hooks.use_memo(
 ### `use_output`
 
 ```rust
-let output = hooks.use_output();
-output.println("Log message above the rendered UI");
+let (stdout, stderr) = hooks.use_output();
+stdout.println("Log message above the rendered TUI");
+stderr.println("Log message above the rendered TUI (stderr)");
 ```
 
-Writes text output above the rendered TUI without breaking the layout.
+`use_output` returns a `(StdoutHandle, StderrHandle)` tuple; each handle offers `print` and `println`. Output is written above the rendered TUI without breaking the layout.
 
 ### `use_async_handler`
 
@@ -426,6 +445,12 @@ let constant = hooks.use_const(|| "static string".to_string());
 ```
 
 Caches a value computed once during the component's lifetime.
+
+### 0.9.1 Additions
+
+- `use_state_default::<T>()` - shorthand for `use_state(T::default)`.
+- `use_const_default::<T>()` - shorthand for `use_const(T::default)`.
+- `try_use_context_mut::<T>()` - mutable `Option<RefMut<T>>` context lookup.
 
 ## Custom Components
 
@@ -520,7 +545,7 @@ impl Component for MyCustomComponent {
 
 **Size:**
 - `width`, `height`, `min_width`, `min_height`, `max_width`, `max_height`
-- Types: `Size::Auto`, `Size::Length(u32)`, `Size::Percent(f32)`
+- Types: `Size::Unset`, `Size::Auto`, `Size::Length(u32)`, `Size::Percent(f32)`
 - Shorthand: `width: 10`, `width: 50pct`
 
 **Spacing:**
@@ -546,13 +571,13 @@ impl Component for MyCustomComponent {
 - Absolute positioning uses negative values to overlap: `margin_top: -1`
 
 **Overflow:**
-- `overflow`, `overflow_x`, `overflow_y`: `Visible`, `Hidden`, `Scroll`, `Auto`
+- `overflow`, `overflow_x`, `overflow_y`: `Visible`, `Clip`, `Hidden`, `Scroll`
 
 ### Colors
 
-Use `crossterm::style::Color`:
+Use `iocraft::Color` (re-exported in the prelude). It mirrors `crossterm::style::Color`, with `From`/`Into` conversions to crossterm's `Color` when the `crossterm` feature is enabled:
 ```rust
-Color::Black, Color::DarkGrey, Color::Grey, Color::White
+Color::Reset, Color::Black, Color::DarkGrey, Color::Grey, Color::White
 Color::Red, Color::DarkRed, Color::Green, Color::DarkGreen
 Color::Blue, Color::DarkBlue, Color::Cyan, Color::DarkCyan
 Color::Magenta, Color::DarkMagenta, Color::Yellow, Color::DarkYellow
@@ -674,7 +699,7 @@ hooks.use_future(async move {
 Add to `Cargo.toml`:
 ```toml
 [dependencies]
-iocraft = "0.8"
+iocraft = "0.9.1"
 tokio = { version = "1", features = ["full"] }  # or smol, async-std, etc.
 ```
 
@@ -682,6 +707,8 @@ Feature flags:
 - `unstable-output-streams` - enables custom stdout/stderr handles for render loops (has crossterm caveats)
 
 ## Common Gotchas
+
+<!-- not re-verified for 0.9.1 -->
 
 1. **Hooks ordering:** Hooks must be called in the same order every render. No conditional hook calls. Panics will result from violations.
 
@@ -845,7 +872,7 @@ while let Ok(new_data) = channel_ref.write().receiver.try_recv() {
 
 | Type | Values |
 |------|--------|
-| `Size` | `Auto`, `Length(u32)`, `Percent(f32)` |
+| `Size` | `Unset`, `Auto`, `Length(u32)`, `Percent(f32)` |
 | `Padding` | `Unset`, `Length(u32)`, `Percent(f32)` |
 | `Margin` | `Unset`, `Auto`, `Length(i32)`, `Percent(f32)` |
 | `Inset` | `Unset`, `Auto`, `Length(i32)`, `Percent(f32)` |
@@ -853,7 +880,7 @@ while let Ok(new_data) = channel_ref.write().receiver.try_recv() {
 | `Gap` | `Unset`, `Length(u32)`, `Percent(f32)` |
 | `Position` | `Relative`, `Absolute` |
 | `Display` | `Flex`, `None` |
-| `Overflow` | `Visible`, `Hidden`, `Scroll`, `Auto` |
+| `Overflow` | `Visible`, `Clip`, `Hidden`, `Scroll` |
 | `FlexDirection` | `Row`, `Column`, `RowReverse`, `ColumnReverse` |
 | `FlexWrap` | `Wrap`, `NoWrap` |
 | `AlignItems` | `FlexStart`, `FlexEnd`, `Center`, `Baseline`, `Stretch` |
