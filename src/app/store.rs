@@ -120,6 +120,8 @@ impl ViewId {
                 km
                     .bind(&[Key::alt_char('>')], "scroll-bottom")
                     .unwrap();
+                // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
+                km.bind(&[Key::ctrl_char('l')], "recenter").unwrap();
                 // Navigation (issue 05).
                 km
                     .bind(&[Key::alt_char('.')], "xref-find-definitions")
@@ -2462,6 +2464,67 @@ impl AppStore {
             .unwrap_or(0);
         let top = total.saturating_sub(self.viewport_lines);
         self.set_scroll_top(top);
+    }
+
+    /// `C-l` recenter cycle (plan 004 row 8): cycles the cursor position
+    /// through top → middle → bottom of the buffer. Emacs `C-l`
+    /// (`recenter-top-of-window`) cycles point's position within the
+    /// window; in our read-focused model the cursor IS the top of the
+    /// window, so the cycle operates on the scroll position relative to
+    /// the buffer extent.
+    pub fn recenter(&mut self) {
+        let total = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        if total <= 1 {
+            return;
+        }
+        let top = self.scroll_top();
+        let max_scroll = total.saturating_sub(self.viewport_lines);
+        if max_scroll == 0 {
+            // The whole buffer fits in the viewport; nothing to recenter.
+            return;
+        }
+        // Clamp the third so tiny scroll ranges (max_scroll 1-2) still
+        // cycle: with third=0 the bottom zone would be unreachable and C-l
+        // could never return to top after M-> on a barely-scrolling buffer.
+        let third = (max_scroll / 3).max(1);
+        if top <= third {
+            // At (or near) top → move to middle.
+            self.set_scroll_top(max_scroll / 2);
+        } else if top <= max_scroll - third {
+            // In the middle zone → move to bottom.
+            self.set_scroll_top(max_scroll);
+        } else {
+            // At (or near) bottom → move to top.
+            self.set_scroll_top(0);
+        }
+    }
+
+    /// Compact position display for the status line (plan 004 row 11):
+    /// `Top` at the first line, `Bot` at the last, otherwise
+    /// `L{n},{pct}%` where `n` is the 1-based line number and `pct` is
+    /// the integer percentage through the buffer.
+    pub fn file_view_position_display(&self) -> String {
+        let total = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        if total == 0 {
+            return String::new();
+        }
+        let line = self.scroll_top(); // 0-based
+        if line == 0 {
+            return "Top".to_string();
+        }
+        if line + self.viewport_lines >= total {
+            return "Bot".to_string();
+        }
+        let pct = (line * 100 + total / 2) / total.max(1);
+        format!("L{},{}%", line + 1, pct)
     }
 
     /// Pre-compute the visible lines for the file view: text from the
@@ -6549,7 +6612,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 83);
+        assert_eq!(store.picker_count().0, 84);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -6567,11 +6630,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 82);
+        assert_eq!(store.picker_selected(), 83);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 81);
+        assert_eq!(store.picker_selected(), 82);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op close, *scratch* is not editable, so just a message).
@@ -6606,7 +6669,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 83);
+        assert_eq!(store.picker_count().0, 84);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -6719,6 +6782,131 @@ mod tests {
         s.scroll_page_down();
         s.scroll_to_top();
         assert_eq!(s.scroll_top(), 0);
+    }
+
+    // ── plan 004 row 8: recenter cycle ────────────────────────────────
+
+    #[test]
+    fn recenter_cycles_top_to_middle() {
+        // viewport=10, total=100 → max_scroll=90, third=30.
+        // scroll_top=0 is in the top zone → move to middle (45).
+        let (mut s, _dir) = store_with_lines(100);
+        s.recenter();
+        assert_eq!(s.scroll_top(), 45, "top → middle");
+    }
+
+    #[test]
+    fn recenter_cycles_middle_to_bottom() {
+        // viewport=10, total=101 (100\n → ropey len_lines=101), max_scroll=91, third=30.
+        // scroll_top=45 is in the middle zone (30 < 45 <= 61) → move to bottom (91).
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_scroll_top(45);
+        s.recenter();
+        assert_eq!(s.scroll_top(), 91, "middle → bottom");
+    }
+
+    #[test]
+    fn recenter_cycles_bottom_to_top() {
+        // scroll_top=91 is in the bottom zone (91 > 61) → move to top (0).
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_scroll_top(91);
+        s.recenter();
+        assert_eq!(s.scroll_top(), 0, "bottom → top");
+    }
+
+    #[test]
+    fn recenter_full_cycle_returns_to_start() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.recenter(); // top → middle (45)
+        s.recenter(); // middle → bottom (91)
+        s.recenter(); // bottom → top (0)
+        assert_eq!(s.scroll_top(), 0, "full cycle returns to top");
+    }
+
+    #[test]
+    fn recenter_tiny_scroll_ranges_still_cycle() {
+        // Regression (plan-004-02 review): max_scroll in {1,2} made the
+        // bottom zone unreachable (third=0), so C-l could never return to
+        // top after M-> on a buffer 1-2 lines taller than the viewport.
+        // Regression (review): with third=0 the bottom zone was unreachable,
+        // so C-l could never return to top after M-> when the buffer is only
+        // 1-2 lines taller than the viewport. The clamp restores bottom->top.
+        // (A full positional 3-zone cycle is mathematically impossible for
+        // max_scroll <= 2 — the middle target lands inside the top zone — so
+        // the pinned contract is exactly the bottom->top edge.)
+        // store_with_lines(n) writes n lines + trailing \n -> ropey n+1
+        // lines; viewport=10 → max_scroll = n+1-10.
+        let (mut s, _dir) = store_with_lines(11); // max_scroll=2
+        s.set_scroll_top(2); // at bottom (M->)
+        s.recenter();
+        assert_eq!(s.scroll_top(), 0, "max_scroll=2: bottom -> top");
+        let (mut s, _dir) = store_with_lines(10); // max_scroll=1
+        s.set_scroll_top(1);
+        s.recenter();
+        assert_eq!(s.scroll_top(), 0, "max_scroll=1: bottom -> top");
+    }
+
+    #[test]
+    fn recenter_noop_when_buffer_fits_viewport() {
+        // total=5, viewport=10 → max_scroll=0 → no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = String::new();
+        for i in 0..5 {
+            c.push_str(&format!("line_{i}\n"));
+        }
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), &c).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.set_viewport_lines(10);
+        s.open_path("src/a.rs");
+        s.recenter();
+        assert_eq!(s.scroll_top(), 0, "no-op when buffer fits viewport");
+    }
+
+    // ── plan 004 row 11: position display ─────────────────────────────
+
+    #[test]
+    fn position_display_top() {
+        let (s, _dir) = store_with_lines(100);
+        assert_eq!(s.file_view_position_display(), "Top");
+    }
+
+    #[test]
+    fn position_display_bot() {
+        let (mut s, _dir) = store_with_lines(100);
+        // M-> equivalent: scroll_to_bottom lands at total - viewport_lines
+        s.scroll_to_bottom();
+        assert_eq!(s.file_view_position_display(), "Bot");
+    }
+
+    #[test]
+    fn position_display_middle() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_scroll_top(50); // line 51 (1-based), 50/101 → 50% (rounded)
+        assert_eq!(s.file_view_position_display(), "L51,50%");
+    }
+
+    #[test]
+    fn position_display_single_line_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "hello\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/a.rs");
+        assert_eq!(s.file_view_position_display(), "Top");
+    }
+
+    #[test]
+    fn position_display_empty_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let s = AppStore::at(dir.path(), base.path().to_path_buf());
+        // The scratch buffer has an empty rope: line_count()=1, scroll_top=0 → "Top".
+        assert_eq!(s.file_view_position_display(), "Top");
     }
 
     #[test]

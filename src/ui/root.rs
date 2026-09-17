@@ -177,6 +177,8 @@ struct Snapshot {
     search_running: bool,
     search_error: Option<String>,
     searching: String,
+    // Plan 004 row 11: file-view position display (Top/Bot/L{n},{pct}%).
+    position: String,
 }
 
 #[component]
@@ -414,6 +416,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             search_running: s.search_running(),
             search_error: s.search_error(),
             searching: s.search_display(),
+            position: s.file_view_position_display(),
         }
     };
 
@@ -576,6 +579,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 which_function: snap.which_function,
                 indexing: snap.indexing,
                 searching: snap.searching,
+                position: snap.position,
             )
         }
     }
@@ -615,6 +619,7 @@ struct StatusLineProps {
     pub which_function: String,
     pub indexing: String,
     pub searching: String,
+    pub position: String,
 }
 
 #[component]
@@ -648,6 +653,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     }
     if !props.searching.is_empty() {
         text.push_str(&format!("  *{}", props.searching));
+    }
+    if !props.position.is_empty() {
+        text.push_str(&format!("  {}", props.position));
     }
     element! {
         View(flex_shrink: 0.0, background_color: face_bg(face)) {
@@ -735,7 +743,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 83"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 84"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

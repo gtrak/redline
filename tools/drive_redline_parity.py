@@ -29,11 +29,27 @@ if __name__ == '__main__':
     root = '/tmp/redline_parity_repo'
     fixture(root)
     s = Session(root)
-    step(s, 'startup (file given)', b'\x06', 1.2)      # C-f to open file view on main.rs? or picker; observe first
+    step(s, 'startup (file given)', b'', 1.2)          # observe startup state
+    # Open src/main.rs (60 lines) before scroll/position/recenter legs
+    step(s, 'C-x C-f (find file)', b'\x18\x06', 0.8)
+    step(s, 'type main + RET (open src/main.rs)', b'main\r', 1.2)
     step(s, 'C-n x5', b'\x0e' * 5)
-    step(s, 'C-v', b'\x16')
+    # ── plan 004 row 9: scroll overlap (C-v / M-v leave 2 context rows) ──
+    step(s, 'C-v (page down, 2-row overlap)', b'\x16')
+    step(s, 'M-v (page up, 2-row overlap)', b'\x1bv')
     step(s, 'M-<', b'\x1b<')
     step(s, 'M->', b'\x1b>')
+    # ── plan 004 row 11: position segment in status line ──
+    # Observe the status line: at top it shows "Top", after C-n x5 it
+    # shows "L6,8%"-style, at bottom it shows "Bot".
+    step(s, 'position: after M-< (should show Top)', b'\x1b<')
+    step(s, 'position: C-n x5 (should show L6,~8%)', b'\x0e' * 5)
+    step(s, 'position: M-> (should show Bot)', b'\x1b>')
+    # ── plan 004 row 8: C-l recenter cycle (top → middle → bottom → top) ──
+    step(s, 'C-l cycle 1: at top → middle', b'\x0c')
+    step(s, 'C-l cycle 2: at middle → bottom', b'\x0c')
+    step(s, 'C-l cycle 3: at bottom → top', b'\x0c')
+    # ── isearch (plan 004 row 1: bound-letter interception) ──
     step(s, 'C-s isearch', b'\x13')
     # 'line_5' contains 'n' and 'l' which are depth-1 leaf commands in the
     # file view; the isearch interception must extend the query with every
@@ -45,10 +61,10 @@ if __name__ == '__main__':
     step(s, 'C-g', b'\x07')
     step(s, 'C-x C-f', b'\x18\x06', 1.0)
     step(s, 'type READ + RET', b'READ\r', 1.2)
+    # ── plan 004 row 6: C-x b (buffer switch, already bound) ──
     step(s, 'C-x b (buffer list)', b'\x18\x62', 1.0)
     step(s, 'RET (back to main.rs)', b'\r', 1.0)
     step(s, 'M-g g 30 RET', b'\x1bgg30\r', 1.0)
-    step(s, 'C-l', b'\x0c')
     step(s, 'M-x', b'\x1bx', 1.0)
     step(s, 'M-x type goto', b'goto', 1.0)
     step(s, 'M-x C-g', b'\x07')

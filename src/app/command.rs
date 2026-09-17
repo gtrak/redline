@@ -249,6 +249,12 @@ impl CommandRegistry {
             |store, _arg| store.scroll_to_bottom(),
         ));
         reg.register(Command::new(
+            "recenter",
+            "Recenter: cycle cursor position top → middle → bottom (C-l)",
+            "motion",
+            |store, _arg| store.recenter(),
+        ));
+        reg.register(Command::new(
             "goto-line",
             "Jump to a line number (M-g g)",
             "motion",
@@ -659,7 +665,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 83, "expected 83 seed commands: {names:?}");
+        assert_eq!(names.len(), 84, "expected 84 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -682,6 +688,7 @@ mod tests {
             "scroll-half-page-up",
             "scroll-top",
             "scroll-bottom",
+            "recenter",
             "goto-line",
             "isearch-forward",
             "isearch-backward",

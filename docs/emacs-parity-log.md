@@ -56,3 +56,12 @@ Implementation: rows 9/11 → plan-004 issue 02; row 14+select → issue 03;
 row 13+selection → issue 04. Only clear BUGS go forward without review
 (row 1, isearch — plan-004 issue 01). DEFER rows 6/8 get re-verified in
 the next battery regardless (verification, not decision).
+
+## Battery 1 follow-up — 2026-09-17 (plan-004 issue 02: parity adopts, batch 1)
+
+| # | Row | Disposition | Evidence |
+|---|---|---|---|
+| 6 | C-x b buffer switch | **VERIFIED — already bound** | `C-x b` → `switch-buffer` picker (binding present at store.rs global keymap; test `issue_02_bindings_resolve_including_c_c_p_prefix` asserts `expect("C-x b", "switch-buffer")`; battery step drives it: picker opens showing README.md, src/main.rs, *scratch* (3 of 3)). No new code needed. |
+| 8 | C-l recenter cycle | **ADOPT (implemented)** | New `recenter` command registered (motion category); `C-l` bound in the Buffer view keymap. Cycle: top zone → middle (`max_scroll/2`) → bottom (`max_scroll`) → top (`0`). Zones determined by thirds of the scroll range. Unit tests: `recenter_cycles_top_to_middle`, `recenter_cycles_middle_to_bottom`, `recenter_cycles_bottom_to_top`, `recenter_full_cycle_returns_to_start`, `recenter_noop_when_buffer_fits_viewport`. Battery leg (121-line fixture, viewport=27): from Bot, C-l→Top, C-l→Middle (`L48,39%`), C-l→Bottom (`Bot`). |
+| 9 | C-v/M-v 2-line overlap | **VERIFIED — already implemented** | `scroll_page_down`/`scroll_page_up` use `step = viewport - 2` (since plan-002 issue 03, "PART A fix item 5"). Unit tests: `scroll_page_down_keeps_two_line_overlap` (viewport=10, 100 lines: step=8, not 10). Battery legs (121-line fixture, viewport=27): C-v from `L6,4%` to `L31,25%` (step=25=viewport−2); M-v returns to `L6,4%` (step=25=viewport−2). 2-row overlap confirmed. |
+| 11 | Status-line position | **ADOPT (implemented)** | New `file_view_position_display()` on the store; format: `Top` at line 1, `Bot` when the window shows the buffer end (`scroll_top + viewport >= total`), otherwise `L{n},{pct}%` (1-based line, integer percent through the buffer, round-half-up). Appended to the status line after the searching indicator. Updates on every scroll/cursor movement (the status line re-renders every tick). Unit tests: `position_display_top`, `position_display_bot`, `position_display_middle`, `position_display_single_line_buffer`, `position_display_empty_buffer`. Battery legs (121-line fixture): after M-< shows `Top`, after C-n×5 shows `L6,4%`, after M-> shows `Bot`. |

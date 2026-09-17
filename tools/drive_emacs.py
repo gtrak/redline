@@ -80,7 +80,7 @@ KEYS = {
     'C-n': b'\x0e', 'C-p': b'\x10', 'C-f': b'\x06', 'C-b': b'\x02',
     'C-a': b'\x01', 'C-e': b'\x05', 'C-v': b'\x16', 'M-v': b'\x1bv',
     'M-<': b'\x1b<', 'M->': b'\x1b>', 'C-s': b'\x13', 'RET': b'\r',
-    'C-g': b'\x07', 'C-xC-f': b'\x18\x06', 'C-xb': b'\x182',
+    'C-g': b'\x07', 'C-xC-f': b'\x18\x06', 'C-xb': b'\x18b',
     'M-x': b'\x1bx', 'C-l': b'\x0c', 'C-x2': b'\x18\x12',
     'C-xo': b'\x18\x0f', 'C-x1': b'\x181', 'M-gg': b'\x1bg\x01b',
     'C-xC-c': b'\x18\x18', 'C-/': b'\x1f', 'C-aw': b'\x01\x17',
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     step(s, 'C-x C-f (find file)', b'\x18\x06')
     step(s, 'find-file type READ + tab', b'READ\t')
     step(s, 'find-file RET', b'\r', 1.0)
-    step(s, 'C-x b (switch buffer)', b'\x182')
+    step(s, 'C-x b (switch buffer)', b'\x18b')
     step(s, 'C-x b RET (back to main.rs)', b'\r', 0.8)
     step(s, 'M-g g 30 RET (goto line)', b'\x1bgg30\r')
     step(s, 'C-l (recenter)', b'\x0c')
