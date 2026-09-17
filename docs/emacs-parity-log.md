@@ -39,6 +39,7 @@ rewritten (a changed mind adds a new row).
 | 17 | dirty indicators | `**` modified flag in mode line | `*` dirty counts in status line | KEEP |
 | 18 | which-function | separate echo area / mode-line imenu entry | which-function in status line (verified in battery: `(line_48)`) | KEEP (already better: always visible) |
 
+| 19 | no-buffer state | emacs -Q shows *scratch* (+ splash) | **discovery home**: derived keymap×registry menu replaces *scratch* entirely (user directive 2026-09-17) | KEEP (deliberate divergence: discovery over scratch; emacs muscle memory bindings unchanged) |
 ## Findings vs battery notes
 
 - The isearch bug (#1) is the only functional defect found in battery 1.

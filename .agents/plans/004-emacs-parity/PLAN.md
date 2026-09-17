@@ -1,7 +1,7 @@
 # 004 — Redline: emacs-parity polish
 
 Status: planned
-Phases: 1 · Issues: 01–05
+Phases: 1 · Issues: 01–06
 
 ## Why
 
@@ -59,6 +59,7 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 | 1 | 05 cursor visibility (user-reported) | 01 |
 | 1 | 03 mark & kill/yank | 02 |
 | 1 | 04 quit save-prompt | 03 |
+| 1 | 06 discovery home (drop *scratch*) | 04 |
 
 ## Issue index
 
@@ -67,5 +68,6 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 - [03 — mark & kill/yank](03-mark-and-kill-yank.md)
 - [04 — quit save-prompt](04-quit-save-prompt.md)
 - [05 — cursor visibility on real terminals](05-cursor-visibility.md)
+- [06 — discovery home](06-discovery-home.md)
 
 When complete, archive per plan-process.
