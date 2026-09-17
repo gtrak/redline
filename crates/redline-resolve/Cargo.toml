@@ -1,0 +1,13 @@
+[package]
+name = "redline-resolve"
+version = "0.1.0"
+edition = "2024"
+description = "Language/tooling-aware symbol resolution for redline: workspace xref fall-through to cargo (and later other tools)"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+anyhow = "1.0.104"
+
+[dev-dependencies]
+tempfile = "3.27"

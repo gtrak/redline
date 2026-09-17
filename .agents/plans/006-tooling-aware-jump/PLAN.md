@@ -15,6 +15,15 @@ Definitions in dependencies (tokio::spawn, serde::Deserialize) go nowhere.
 The user wants the jump to fall through to the language's own tooling:
 resolve where a crate's real source lives and fetch it on demand.
 
+## Architecture (revised 2026-09-17)
+
+The repo is now a **Cargo workspace** (root package `redline` + `crates/*`).
+The resolver lives in its own crate **`redline-resolve`** — app-free (no
+iocraft/store): plain inputs (project root, symbol context) → plain
+locations. This is what makes provider work parallel-safe with UX lanes
+(disjoint file trees). The app consumes it as a dependency; deeper core/ui
+splits are a later plan if ever needed.
+
 ## What
 
 1. **Issue 01 — resolver chain architecture + Rust/cargo provider**: M-.
@@ -61,6 +70,7 @@ resolve where a crate's real source lives and fetch it on demand.
 ## Issue index
 
 - [01 — resolver chain + cargo provider](01-resolver-chain.md)
-- [02 — external source polish](02-external-sources.md)
+- [02 — app wiring: M-. fall-through](02-app-wiring.md)
+- [03 — external source polish](03-external-sources.md)
 
 When complete, archive per plan-process.

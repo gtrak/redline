@@ -5590,8 +5590,10 @@ impl AppStore {
             // Other keys: swallow (no "unbound key" echo mid-prompt).
             return;
         }
-        // Isearch mode: printable chars extend the query, n/N navigate,
-        // RET confirms, C-g cancels (restores pre-search position).
+        // Isearch mode: every printable self-inserts into the query (run
+        // before any keymap dispatch, the isearch analogue of the notes
+        // editable branch in plan-002 issue 05). Chords keep their isearch
+        // semantics: C-s next, C-r reverse, RET end, C-g cancel, DEL rubout.
         if self.isearch.active {
             if key == Key::ctrl_char('g') {
                 self.isearch_cancel();
@@ -5599,14 +5601,6 @@ impl AppStore {
             }
             if key.code == KeyCode::Enter {
                 self.isearch_confirm();
-                return;
-            }
-            if key == Key::char('n') {
-                self.isearch_next();
-                return;
-            }
-            if key == Key::char('N') {
-                self.isearch_prev();
                 return;
             }
             // PART A fix (item 5): C-s / C-r while isearch is active repeat
@@ -6838,6 +6832,136 @@ mod tests {
         s.isearch_start(IsearchDirection::Forward);
         s.isearch_query_char('\u{e9}'); // é
         assert_eq!(s.isearch_match_count(), 3);
+    }
+
+    #[test]
+    fn isearch_bound_command_letters_extend_query() {
+        // Regression: keys that are depth-1 leaf commands in the file view
+        // (n, p, l, g, q) must extend the isearch query, not dispatch.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // Content with "line_5" on line 5 so the full query matches.
+        let lines: Vec<String> = (1..=10).map(|i| format!("fn line_{}() {{\n", i)).collect();
+        std::fs::write(root.join("src/t.rs"), lines.join("")).unwrap();
+        let mut s = store(root);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        // Type each character of "line_5" via key_event (the bug path).
+        for c in "line_5".chars() {
+            s.key_event(Key::char(c));
+        }
+        assert_eq!(s.isearch.query, "line_5", "all printables must extend the query");
+        assert!(s.isearch.active);
+    }
+
+    #[test]
+    fn isearch_match_count_continuity_while_typing() {
+        // Match count must update as each character is typed, including
+        // bound-command letters (n, p, l, g, q) inside the query.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // "gamma" is the only line with a 'g'; typing "gamma" one char at a
+        // time (including 'n'... wait, no 'n' in gamma). Use "gnome" style:
+        // "gnome" appears once; 'g' matches, 'gn' matches, 'gno' matches,
+        // 'gnom' matches, 'gnome' matches – all with count 1, and 'n'
+        // (the 2nd char) must extend the query, not navigate.
+        std::fs::write(
+            root.join("src/t.rs"),
+            "gnome\nalpha\nbeta\n",
+        )
+        .unwrap();
+        let mut s = store(root);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.key_event(Key::char('g'));
+        assert_eq!(s.isearch.query, "g");
+        assert_eq!(s.isearch_match_count(), 1);
+        // 'n' is the key that was dropped by the old code – it must extend
+        // the query, not call isearch_next().
+        s.key_event(Key::char('n'));
+        assert_eq!(s.isearch.query, "gn");
+        assert_eq!(s.isearch_match_count(), 1);
+        s.key_event(Key::char('o'));
+        assert_eq!(s.isearch.query, "gno");
+        assert_eq!(s.isearch_match_count(), 1);
+        s.key_event(Key::char('m'));
+        assert_eq!(s.isearch.query, "gnom");
+        assert_eq!(s.isearch_match_count(), 1);
+        s.key_event(Key::char('e'));
+        assert_eq!(s.isearch.query, "gnome");
+        assert_eq!(s.isearch_match_count(), 1);
+    }
+
+    #[test]
+    fn isearch_c_s_c_r_ret_c_g_unchanged() {
+        // Chords (C-s, C-r, RET, C-g) keep their isearch semantics after
+        // the printable-interception fix.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/t.rs"),
+            "foo bar foo baz foo qux\n",
+        )
+        .unwrap();
+        let mut s = store(root);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.key_event(Key::char('f'));
+        s.key_event(Key::char('o'));
+        s.key_event(Key::char('o'));
+        assert!(s.isearch.active);
+        assert_eq!(s.isearch_match_count(), 3);
+        // C-s advances to next match.
+        let before = s.isearch.current;
+        s.key_event(Key::ctrl_char('s'));
+        assert_eq!(s.isearch.current, (before + 1) % 3, "C-s must advance");
+        assert!(s.isearch.active);
+        // C-r moves to previous match.
+        s.key_event(Key::ctrl_char('r'));
+        assert_eq!(s.isearch.current, before, "C-r must go back");
+        assert!(s.isearch.active);
+        // RET confirms and deactivates.
+        s.key_event(Key::new(KeyCode::Enter));
+        assert!(!s.isearch.active);
+        // C-g cancels (start a new search first).
+        s.isearch_start(IsearchDirection::Forward);
+        s.key_event(Key::char('f'));
+        assert!(s.isearch.active);
+        s.key_event(Key::ctrl_char('g'));
+        assert!(!s.isearch.active);
+    }
+
+    #[test]
+    fn isearch_regression_guard_n_is_not_navigation() {
+        // Discriminating test: with the old code, key('n') during isearch
+        // called isearch_next() and left the query unchanged. With the fix,
+        // it appends 'n' to the query.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/t.rs"), "line_5\nline_5\n").unwrap();
+        let mut s = store(root);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.key_event(Key::char('l'));
+        assert_eq!(s.isearch.query, "l");
+        s.key_event(Key::char('i'));
+        assert_eq!(s.isearch.query, "li");
+        // This is the character that was dropped by the old code.
+        s.key_event(Key::char('n'));
+        assert_eq!(s.isearch.query, "lin", "'n' must extend the query, not navigate");
+        s.key_event(Key::char('e'));
+        s.key_event(Key::char('_'));
+        s.key_event(Key::char('5'));
+        assert_eq!(s.isearch.query, "line_5");
+        assert_eq!(s.isearch_match_count(), 2);
     }
 
     #[test]

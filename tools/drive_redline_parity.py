@@ -35,13 +35,17 @@ if __name__ == '__main__':
     step(s, 'M-<', b'\x1b<')
     step(s, 'M->', b'\x1b>')
     step(s, 'C-s isearch', b'\x13')
-    step(s, 'type line_5', b'line_5', 1.0)
+    # 'line_5' contains 'n' and 'l' which are depth-1 leaf commands in the
+    # file view; the isearch interception must extend the query with every
+    # printable, not drop or dispatch them. With the old code the query
+    # would be 'lie_5' (the 'n' vanished); with the fix it is 'line_5'.
+    step(s, 'type line_5 (bound-letter interception)', b'line_5', 1.0)
     step(s, 'C-s again', b'\x13', 0.6)
     step(s, 'RET (end at match)', b'\r', 0.6)
     step(s, 'C-g', b'\x07')
     step(s, 'C-x C-f', b'\x18\x06', 1.0)
     step(s, 'type READ + RET', b'READ\r', 1.2)
-    step(s, 'C-x b', b'\x182', 1.0)
+    step(s, 'C-x b (buffer list)', b'\x18\x62', 1.0)
     step(s, 'RET (back to main.rs)', b'\r', 1.0)
     step(s, 'M-g g 30 RET', b'\x1bgg30\r', 1.0)
     step(s, 'C-l', b'\x0c')
