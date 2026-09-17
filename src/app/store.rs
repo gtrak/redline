@@ -122,6 +122,22 @@ impl ViewId {
                     .unwrap();
                 // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
                 km.bind(&[Key::ctrl_char('l')], "recenter").unwrap();
+                // Plan 004 issue 03: mark/region + kill ring.
+                // C-SPC: set-mark. The terminal delivers C-SPC as NUL,
+                // which crossterm/iocraft decode as Char(' ') + CONTROL.
+                // The binding must match that representation.
+                km.bind(&[Key::ctrl_char(' ')], "set-mark").unwrap();
+                // C-w: kill-region.
+                km.bind(&[Key::ctrl_char('w')], "kill-region").unwrap();
+                // M-w: copy-region-to-kill-ring.
+                km.bind(&[Key::alt_char('w')], "copy-region").unwrap();
+                // C-y: yank.
+                km.bind(&[Key::ctrl_char('y')], "yank").unwrap();
+                // M-y: yank-pop.
+                km.bind(&[Key::alt_char('y')], "yank-pop").unwrap();
+                // C-x C-x: exchange point and mark.
+                km.bind(&[Key::ctrl_char('x'), Key::ctrl_char('x')], "exchange-point-and-mark")
+                    .unwrap();
                 // Navigation (issue 05).
                 km
                     .bind(&[Key::alt_char('.')], "xref-find-definitions")
@@ -711,6 +727,53 @@ const LOG_PAGE: usize = 25;
 const PREVIEW_LINES: usize = 32;
 const PREVIEW_MAX_BYTES: usize = 64 * 1024;
 
+/// The kill ring: a bounded LIFO of text strings (emacs depth 60).
+/// Shared across all buffers (kill in a read-only view, yank in notes).
+#[derive(Debug, Clone, Default)]
+pub struct KillRing {
+    entries: Vec<String>,
+}
+
+impl KillRing {
+    const MAX: usize = 60;
+
+    /// Push a string onto the ring (most recent first). Empty strings and
+    /// consecutive duplicates at the top are suppressed.
+    pub fn push(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.entries.first() == Some(&text) {
+            return;
+        }
+        self.entries.insert(0, text);
+        if self.entries.len() > Self::MAX {
+            self.entries.pop();
+        }
+    }
+
+    /// The most recent entry (for yank).
+    pub fn top(&self) -> Option<&str> {
+        self.entries.first().map(|s| s.as_str())
+    }
+
+    /// The entry at depth `n` (0 = most recent, 1 = previous, etc.).
+    pub fn at(&self, n: usize) -> Option<&str> {
+        self.entries.get(n).map(|s| s.as_str())
+    }
+
+    /// Number of entries in the ring.
+    #[allow(dead_code)] // public API: used by tests and future UI wiring
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[allow(dead_code)] // public API: used by tests and future UI wiring
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 pub struct AppStore {
     pub theme: Theme,
     pub registry: CommandRegistry,
@@ -868,6 +931,16 @@ pub struct AppStore {
     /// change: its next matching event is ignored so we don't flag the
     /// buffer "changed on disk" over our own write (issue 05, finding 2).
     created_paths: HashSet<String>,
+    // ── plan 004 issue 03: mark/region + kill ring ──────────────────────
+    /// The shared kill ring (emacs depth 60; shared across all buffers).
+    kill_ring: KillRing,
+    /// Byte offset where the last yank was inserted (for M-y yank-pop).
+    yank_pos: Option<usize>,
+    /// Length of the last yanked text (for M-y yank-pop).
+    yank_len: Option<usize>,
+    /// Kill ring depth for yank-pop (M-y cycles backward from 0).
+    /// `None` when no yank is in progress.
+    yank_ring_index: Option<usize>,
 }
 
 impl AppStore {
@@ -1050,6 +1123,10 @@ impl AppStore {
             menu: TransientMenuState::default(),
             discard_confirm: None,
             created_paths: HashSet::new(),
+            kill_ring: KillRing::default(),
+            yank_pos: None,
+            yank_len: None,
+            yank_ring_index: None,
         }
     }
 
@@ -1413,6 +1490,306 @@ impl AppStore {
             buf.locally_modified = true;
             self.invalidate_highlight_for_key(&key);
         }
+    }
+
+    // ── plan 004 issue 03: mark / region / kill ring / yank ───────────
+
+    /// The current buffer's "point" as a byte offset: the start of the line
+    /// at `scroll_top`. Returns `None` when there is no current buffer.
+    fn current_point_byte(&self) -> Option<usize> {
+        let key = self.buffers.current()?.to_string();
+        let buf = self.buffers.get(&key)?;
+        let line = self.scroll_top();
+        buf.rope.try_line_to_byte(line.min(buf.line_count().saturating_sub(1))).ok()
+    }
+
+    /// The region's normalized byte range [start, end) for the current buffer,
+    /// or `None` when no mark is set.
+    pub fn region_byte_range(&self) -> Option<(usize, usize)> {
+        let key = self.buffers.current()?.to_string();
+        let buf = self.buffers.get(&key)?;
+        let mark = buf.mark?;
+        let point = self.current_point_byte()?;
+        let start = mark.min(point);
+        let end = mark.max(point);
+        if start == end {
+            None
+        } else {
+            Some((start, end))
+        }
+    }
+
+    /// The region size in bytes (for the status line display). `None` when
+    /// no mark is set or the region is empty.
+    pub fn region_size_bytes(&self) -> Option<usize> {
+        self.region_byte_range()
+            .map(|(s, e)| e - s)
+    }
+
+    /// The region's line range (start_line, end_line inclusive) in buffer
+    /// line indices, for the file view's region face rendering. `None` when
+    /// no mark is set or the region is empty.
+    pub fn region_line_range(&self) -> Option<(usize, usize)> {
+        let (byte_start, byte_end) = self.region_byte_range()?;
+        let key = self.buffers.current()?.to_string();
+        let buf = self.buffers.get(&key)?;
+        let start_line = buf.rope.try_byte_to_line(byte_start).ok()?;
+        // end is exclusive; the last line in the region is the line
+        // containing byte_end - 1 (the last byte of the region).
+        let last_byte = byte_end.saturating_sub(1);
+        let end_line = buf.rope.try_byte_to_line(last_byte).ok()?;
+        Some((start_line, end_line))
+    }
+
+    /// C-SPC: set the mark at the current point. Echoes "Mark set".
+    pub fn set_mark(&mut self) {
+        let point = match self.current_point_byte() {
+            Some(p) => p,
+            None => {
+                self.minibuffer_message("no buffer");
+                return;
+            }
+        };
+        let key = self.buffers.current().map(String::from);
+        if let Some(key) = key
+            && let Some(buf) = self.buffers.get_mut(&key)
+        {
+            buf.mark = Some(point);
+        }
+        self.minibuffer_message("Mark set");
+    }
+
+    /// C-x C-x: exchange point and mark. If no mark is set, no-op.
+    /// After the exchange, the cursor is at where the mark was, and the mark
+    /// is at where the point was.
+    pub fn exchange_point_and_mark(&mut self) {
+        let key = match self.buffers.current().map(String::from) {
+            Some(k) => k,
+            None => {
+                self.minibuffer_message("no buffer");
+                return;
+            }
+        };
+        let (mark, point) = {
+            let buf = match self.buffers.get(&key) {
+                Some(b) => b,
+                None => {
+                    self.minibuffer_message("no buffer");
+                    return;
+                }
+            };
+            (buf.mark, self.current_point_byte())
+        };
+        let Some(mark) = mark else {
+            self.minibuffer_message("Mark not set");
+            return;
+        };
+        let Some(point) = point else { return };
+        // Scroll to the line where the mark was (the new point).
+        let mark_line = self
+            .buffers
+            .get(&key)
+            .and_then(|b| b.rope.try_byte_to_line(mark).ok())
+            .unwrap_or(0);
+        self.set_scroll_top(mark_line);
+        // Set the mark to the old point.
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.mark = Some(point);
+        }
+    }
+
+    /// C-w: kill the region. In editable buffers, removes the text and saves
+    /// it to the kill ring. In read-only buffers, saves the text to the kill
+    /// ring without modifying the buffer (emacs read-only kill-ring-save).
+    /// Clears the mark after the operation.
+    pub fn kill_region(&mut self) {
+        let range = match self.region_byte_range() {
+            Some(r) => r,
+            None => {
+                self.minibuffer_message("Mark not set");
+                return;
+            }
+        };
+        let key = self.buffers.current().map(String::from).unwrap_or_default();
+        let (editable, text, char_start, char_end) = {
+            let Some(buf) = self.buffers.get(&key) else {
+                self.minibuffer_message("no buffer");
+                return;
+            };
+            // Convert byte offsets to char offsets (ropey edit APIs are char-index based).
+            let char_start = buf.rope.byte_to_char(range.0);
+            let char_end = buf.rope.byte_to_char(range.1);
+            let text = buf.rope.slice(char_start..char_end).to_string();
+            (buf.editable, text, char_start, char_end)
+        };
+        // Save to the kill ring (always, regardless of editable).
+        self.kill_ring.push(text.clone());
+        // In editable buffers, remove the text from the rope.
+        if editable {
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.rope.remove(char_start..char_end);
+                buf.locally_modified = true;
+                buf.mark = None;
+            }
+            self.invalidate_highlight_for_key(&key);
+            // Adjust scroll to keep the view sane after the text removal.
+            let total = self
+                .buffers
+                .get(&key)
+                .map(|b| b.line_count())
+                .unwrap_or(0);
+            let top = self.scroll_top();
+            if total > 0 && top >= total.saturating_sub(1) {
+                self.set_scroll_top(total.saturating_sub(1));
+            }
+        } else {
+            // Read-only: clear the mark (region is consumed).
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.mark = None;
+            }
+        }
+        // Reset yank-pop state (a new kill is not a yank).
+        self.yank_pos = None;
+        self.yank_len = None;
+        self.yank_ring_index = None;
+        self.minibuffer_message(&format!("{} bytes killed", range.1 - range.0));
+    }
+
+    /// M-w: copy the region to the kill ring (no removal; works in both
+    /// editable and read-only buffers). Keeps the mark active.
+    pub fn copy_region(&mut self) {
+        let range = match self.region_byte_range() {
+            Some(r) => r,
+            None => {
+                self.minibuffer_message("Mark not set");
+                return;
+            }
+        };
+        let key = self.buffers.current().map(String::from).unwrap_or_default();
+        let text = {
+            let Some(buf) = self.buffers.get(&key) else {
+                self.minibuffer_message("no buffer");
+                return;
+            };
+            // Convert byte offsets to char offsets (ropey slice is char-index based).
+            let char_start = buf.rope.byte_to_char(range.0);
+            let char_end = buf.rope.byte_to_char(range.1);
+            buf.rope.slice(char_start..char_end).to_string()
+        };
+        self.kill_ring.push(text);
+        // Reset yank-pop state.
+        self.yank_pos = None;
+        self.yank_len = None;
+        self.yank_ring_index = None;
+        self.minibuffer_message(&format!("{} bytes copied to kill ring", range.1 - range.0));
+    }
+
+    /// C-y: yank the most recent kill ring entry at the current point.
+    /// Only works in editable buffers. Sets the yank-pop state for M-y.
+    pub fn yank(&mut self) {
+        let text = match self.kill_ring.top() {
+            Some(t) => t.to_string(),
+            None => {
+                self.minibuffer_message("Kill ring is empty");
+                return;
+            }
+        };
+        let key = match self.buffers.current().map(String::from) {
+            Some(k) => k,
+            None => {
+                self.minibuffer_message("no buffer");
+                return;
+            }
+        };
+        let editable = self
+            .buffers
+            .get(&key)
+            .map(|b| b.editable)
+            .unwrap_or(false);
+        if !editable {
+            self.minibuffer_message("Buffer is read-only");
+            return;
+        }
+        let point_byte = match self.current_point_byte() {
+            Some(p) => p,
+            None => {
+                self.minibuffer_message("no buffer");
+                return;
+            }
+        };
+        let point_char = {
+            let buf = self.buffers.get(&key).unwrap();
+            buf.rope.byte_to_char(point_byte)
+        };
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope.insert(point_char, &text);
+            buf.locally_modified = true;
+            // Clear the mark (the text insertion shifts byte offsets).
+            buf.mark = None;
+        }
+        self.invalidate_highlight_for_key(&key);
+        // Set the yank-pop state (char offsets for ropey edit APIs).
+        self.yank_pos = Some(point_char);
+        self.yank_len = Some(text.chars().count());
+        self.yank_ring_index = Some(0);
+        // No scroll adjustment: the insertion is at the current top line,
+        // so the view is already anchored correctly (finding 4 fix).
+    }
+
+    /// M-y: yank-pop — replace the last yanked text with the previous kill
+    /// ring entry. Only valid immediately after C-y or another M-y.
+    pub fn yank_pop(&mut self) {
+        let Some(idx) = self.yank_ring_index else {
+            self.minibuffer_message("Yank-pop: no previous yank");
+            return;
+        };
+        let next = idx + 1;
+        let text = match self.kill_ring.at(next) {
+            Some(t) => t.to_string(),
+            None => {
+                self.minibuffer_message("Yank-pop: end of kill ring");
+                return;
+            }
+        };
+        let key = match self.buffers.current().map(String::from) {
+            Some(k) => k,
+            None => {
+                self.minibuffer_message("no buffer");
+                return;
+            }
+        };
+        let (yank_pos, yank_len) = match (self.yank_pos, self.yank_len) {
+            (Some(p), Some(l)) => (p, l),
+            _ => {
+                self.minibuffer_message("Yank-pop: no previous yank");
+                return;
+            }
+        };
+        let editable = self
+            .buffers
+            .get(&key)
+            .map(|b| b.editable)
+            .unwrap_or(false);
+        if !editable {
+            self.minibuffer_message("Buffer is read-only");
+            return;
+        }
+        let end = (yank_pos + yank_len).min(
+            self.buffers
+                .get(&key)
+                .map(|b| b.rope.len_chars())
+                .unwrap_or(0),
+        );
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope.remove(yank_pos..end);
+            buf.rope.insert(yank_pos, &text);
+            buf.locally_modified = true;
+            buf.mark = None;
+        }
+        self.invalidate_highlight_for_key(&key);
+        self.yank_len = Some(text.chars().count());
+        self.yank_ring_index = Some(next);
+        // No scroll adjustment: the replacement is at the current top line.
     }
 
     /// Open the project-relative file in a buffer and make it current;
@@ -5863,8 +6240,8 @@ impl AppStore {
         Ok(())
     }
 
-    /// C-g semantics: clear a pending sequence, close the picker, and
-    /// echo a cancel notice in the minibuffer.
+    /// C-g semantics: clear a pending sequence, close the picker, clear the
+    /// mark (plan 004 issue 03), and echo a cancel notice in the minibuffer.
     pub fn cancel(&mut self) {
         let mut did = false;
         if !self.pending.is_empty() {
@@ -5872,6 +6249,14 @@ impl AppStore {
             did = true;
         }
         if self.picker.take().is_some() {
+            did = true;
+        }
+        // Clear the mark on the current buffer (plan 004 issue 03).
+        if let Some(key) = self.buffers.current().map(String::from)
+            && let Some(buf) = self.buffers.get_mut(&key)
+            && buf.mark.is_some()
+        {
+            buf.mark = None;
             did = true;
         }
         if did {
@@ -6612,7 +6997,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 84);
+        assert_eq!(store.picker_count().0, 90);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -6630,11 +7015,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 83);
+        assert_eq!(store.picker_selected(), 89);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 82);
+        assert_eq!(store.picker_selected(), 88);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op close, *scratch* is not editable, so just a message).
@@ -6669,7 +7054,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 84);
+        assert_eq!(store.picker_count().0, 90);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -9780,6 +10165,515 @@ mod tests {
             "access-only batch must not set changed_on_disk"
         );
         assert!(!s.current_buffer_changed_on_disk());
+    }
+
+    // ── plan 004 issue 03: mark / region / kill ring / yank tests ──────
+
+    /// A store with a multi-line editable buffer (notes) for mark/region tests.
+    fn notes_store_with_lines(n_lines: usize) -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        // Type n_lines lines into the notes buffer.
+        for _ in 0..n_lines {
+            s.notes_insert_char('x');
+            s.notes_insert_char('\n');
+        }
+        (s, dir)
+    }
+
+    #[test]
+    fn set_mark_sets_buffer_mark_and_echoes() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        assert!(s.buffers.get(&key).unwrap().mark.is_none(), "no mark initially");
+        s.set_mark();
+        assert!(s.buffers.get(&key).unwrap().mark.is_some(), "mark must be set");
+        assert_eq!(s.message, "Mark set");
+    }
+
+    #[test]
+    fn region_byte_range_returns_normalized_range() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        // Set mark at line 2 (byte offset of line 2's start).
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        // Scroll to line 5: point is at line 5's start.
+        s.set_scroll_top(5);
+        let range = s.region_byte_range().unwrap();
+        let line5_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(5).unwrap();
+        assert_eq!(range.0, line2_byte, "start = min(mark, point)");
+        assert_eq!(range.1, line5_byte, "end = max(mark, point)");
+    }
+
+    #[test]
+    fn region_byte_range_none_when_mark_not_set() {
+        let (s, _dir) = notes_store_with_lines(10);
+        assert!(s.region_byte_range().is_none());
+    }
+
+    #[test]
+    fn region_size_bytes_returns_correct_size() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        let size = s.region_size_bytes().unwrap();
+        assert!(size > 0, "region must have a positive size");
+    }
+
+    #[test]
+    fn region_line_range_returns_correct_lines() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        let (start, end) = s.region_line_range().unwrap();
+        assert_eq!(start, 2, "region starts at line 2");
+        assert_eq!(end, 4, "region ends at line 4 (end byte is exclusive: line 5's start)");
+    }
+
+    #[test]
+    fn c_g_clears_mark() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let bkey = s.buffers.current().unwrap().to_string();
+        s.set_mark();
+        assert!(s.buffers.get(&bkey).unwrap().mark.is_some());
+        s.key_event(key("C-g"));
+        assert!(s.buffers.get(&bkey).unwrap().mark.is_none(), "C-g must clear the mark");
+    }
+
+    #[test]
+    fn exchange_point_and_mark_swaps_positions() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        // Set mark at line 2.
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        // Point is at line 0 (scroll_top = 0).
+        assert_eq!(s.scroll_top(), 0);
+        s.exchange_point_and_mark();
+        // After exchange: point should be at line 2, mark should be at line 0's byte.
+        assert_eq!(s.scroll_top(), 2, "point must move to where mark was");
+        let line0_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(0).unwrap();
+        assert_eq!(s.buffers.get(&key).unwrap().mark, Some(line0_byte), "mark must be at old point");
+    }
+
+    #[test]
+    fn exchange_point_and_mark_noop_when_no_mark() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        assert_eq!(s.scroll_top(), 0);
+        s.exchange_point_and_mark();
+        assert_eq!(s.scroll_top(), 0, "no-op when mark not set");
+        assert!(s.message.contains("Mark not set"));
+    }
+
+    #[test]
+    fn copy_region_pushes_to_kill_ring() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let bkey = s.buffers.current().unwrap().to_string();
+        let line2_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        let region_text = s.buffers.get(&bkey).unwrap()
+            .rope.slice(line2_byte..s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(5).unwrap())
+            .to_string();
+        s.copy_region();
+        assert!(s.message.contains("copied to kill ring"));
+        // The kill ring should now hold the region text.
+        assert_eq!(s.kill_ring.top(), Some(region_text.as_str()));
+    }
+
+    #[test]
+    fn kill_region_removes_text_in_editable_buffer() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        let len_before = s.buffers.get(&key).unwrap().rope.len_bytes();
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        let line5_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(5).unwrap();
+        s.kill_region();
+        let len_after = s.buffers.get(&key).unwrap().rope.len_bytes();
+        assert!(len_after < len_before, "kill must remove text");
+        assert_eq!(len_before - len_after, line5_byte - line2_byte, "exactly the region bytes removed");
+        // Mark is cleared after kill.
+        assert!(s.buffers.get(&key).unwrap().mark.is_none());
+        // Kill ring holds the removed text.
+        assert!(!s.kill_ring.is_empty());
+    }
+
+    #[test]
+    fn kill_region_read_only_copies_without_removing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut content = String::new();
+        for i in 0..10 {
+            content.push_str(&format!("line{}\n", i));
+        }
+        std::fs::write(dir.path().join("src/t.rs"), &content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        let bkey = s.buffers.current().unwrap().to_string();
+        let len_before = s.buffers.get(&bkey).unwrap().rope.len_bytes();
+        // Set mark at line 2.
+        let line2_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        s.kill_region();
+        // Buffer is unchanged (read-only).
+        assert_eq!(s.buffers.get(&bkey).unwrap().rope.len_bytes(), len_before);
+        // Kill ring has the text.
+        assert!(!s.kill_ring.is_empty());
+        // Mark is cleared.
+        assert!(s.buffers.get(&bkey).unwrap().mark.is_none());
+    }
+
+    #[test]
+    fn yank_inserts_at_point_in_editable_buffer() {
+        let (mut s, _dir) = notes_store_with_lines(5);
+        let bkey = s.buffers.current().unwrap().to_string();
+        // First, copy some text to the kill ring.
+        let line1_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
+        let _line3_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(3).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line1_byte);
+        }
+        s.set_scroll_top(3);
+        s.copy_region();
+        let yank_text = s.kill_ring.top().unwrap().to_string();
+        let len_before = s.buffers.get(&bkey).unwrap().rope.len_bytes();
+        // Now yank at line 0.
+        s.set_scroll_top(0);
+        s.yank();
+        let len_after = s.buffers.get(&bkey).unwrap().rope.len_bytes();
+        assert_eq!(len_after - len_before, yank_text.len(), "yank must insert the ring text");
+        // The inserted text is at the start (line 0's byte offset).
+        let buf_text = s.buffers.get(&bkey).unwrap().rope.to_string();
+        assert!(buf_text.starts_with(&yank_text), "yanked text must be at the start");
+    }
+
+    #[test]
+    fn yank_read_only_buffer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "hello\nworld\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        // Open the read-only file and copy a region to the kill ring.
+        s.open_path("src/t.rs");
+        let file_key = s.buffers.current().unwrap().to_string();
+        assert!(!s.buffers.get(&file_key).unwrap().editable, "file buffer must be read-only");
+        // Set mark at line 0, scroll to line 1, copy the region.
+        if let Some(buf) = s.buffers.get_mut(&file_key) {
+            buf.mark = Some(0);
+        }
+        s.set_scroll_top(1);
+        s.copy_region();
+        assert!(!s.kill_ring.is_empty(), "kill ring must have an entry");
+        // Switch to the read-only file (it's already current, but set it
+        // explicitly to be sure).
+        s.buffers.set_current(&file_key);
+        assert_eq!(s.buffers.current().unwrap(), &file_key, "current must be the file buffer");
+        let len_before = s.buffers.get(&file_key).unwrap().rope.len_bytes();
+        s.yank();
+        assert_eq!(s.buffers.get(&file_key).unwrap().rope.len_bytes(), len_before);
+        assert!(s.message.contains("read-only"), "got: {}", s.message);
+    }
+
+    #[test]
+    fn yank_pop_cycles_kill_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        // The notes buffer starts with "# Notes\n" (1 line pre-filled).
+        // Type unique lines so the kill ring entries are distinguishable.
+        for c in "AAAA\n".chars() { s.notes_insert_char(c); }
+        for c in "BBBB\n".chars() { s.notes_insert_char(c); }
+        for c in "CCCC\n".chars() { s.notes_insert_char(c); }
+        let bkey = s.buffers.current().unwrap().to_string();
+        // Buffer: line 0="# Notes", line 1="AAAA", line 2="BBBB", line 3="CCCC"
+        // Copy lines 1-2 ("AAAA\n") to the ring.
+        let line1_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
+        let _line2_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line1_byte);
+        }
+        s.set_scroll_top(2);
+        s.copy_region();
+        let first_entry = s.kill_ring.top().unwrap().to_string();
+        assert!(first_entry.contains("AAAA"), "first entry: {first_entry}");
+        // Copy lines 3-4 ("CCCC\n") to the ring.
+        let line3_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(3).unwrap();
+        let _line4_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(4).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line3_byte);
+        }
+        s.set_scroll_top(4);
+        s.copy_region();
+        let second_entry = s.kill_ring.top().unwrap().to_string();
+        assert!(second_entry.contains("CCCC"), "second entry: {second_entry}");
+        assert_ne!(first_entry, second_entry);
+        // Now yank (inserts second_entry at line 0).
+        s.set_scroll_top(0);
+        s.yank();
+        let text_after_yank = s.buffers.get(&bkey).unwrap().rope.to_string();
+        // The yanked text (CCCC) is now at the start.
+        assert!(text_after_yank.starts_with("CCCC"), "C-y must insert at start: {text_after_yank}");
+        // M-y: replace with first_entry (AAAA...).
+        s.yank_pop();
+        let text_after_pop = s.buffers.get(&bkey).unwrap().rope.to_string();
+        // After yank-pop, the first_entry replaces the second_entry at the start.
+        assert!(text_after_pop.starts_with("AAAA"), "M-y must replace with first entry: {text_after_pop}");
+    }
+
+    #[test]
+    fn yank_pop_noop_without_prior_yank() {
+        let (mut s, _dir) = notes_store_with_lines(5);
+        s.yank_pop();
+        assert!(s.message.contains("no previous yank"));
+    }
+
+    #[test]
+    fn kill_ring_shared_across_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "hello world\nfoo bar\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        // Open the read-only file and copy a region to the kill ring.
+        s.open_path("src/t.rs");
+        let file_key = s.buffers.current().unwrap().to_string();
+        let _line1_byte = s.buffers.get(&file_key).unwrap().rope.try_line_to_byte(1).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&file_key) {
+            buf.mark = Some(0);
+        }
+        s.set_scroll_top(1);
+        s.copy_region();
+        let copied = s.kill_ring.top().unwrap().to_string();
+        assert!(!copied.is_empty());
+        // Switch to notes and yank: the kill ring is shared.
+        s.open_notes();
+        let len_before = s.buffers.current_buffer().unwrap().rope.len_bytes();
+        s.yank();
+        let len_after = s.buffers.current_buffer().unwrap().rope.len_bytes();
+        assert_eq!(len_after - len_before, copied.len(), "cross-buffer yank must work");
+    }
+
+    #[test]
+    fn kill_ring_bounded_at_60() {
+        let (mut s, _dir) = notes_store_with_lines(5);
+        // Push 65 different strings.
+        for i in 0..65 {
+            s.kill_ring.push(format!("entry_{}", i));
+        }
+        assert_eq!(s.kill_ring.len(), 60, "ring must be bounded at 60");
+        // The most recent entry is entry_64.
+        assert_eq!(s.kill_ring.top(), Some("entry_64"));
+        // The oldest is entry_5 (entry_0 through entry_4 were evicted).
+        assert_eq!(s.kill_ring.at(59), Some("entry_5"));
+    }
+
+    #[test]
+    fn kill_ring_suppresses_consecutive_duplicates() {
+        let (mut s, _dir) = notes_store_with_lines(5);
+        s.kill_ring.push("hello".into());
+        s.kill_ring.push("hello".into());
+        s.kill_ring.push("world".into());
+        assert_eq!(s.kill_ring.len(), 2, "consecutive duplicates must be suppressed");
+        assert_eq!(s.kill_ring.top(), Some("world"));
+        assert_eq!(s.kill_ring.at(1), Some("hello"));
+    }
+
+    #[test]
+    fn set_mark_keybinding_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        use crate::app::keymap::{Lookup, parse_sequence};
+        // C-SPC resolves to set-mark. The terminal delivers C-SPC as
+        // Char(' ') + CONTROL (NUL byte decoded by crossterm/iocraft).
+        let c_spc = vec![crate::app::keymap::Key::ctrl_char(' ')];
+        assert_eq!(
+            store.engine.resolve(&c_spc),
+            Some(Lookup::Command("set-mark")),
+            "C-SPC must resolve to set-mark"
+        );
+        // Also verify the parser path: "C-SPC" in config resolves to the same key.
+        let parsed = parse_sequence("C-SPC").unwrap();
+        assert_eq!(parsed, c_spc, "parser C-SPC must match the terminal representation");
+        assert_eq!(
+            store.engine.resolve(&parsed),
+            Some(Lookup::Command("set-mark")),
+            "parsed C-SPC must resolve to set-mark"
+        );
+        // C-w resolves to kill-region.
+        assert_eq!(
+            store.engine.resolve(&parse_sequence("C-w").unwrap()),
+            Some(Lookup::Command("kill-region")),
+        );
+        // M-w resolves to copy-region.
+        assert_eq!(
+            store.engine.resolve(&parse_sequence("M-w").unwrap()),
+            Some(Lookup::Command("copy-region")),
+        );
+        // C-y resolves to yank.
+        assert_eq!(
+            store.engine.resolve(&parse_sequence("C-y").unwrap()),
+            Some(Lookup::Command("yank")),
+        );
+        // M-y resolves to yank-pop.
+        assert_eq!(
+            store.engine.resolve(&parse_sequence("M-y").unwrap()),
+            Some(Lookup::Command("yank-pop")),
+        );
+        // C-x C-x resolves to exchange-point-and-mark.
+        assert_eq!(
+            store.engine.resolve(&parse_sequence("C-x C-x").unwrap()),
+            Some(Lookup::Command("exchange-point-and-mark")),
+        );
+    }
+
+    #[test]
+    fn region_display_in_status_line() {
+        let (mut s, _dir) = notes_store_with_lines(10);
+        let key = s.buffers.current().unwrap().to_string();
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte);
+        }
+        s.set_scroll_top(5);
+        let size = s.region_size_bytes().unwrap();
+        assert!(size > 0);
+        // The status line should show the region size.
+        // (We verify via the store method, not the full render.)
+        assert_eq!(s.region_size_bytes(), Some(size));
+    }
+
+    #[test]
+    fn kill_region_non_ascii_content_correct() {
+        // Proves the byte-to-char conversion at the edit boundary: a region
+        // containing multi-byte UTF-8 characters must be killed correctly
+        // (not the wrong text, not a panic from out-of-bounds char index).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        // Type content with multi-byte characters: "café\nnaïve\nend\n"
+        // Buffer: line 0="# Notes", line 1="café", line 2="naïve", line 3="end"
+        for c in "café\nnaïve\nend\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        // Set mark at byte 0 (start of "# Notes"), scroll to line 2 (start of "naïve").
+        if let Some(b) = s.buffers.get_mut(&key) {
+            b.mark = Some(0); // byte 0 = char 0
+        }
+        s.set_scroll_top(2);
+        // Region is bytes [0, byte_offset_of_line2) = "# Notes\ncafé\n"
+        s.kill_region();
+        // After kill, the buffer should contain "naïve\nend\n".
+        let remaining = s.buffers.get(&key).unwrap().rope.to_string();
+        assert_eq!(remaining, "naïve\nend\n", "kill must remove exactly the region: {remaining:?}");
+        // The kill ring holds the killed text.
+        assert_eq!(s.kill_ring.top(), Some("# Notes\ncafé\n"));
+    }
+
+    #[test]
+    fn yank_non_ascii_content_correct() {
+        // Proves that yank inserts at the correct char offset when the buffer
+        // contains multi-byte characters before the insertion point.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        // Buffer: "# Notes\n" + "héllo\n" (héllo has a multi-byte é)
+        for c in "héllo\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        // Copy "héllo\n" to the kill ring (lines 1-2).
+        let line1_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
+        let _line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line1_byte);
+        }
+        s.set_scroll_top(2);
+        s.copy_region();
+        let yank_text = s.kill_ring.top().unwrap().to_string();
+        assert_eq!(yank_text, "héllo\n");
+        // Now yank at line 0 (start of buffer, before the multi-byte content).
+        s.set_scroll_top(0);
+        s.yank();
+        let buf_text = s.buffers.get(&key).unwrap().rope.to_string();
+        // The yanked text is inserted at the start.
+        assert!(buf_text.starts_with("héllo\n"), "yank must insert at correct char offset: {buf_text:?}");
+    }
+
+    #[test]
+    fn yank_pop_non_ascii_content_correct() {
+        // Proves that yank-pop removes/inserts at the correct char offsets
+        // when the buffer contains multi-byte characters.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        // Type unique lines with multi-byte content.
+        for c in "café\n".chars() { s.notes_insert_char(c); }
+        for c in "naïve\n".chars() { s.notes_insert_char(c); }
+        for c in "end\n".chars() { s.notes_insert_char(c); }
+        let key = s.buffers.current().unwrap().to_string();
+        // Copy "café\n" (lines 1-2) to the ring.
+        let l1 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
+        let _l2 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) { buf.mark = Some(l1); }
+        s.set_scroll_top(2);
+        s.copy_region();
+        // Copy "naïve\n" (lines 2-3) to the ring (now on top).
+        let l2b = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        let _l3 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(3).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) { buf.mark = Some(l2b); }
+        s.set_scroll_top(3);
+        s.copy_region();
+        // Yank at line 0 (inserts "naïve\n" at the start).
+        s.set_scroll_top(0);
+        s.yank();
+        let after_yank = s.buffers.get(&key).unwrap().rope.to_string();
+        assert!(after_yank.starts_with("naïve\n"), "yank: {after_yank:?}");
+        // M-y: replace with "café\n".
+        s.yank_pop();
+        let after_pop = s.buffers.get(&key).unwrap().rope.to_string();
+        assert!(after_pop.starts_with("café\n"), "yank-pop must replace with prev entry: {after_pop:?}");
+        // The rest of the buffer is intact.
+        assert!(after_pop.contains("naïve\n"), "original content must be preserved: {after_pop:?}");
+        assert!(after_pop.contains("end\n"), "original content must be preserved: {after_pop:?}");
     }
 }
 

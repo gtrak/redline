@@ -261,7 +261,7 @@ fn parse_key_code(name: &str, key: &Key, token: &str) -> Result<Key, ParseKeyErr
             KeyCode::Char(c) if c.is_ascii_alphabetic() => {
                 KeyCode::Char(c.to_ascii_lowercase())
             }
-            KeyCode::Space => KeyCode::Char('\0'),
+            KeyCode::Space => KeyCode::Char(' '),
             other => other,
         }
     } else {
@@ -461,6 +461,16 @@ mod tests {
         assert_eq!(parse_sequence("ESC").unwrap(), vec![Key::new(KeyCode::Escape)]);
         assert_eq!(parse_sequence("UP").unwrap(), vec![Key::up()]);
         assert_eq!(parse_sequence("DOWN").unwrap(), vec![Key::down()]);
+    }
+
+    #[test]
+    fn parse_c_spc_matches_terminal_representation() {
+        // C-SPC in emacs notation must produce the same key that the terminal
+        // delivers: Char(' ') + ctrl (NUL decoded by crossterm/iocraft).
+        let k = parse_sequence("C-SPC").unwrap()[0];
+        assert_eq!(k, Key::ctrl_char(' '));
+        assert_eq!(k.code, KeyCode::Char(' '));
+        assert!(k.ctrl);
     }
 
     #[test]

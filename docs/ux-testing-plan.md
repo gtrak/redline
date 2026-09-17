@@ -216,6 +216,34 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       behind the picker — known gap, verify current behavior); isearch inside
       magit/search views (bindings should be view-appropriate).
 
+## U-M · Mark, region, kill/yank (plan 004 issue 03)
+
+- [ ] **U-M1 set-mark**: `C-SPC` (NUL byte) sets the mark at the current point;
+      minibuffer echoes "Mark set"; region is active until C-g or a command
+      that clears it.
+- [ ] **U-M2 region face visible**: after set-mark + movement (C-n), the region
+      face (background) is visible at the attribute level on the marked lines
+      (multi-line range: first and last region lines show the background).
+- [ ] **U-M3 C-w kill region**: with a region active in an editable buffer,
+      `C-w` removes the region text and pushes it to the kill ring; minibuffer
+      echoes the byte count; mark is cleared.
+- [ ] **U-M4 C-y yank**: after C-w, `C-y` restores the exact text at the
+      insertion point (the current top line's start); buffer content matches
+      the pre-kill state.
+- [ ] **U-M5 M-y yank-pop**: after C-y, `M-y` cycles backward through the kill
+      ring, replacing the last yanked text with the previous entry.
+- [ ] **U-M6 M-w copy region (read-only)**: in a read-only file view, `C-SPC`
+      + movement + `M-w` copies the region to the kill ring without modifying
+      the buffer; then `C-y` in the notes buffer yanks the copied text
+      (cross-buffer kill ring).
+- [ ] **U-M7 C-g clears region**: with a mark set, `C-g` clears the mark and
+      region (the region face disappears from the file view).
+- [ ] **U-M8 C-x C-x exchange**: with a mark set, `C-x C-x` swaps point and
+      mark: the cursor moves to where the mark was, and the mark is set where
+      the point was.
+- [ ] **U-M9 mark persists across movement**: after C-SPC, scrolling (C-n/C-p)
+      does not clear the mark; the region extends from mark to current point.
+
 ## U-I · Config & persistence
 
 - [ ] **U-I1 Missing config**: starts with defaults; `bindings=0` in log.

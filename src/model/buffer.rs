@@ -52,6 +52,9 @@ pub struct Buffer {
     /// the user must reconcile manually (`g` forces a reload; the view
     /// shows a "changed on disk" marker while this is set).
     pub changed_on_disk: bool,
+    /// The mark position (byte offset in the rope). `None` when no mark is
+    /// set (plan 004 issue 03: set by C-SPC, cleared by C-g / C-w / C-y / M-y).
+    pub mark: Option<usize>,
 }
 
 impl std::fmt::Debug for Buffer {
@@ -78,6 +81,7 @@ impl Buffer {
             editable,
             locally_modified: false,
             changed_on_disk: false,
+            mark: None,
         }
     }
 

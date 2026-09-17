@@ -645,6 +645,43 @@ impl CommandRegistry {
             "buffers",
             |store, _arg| store.save_buffer(),
         ));
+        // ── plan 004 issue 03: mark/region + kill ring ─────────────────
+        reg.register(Command::new(
+            "set-mark",
+            "Set the mark at the current position (C-SPC)",
+            "region",
+            |store, _arg| store.set_mark(),
+        ));
+        reg.register(Command::new(
+            "kill-region",
+            "Kill the marked region (C-w); in read-only views copies to kill ring",
+            "region",
+            |store, _arg| store.kill_region(),
+        ));
+        reg.register(Command::new(
+            "copy-region",
+            "Copy the marked region to the kill ring (M-w)",
+            "region",
+            |store, _arg| store.copy_region(),
+        ));
+        reg.register(Command::new(
+            "yank",
+            "Yank the kill ring's top entry at point (C-y, editable buffers only)",
+            "region",
+            |store, _arg| store.yank(),
+        ));
+        reg.register(Command::new(
+            "yank-pop",
+            "Replace the last yank with the previous kill ring entry (M-y)",
+            "region",
+            |store, _arg| store.yank_pop(),
+        ));
+        reg.register(Command::new(
+            "exchange-point-and-mark",
+            "Exchange point and mark (C-x C-x)",
+            "region",
+            |store, _arg| store.exchange_point_and_mark(),
+        ));
         reg
     }
 }
@@ -665,7 +702,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 84, "expected 84 seed commands: {names:?}");
+        assert_eq!(names.len(), 90, "expected 90 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -749,6 +786,12 @@ mod tests {
             "close-search-view",
             "save-buffer",
             "toggle-tree-follow",
+            "set-mark",
+            "kill-region",
+            "copy-region",
+            "yank",
+            "yank-pop",
+            "exchange-point-and-mark",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

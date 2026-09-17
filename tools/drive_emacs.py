@@ -81,8 +81,8 @@ KEYS = {
     'C-a': b'\x01', 'C-e': b'\x05', 'C-v': b'\x16', 'M-v': b'\x1bv',
     'M-<': b'\x1b<', 'M->': b'\x1b>', 'C-s': b'\x13', 'RET': b'\r',
     'C-g': b'\x07', 'C-xC-f': b'\x18\x06', 'C-xb': b'\x18b',
-    'M-x': b'\x1bx', 'C-l': b'\x0c', 'C-x2': b'\x18\x12',
-    'C-xo': b'\x18\x0f', 'C-x1': b'\x181', 'M-gg': b'\x1bg\x01b',
+    'M-x': b'\x1bx', 'C-l': b'\x0c', 'C-x2': b'\x18\x32',
+    'C-xo': b'\x18\x6f', 'C-x1': b'\x181', 'M-gg': b'\x1bg\x01b',
     'C-xC-c': b'\x18\x18', 'C-/': b'\x1f', 'C-aw': b'\x01\x17',
 }
 
@@ -117,8 +117,8 @@ if __name__ == '__main__':
     step(s, 'M-x (palette)', b'\x1bx')
     step(s, 'M-x type "goto"', b'\x1bgoto')
     step(s, 'M-x C-g', b'\x07')
-    step(s, 'C-x 2 (split window)', b'\x18\x12')
-    step(s, 'C-x o (other window)', b'\x18\x0f')
+    step(s, 'C-x 2 (split window)', b'\x18\x32')
+    step(s, 'C-x o (other window)', b'\x18\x6f')
     step(s, 'C-x 1 (one window)', b'\x181')
     step(s, 'M-< then M-> (bottom)', b'\x1b<')
     step(s, 'M-> ', b'\x1b>')

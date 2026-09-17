@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 sys.path.insert(0, "/home/gary/dev/red/tools")
-from pyte_driver import App, encode_key
+from pyte_driver import App, encode_key, BAR_BGS
 from fixture import reset as _reset_fixture
 
 REPO = "/tmp/redline_pyte_repo"
@@ -1295,6 +1295,174 @@ NOT_APPLICABLE = [
 ]
 
 
+# ── plan-004-issue-03 mark/kill/yank sweep legs ──────────────────────────────
+
+def flow_mark_kill_yank(app):
+    """U-M1..U-M9: mark/region/kill/yank verification legs.
+
+    Driven across two buffers: the read-only src/main.rs (multiple lines,
+    for the region face + mark + copy) and the notes buffer (editable,
+    for yank). C-SPC (NUL) sets the mark, C-n moves the point (region
+    active), M-w copies to ring, C-y yanks into notes, C-g clears.
+    """
+    # Open the read-only file (src/main.rs has multiple lines).
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in "main":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(1.0)
+    file_open = "src/main.rs" in row0(app)
+
+    # Move down 2 lines so the top visible line is at line 2.
+    app.key("C-n")
+    app.wait(0.4)
+    app.key("C-n")
+    app.wait(0.4)
+    # U-M1: C-SPC (NUL byte) sets the mark at line 2 (the current top visible line).
+    app.feed(b"\x00", settle=0.8)
+    mark_set = "Mark set" in app.row_text(app.rows - 2)
+
+    # U-M9: mark persists after movement; move up 2 lines so the top
+    # visible line is back at line 0. The region is now lines 0-2.
+    app.key("C-p")
+    app.wait(0.4)
+    app.key("C-p")
+    app.wait(0.4)
+    # U-M2: region face visible (attribute-level: background on region lines).
+    region_visible = False
+    for r in range(1, app.rows - 2):
+        row = app.screen.buffer[r]
+        for i in range(app.cols):
+            bg = str(row[i].bg).lower()
+            if bg and bg != '000000' and bg not in BAR_BGS:
+                region_visible = True
+                break
+        if region_visible:
+            break
+
+    # U-M6 leg: M-w copy region to kill ring (read-only: buffer unchanged).
+    app.key("M-w")
+    app.wait(0.8)
+    copy_echo = "copied to kill ring" in app.row_text(app.rows - 2)
+
+    # Switch to notes and yank (cross-buffer kill ring).
+    app.key("C-x n")
+    app.wait(0.8)
+    notes_open = ".redline-notes.md" in row0(app)
+    before = app.screen_text()
+    # U-M4: C-y yank the copied text into the notes buffer.
+    app.key("C-y")
+    app.wait(0.8)
+    after = app.screen_text()
+    yank_landed = before != after
+    yank_done = "Kill ring is empty" not in app.row_text(app.rows - 2)
+
+    # U-M5: M-y yank-pop (only 1 ring entry, so "end of kill ring" is valid).
+    app.key("M-y")
+    app.wait(0.8)
+    alive = any(row.strip() for row in [app.row_text(r) for r in range(app.rows)])
+
+    # U-M7: C-g clears the region/mark (switch back to the file view first).
+    app.key("C-x C-f")
+    app.wait(0.6)
+    for ch in "main":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.8)
+    app.key("C-g")
+    app.wait(0.5)
+    region_cleared = True
+    for r in range(1, app.rows - 2):
+        row = app.screen.buffer[r]
+        for i in range(app.cols):
+            bg = str(row[i].bg).lower()
+            if bg and bg != '000000' and bg not in BAR_BGS:
+                region_cleared = False
+                break
+        if not region_cleared:
+            break
+
+    ok = (file_open and mark_set and region_visible and copy_echo
+          and notes_open and yank_done and yank_landed and alive and region_cleared)
+    record("U-M1..M7", "C-x C-f,main,RET;NUL;C-n x2;M-w;C-x n;C-y;M-y;C-g", ok,
+           f"file-open={file_open} mark-set-echo={mark_set} "
+           f"region-face-visible={region_visible} copy-echo={copy_echo} "
+           f"notes-open={notes_open} yank-done={yank_done} "
+           f"yank-landed={yank_landed} alive-after-m-y={alive} "
+           f"region-cleared-by-c-g={region_cleared}")
+
+
+def flow_mark_exchange(app):
+    """U-M8: C-x C-x exchange point and mark (on the read-only file view)."""
+    # Open the read-only file (src/main.rs has multiple lines).
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in "main":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(1.0)
+    file_open = "src/main.rs" in row0(app)
+    # Set mark at line 0.
+    app.feed(b"\x00", settle=0.6)
+    mark_set = "Mark set" in app.row_text(app.rows - 2)
+    # Move down 2 lines.
+    app.key("C-n")
+    app.wait(0.4)
+    app.key("C-n")
+    app.wait(0.4)
+    top_before = app.row_text(1)
+    # C-x C-x: exchange point and mark.
+    app.key("C-x C-x")
+    app.wait(0.6)
+    top_after = app.row_text(1)
+    # After exchange, the point should be where the mark was (line 0),
+    # so the view should scroll back to the top.
+    exchanged = top_before != top_after
+    ok = file_open and mark_set and exchanged
+    record("U-M8", "C-x C-f,main,RET;NUL;C-n x2;C-x C-x", ok,
+           f"file-open={file_open} mark-set={mark_set} exchange-scrolled={exchanged} "
+           f"(before={top_before.strip()!r} after={top_after.strip()!r})")
+
+
+def flow_cross_buffer_kill(app):
+    """U-M6: M-w in a read-only view copies to ring; C-y in notes yanks it."""
+    # Open a read-only file (src/main.rs from the fixture).
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in "main":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.8)
+    file_open = "src/main.rs" in row0(app)
+    # Set mark at line 0 (NUL byte = C-SPC).
+    app.feed(b"\x00", settle=0.6)
+    mark_set = "Mark set" in app.row_text(app.rows - 2)
+    # Move down 2 lines to create a region.
+    app.key("C-n")
+    app.wait(0.4)
+    app.key("C-n")
+    app.wait(0.4)
+    # M-w: copy region to kill ring (read-only: buffer unchanged).
+    app.key("M-w")
+    app.wait(0.8)
+    copy_echo = "copied to kill ring" in app.row_text(app.rows - 2)
+    # Switch to notes and yank.
+    app.key("C-x n")
+    app.wait(0.8)
+    notes_open = ".redline-notes.md" in row0(app)
+    # Record the notes content before yank.
+    before = app.screen_text()
+    app.key("C-y")
+    app.wait(0.8)
+    after = app.screen_text()
+    yank_landed = before != after
+    ok = file_open and mark_set and copy_echo and notes_open and yank_landed
+    record("U-M6", "C-x C-f,main,RET;NUL;C-n x2;M-w;C-x n;C-y", ok,
+           f"file-open={file_open} mark-set={mark_set} copy-echo={copy_echo} "
+           f"notes-open={notes_open} cross-buffer-yank-landed={yank_landed}")
+
+
 def main():
     _reset_fixture()
     app = App(REPO, rows=ROWS, cols=COLS)
@@ -1414,6 +1582,16 @@ def main():
     flow_blame_windowing()
     flow_notes_scroll()
     flow_banner_hint()
+
+    # plan-004-issue-03 mark/kill/yank sweep legs (on the fixture repo).
+    app = App(REPO, rows=ROWS, cols=COLS)
+    flow_mark_kill_yank(app)
+    flow_mark_exchange(app)
+    app.kill()
+
+    app = App(REPO, rows=ROWS, cols=COLS)
+    flow_cross_buffer_kill(app)
+    app.kill()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

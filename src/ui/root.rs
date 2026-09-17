@@ -179,6 +179,10 @@ struct Snapshot {
     searching: String,
     // Plan 004 row 11: file-view position display (Top/Bot/L{n},{pct}%).
     position: String,
+    // Plan 004 issue 03: region line range for the file view's region face.
+    region_lines: Option<(usize, usize)>,
+    // Plan 004 issue 03: region size for the status line display.
+    region_size: Option<usize>,
 }
 
 #[component]
@@ -417,6 +421,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             search_error: s.search_error(),
             searching: s.search_display(),
             position: s.file_view_position_display(),
+            region_lines: s.region_line_range(),
+            region_size: s.region_size_bytes(),
         }
     };
 
@@ -471,6 +477,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 viewport_lines: snap.file_view_viewport_lines,
                 changed_on_disk: snap.file_view_changed_on_disk,
                 buffer_editable: snap.file_view_current_buffer_editable,
+                region_lines: snap.region_lines,
             )
         }
         .into()),
@@ -580,6 +587,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 indexing: snap.indexing,
                 searching: snap.searching,
                 position: snap.position,
+                region_size: snap.region_size,
             )
         }
     }
@@ -620,6 +628,8 @@ struct StatusLineProps {
     pub indexing: String,
     pub searching: String,
     pub position: String,
+    /// Region size in bytes (plan 004 issue 03); shown when a region is active.
+    pub region_size: Option<usize>,
 }
 
 #[component]
@@ -656,6 +666,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     }
     if !props.position.is_empty() {
         text.push_str(&format!("  {}", props.position));
+    }
+    if let Some(size) = props.region_size {
+        text.push_str(&format!("  [{}B]", size));
     }
     element! {
         View(flex_shrink: 0.0, background_color: face_bg(face)) {
@@ -743,7 +756,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 84"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 90"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

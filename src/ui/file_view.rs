@@ -16,6 +16,10 @@ struct FileViewCanvasProps {
     pub lines: Vec<FileViewLine>,
     pub total_lines: usize,
     pub top_line: usize,
+    /// The region's line range (start_line, end_line inclusive) in buffer
+    /// line indices, or `None` when no mark is set. The store computes this
+    /// from the byte range using the rope (plan 004 issue 03).
+    pub region_lines: Option<(usize, usize)>,
 }
 
 /// Canvas-backed file view: renders the visible lines with colored
@@ -24,6 +28,7 @@ struct FileViewCanvas {
     lines: Vec<FileViewLine>,
     total_lines: usize,
     top_line: usize,
+    region_lines: Option<(usize, usize)>,
 }
 
 impl FileViewCanvas {
@@ -32,6 +37,7 @@ impl FileViewCanvas {
             lines: props.lines.clone(),
             total_lines: props.total_lines,
             top_line: props.top_line,
+            region_lines: props.region_lines,
         }
     }
 }
@@ -70,6 +76,14 @@ impl Component for FileViewCanvas {
         for (row, line) in self.lines.iter().enumerate() {
             if row >= h {
                 break;
+            }
+            let buffer_line = self.top_line + row;
+            // Paint the region background for lines within the region.
+            if let Some((rl_start, rl_end)) = self.region_lines
+                && (rl_start..=rl_end).contains(&buffer_line)
+            {
+                let bg = color(t.region.background);
+                canvas.set_background_color(0, row as isize, w, 1, bg);
             }
             draw_line(&mut canvas, row as isize, w, &line.text, &line.spans, &t);
         }
@@ -214,6 +228,9 @@ pub struct FileViewProps {
     /// Whether the current buffer is editable (drives the "changed on disk"
     /// banner hint: editable → `M-x reload-buffer`, plain → `g`).
     pub buffer_editable: bool,
+    /// The region's line range (start_line, end_line inclusive) in buffer
+    /// line indices, or `None` when no mark is set (plan 004 issue 03).
+    pub region_lines: Option<(usize, usize)>,
 }
 
 /// The "changed on disk" banner hint, accurate per buffer kind: on an
@@ -259,6 +276,7 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                     lines: props.lines.clone(),
                     total_lines: props.total_lines,
                     top_line: props.top_line,
+                    region_lines: props.region_lines,
                 )
             }
         }

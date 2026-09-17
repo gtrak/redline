@@ -69,6 +69,9 @@ pub struct Theme {
     pub log_commit: Face,
     /// Blame-row rows (issue 08): a dim prefix + text line.
     pub blame: Face,
+    /// The region face (mark/region highlighting; plan 004 issue 03).
+    /// High-contrast background distinct from the cursor/status-line blue.
+    pub region: Face,
     /// One face per tree-sitter token category, indexed by
     /// `HIGHLIGHT_FACES`. See `Theme::syntax_face`.
     pub syntax_faces: Vec<Face>,
@@ -102,6 +105,7 @@ impl Theme {
             diff_hunk_header: Face::new(Color::Magenta, Color::Black, true),
             log_commit: Face::new(Color::White, Color::Black, false),
             blame: Face::new(Color::DarkGrey, Color::Black, false),
+            region: Face::new(Color::White, Color::DarkGrey, false),
             syntax_faces: dark_syntax_faces(),
         }
     }
@@ -129,6 +133,7 @@ impl Theme {
             diff_hunk_header: Face::new(Color::Magenta, bg, true),
             log_commit: Face::new(fg, bg, false),
             blame: Face::new(Color::DarkGrey, bg, false),
+            region: Face::new(Color::Black, Color::Grey, false),
             syntax_faces: light_syntax_faces(),
         }
     }

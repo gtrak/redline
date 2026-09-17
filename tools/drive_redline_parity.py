@@ -68,6 +68,6 @@ if __name__ == '__main__':
     step(s, 'M-x', b'\x1bx', 1.0)
     step(s, 'M-x type goto', b'goto', 1.0)
     step(s, 'M-x C-g', b'\x07')
-    step(s, 'C-x 2', b'\x18\x12')
-    step(s, 'C-x o', b'\x18\x0f', 1.0)
+    step(s, 'C-x 2', b'\x18\x32')
+    step(s, 'C-x o', b'\x18\x6f', 1.0)
     step(s, 'C-x C-c quit', b'\x18\x18', 1.0)
