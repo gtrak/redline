@@ -24,9 +24,15 @@ mod tests {
 
     /// Structural regression: the tree sidebar title and file rows must
     /// render on separate lines (not overprinted on the same row).
+    ///
+    /// Non-vacuous by construction: it requires the tree's own rows to
+    /// actually render (the first two must be present on the frame) and to
+    /// land on lines distinct from the title and from each other. A layout
+    /// that clips the rows away, or collapses them onto the title line, fails.
     #[test]
     fn tree_title_and_rows_on_separate_lines() {
         use crate::ui::root::Root;
+        use iocraft::prelude::*;
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -39,35 +45,56 @@ mod tests {
         store.set_viewport_lines(24);
         store.toggle_tree();
 
+        // Capture the actual tree rows (by name) before the store is moved
+        // into the render, so the assertions check the rows that really
+        // rendered rather than a hard-coded string that could be absent.
+        let tree_names: Vec<String> = store
+            .tree_rows()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        assert!(
+            tree_names.len() >= 2,
+            "need >=2 tree rows to assert distinct lines: {tree_names:?}"
+        );
+
         let mut app = element! {
             ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
                 Root
             }
         };
-        let s = app.to_string();
-
-        // The tree title "*tree*" must be on its own line.
+        // Render at a fixed 80-column width — the standard terminal — so the
+        // structural layout is deterministic and matches what the user sees
+        // (the default content-sized static width is too narrow to assert on).
+        let s = app.render(Some(80)).to_string();
         let lines: Vec<&str> = s.lines().collect();
-        let title_line = lines
+
+        // The tree title "*tree*" must be present on its own line.
+        let title_idx = lines
             .iter()
-            .find(|l| l.contains("*tree*"))
+            .position(|l| l.contains("*tree*"))
             .expect("tree title line missing");
-        // The title line should not also contain a file name.
+        // The title line must not also carry the first tree row.
+        let first = tree_names[0].as_str();
         assert!(
-            !title_line.contains("main.rs"),
-            "tree title overprinted with file row: {title_line:?}"
+            !lines[title_idx].contains(first),
+            "tree title shares a line with the first row {first:?}: {}",
+            lines[title_idx]
         );
-        // A file row must be on a different line than the title.
-        let title_idx = lines.iter().position(|l| l.contains("*tree*")).unwrap();
-        let file_lines: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.contains("main.rs"))
-            .map(|(i, _)| i)
-            .collect();
-        assert!(
-            !file_lines.contains(&title_idx),
-            "file row 'main.rs' overprinted on tree title line"
+
+        // Non-vacuous core: the first two tree rows must each render, on a line
+        // distinct from the title line and distinct from each other.
+        let line_of = |name: &str| lines.iter().position(|l| l.contains(name));
+        let i0 = line_of(first)
+            .unwrap_or_else(|| panic!("first tree row {first:?} did not render\n{s}"));
+        let second = tree_names[1].as_str();
+        let i1 = line_of(second)
+            .unwrap_or_else(|| panic!("second tree row {second:?} did not render\n{s}"));
+        assert_ne!(i0, title_idx, "first tree row {first:?} overprinted on the title line");
+        assert_ne!(i1, title_idx, "second tree row {second:?} overprinted on the title line");
+        assert_ne!(
+            i0, i1,
+            "tree rows not on distinct lines (first={i0}, second={i1})\n{s}"
         );
     }
 }

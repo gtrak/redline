@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Reset the /tmp/redline_pyte_repo fixture to a known baseline so the sweep is
+reproducible regardless of prior (possibly state-mutating) runs.
+
+Baseline:
+  * src/lib.rs  — working-tree change, STAGED   (git diff --cached shows it)
+  * README.md   — working-tree change, UNSTAGED
+  * no untracked .redline-notes.md (the notes flow creates it; sweep removes it)
+
+Run directly to reset:  python3 tools/fixture.py
+Or import:               from fixture import reset; reset()
+"""
+import os
+import subprocess
+
+REPO = "/tmp/redline_pyte_repo"
+
+
+def _git(*args):
+    subprocess.run(["git", "-C", REPO, *args], check=True,
+                   capture_output=True, text=True)
+
+
+def reset():
+    # Ensure the working-tree changes exist (idempotent: only writes markers if
+    # the files lost them).
+    lib = os.path.join(REPO, "src", "lib.rs")
+    readme = os.path.join(REPO, "README.md")
+    with open(lib) as f:
+        if "staged_change_marker" not in f.read():
+            with open(lib, "a") as f:
+                f.write("\nstaged_change_marker\n")
+    with open(readme) as f:
+        if "unstaged_change_marker" not in f.read():
+            with open(readme, "a") as f:
+                f.write("\nunstaged_change_marker\n")
+
+    # Staged: src/lib.rs ; unstaged: README.md ; drop the untracked notes file.
+    _git("add", "src/lib.rs")
+    _git("restore", "--staged", "README.md")
+    try:
+        os.remove(os.path.join(REPO, ".redline-notes.md"))
+    except FileNotFoundError:
+        pass
+
+
+if __name__ == "__main__":
+    reset()
+    out = subprocess.run(["git", "-C", REPO, "status", "--porcelain"],
+                         capture_output=True, text=True).stdout
+    print("fixture reset to:\n" + out.strip())

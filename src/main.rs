@@ -18,6 +18,9 @@ mod syntax;
 mod theme;
 mod ui;
 
+#[cfg(test)]
+mod perf;
+
 use app::config;
 use app::store::AppStore;
 use iocraft::prelude::*;
