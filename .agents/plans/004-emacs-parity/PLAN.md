@@ -46,7 +46,7 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 | Phase | Issues | Depends on |
 |---|---|---|
 | 1 | 01 isearch interception | — |
-| 1 | 02 parity adopts batch 1 | — (after 01 lands, same-file store.rs: serialize) |
+| 1 | 02 parity adopts batch 1 | 01 + **user review of the PROPOSE rows** (docs/emacs-parity-log.md — user directive 2026-09-17: they review before feel-changes implement) |
 
 ## Issue index
 

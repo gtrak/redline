@@ -48,5 +48,8 @@ rewritten (a changed mind adds a new row).
 ## Open questions for the user (PROPOSE rows)
 
 9 (C-v overlap), 11 (position %), 13 (quit save-prompt), 14 (kill/yank
-scope), 15 (undo in notes). Default if unanswered: implement 9 and 11
-(cheap, additive), keep 13/14/15 logged until decided.
+scope), 15 (undo in notes). **User answered 2026-09-17: they review these
+first — no default implementations.** Only clear BUGS go forward without
+review (row 1, isearch — in flight as plan-004 issue 01). Rows 9/11/13/14/
+15 wait for explicit user decisions; DEFER rows 6/8 get re-verified in the
+next battery regardless (verification, not decision).
