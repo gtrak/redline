@@ -40,7 +40,78 @@ rewritten (a changed mind adds a new row).
 | 18 | which-function | separate echo area / mode-line imenu entry | which-function in status line (verified in battery: `(line_48)`) | KEEP (already better: always visible) |
 
 | 19 | no-buffer state | emacs -Q shows *scratch* (+ splash) | **discovery home**: derived keymap×registry menu replaces *scratch* entirely (user directive 2026-09-17) | KEEP (deliberate divergence: discovery over scratch; emacs muscle memory bindings unchanged) |
+| 20 | word motion | `M-f`/`M-b` move by word (column moves) | unverified at column level in this battery (frames don't show column) | re-verify battery 3 |
+| 21 | kill-line / kill-word | `C-k` / `M-d` in editable text | unbound in read-only views (expected); notes have no kill-line/kill-word (single-char backspace only) | PROPOSE (kill-line/kill-word in editable buffers, on the 004-03 ring machinery) |
+| 22 | numeric prefix | `C-u 3 C-n` / `M-5 C-n` repeat 3/5 | none; **`C-u` is bound to half-page scroll** (deliberate but conflicting — adopting numeric args needs a different home for half-page) | PROPOSE (user decision: real `C-u` args vs keep half-page) |
+| 23 | registers | `C-x r s a` / `C-x r i a` prompt + restore | none | DEFER (kill ring covers the common case) |
+| 24 | query-replace | `M-% line RET rope RET !` rewrote the buffer | none | PROPOSE (in-file replace once file-edit mode lands, plan 005) |
+| 25 | word search | `M-s w` | isearch (substring) + project search cover it | KEEP |
+| 26 | dired | `C-x d` directory editor (flag-based file ops) | tree sidebar + finder model | KEEP (deliberate architecture) |
+| 27 | vc git | `C-x v v` next-action, `C-x v d` vc-dir (vanilla VC) | full magit surface (status/stage/hunks/discard/log/blame/commit) — redline ahead of vanilla emacs | KEEP (ahead) |
+| 28 | describe-key | `C-h k` explains a keybinding | transient menu + discovery home (plan 004-06) covers discoverability | KEEP (note `C-h k` as future candidate) |
+| 29 | minibuffer completion | TAB completion list | fuzzy filter-as-you-type in pickers | KEEP (no TAB needed) |
+| 30 | minibuffer history | `M-p`/`M-n` in prompts | finder has recents; query history none | DEFER |
+| 31 | kill buffer | `C-x k` prompts by name | **exists**: opens the buffer-list picker with kill affordance (2-of-2 driven); shape differs | KEEP (backlog: `d` inside the list echoes unbound — bind it as the kill verb per dired convention) |
+
+## Battery 2 — 2026-09-17 (word motion, prefixes, registers, replace, dired, VC, minibuffer)
+
+Driver fixes first: the `C-x 2`/`C-x o` keystroke bugs were fixed in BOTH
+drivers (`0x18 0x32` / `0x18 0x6f`) — the review-flagged family. Harness
+note: the dired leg typed `src/` relative to an already-src directory
+(emacs errored src/src/ — harness path mistake, dired itself works).
+
+| 20 | word motion | `M-f`/`M-b` move by word (column moves) | unverified at column level in this battery (frames don't show column) | re-verify battery 3 |
+| 21 | kill-line / kill-word | `C-k` / `M-d` in editable text | unbound in read-only views (expected); notes have no kill-line/kill-word (single-char backspace only) | PROPOSE (kill-line/kill-word in editable buffers, on the 004-03 ring machinery) |
+| 22 | numeric prefix | `C-u 3 C-n` / `M-5 C-n` repeat 3/5 | none; **`C-u` is bound to half-page scroll** (deliberate but conflicting — adopting numeric args needs a different home for half-page) | PROPOSE (user decision: real `C-u` args vs keep half-page) |
+| 23 | registers | `C-x r s a` / `C-x r i a` prompt + restore | none | DEFER (kill ring covers the common case) |
+| 24 | query-replace | `M-% line RET rope RET !` rewrote the buffer | none | PROPOSE (in-file replace once file-edit mode lands, plan 005) |
+| 25 | word search | `M-s w` | isearch (substring) + project search cover it | KEEP |
+| 26 | dired | `C-x d` directory editor (flag-based file ops) | tree sidebar + finder model | KEEP (deliberate architecture) |
+| 27 | vc git | `C-x v v` next-action, `C-x v d` vc-dir (vanilla VC) | full magit surface (status/stage/hunks/discard/log/blame/commit) — redline ahead of vanilla emacs | KEEP (ahead) |
+| 28 | describe-key | `C-h k` explains a keybinding | transient menu + discovery home (plan 004-06) covers discoverability | KEEP (note `C-h k` as future candidate) |
+| 29 | minibuffer completion | TAB completion list | fuzzy filter-as-you-type in pickers | KEEP (no TAB needed) |
+| 30 | minibuffer history | `M-p`/`M-n` in prompts | finder has recents; query history none | DEFER |
+| 31 | kill buffer | `C-x k` prompts by name | **exists**: opens the buffer-list picker with kill affordance (2-of-2 driven); shape differs | KEEP (backlog: `d` inside the list echoes unbound — bind it as the kill verb per dired convention) |
+
+M-b` move by word (column moves) | unverified at column level in this battery (frames don't show column) | re-verify battery 3 |
+| 21 | kill-line / kill-word | `C-k` / `M-d` in editable text | unbound in read-only views (expected); notes have no kill-line/kill-word (single-char backspace only) | PROPOSE (kill-line/kill-word in editable buffers, on the 004-03 ring machinery) |
+| 22 | numeric prefix | `C-u 3 C-n` / `M-5 C-n` repeat 3/5 | none; **`C-u` is bound to half-page scroll** (deliberate but conflicting — adopting numeric args needs a different home for half-page) | PROPOSE (user decision: real `C-u` args vs keep half-page) |
+| 23 | registers | `C-x r s a` / `C-x r i a` prompt + restore | none | DEFER (kill ring covers the common case) |
+| 24 | query-replace | `M-% line RET rope RET !` rewrote the buffer | none | PROPOSE (in-file replace once file-edit mode lands, plan 005) |
+| 25 | word search | `M-s w` | isearch (substring) + project search cover it | KEEP |
+| 26 | dired | `C-x d` directory editor (flag-based file ops) | tree sidebar + finder model | KEEP (deliberate architecture) |
+| 27 | vc git | `C-x v v` next-action, `C-x v d` vc-dir (vanilla VC) | full magit surface (status/stage/hunks/discard/log/blame/commit) — redline ahead of vanilla emacs | KEEP (ahead) |
+| 28 | describe-key | `C-h k` explains a keybinding | transient menu + discovery home (plan 004-06) covers discoverability | KEEP (note `C-h k` as future candidate) |
+| 29 | minibuffer completion | TAB completion list | fuzzy filter-as-you-type in pickers | KEEP (no TAB needed) |
+| 30 | minibuffer history | `M-p`/`M-n` in prompts | finder has recents; query history none | DEFER |
+| 31 | kill buffer | `C-x k` prompts by name | **exists**: opens the buffer-list picker with kill affordance (2-of-2 driven); shape differs | KEEP (backlog: `d` inside the list echoes unbound — bind it as the kill verb per dired convention) |
+
 ## Findings vs battery notes
+
+- The isearch bug (#1) is the only functional defect found in battery 1.
+- Harness bug on our side: the battery's `C-x b` step actually sent `C-x 2`
+  (0x32 vs 0x62) — C-x b untested; row 6 stays DEFER until re-driven.
+
+## Open questions for the user (PROPOSE rows)
+
+9 (C-v overlap), 11 (position %), 13 (quit save-prompt), 14 (kill/yank
+scope), 15 (undo in notes). **User decided 2026-09-17: 9 YES, 11 YES,
+13 YES with buffer selection ("I guess we need buffer selection?"),
+14 YES with mark/select, 15 NO ("no undo yet" — stays logged).**
+Implementation: rows 9/11 → plan-004 issue 02; row 14+select → issue 03;
+row 13+selection → issue 04. Only clear BUGS go forward without review
+(row 1, isearch — plan-004 issue 01). DEFER rows 6/8 get re-verified in
+the next battery regardless (verification, not decision).
+
+## Battery 1 follow-up — 2026-09-17 (plan-004 issue 02: parity adopts, batch 1)
+
+| # | Row | Disposition | Evidence |
+|---|---|---|---|
+| 6 | C-x b buffer switch | **VERIFIED — already bound** | `C-x b` → `switch-buffer` picker (binding present at store.rs global keymap; test `issue_02_bindings_resolve_including_c_c_p_prefix` asserts `expect("C-x b", "switch-buffer")`; battery step drives it: picker opens showing README.md, src/main.rs, *scratch* (3 of 3)). No new code needed. |
+| 8 | C-l recenter cycle | **ADOPT (implemented)** | New `recenter` command registered (motion category); `C-l` bound in the Buffer view keymap. Cycle: top zone → middle (`max_scroll/2`) → bottom (`max_scroll`) → top (`0`). Zones determined by thirds of the scroll range. Unit tests: `recenter_cycles_top_to_middle`, `recenter_cycles_middle_to_bottom`, `recenter_cycles_bottom_to_top`, `recenter_full_cycle_returns_to_start`, `recenter_noop_when_buffer_fits_viewport`. Battery leg (121-line fixture, viewport=27): from Bot, C-l→Top, C-l→Middle (`L48,39%`), C-l→Bottom (`Bot`). |
+| 9 | C-v/M-v 2-line overlap | **VERIFIED — already implemented** | `scroll_page_down`/`scroll_page_up` use `step = viewport - 2` (since plan-002 issue 03, "PART A fix item 5"). Unit tests: `scroll_page_down_keeps_two_line_overlap` (viewport=10, 100 lines: step=8, not 10). Battery legs (121-line fixture, viewport=27): C-v from `L6,4%` to `L31,25%` (step=25=viewport−2); M-v returns to `L6,4%` (step=25=viewport−2). 2-row overlap confirmed. |
+| 11 | Status-line position | **ADOPT (implemented)** | New `file_view_position_display()` on the store; format: `Top` at line 1, `Bot` when the window shows the buffer end (`scroll_top + viewport >= total`), otherwise `L{n},{pct}%` (1-based line, integer percent through the buffer, round-half-up). Appended to the status line after the searching indicator. Updates on every scroll/cursor movement (the status line re-renders every tick). Unit tests: `position_display_top`, `position_display_bot`, `position_display_middle`, `position_display_single_line_buffer`, `position_display_empty_buffer`. Battery legs (121-line fixture): after M-< shows `Top`, after C-n×5 shows `L6,4%`, after M-> shows `Bot`. |
+
 
 - The isearch bug (#1) is the only functional defect found in battery 1.
 - Harness bug on our side: the battery's `C-x b` step actually sent `C-x 2`
