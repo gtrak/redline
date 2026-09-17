@@ -179,9 +179,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub mod providers;
-
-use std::path::PathBuf;
+    use std::path::PathBuf;
 
     fn hit(name: &'static str) -> ResolvedSource {
         ResolvedSource {
