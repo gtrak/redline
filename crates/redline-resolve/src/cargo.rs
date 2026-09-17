@@ -11,10 +11,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{crate_from_symbol, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{crate_from_symbol, run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+
+/// Timeout for `cargo metadata` (local, but can be slow on large workspaces).
+const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for `cargo fetch` (network download).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolve Rust symbols to real source via cargo metadata / fetch.
 pub struct CargoProvider {
@@ -87,9 +93,10 @@ impl CargoProvider {
         }
         self.with_home(&mut cmd);
         // `cargo metadata` prints progress to stderr and JSON to stdout.
-        let out = cmd.output().map_err(|e| {
-            anyhow::anyhow!("failed to run `cargo metadata` in {}: {e}", workspace_root.display())
-        })?;
+        let out =
+            run_with_timeout(cmd, METADATA_TIMEOUT).map_err(|e| {
+                anyhow::anyhow!("failed to run `cargo metadata` in {}: {e}", workspace_root.display())
+            })?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let msg = if self.offline {
@@ -117,7 +124,8 @@ impl CargoProvider {
         let mut cmd = Command::new(&self.cargo_bin);
         cmd.current_dir(workspace_root).arg("fetch");
         self.with_home(&mut cmd);
-        let out = cmd.output().map_err(|e| anyhow::anyhow!("failed to run `cargo fetch`: {e}"))?;
+        let out =
+            run_with_timeout(cmd, FETCH_TIMEOUT).map_err(|e| anyhow::anyhow!("failed to run `cargo fetch`: {e}"))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(anyhow::anyhow!(
@@ -419,6 +427,10 @@ fn kind_priority(kind: &str) -> u8 {
 /// `pub struct Error`, `fn greet`, `impl<T> Foo` while rejecting
 /// `pub use crate::Error;`, `fn f() -> Error`, and `impl Display for Error`.
 fn line_defines_item(line: &str, item: &str) -> Option<&'static str> {
+    // Comment lines are never definitions (covers `//`, `///`, `//!`).
+    if line.trim_start().starts_with("//") {
+        return None;
+    }
     let stripped = strip_generics(line);
     let mut search_from = 0usize;
     loop {
@@ -511,6 +523,10 @@ mod tests {
         // substring of a longer identifier is not a whole word
         assert_eq!(line_defines_item("pub struct ErrorKind {", "Error"), None);
         assert_eq!(line_defines_item("pub struct Error {", "ErrorKind"), None);
+        // comment lines are never definitions
+        assert_eq!(line_defines_item("// fn helper() {", "helper"), None);
+        assert_eq!(line_defines_item("/// fn main() {", "main"), None);
+        assert_eq!(line_defines_item("//! fn main() {", "main"), None);
     }
 
     #[test]

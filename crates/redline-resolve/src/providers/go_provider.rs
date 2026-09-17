@@ -21,8 +21,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
-use crate::{ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+
+/// Timeout for `go env` (fast local call).
+const GO_ENV_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for `go mod download` (network fetch).
+const MOD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolve Go symbols to real source via the Go module cache.
 pub struct GoProvider {
@@ -75,11 +81,11 @@ impl GoProvider {
         if let Some(cache) = &self.mod_cache {
             return Ok(cache.clone());
         }
-        let out = Command::new(&self.go_bin)
-            .arg("env")
-            .arg("GOMODCACHE")
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to run `go env GOMODCACHE`: {e}"))?;
+        let mut go_cmd = Command::new(&self.go_bin);
+        go_cmd.arg("env").arg("GOMODCACHE");
+        let out =
+            run_with_timeout(go_cmd, GO_ENV_TIMEOUT)
+                .map_err(|e| anyhow::anyhow!("failed to run `go env GOMODCACHE`: {e}"))?;
         if out.status.success() {
             let cache = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !cache.is_empty() {
@@ -94,13 +100,14 @@ impl GoProvider {
     /// Run `go mod download <module>` in the workspace (fetch-on-demand,
     /// sanctioned by the operator directive).
     fn run_mod_download(&self, workspace_root: &Path, module: &str) -> anyhow::Result<()> {
-        let out = Command::new(&self.go_bin)
-            .current_dir(workspace_root)
+        let mut cmd = Command::new(&self.go_bin);
+        cmd.current_dir(workspace_root)
             .arg("mod")
             .arg("download")
-            .arg(module)
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to run `go mod download {module}`: {e}"))?;
+            .arg(module);
+        let out =
+            run_with_timeout(cmd, MOD_DOWNLOAD_TIMEOUT)
+                .map_err(|e| anyhow::anyhow!("failed to run `go mod download {module}`: {e}"))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(anyhow::anyhow!(

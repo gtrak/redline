@@ -24,12 +24,10 @@
 //! - `pip install`: `pip3 install <pkg>` (or the venv's `pip`), timeout 120 s.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::mpsc;
-use std::thread;
+use std::process::Command;
 use std::time::Duration;
 
-use crate::{ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// Timeout for the `find_spec` subprocess (should be fast).
 const FIND_SPEC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -307,26 +305,7 @@ impl ToolingProvider for PythonProvider {
     }
 }
 
-/// Run a command with a timeout. The command is spawned in a background
-/// thread; if the timeout expires before the command finishes, an error is
-/// returned (the orphaned process will eventually exit or be reaped by the OS).
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let result = cmd.output();
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(anyhow::anyhow!("failed to run command: {e}")),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err(anyhow::anyhow!("command timed out after {timeout:?}"))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(anyhow::anyhow!("command thread panicked"))
-        }
-    }
-}
+
 
 /// Determine the source root for an external (non-workspace) Python file.
 ///

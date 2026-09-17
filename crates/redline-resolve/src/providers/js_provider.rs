@@ -24,14 +24,18 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// File extensions considered JavaScript/TypeScript sources.
 const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts"];
+
+/// Timeout for `npm install` (network download).
+const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolve JS/TS symbols to real source via `node_modules` / `npm install`.
 pub struct JsProvider {
@@ -79,7 +83,7 @@ impl JsProvider {
             .arg(base_pkg)
             .arg("--no-audit")
             .arg("--no-fund");
-        let out = cmd.output().map_err(|e| {
+        let out = run_with_timeout(cmd, NPM_INSTALL_TIMEOUT).map_err(|e| {
             anyhow::anyhow!(
                 "failed to run `npm install {base_pkg}` in {}: {e}",
                 install_root.display()
@@ -97,6 +101,16 @@ impl JsProvider {
 
     fn resolve_js(&self, ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
         let (pkg_spec, item) = split_symbol(&ctx.symbol);
+        // A bare (dot-free) symbol has no package path; resolving it to a
+        // concrete package would require scope info (tree-sitter) not yet
+        // provided by the app. Bail rather than guess an install name.
+        if item.is_none() {
+            anyhow::bail!(
+                "bare symbol `{}` has no package path; resolving it to a package \n\
+                 needs scope info (tree-sitter) not yet provided by the app",
+                ctx.symbol
+            );
+        }
         let base_pkg = base_package_name(&pkg_spec);
         let ws = ctx
             .workspace_root
@@ -782,6 +796,7 @@ mod tests {
     // ── live E2E: real tiny npm package (network) ──────────────────────────
 
     #[test]
+    #[ignore] // requires network (npm registry)
     fn e2e_leftpad_live() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();

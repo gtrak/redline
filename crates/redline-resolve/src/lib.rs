@@ -12,11 +12,80 @@
 
 pub mod providers;
 
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod cargo;
 
 pub use cargo::CargoProvider;
+
+/// Run a command with a timeout. The child is spawned directly in this
+/// thread; stdout/stderr are drained by reader threads so the pipe buffer
+/// does not deadlock the child. On timeout the child is killed and reaped
+/// before the error is returned.
+pub(crate) fn run_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to run command: {e}"))?;
+
+    // Detach stdout/stderr so we can read them concurrently with waiting.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_reader = stdout_pipe.map(|mut p| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = Read::read_to_end(&mut p, &mut buf);
+            buf
+        })
+    });
+    let stderr_reader = stderr_pipe.map(|mut p| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = Read::read_to_end(&mut p, &mut buf);
+            buf
+        })
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    match child.wait() {
+                        Ok(s) => break s,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "command timed out after {timeout:?} and reap failed: {e}"
+                            ))
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(anyhow::anyhow!("failed to wait for command: {e}")),
+        }
+    };
+
+    let stdout = stdout_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 /// Where a resolution landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
