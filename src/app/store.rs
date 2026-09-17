@@ -206,15 +206,31 @@ impl ViewId {
                 km
             }
             ViewId::Blame => {
-                // Blame (issue 08): read-only; q closes.
+                // Blame (issue 08): read-only; q closes. Emacs motion
+                // (issue 003-02): the cursor-following window keeps the
+                // selected row in view on every move.
                 let mut km = KeyMap::new();
                 km.bind(&[Key::char('q')], "close-view").unwrap();
+                km.bind(&[Key::ctrl_char('n')], "blame-next").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "blame-prev").unwrap();
+                km.bind(&[Key::ctrl_char('v')], "blame-page-down").unwrap();
+                km.bind(&[Key::alt_char('v')], "blame-page-up").unwrap();
+                km.bind(&[Key::alt_char('<')], "blame-top").unwrap();
+                km.bind(&[Key::alt_char('>')], "blame-bottom").unwrap();
                 km
             }
             ViewId::CommitDiff => {
                 // Read-only commit diff (issue 08): q closes back to log.
+                // Emacs motion (issue 003-02): the pane has no cursor; these
+                // move the window (the FileView vocabulary, no new bindings).
                 let mut km = KeyMap::new();
                 km.bind(&[Key::char('q')], "close-view").unwrap();
+                km.bind(&[Key::ctrl_char('n')], "commit-diff-scroll-down").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "commit-diff-scroll-up").unwrap();
+                km.bind(&[Key::ctrl_char('v')], "commit-diff-page-down").unwrap();
+                km.bind(&[Key::alt_char('v')], "commit-diff-page-up").unwrap();
+                km.bind(&[Key::alt_char('<')], "commit-diff-scroll-top").unwrap();
+                km.bind(&[Key::alt_char('>')], "commit-diff-scroll-bottom").unwrap();
                 km
             }
             ViewId::CommitEditor => {
@@ -824,6 +840,13 @@ pub struct AppStore {
     commit_diff: Option<CommitDiffState>,
     /// The blame view state (for the file being blamed).
     blame: Option<BlameState>,
+    /// Per-pane scroll offsets (issue 003-02 shared windowing): the index of
+    /// the first visible row in each pane's full row list. Each is kept in
+    /// range by the shared window helpers and resets to 0 when its pane opens
+    /// (or, for the log, when it pages).
+    commit_diff_scroll: usize,
+    blame_scroll: usize,
+    log_scroll: usize,
     /// The inline commit-editor state (the first editable buffer).
     commit_editor: Option<CommitEditorState>,
     /// The branch-create name prompt (`M-x` → `branch-create`), when active.
@@ -1011,6 +1034,9 @@ impl AppStore {
             log: None,
             commit_diff: None,
             blame: None,
+            commit_diff_scroll: 0,
+            blame_scroll: 0,
+            log_scroll: 0,
             commit_editor: None,
             branch_create: None,
             tree: TreeState {
@@ -1197,9 +1223,35 @@ impl AppStore {
             buf.locally_modified = true;
             // Invalidate the highlight cache for this buffer (text changed).
             self.invalidate_highlight_for_key(&key);
+            // Keep the insertion row (the new end of the buffer) inside the
+            // visible window (issue 003-02: typing near the bottom keeps the
+            // active region in view). The file view's window is the full
+            // `viewport_lines` (its title/indicator live in the same area).
+            self.buffer_keep_insert_visible();
             true
         } else {
             false
+        }
+    }
+
+    /// Keep the current buffer's last line (the insertion row) inside the
+    /// visible file-view window after an edit; no-op when there is no current
+    /// buffer or the row is already visible. Uses the shared window math with
+    /// the file view's window size (`viewport_lines`).
+    fn buffer_keep_insert_visible(&mut self) {
+        let key = self.buffers.current().map(String::from);
+        let Some(key) = key else {
+            return;
+        };
+        let total = self.buffers.get(&key).map(|b| b.line_count()).unwrap_or(0);
+        if total == 0 {
+            return;
+        }
+        let insert_row = total - 1;
+        let window = self.viewport_lines.max(1);
+        let next = keep_cursor_visible(self.scroll_top(), insert_row, total, window);
+        if next != self.scroll_top() {
+            self.scroll.insert(key, next);
         }
     }
 
@@ -2953,7 +3005,7 @@ impl AppStore {
     /// and the help line), at least one. `viewport_lines` is the file-view
     /// content height set on resize.
     fn magit_window(&self) -> usize {
-        self.viewport_lines.saturating_sub(2).max(1)
+        pane_window(self.viewport_lines)
     }
 
     /// Keep the magit cursor row inside the visible window (issue 002-02
@@ -2977,14 +3029,12 @@ impl AppStore {
             self.magit_scroll = self.magit_scroll.min(total.saturating_sub(1));
             return;
         };
-        let window = self.magit_window();
-        let scroll = &mut self.magit_scroll;
-        if cursor < *scroll {
-            *scroll = cursor;
-        } else if cursor >= *scroll + window {
-            *scroll = cursor + 1 - window; // cursor lands on the last visible row
-        }
-        *scroll = (*scroll).min(total.saturating_sub(1));
+        self.magit_scroll = keep_cursor_visible(
+            self.magit_scroll,
+            cursor,
+            total,
+            self.magit_window(),
+        );
     }
 
     /// The magit status window (visible rows + top row index + total row
@@ -2998,10 +3048,8 @@ impl AppStore {
         if total == 0 {
             return (Vec::new(), 0, 0);
         }
-        let window = self.magit_window();
-        let scroll = self.magit_scroll.min(total.saturating_sub(1));
-        let end = (scroll + window).min(total);
-        (rows[scroll..end].to_vec(), scroll, total)
+        let (start, end) = window_slice(self.magit_scroll, total, self.magit_window());
+        (rows[start..end].to_vec(), start, total)
     }
 
     /// Live dirty counts for the status line (`None` until the first
@@ -3439,6 +3487,7 @@ impl AppStore {
             entries,
             selected: 0,
         });
+        self.log_scroll = 0;
         if self.top_view() != ViewId::Log {
             self.push_view(ViewId::Log);
         }
@@ -3479,6 +3528,8 @@ impl AppStore {
             l.entries = entries;
             l.selected = 0;
         }
+        // A new page starts its in-page window at the top (issue 003-02).
+        self.log_scroll = 0;
     }
 
     /// Move the in-page log selection down (arrows / j / C-n).
@@ -3486,6 +3537,7 @@ impl AppStore {
         if let Some(l) = self.log.as_mut() {
             l.selected = (l.selected + 1).min(l.entries.len().saturating_sub(1));
         }
+        self.log_keep_visible();
     }
 
     /// Move the in-page log selection up (arrows / k / C-p).
@@ -3493,6 +3545,7 @@ impl AppStore {
         if let Some(l) = self.log.as_mut() {
             l.selected = l.selected.saturating_sub(1);
         }
+        self.log_keep_visible();
     }
 
     /// `RET` in the log: open the selected commit's full tree diff read-only.
@@ -3509,6 +3562,7 @@ impl AppStore {
         match self.with_git(|g| g.commit_diff(&oid)) {
             Ok(diff) => {
                 self.commit_diff = Some(CommitDiffState { diff });
+                self.commit_diff_scroll = 0;
                 if self.top_view() != ViewId::CommitDiff {
                     self.push_view(ViewId::CommitDiff);
                 }
@@ -3533,6 +3587,7 @@ impl AppStore {
             l.entries = entries;
             l.selected = l.selected.min(l.entries.len().saturating_sub(1));
         }
+        self.log_keep_visible();
     }
 
     /// `b` in the magit-status context: blame the current buffer's file
@@ -3566,6 +3621,7 @@ impl AppStore {
                     lines,
                     selected: 0,
                 });
+                self.blame_scroll = 0;
                 if self.top_view() != ViewId::Blame {
                     self.push_view(ViewId::Blame);
                 }
@@ -3977,6 +4033,189 @@ impl AppStore {
             }
         }
         rows
+    }
+
+    /// The total row count of the commit-diff pane (header + diffstat +
+    /// files + hunks), computed without building the row Vecs (the scroll
+    /// handlers only need the bound, not the rows).
+    fn commit_diff_row_count(&self) -> usize {
+        let Some(cd) = self.commit_diff.as_ref() else {
+            return 0;
+        };
+        let d = &cd.diff;
+        let mut n = 2; // header + diffstat
+        for f in &d.files {
+            n += 1; // file row
+            for h in &f.hunks {
+                n += 1 + h.lines.len(); // hunk header + body lines
+            }
+        }
+        n
+    }
+
+    /// The commit-diff window (visible rows + top + total) for the shared
+    /// windowing (issue 003-02). This pane has no cursor: the emacs-motion
+    /// keys move `commit_diff_scroll` (the window), so `window_slice` alone
+    /// bounds it.
+    pub fn commit_diff_view_info(&self) -> (Vec<MagitRow>, usize, usize) {
+        let rows = self.commit_diff_rows();
+        let total = rows.len();
+        if total == 0 {
+            return (Vec::new(), 0, 0);
+        }
+        let (start, end) = window_slice(self.commit_diff_scroll, total, pane_window(self.viewport_lines));
+        (rows[start..end].to_vec(), start, total)
+    }
+
+    fn set_commit_diff_scroll(&mut self, top: usize) {
+        self.commit_diff_scroll = top.min(self.commit_diff_row_count().saturating_sub(1));
+    }
+
+    /// C-n in the commit-diff view: scroll the window down one row.
+    pub fn commit_diff_scroll_down(&mut self) {
+        self.set_commit_diff_scroll(self.commit_diff_scroll + 1);
+    }
+
+    /// C-p in the commit-diff view: scroll the window up one row.
+    pub fn commit_diff_scroll_up(&mut self) {
+        self.set_commit_diff_scroll(self.commit_diff_scroll.saturating_sub(1));
+    }
+
+    /// C-v in the commit-diff view: scroll the window down one page.
+    pub fn commit_diff_page_down(&mut self) {
+        let step = pane_window(self.viewport_lines).saturating_sub(2).max(1);
+        self.set_commit_diff_scroll(self.commit_diff_scroll + step);
+    }
+
+    /// M-v in the commit-diff view: scroll the window up one page.
+    pub fn commit_diff_page_up(&mut self) {
+        let step = pane_window(self.viewport_lines).saturating_sub(2).max(1);
+        self.set_commit_diff_scroll(self.commit_diff_scroll.saturating_sub(step));
+    }
+
+    /// M-> in the commit-diff view: scroll the window to the last row.
+    pub fn commit_diff_scroll_bottom(&mut self) {
+        let total = self.commit_diff_row_count();
+        let w = pane_window(self.viewport_lines);
+        self.commit_diff_scroll = total.saturating_sub(w);
+    }
+
+    /// M-< in the commit-diff view: scroll the window to the top.
+    pub fn commit_diff_scroll_top(&mut self) {
+        self.commit_diff_scroll = 0;
+    }
+
+    /// The blame cursor row count (header + one row per blamed line).
+    fn blame_row_count(&self) -> usize {
+        self.blame.as_ref().map(|b| b.lines.len() + 1).unwrap_or(0)
+    }
+
+    /// Keep the blame cursor (`b.selected`) inside the visible window; persists
+    /// `blame_scroll` so the window follows the cursor in both directions.
+    fn blame_keep_visible(&mut self) {
+        let Some(b) = self.blame.as_mut() else {
+            return;
+        };
+        // The cursor row sits after the header, so its index in the row list
+        // is `b.selected + 1`.
+        let cursor = b.selected + 1;
+        let total = self.blame_row_count();
+        self.blame_scroll = keep_cursor_visible(self.blame_scroll, cursor, total, pane_window(self.viewport_lines));
+    }
+
+    /// The blame window (visible rows + top + total) for the shared windowing
+    /// (issue 003-02). The cursor row is always inside it (kept by
+    /// `blame_keep_visible`).
+    pub fn blame_view_info(&self) -> (Vec<MagitRow>, usize, usize) {
+        let rows = self.blame_rows();
+        let total = rows.len();
+        if total == 0 {
+            return (Vec::new(), 0, 0);
+        }
+        let (start, end) = window_slice(self.blame_scroll, total, pane_window(self.viewport_lines));
+        (rows[start..end].to_vec(), start, total)
+    }
+
+    /// C-n in the blame view: move the cursor down one row (the window keeps
+    /// it in view).
+    pub fn blame_cursor_down(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            b.selected = (b.selected + 1).min(b.lines.len().saturating_sub(1));
+        }
+        self.blame_keep_visible();
+    }
+
+    /// C-p in the blame view: move the cursor up one row.
+    pub fn blame_cursor_up(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            b.selected = b.selected.saturating_sub(1);
+        }
+        self.blame_keep_visible();
+    }
+
+    /// C-v in the blame view: move the cursor down one page.
+    pub fn blame_page_down(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            let step = pane_window(self.viewport_lines).saturating_sub(2).max(1);
+            b.selected = (b.selected + step).min(b.lines.len().saturating_sub(1));
+        }
+        self.blame_keep_visible();
+    }
+
+    /// M-v in the blame view: move the cursor up one page.
+    pub fn blame_page_up(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            let step = pane_window(self.viewport_lines).saturating_sub(2).max(1);
+            b.selected = b.selected.saturating_sub(step);
+        }
+        self.blame_keep_visible();
+    }
+
+    /// M-> in the blame view: move the cursor to the last row.
+    pub fn blame_cursor_bottom(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            b.selected = b.lines.len().saturating_sub(1);
+        }
+        self.blame_keep_visible();
+    }
+
+    /// M-< in the blame view: move the cursor to the first row.
+    pub fn blame_cursor_top(&mut self) {
+        if let Some(b) = self.blame.as_mut() {
+            b.selected = 0;
+        }
+        self.blame_keep_visible();
+    }
+
+    /// The log row count (header + one row per entry + paging footer).
+    fn log_row_count(&self) -> usize {
+        self.log.as_ref().map(|l| l.entries.len() + 2).unwrap_or(0)
+    }
+
+    /// Keep the log's in-page selection inside the visible window; persists
+    /// `log_scroll` so the window follows the selection (paging via `n`/`p`
+    /// resets the window to the top, separately).
+    fn log_keep_visible(&mut self) {
+        let Some(log) = self.log.as_ref() else {
+            return;
+        };
+        // The selection row sits after the header, so its index is `log.selected + 1`.
+        let cursor = log.selected + 1;
+        let total = self.log_row_count();
+        self.log_scroll = keep_cursor_visible(self.log_scroll, cursor, total, pane_window(self.viewport_lines));
+    }
+
+    /// The log window (visible rows + top + total) for the shared windowing
+    /// (issue 003-02). The in-page selection is always inside it (kept by
+    /// `log_keep_visible`).
+    pub fn log_view_info(&self) -> (Vec<MagitRow>, usize, usize) {
+        let rows = self.log_rows();
+        let total = rows.len();
+        if total == 0 {
+            return (Vec::new(), 0, 0);
+        }
+        let (start, end) = window_slice(self.log_scroll, total, pane_window(self.viewport_lines));
+        (rows[start..end].to_vec(), start, total)
     }
 
     /// The log view's title (the branch name or "(detached HEAD)").
@@ -5676,6 +5915,49 @@ fn editor_cursor_line(ed: &mut CommitEditorState, delta: i32) {
     ed.cursor = t_start + col.min(t_len);
 }
 
+// ── Shared windowing (issue 003-02) ──────────────────────────────────────
+//
+// The single windowing mechanism for every long-content pane (magit status,
+// commit-diff, blame, log, editable buffers). Three pure pieces of math,
+// extracted from the magit status buffer's shipped logic so each pane reuses
+// one implementation. All are plain Rust (no iocraft), so the UI layer only
+// renders whatever the store pre-computes.
+
+/// The number of rows that fit in a pane's content area: the viewport minus
+/// the pinned chrome rows (the title, a scroll indicator, and the help line),
+/// at least one. `viewport_lines` is the content height set on resize.
+fn pane_window(viewport_lines: usize) -> usize {
+    viewport_lines.saturating_sub(2).max(1)
+}
+
+/// The first/last visible row indices for a scroll window over `total` rows.
+/// `scroll` is clamped into `[0, total)`; `end` is bounded by `total`. Returns
+/// `(start, end)` (a half-open range); `(0, 0)` when `total` is 0.
+fn window_slice(scroll: usize, total: usize, window: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let start = scroll.min(total.saturating_sub(1));
+    (start, (start + window).min(total))
+}
+
+/// The new scroll offset that keeps `cursor` inside the visible window:
+/// scroll up when the cursor is above the top row, scroll down when it is
+/// below the last visible row (the cursor then lands on the last visible row).
+/// `cursor` must be `< total`. Pure; returns the clamped offset.
+fn keep_cursor_visible(scroll: usize, cursor: usize, total: usize, window: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let mut scroll = scroll;
+    if cursor < scroll {
+        scroll = cursor;
+    } else if cursor >= scroll + window {
+        scroll = cursor + 1 - window;
+    }
+    scroll.min(total.saturating_sub(1))
+}
+
 /// One log row: `<short_id> <subject>  <author>  <date>`.
 fn log_entry_display(e: &LogEntry) -> String {
     format!("{} {}  {}  {}", e.short_id, e.subject, e.author, e.date)
@@ -6262,7 +6544,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 71);
+        assert_eq!(store.picker_count().0, 83);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -6280,14 +6562,14 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 70);
+        assert_eq!(store.picker_selected(), 82);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 69);
+        assert_eq!(store.picker_selected(), 81);
 
-        // RET runs the candidate at the selected index (70: save-buffer —
-        // *scratch* is not editable, so just a message).
+        // RET runs the candidate at the selected index (the last command —
+        // a no-op close, *scratch* is not editable, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -6319,7 +6601,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 71);
+        assert_eq!(store.picker_count().0, 83);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -8579,6 +8861,257 @@ mod tests {
         let cursor2 = s.magit_rows().iter().position(|r| r.selected).unwrap();
         assert!((top2..top2 + win2.len()).contains(&cursor2),
             "cursor row {cursor2} must stay in window [{top2},{}): top={top2}", top2 + win2.len());
+    }
+
+    // ── issue 003-02: shared windowing (commit-diff / blame / log / notes) ──
+
+    /// Shared git CLI helper for the windowing tests (isolated env, like the
+    /// magit windowing test above).
+    fn git_test_cli(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A git repo with a base commit and one "tall" commit that grows a file
+    /// to 60 lines, so the selected commit's diff overflows a small viewport.
+    fn tall_commit_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
+        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
+        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
+        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("big.txt"), "l1\n").unwrap();
+        git_test_cli(dir.path(), &["add", "-A"]);
+        git_test_cli(dir.path(), &["commit", "-q", "-m", "base"]);
+        let mut content = String::new();
+        for i in 1..=60 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(dir.path().join("big.txt"), content).unwrap();
+        git_test_cli(dir.path(), &["add", "-A"]);
+        git_test_cli(dir.path(), &["commit", "-q", "-m", "tall"]);
+        dir
+    }
+
+    /// Commit-diff (issue 003-02): the window is bounded by the pane window,
+    /// `M->` lands on the last row (top clamps), `M-<` round-trips to the top,
+    /// and C-n/C-p move the window one row.
+    #[test]
+    fn commit_diff_window_bounded_and_motions_clamp() {
+        let dir = tall_commit_repo();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.set_viewport_lines(8); // pane window == 6
+        s.open_log();
+        s.log_open_commit();
+        assert_eq!(s.top_view(), ViewId::CommitDiff);
+
+        let total = s.commit_diff_rows().len();
+        assert!(total > 6, "commit diff must overflow the window: {total} rows");
+
+        // Window bounded at the top.
+        let (win, top, tot) = s.commit_diff_view_info();
+        assert_eq!(tot, total);
+        assert!(win.len() <= 6, "window must be bounded: {} rows", win.len());
+        assert_eq!(top, 0);
+
+        // C-n advances the top one row; C-p steps back.
+        s.key_event(key("C-n"));
+        assert_eq!(s.commit_diff_view_info().1, 1, "C-n must advance the top");
+        s.key_event(key("C-p"));
+        assert_eq!(s.commit_diff_view_info().1, 0, "C-p must step back");
+
+        // M-> (scroll to bottom) lands the top on the full last page; the
+        // last visible row is the diff's final row.
+        let w = pane_window(s.viewport_lines);
+        s.key_event(key("M->"));
+        let (win_b, top_b, _) = s.commit_diff_view_info();
+        assert_eq!(top_b, total - w, "M-> must land on the full last page: got {top_b}");
+        assert_eq!(
+            win_b[win_b.len() - 1].text,
+            s.commit_diff_rows()[total - 1].text,
+            "the last visible row must be the diff's final row"
+        );
+
+        // M-< (scroll to top) round-trips.
+        s.key_event(key("M-<"));
+        assert_eq!(s.commit_diff_view_info().1, 0, "M-< must round-trip to top");
+
+        // C-v / M-v page: a page-down advances the top by more than a line
+        // (the pane window minus a 2-line overlap), and M-v brings it back.
+        s.key_event(key("C-v"));
+        let top_page = s.commit_diff_view_info().1;
+        assert!(top_page > 1, "C-v must page down (more than one row): got {top_page}");
+        s.key_event(key("M-v"));
+        assert_eq!(s.commit_diff_view_info().1, 0, "M-v must page back to top");
+    }
+
+    /// Blame (issue 003-02): the cursor-following window keeps `b.selected`
+    /// in view on every move; the top advances as the cursor passes it and
+    /// clamps so the last row stays visible.
+    #[test]
+    fn blame_cursor_stays_in_window_on_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
+        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
+        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
+        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        let mut content = String::new();
+        for i in 1..=60 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(dir.path().join("big.txt"), content).unwrap();
+        git_test_cli(dir.path(), &["add", "-A"]);
+        git_test_cli(dir.path(), &["commit", "-q", "-m", "one"]);
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.set_viewport_lines(8); // pane window == 6
+        s.open_path("big.txt");
+        s.open_blame();
+        assert_eq!(s.top_view(), ViewId::Blame);
+
+        let total = s.blame_rows().len(); // header + 60 lines
+        assert!(total > 6, "blame must overflow the window: {total} rows");
+
+        // Initially the cursor is on the first line (row 1); the window top is 0.
+        let (win, top, tot) = s.blame_view_info();
+        assert_eq!(tot, total);
+        assert!(win.len() <= 6);
+        assert_eq!(top, 0);
+        assert!(s.blame.as_ref().unwrap().selected + 1 < top + win.len());
+
+        // Move the cursor down past the first window; it must stay in view and
+        // the top must advance.
+        for _ in 0..10 {
+            s.key_event(key("C-n"));
+        }
+        let (win2, top2, _) = s.blame_view_info();
+        let sel = s.blame.as_ref().unwrap().selected + 1;
+        assert!(
+            (top2..top2 + win2.len()).contains(&sel),
+            "cursor row {sel} must be in window [{top2},{}): top={top2}",
+            top2 + win2.len()
+        );
+        assert!(top2 > 0, "window must have scrolled down: {top2}");
+
+        // M-> moves the cursor to the last line; the top clamps so the last row
+        // is the last visible row.
+        s.key_event(key("M->"));
+        let (win3, top3, _) = s.blame_view_info();
+        let last = s.blame.as_ref().unwrap().selected + 1;
+        assert_eq!(last, total - 1, "M-> must move the cursor to the last row");
+        assert!(
+            (top3..top3 + win3.len()).contains(&last),
+            "last row {last} must be in window [{top3},{}): top={top3}",
+            top3 + win3.len()
+        );
+        assert_eq!(top3, 55, "top must clamp to show the last row: got {top3}");
+
+        // M-< round-trips the cursor to the first row.
+        s.key_event(key("M-<"));
+        let (win4, top4, _) = s.blame_view_info();
+        let first = s.blame.as_ref().unwrap().selected + 1;
+        assert_eq!(first, 1, "M-< must move the cursor to the first row");
+        assert!((top4..top4 + win4.len()).contains(&first));
+    }
+
+    /// Log in-page (issue 003-02): the in-page motion (arrows / j / k) keeps
+    /// the selection inside the visible window; paging (`n`/`p`) resets the
+    /// window to the top and is unchanged.
+    #[test]
+    fn log_in_page_selection_stays_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
+        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
+        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
+        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        for i in 0..30 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x\n").unwrap();
+            git_test_cli(dir.path(), &["add", "-A"]);
+            git_test_cli(dir.path(), &["commit", "-q", "-m", &format!("commit {i}")]);
+        }
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.set_viewport_lines(8); // pane window == 6
+        s.open_log();
+        assert_eq!(s.top_view(), ViewId::Log);
+
+        let total = s.log_rows().len(); // header + up-to-25 entries + footer
+        assert!(total > 6, "log page must overflow the window: {total} rows");
+
+        // Move the in-page selection down with `j`; it must stay in view and
+        // the top must advance.
+        for _ in 0..20 {
+            s.key_event(key("j"));
+        }
+        let (win, top, _) = s.log_view_info();
+        let sel = s.log.as_ref().unwrap().selected + 1;
+        assert!(
+            (top..top + win.len()).contains(&sel),
+            "log selection row {sel} must be in window [{top},{}): top={top}",
+            top + win.len()
+        );
+        assert!(top > 0, "log window must have scrolled: {top}");
+
+        // Paging (`n`) resets the in-page window to the top.
+        s.key_event(key("n"));
+        let (_, top_paged, _) = s.log_view_info();
+        assert_eq!(top_paged, 0, "n (next page) must reset the window to the top");
+    }
+
+    /// Editable buffers (issue 003-02): typing in the notes buffer near the
+    /// bottom keeps the insertion row inside the visible file-view window.
+    #[test]
+    fn notes_typing_near_bottom_keeps_insertion_row_in_view() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.set_viewport_lines(8); // file-view window == 8
+        s.open_notes();
+        // Type 40 lines so the buffer far exceeds the 8-line viewport.
+        for _ in 0..40 {
+            s.notes_insert_char('x');
+            s.notes_insert_char('\n');
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        let total = s.buffers.get(&key).unwrap().line_count();
+        assert!(total > 8, "notes buffer must overflow the viewport: {total} lines");
+        // The insertion row (the last line) must be inside the visible window.
+        let (top, total2, viewport) = s.file_view_scroll_info();
+        assert_eq!(total2, total);
+        let last = total - 1;
+        assert!(
+            last < top + viewport,
+            "insertion row {last} must be in view [top={top}, {viewport} rows)"
+        );
+        // The rendered window ends exactly on the last line (no gap).
+        let lines = s.file_view_lines();
+        assert_eq!(
+            top + lines.len(),
+            total,
+            "window must end at the last line: top={top} len={} total={total}",
+            lines.len()
+        );
     }
 
     fn git_store(dir: &std::path::Path) -> AppStore {

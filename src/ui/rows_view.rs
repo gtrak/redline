@@ -13,8 +13,16 @@ use crate::ui::{face_bg, face_color, face_weight};
 #[derive(Default, Props)]
 pub struct MagitRowsViewProps {
     pub title: String,
+    /// The visible window of rows (pre-sliced by the store; the cursor row is
+    /// always inside it when the store uses cursor-following windowing).
     pub rows: Vec<MagitRow>,
     pub help: String,
+    /// The scroll offset (index of the first visible row in the full list).
+    /// `0` (the default) disables the scroll indicator for callers that pass
+    /// a full row list.
+    pub top_row: usize,
+    /// The total number of rows in the full list (drives the scroll indicator).
+    pub total_rows: usize,
 }
 
 #[cfg(test)]
@@ -132,6 +140,23 @@ pub fn MagitRowsView(
                             }
                         }
                     })
+                })
+                #({
+                    // Scroll indicators (same convention as the file view and
+                    // the magit status buffer): shown only when the pane is
+                    // actually windowed (`total_rows` > the visible rows).
+                    let mut ind = String::new();
+                    if props.top_row > 0 {
+                        ind.push('\u{2191}');
+                    }
+                    if props.top_row + props.rows.len() < props.total_rows {
+                        ind.push('\u{2193}');
+                    }
+                    if ind.is_empty() {
+                        None
+                    } else {
+                        Some(element! { Text(content: ind, color: face_color(t.preview)) })
+                    }
                 })
                 Text(
                     content: &props.help,

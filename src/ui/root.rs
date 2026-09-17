@@ -107,6 +107,8 @@ struct Snapshot {
     blame_rows: Vec<MagitRow>,
     commit_diff_title: String,
     commit_diff_rows: Vec<MagitRow>,
+    commit_diff_top_row: usize,
+    commit_diff_total_rows: usize,
     commit_editor_title: String,
     commit_editor_rows: Vec<MagitRow>,
     dirty: Option<DirtyCounts>,
@@ -307,6 +309,13 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let (search_rows, search_top_row, search_total_rows, search_selected_row) =
             s.search_view_info();
         let (magit_rows, magit_top_row, magit_total_rows) = s.magit_view_info();
+        // Issue 003-02 shared windowing: the log / blame / commit-diff panes
+        // render their pre-computed visible window (the store keeps the
+        // cursor row in view; paging resets the log window).
+        let (log_rows, _log_top, _log_total) = s.log_view_info();
+        let (blame_rows, _blame_top, _blame_total) = s.blame_view_info();
+        let (commit_diff_rows, commit_diff_top_row, commit_diff_total_rows) =
+            s.commit_diff_view_info();
         Snapshot {
             quit: s.quit,
             project: s.project_display().to_string(),
@@ -335,11 +344,13 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             menu_rows: s.menu_rows(),
             menu_height: s.menu_height(),
             log_title: s.log_title(),
-            log_rows: s.log_rows(),
+            log_rows,
             blame_title: s.blame_title(),
-            blame_rows: s.blame_rows(),
+            blame_rows,
             commit_diff_title: s.commit_diff_title(),
-            commit_diff_rows: s.commit_diff_rows(),
+            commit_diff_rows,
+            commit_diff_top_row,
+            commit_diff_total_rows,
             commit_editor_title: s.commit_editor_title(),
             commit_editor_rows: s.commit_editor_rows(),
             dirty: s.dirty_counts(),
@@ -408,7 +419,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             MagitRowsView(
                 title: snap.commit_diff_title.clone(),
                 rows: snap.commit_diff_rows.clone(),
-                help: "commit diff (read-only) · q back".to_string(),
+                top_row: snap.commit_diff_top_row,
+                total_rows: snap.commit_diff_total_rows,
+                help: "commit diff (read-only) · C-n/C-p · C-v/M-v · M->/M-< · q back".to_string(),
             )
         }
         .into()),
@@ -643,7 +656,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 71"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 83"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

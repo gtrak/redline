@@ -434,6 +434,83 @@ impl CommandRegistry {
             "git",
             |store, _arg| store.commit_editor_abort(),
         ));
+        // ── issue 003-02: shared windowing (commit-diff + blame motion) ────
+        // The commit-diff pane has no cursor: these move the window itself via
+        // the emacs-motion vocabulary (the FileView keys, no new bindings).
+        reg.register(Command::new(
+            "commit-diff-scroll-down",
+            "Scroll the commit-diff window down one row (C-n)",
+            "motion",
+            |store, _arg| store.commit_diff_scroll_down(),
+        ));
+        reg.register(Command::new(
+            "commit-diff-scroll-up",
+            "Scroll the commit-diff window up one row (C-p)",
+            "motion",
+            |store, _arg| store.commit_diff_scroll_up(),
+        ));
+        reg.register(Command::new(
+            "commit-diff-page-down",
+            "Scroll the commit-diff window down one page (C-v)",
+            "motion",
+            |store, _arg| store.commit_diff_page_down(),
+        ));
+        reg.register(Command::new(
+            "commit-diff-page-up",
+            "Scroll the commit-diff window up one page (M-v)",
+            "motion",
+            |store, _arg| store.commit_diff_page_up(),
+        ));
+        reg.register(Command::new(
+            "commit-diff-scroll-top",
+            "Scroll the commit-diff window to the top (M-<)",
+            "motion",
+            |store, _arg| store.commit_diff_scroll_top(),
+        ));
+        reg.register(Command::new(
+            "commit-diff-scroll-bottom",
+            "Scroll the commit-diff window to the bottom (M->)",
+            "motion",
+            |store, _arg| store.commit_diff_scroll_bottom(),
+        ));
+        // The blame pane has a cursor; these move it and the window follows
+        // (keeps the cursor row in view).
+        reg.register(Command::new(
+            "blame-next",
+            "Move the blame cursor down one row (C-n)",
+            "git",
+            |store, _arg| store.blame_cursor_down(),
+        ));
+        reg.register(Command::new(
+            "blame-prev",
+            "Move the blame cursor up one row (C-p)",
+            "git",
+            |store, _arg| store.blame_cursor_up(),
+        ));
+        reg.register(Command::new(
+            "blame-page-down",
+            "Move the blame cursor down one page (C-v)",
+            "git",
+            |store, _arg| store.blame_page_down(),
+        ));
+        reg.register(Command::new(
+            "blame-page-up",
+            "Move the blame cursor up one page (M-v)",
+            "git",
+            |store, _arg| store.blame_page_up(),
+        ));
+        reg.register(Command::new(
+            "blame-top",
+            "Move the blame cursor to the first row (M-<)",
+            "git",
+            |store, _arg| store.blame_cursor_top(),
+        ));
+        reg.register(Command::new(
+            "blame-bottom",
+            "Move the blame cursor to the last row (M->)",
+            "git",
+            |store, _arg| store.blame_cursor_bottom(),
+        ));
         // ── issue 04: file watching ─────────────────────────────────
         reg.register(Command::new(
             "reload-buffer",
@@ -582,7 +659,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 71, "expected 71 seed commands: {names:?}");
+        assert_eq!(names.len(), 83, "expected 83 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -635,6 +712,18 @@ mod tests {
             "log-open-commit",
             "commit-editor-commit",
             "commit-editor-abort",
+            "commit-diff-scroll-down",
+            "commit-diff-scroll-up",
+            "commit-diff-page-down",
+            "commit-diff-page-up",
+            "commit-diff-scroll-top",
+            "commit-diff-scroll-bottom",
+            "blame-next",
+            "blame-prev",
+            "blame-page-down",
+            "blame-page-up",
+            "blame-top",
+            "blame-bottom",
             "reload-buffer",
             "toggle-watcher",
             "xref-find-definitions",
