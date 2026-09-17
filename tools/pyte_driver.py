@@ -5,8 +5,10 @@ reconstructs the screen with pyte so we can inspect per-cell fg/bg/reverse.
 
 The selected-row cursor bar is a per-row View with the selected face's
 background. For the default (dark) theme that is White-on-Blue: iocraft
-emits fg `38;5;15` -> pyte `ffffff`, bg `48;5;12` -> pyte `5c5cff`.
-So the discriminating signature of the cursor row is bg == '5c5cff'.
+emits fg `38;5;15` -> pyte `ffffff`. The bar background is the theme's
+bright blue: as 256-color `48;5;12` -> pyte `5c5cff`, or (plan-004 issue 05,
+when `COLORTERM=truecolor`) as truecolor `48;2;0;0;255` -> pyte `0000ff`.
+So the discriminating signature of the cursor row is a bg in `BAR_BGS`.
 """
 import os, pty, fcntl, termios, struct, time, select, signal, sys
 
@@ -15,7 +17,11 @@ import pyte
 BIN = os.environ.get("REDLINE_BIN", "/home/gary/dev/red/target/debug/redline")
 COLS = int(os.environ.get("COLS", "80"))
 ROWS = int(os.environ.get("ROWS", "24"))
-BLUE_BG = "5c5cff"  # pyte's rendering of iocraft Color::Blue (48;5;12)
+# pyte's rendering of the selected-row bar background, per color mode:
+#   256-color (default / no COLORTERM): 48;5;12  -> '5c5cff'
+#   truecolor (COLORTERM=truecolor):    48;2;0;0;255 -> '0000ff'
+BLUE_BG = "5c5cff"  # legacy 256-color signature (kept for reference)
+BAR_BGS = {"5c5cff", "0000ff"}
 
 
 def _set_winsize(fd, rows, cols):
@@ -57,10 +63,11 @@ def encode_key(seq):
 
 
 class App:
-    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0):
+    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None):
         self.repo = repo
         self.rows = rows
         self.cols = cols
+        self.colorterm = colorterm
         master, slave = pty.openpty()
         _set_winsize(slave, rows, cols)
         _set_winsize(master, rows, cols)
@@ -77,6 +84,13 @@ class App:
             env = dict(os.environ)
             env["TERM"] = "xterm-256color"
             env["RUST_LOG"] = "info"
+            # Deterministic bar color for the pyte drives: default to the
+            # 256-color path (pop any ambient COLORTERM); pass colorterm="truecolor"
+            # to exercise the truecolor bar (plan-004 issue 05).
+            if colorterm is None:
+                env.pop("COLORTERM", None)
+            else:
+                env["COLORTERM"] = colorterm
             os.chdir(repo)
             os.execvpe(BIN, [BIN], env)
         os.close(slave)
@@ -157,15 +171,15 @@ class App:
         for r in range(upper):
             row = self.screen.buffer[r]
             for i in range(self.cols):
-                if str(row[i].bg).lower() == BLUE_BG:
+                if str(row[i].bg).lower() in BAR_BGS:
                     out.append(r)
                     break
         return out
 
     def blue_count(self, row):
-        """Number of blue-bg cells in a row."""
+        """Number of bar-bg cells in a row (256-color or truecolor)."""
         return sum(1 for i in range(self.cols)
-                   if str(self.screen.buffer[row][i].bg).lower() == BLUE_BG)
+                   if str(self.screen.buffer[row][i].bg).lower() in BAR_BGS)
 
     def reverse_rows(self):
         """Rows containing any reversed cell (sanity: the fix must use NO reverse)."""

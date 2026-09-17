@@ -8,7 +8,7 @@ use iocraft::prelude::*;
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::diff_view::row_face;
-use crate::ui::{face_bg, face_color, face_weight};
+use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct MagitStatusViewProps {
@@ -135,7 +135,7 @@ pub fn MagitStatusView(
                     // erase the cursor. Unselected rows keep the view background.
                     props.rows.iter().enumerate().map(|(i, row)| {
                         let face = row_face(row.role, row.selected, &t);
-                        let bg = if row.selected { face_bg(face) } else { face_bg(t.view) };
+                        let bg = if row.selected { bar_bg(face) } else { face_bg(t.view) };
                         element! {
                             View(key: i.to_string(), background_color: bg) {
                                 Text(

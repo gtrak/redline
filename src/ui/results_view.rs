@@ -12,7 +12,7 @@ use iocraft::prelude::*;
 
 use crate::app::store::ResultRow;
 use crate::theme;
-use crate::ui::{face_bg, face_color, face_weight};
+use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct ResultsViewProps {
@@ -92,7 +92,7 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
                                 ResultRow::Hit { .. } => t.view,
                             }
                         };
-                        let bg = if selected { face_bg(face) } else { face_bg(t.view) };
+                        let bg = if selected { bar_bg(face) } else { face_bg(t.view) };
                         element! {
                             View(key: i.to_string(), background_color: bg) {
                                 Text(

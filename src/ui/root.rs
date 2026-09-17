@@ -74,6 +74,43 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
     Some(app_key)
 }
 
+/// The hardware-cursor position (0-based column, 0-based row — crossterm's
+/// `MoveTo(col, row)` order) for the current view. The row is the view's cursor
+/// row — the blue-bar (selected) row for list views, the top visible line for
+/// the read-focused buffer view — and the column is a sane default of 0 (the
+/// logical start of the row/content), per the plan-004 issue-05 decision ("a
+/// sane column default is fine, document it").
+///
+/// Layout (0-based terminal rows): the main view's title is row 0 and its first
+/// content row is row 1, so content row `i` (0-based within the window) is at
+/// terminal row `1 + i`. The tree sidebar (when visible) shares these rows in a
+/// separate column and is not the current view, so it is not positioned here.
+fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
+    let cell = |i: usize| (0u16, 1 + i as u16);
+    match snap.view {
+        ViewId::BufferList => Some(cell(
+            snap.buffer_list_selected.min(snap.buffer_rows.len().saturating_sub(1)),
+        )),
+        ViewId::Search => snap.search_selected_row.map(cell).or_else(|| Some(cell(0))),
+        ViewId::MagitStatus => Some(cell(
+            snap.magit_rows.iter().position(|r| r.selected).unwrap_or(0),
+        )),
+        ViewId::Log => Some(cell(snap.log_rows.iter().position(|r| r.selected).unwrap_or(0))),
+        ViewId::Blame => Some(cell(snap.blame_rows.iter().position(|r| r.selected).unwrap_or(0))),
+        ViewId::CommitDiff => Some(cell(
+            snap.commit_diff_rows.iter().position(|r| r.selected).unwrap_or(0),
+        )),
+        ViewId::CommitEditor => Some(cell(0)),
+        ViewId::Buffer => {
+            // The "changed on disk" banner (when present) pushes the content
+            // down one row; account for it so the cursor lands on the first
+            // visible line, not the banner.
+            let banner = u16::from(snap.file_view_changed_on_disk);
+            Some((0, 1 + banner))
+        }
+    }
+}
+
 /// One render's worth of store state, extracted as owned values so the
 /// `Mutex` guard can be dropped before the element tree is built.
 struct Snapshot {
@@ -379,6 +416,43 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             searching: s.search_display(),
         }
     };
+
+    // issue 004-05 (hardware cursor): iocraft hides the cursor ONCE at startup
+    // (?25l), never re-shows it, and re-parks it at the status line after every
+    // frame's synchronized output (?2026h ... ?2026l). This effect (which fires
+    // after every render) re-shows the cursor and repositions it on the current
+    // view's cursor row — the blue-bar (selected) row for list views, the top
+    // visible line for the buffer view (emacs -nw parity: the terminal cursor
+    // sits on point).
+    //
+    // The write is deferred to a short-lived task: iocraft's own effect hook
+    // fires mid-frame (after ?2026h, before the content draw), so a direct
+    // write here would be clobbered by the frame's status-line park (24;1).
+    // Deferring ~12 ms (the measured frame flush is ~5 ms) lands the ?25h + CUP
+    // AFTER the frame's ?2026l, making it the last cursor position for that
+    // frame. Because the effect fires on every render (key, watcher, index,
+    // search, or resize), the cursor is re-asserted after every frame. Guarded
+    // to the live terminal (and not on quit): the static render path reports
+    // size 0 and must not emit raw cursor escapes.
+    let revision = tick.get();
+    let cursor_cell_opt = cursor_cell(&snap);
+    let cursor_live = tw_raw > 0 && !snap.quit;
+    hooks.use_effect(
+        move || {
+            if !cursor_live {
+                return;
+            }
+            let cell = cursor_cell_opt;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+                if let Some((col, row)) = cell {
+                    use crossterm::cursor::{MoveTo, Show};
+                    let _ = crossterm::execute!(std::io::stdout(), Show, MoveTo(col, row));
+                }
+            });
+        },
+        (&revision,),
+    );
 
     if snap.quit {
         system.exit();

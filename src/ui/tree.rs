@@ -8,7 +8,7 @@ use iocraft::prelude::*;
 
 use crate::app::store::TreeRow;
 use crate::theme;
-use crate::ui::{face_bg, face_color, face_weight};
+use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct TreeSidebarProps {
@@ -136,7 +136,7 @@ pub fn TreeSidebar(props: &TreeSidebarProps, mut _hooks: Hooks) -> impl Into<Any
                         } else {
                             t.list_item
                         };
-                        let bg = if selected { face_bg(face) } else { face_bg(t.view) };
+                        let bg = if selected { bar_bg(face) } else { face_bg(t.view) };
                         let indent = "  ".repeat(row.depth.min(8));
                         let marker = if row.is_dir { "▸ " } else { "  " };
                         element! {

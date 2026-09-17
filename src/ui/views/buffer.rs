@@ -4,7 +4,7 @@ use iocraft::prelude::*;
 
 use crate::app::store::BufferRow;
 use crate::theme;
-use crate::ui::{face_bg, face_color, face_weight};
+use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct BufferListViewProps {
@@ -79,7 +79,7 @@ pub fn BufferListView(props: &BufferListViewProps, mut _hooks: Hooks) -> impl In
                         } else {
                             t.list_item
                         };
-                        let bg = if i == props.selected { face_bg(face) } else { face_bg(t.view) };
+                        let bg = if i == props.selected { bar_bg(face) } else { face_bg(t.view) };
                         let marker = if row.current { "*" } else { " " };
                         element! {
                             View(key: format!("{i}"), background_color: bg) {
