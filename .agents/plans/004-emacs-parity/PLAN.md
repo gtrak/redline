@@ -1,7 +1,7 @@
 # 004 — Redline: emacs-parity polish
 
 Status: planned
-Phases: 1 · Issues: 01–02
+Phases: 1 · Issues: 01–04
 
 ## Why
 
@@ -17,11 +17,16 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
    isearch query. Every printable must extend the query while isearch is
    active (emacs semantics). Same interception-order class as plan-002
    issue 05.
-2. **Issue 02 — parity adopts, batch 1**: the PROPOSE rows that are cheap
-   and additive — C-v/M-v 2-line overlap (next-screen-context-lines), line
-   and percent position in the status line — plus the DEFER items
-   re-verified (C-x b binding, C-l recenter) and the battery harness fix
-   (the C-x b keystroke bug in drive_redline_parity.py).
+2. **Issue 02 — parity adopts, batch 1** (user-approved rows 9/11):
+   C-v/M-v 2-line overlap, line+percent position in the status line,
+   C-x b / C-l re-verified and bound if missing.
+3. **Issue 03 — mark, select, kill/yank** (user-approved row 14 with
+   "mark/select"): C-SPC set-mark, region face, kill ring, yank/yank-pop —
+   full in editable buffers, copy-only in read-only views.
+4. **Issue 04 — quit save-prompt with buffer selection** (user-approved
+   row 13 with "buffer selection"): C-x C-c enumerates locally-modified
+   buffers (y/n/!/C-g) instead of silently discarding.
+   Row 15 (undo) stays logged-not-implemented ("no undo yet").
 
 ## Key decisions
 
@@ -46,11 +51,15 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 | Phase | Issues | Depends on |
 |---|---|---|
 | 1 | 01 isearch interception | — |
-| 1 | 02 parity adopts batch 1 | 01 + **user review of the PROPOSE rows** (docs/emacs-parity-log.md — user directive 2026-09-17: they review before feel-changes implement) |
+| 1 | 02 parity adopts batch 1 | 01 (store.rs serialization) |
+| 1 | 03 mark & kill/yank | 02 |
+| 1 | 04 quit save-prompt | 03 |
 
 ## Issue index
 
 - [01 — isearch printable interception](01-isearch-interception.md)
 - [02 — parity adopts batch 1](02-parity-adopts-1.md)
+- [03 — mark & kill/yank](03-mark-and-kill-yank.md)
+- [04 — quit save-prompt](04-quit-save-prompt.md)
 
 When complete, archive per plan-process.

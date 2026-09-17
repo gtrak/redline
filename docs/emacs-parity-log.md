@@ -48,8 +48,10 @@ rewritten (a changed mind adds a new row).
 ## Open questions for the user (PROPOSE rows)
 
 9 (C-v overlap), 11 (position %), 13 (quit save-prompt), 14 (kill/yank
-scope), 15 (undo in notes). **User answered 2026-09-17: they review these
-first — no default implementations.** Only clear BUGS go forward without
-review (row 1, isearch — in flight as plan-004 issue 01). Rows 9/11/13/14/
-15 wait for explicit user decisions; DEFER rows 6/8 get re-verified in the
-next battery regardless (verification, not decision).
+scope), 15 (undo in notes). **User decided 2026-09-17: 9 YES, 11 YES,
+13 YES with buffer selection ("I guess we need buffer selection?"),
+14 YES with mark/select, 15 NO ("no undo yet" — stays logged).**
+Implementation: rows 9/11 → plan-004 issue 02; row 14+select → issue 03;
+row 13+selection → issue 04. Only clear BUGS go forward without review
+(row 1, isearch — plan-004 issue 01). DEFER rows 6/8 get re-verified in
+the next battery regardless (verification, not decision).
