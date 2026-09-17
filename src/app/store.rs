@@ -8832,5 +8832,46 @@ mod tests {
         );
         assert!(s.current_buffer_changed_on_disk());
     }
+
+    // ── issue 003-01: access-only batch must not set changed_on_disk ─────
+
+    #[test]
+    fn access_only_batch_does_not_set_changed_on_disk() {
+        use crate::app::watcher::summarize;
+        use notify_debouncer_full::DebouncedEvent;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let bkey = s.buffers.current().unwrap().to_string();
+        let notes_path = dir.path().join(".redline-notes.md");
+
+        // Type to make the buffer locally owned (the bug's precondition).
+        s.key_event(key("a"));
+        assert!(s.buffers.get(&bkey).unwrap().locally_modified);
+
+        // Simulate the old bug path: access events for the notes file go
+        // through summarize. After the fix, summarize drops them, producing
+        // an empty change.
+        let access_events = vec![DebouncedEvent {
+            event: notify::Event {
+                kind: notify::EventKind::Access(notify::event::AccessKind::Any),
+                paths: vec![notes_path.clone()],
+                attrs: Default::default(),
+            },
+            time: std::time::Instant::now(),
+        }];
+        let change = summarize(dir.path(), access_events);
+        assert!(change.is_empty(), "summarize must drop access-only batches");
+
+        // The empty change must not set the marker.
+        s.apply_project_change(&change);
+        assert!(
+            !s.buffers.get(&bkey).unwrap().changed_on_disk,
+            "access-only batch must not set changed_on_disk"
+        );
+        assert!(!s.current_buffer_changed_on_disk());
+    }
 }
 

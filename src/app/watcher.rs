@@ -151,7 +151,11 @@ pub fn summarize(root: &Path, events: Vec<DebouncedEvent>) -> ProjectChange {
         } else if ev.event.kind.is_remove() {
             ChangeKind::Remove
         } else {
-            ChangeKind::Other
+            // Access events (and other non-content notify kinds) are not
+            // project changes: the app's own reads (buffer reload, symbol
+            // index) would self-sustain a debounced batch loop if
+            // published. Drop them entirely.
+            continue;
         };
         for path in ev.event.paths {
             if is_noise(&path, root) {
@@ -327,6 +331,52 @@ mod tests {
     }
 
     #[test]
+    fn summarize_access_only_batch_is_empty() {
+        let root = "/p";
+        let events = batch(
+            root,
+            &[
+                ("src/a.rs", EventKind::Access(notify::event::AccessKind::Any)),
+                ("src/b.rs", EventKind::Access(notify::event::AccessKind::Read)),
+            ],
+        );
+        let change = summarize(Path::new(root), events);
+        assert!(
+            change.is_empty(),
+            "access-only batch must publish nothing: {change:?}"
+        );
+    }
+
+    #[test]
+    fn summarize_mixed_batch_drops_access_keeps_real_kinds() {
+        let root = "/p";
+        let events = batch(
+            root,
+            &[
+                ("src/a.rs", EventKind::Access(notify::event::AccessKind::Any)),
+                ("src/b.rs", EventKind::Modify(notify::event::ModifyKind::Any)),
+                ("src/c.rs", EventKind::Create(notify::event::CreateKind::File)),
+                ("src/d.rs", EventKind::Access(notify::event::AccessKind::Any)),
+                ("src/e.rs", EventKind::Remove(notify::event::RemoveKind::Any)),
+            ],
+        );
+        let change = summarize(Path::new(root), events);
+        assert_eq!(
+            change.paths,
+            vec![
+                Path::new(root).join("src/b.rs"),
+                Path::new(root).join("src/c.rs"),
+                Path::new(root).join("src/e.rs"),
+            ],
+            "only real kinds survive: {change:?}"
+        );
+        assert_eq!(
+            change.kinds,
+            vec![ChangeKind::Modify, ChangeKind::Create, ChangeKind::Remove]
+        );
+    }
+
+    #[test]
     fn is_noise_classifies() {
         let root = Path::new("/p");
         assert!(is_noise(root.join(".git/HEAD").as_path(), root));
@@ -469,6 +519,36 @@ mod tests {
             .await
             .expect("control: a real write must publish");
         assert!(change.paths.iter().any(|p| p.ends_with("real.rs")));
+        s.stop_watcher();
+    }
+
+    #[tokio::test]
+    async fn access_events_produce_no_event() {
+        let root = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/a.rs"), "v1\n").unwrap();
+        let mut s = project_store(root.path(), base.path());
+        let _rx = s.watch_bus().subscribe(); // keeper
+        let baseline = settle_baseline(&mut s, TEST_DEBOUNCE).await;
+
+        // Pure access: read the file (the OS will deliver an Access(Open) event
+        // through the debouncer). Must NOT publish a change.
+        let _content = std::fs::read_to_string(root.path().join("src/a.rs")).unwrap();
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            s.watch_bus().current().seq,
+            baseline,
+            "access events must not publish: {:?}",
+            s.watch_bus().current()
+        );
+
+        // Control: a real write DOES publish (watcher is alive).
+        std::fs::write(root.path().join("src/a.rs"), "v2\n").unwrap();
+        let change = next_change(s.watch_bus(), baseline, WAIT)
+            .await
+            .expect("control: a real write must publish");
+        assert!(change.paths.iter().any(|p| p.ends_with("src/a.rs")));
         s.stop_watcher();
     }
 

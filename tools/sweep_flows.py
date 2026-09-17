@@ -592,19 +592,10 @@ def flow_e2(app):
 
 def flow_g3(app):
     """U-G3 conflict path: a locally-owned buffer shows the 'changed on disk'
-    marker instead of being clobbered; force-reload supersedes it (marker
-    cleared, disk content shown, local edit dropped).
-
-    Drive: the notes buffer is the app's editable, locally-owned buffer (a
-    plain file buffer accepts no key edits, so there is no PTY path to make
-    one locally-owned). The marker is raised by BOTH sources: the watcher's
-    Access-event self-sustain ~0.5 s after the first keystroke (see the
-    U-G3/notes-edit finding) and an explicit external disk append. The
-    reload leg runs the same command the `g` key dispatches in file views
-    (reload-buffer) via M-x, because while a notes buffer is focused the
-    printable `g` deliberately self-inserts (editable-key interception
-    protects notes text). The force-reload supersession — marker cleared,
-    disk edit visible, typed character gone — is the contract under test."""
+    marker ONLY after a real external disk edit; the type-then-idle leg proves
+    the Access-event self-sustain is gone (no false marker after typing + idle).
+    Force-reload supersedes the marker (cleared, disk content shown, local edit
+    dropped)."""
     notes_path = os.path.join(REPO, ".redline-notes.md")
     try:
         app.key("C-x n")
@@ -612,21 +603,21 @@ def flow_g3(app):
         notes_open = ".redline-notes.md" in row0(app)
         # One keystroke: the notes buffer becomes locally-owned.
         app.key("x", settle=0.3)
+        # Type-then-idle leg: pump ~3 s (well past the 500 ms debounce
+        # cadence). The old Access self-sustain would have raised a false
+        # marker within ~0.5 s. After the fix, no marker appears.
+        pump(app, 3.0)
+        no_false_marker = "changed on disk" not in text(app)
         # External disk edit: append a real line to the notes file.
         with open(notes_path, "a") as f:
             f.write("\nexternal_change_marker\n")
-        # Wait for the watcher (debounce ~500 ms; the Access self-sustain
-        # loop re-fires at the same cadence).
-        app.wait(2.5)
-        t = text(app)
-        marker_present = "changed on disk" in t
+        # Wait for the watcher to pick up the real external edit.
+        marker_landed = wait_for(app, lambda: "changed on disk" in text(app), 4.0)
         # Force-reload via the reload-buffer command (the command `g` runs).
         app.key("M-x")
         app.wait(0.8)
         for ch in "reload-buffer":
             app.key(ch, settle=0.2)
-        # Exactly one candidate must match before RET (count line '1 of 71':
-        # first number = filtered matches, second = total registry size).
         cl = count_line(app)
         only_match = cl is not None and cl[0] == "1"
         app.key("RET")
@@ -637,16 +628,15 @@ def flow_g3(app):
         local_edit_superseded = not any(
             app.row_text(r).strip() == "x" for r in range(1, app.rows - 2)
         )
-        ok = (notes_open and marker_present and only_match
+        ok = (notes_open and no_false_marker and marker_landed and only_match
               and marker_cleared and reloaded and local_edit_superseded)
-        record("U-G3", "C-x n,x;disk-append;M-x reload-buffer,RET", ok,
-               f"notes-open={notes_open} marker-appeared={marker_present} "
-               f"command-unique={only_match} "
+        record("U-G3", "C-x n,x;idle 3s;disk-append;M-x reload-buffer,RET", ok,
+               f"notes-open={notes_open} no-false-marker-after-idle={no_false_marker} "
+               f"marker-from-real-append={marker_landed} command-unique={only_match} "
                f"marker-cleared-by-reload={marker_cleared} "
                f"disk-edit-reloaded={reloaded} "
                f"local-edit-superseded={local_edit_superseded}")
     finally:
-        # Fixture hygiene: the notes file is not part of the baseline.
         try:
             os.remove(notes_path)
         except FileNotFoundError:
