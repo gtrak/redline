@@ -10,6 +10,8 @@
 //! inputs (project root, symbol context) and returns plain locations, so
 //! it can be built and tested in parallel with UX lanes.
 
+pub mod providers;
+
 use std::path::PathBuf;
 
 mod cargo;
@@ -177,7 +179,9 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    pub mod providers;
+
+use std::path::PathBuf;
 
     fn hit(name: &'static str) -> ResolvedSource {
         ResolvedSource {
