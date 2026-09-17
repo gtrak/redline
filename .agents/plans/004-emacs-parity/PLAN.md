@@ -1,7 +1,7 @@
 # 004 — Redline: emacs-parity polish
 
 Status: planned
-Phases: 1 · Issues: 01–04
+Phases: 1 · Issues: 01–05
 
 ## Why
 
@@ -23,6 +23,10 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 3. **Issue 03 — mark, select, kill/yank** (user-approved row 14 with
    "mark/select"): C-SPC set-mark, region face, kill ring, yank/yank-pop —
    full in editable buffers, copy-only in read-only views.
+5. **Issue 05 — cursor visibility on real terminals** (user-reported
+   recurrence): show + position the hardware cursor at the selected cell
+   (emacs parity); truecolor bar under COLORTERM=truecolor (palette
+   remapping made the 256-color bar invisible on the user's theme).
 4. **Issue 04 — quit save-prompt with buffer selection** (user-approved
    row 13 with "buffer selection"): C-x C-c enumerates locally-modified
    buffers (y/n/!/C-g) instead of silently discarding.
@@ -52,6 +56,7 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 |---|---|---|
 | 1 | 01 isearch interception | — |
 | 1 | 02 parity adopts batch 1 | 01 (store.rs serialization) |
+| 1 | 05 cursor visibility (user-reported) | 01 |
 | 1 | 03 mark & kill/yank | 02 |
 | 1 | 04 quit save-prompt | 03 |
 
@@ -61,5 +66,6 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 - [02 — parity adopts batch 1](02-parity-adopts-1.md)
 - [03 — mark & kill/yank](03-mark-and-kill-yank.md)
 - [04 — quit save-prompt](04-quit-save-prompt.md)
+- [05 — cursor visibility on real terminals](05-cursor-visibility.md)
 
 When complete, archive per plan-process.
