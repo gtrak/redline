@@ -2665,7 +2665,7 @@ impl AppStore {
         }
     }
 
-    /// Navigate to the next match (n) with wrap-around.
+    /// Navigate to the next match (C-s) with wrap-around.
     pub fn isearch_next(&mut self) {
         if !self.isearch.active || self.isearch.matches.is_empty() {
             return;
@@ -2679,7 +2679,7 @@ impl AppStore {
         self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
     }
 
-    /// Navigate to the previous match (N) with wrap-around.
+    /// Navigate to the previous match (C-r) with wrap-around.
     pub fn isearch_prev(&mut self) {
         if !self.isearch.active || self.isearch.matches.is_empty() {
             return;
@@ -5453,8 +5453,9 @@ impl AppStore {
     /// printable characters extend the query, Backspace/C-h edit it,
     /// a small set of keys drives the picker (RET runs, C-g cancels,
     /// arrows / C-n / C-p move); everything else goes to the keymap
-    /// engine. While isearch is active, printable characters extend the
-    /// query, n/N navigate, RET confirms, C-g cancels. While goto-line
+    /// engine. While isearch is active, printable characters (including
+    /// letters bound to view commands) extend the query, C-s/C-r navigate,
+    /// RET confirms, C-g cancels. While goto-line
     /// is active, digits build the line number, RET confirms, C-g
     /// cancels. While the search-query prompt is active, printable
     /// characters extend the query, RET confirms, C-g/ESC cancel. With
