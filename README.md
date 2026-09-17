@@ -124,16 +124,24 @@ auto_reload = true
 
 ## Performance
 
-Measured on a 500-file Rust repo (each ~50 lines):
+Measured on a 500-file Rust repo (each ~50 lines) — store-level microbench
+(headless `AppStore` on the production code paths, cold cache, median of 5;
+harness: `src/perf.rs`, run with `cargo test -- perf_remeasure -- --include-ignored --nocapture`):
 
 | Metric | Debug | Release |
 |--------|-------|---------|
-| Cold start (store init) | ~50 ms | ~15 ms |
-| Index (500 files) | ~200 ms | ~50 ms |
-| Index throughput | ~2500 files/s | ~10000 files/s |
-| Search first-hit | ~5 ms | ~1 ms |
+| Cold start (store init + file walk) | ~310 ms | ~75 ms |
+| Index (500 files) | ~110 ms | ~33 ms |
+| Index throughput | ~4500 files/s | ~15000 files/s |
+| Search first-hit | ~6 ms | ~1 ms |
 
-(Numbers vary by hardware; recorded on a mid-range laptop, 2025.)
+(Numbers vary by hardware. Re-recorded 2026-09-17, superseding the 2025
+mid-range-laptop numbers; cold start and index moved >20%, search first-hit
+is within 20% of the prior table. Method: store init = `AppStore::at`
+(project detection + store construction) + the initial project file walk;
+index = `start_indexing` to the final index event (includes the store's own
+walk, ~1–2 ms at 500 files); search first-hit = `start_project_search` to
+the first hit event.)
 
 ## Architecture
 
