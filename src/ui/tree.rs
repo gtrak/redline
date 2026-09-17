@@ -45,9 +45,10 @@ mod tests {
         store.set_viewport_lines(24);
         store.toggle_tree();
 
-        // Capture the actual tree rows (by name) before the store is moved
-        // into the render, so the assertions check the rows that really
-        // rendered rather than a hard-coded string that could be absent.
+        // Capture the actual tree rows (by name) before the store is wrapped
+        // in Arc<Mutex<_>> for the render context, so the assertions check
+        // the rows that really rendered rather than a hard-coded string that
+        // could be absent.
         let tree_names: Vec<String> = store
             .tree_rows()
             .iter()

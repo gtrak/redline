@@ -37,6 +37,13 @@ REPO5 = "/tmp/redline_pyte_repo_commit"
 # the walk is still in flight when C-g lands immediately after RET (the small
 # fixture repo finishes a search before C-g can arrive).
 SLOW_REPO = "/tmp/redline_sweep_slow_repo"
+# Throwaway repos for the plan-003-03 new windowing/scroll sweep legs (kept
+# off REPO so the main fixture baseline is never touched; the deep drives live
+# in tools/drive_windowing_panes.py and are cited by the thin legs below):
+# a repo with a tall committed file (commit-diff + blame legs) and a repo with
+# a notes file taller than the viewport (notes-scroll leg).
+WIN_DIFF_REPO = "/tmp/redline_sweep_win_diff"
+WIN_NOTES_REPO = "/tmp/redline_sweep_win_notes"
 SLOW_FILES = 6000
 ROWS, COLS = 24, 80
 
@@ -137,7 +144,10 @@ def flow_b2(app):
 
 
 def flow_b3(app):
-    """U-B3 no-match shows a clean empty state (count 0, no crash)."""
+    """U-B3 (partial leg — no-match only): no match shows a clean empty state
+    (count 0, no crash). The Backspace-edit and empty-query legs of U-B3 are
+    not PTY-driven here (marked partial in the record, per the log's own
+    convention for partial legs, e.g. the B5 populate-leg note)."""
     app.key("C-x C-f")
     app.wait(0.6)
     for ch in "zzzznomatch":
@@ -145,7 +155,9 @@ def flow_b3(app):
     t = text(app)
     empty_ok = ("0 of" in t) or ("0 candidates" in t) or (has(app, "0 of"))
     ok = empty_ok
-    record("U-B3", "C-x C-f,zzzznomatch", ok, f"clean-empty-state(count line present)={empty_ok}")
+    record("U-B3 (no-match leg only)", "C-x C-f,zzzznomatch", ok,
+           f"clean-empty-state(count line present)={empty_ok} "
+           f"[partial leg: Backspace-edit + empty-query legs not PTY-driven]")
     app.key("C-g")
 
 
@@ -529,6 +541,12 @@ def flow_c6(app):
         app.wait(0.6)
         bottom_row1 = app.row_text(1)
         m_gt_changed = bottom_row1 != top_row1
+        # Bottom anchor: the last content row reads the final line (line 50),
+        # not just "the first row changed". Content occupies rows 1..app.rows-4
+        # (title on row 0; the "↑" scroll-indicator row is app.rows-3; status
+        # line + minibuffer on the last two rows).
+        last_content_row = app.rows - 4
+        m_gt_bottom_anchor = app.row_text(last_content_row).strip() == "line 50"
         # M-< scrolls back to top: the first content row must match the original.
         app.key("M-<")
         app.wait(0.6)
@@ -539,14 +557,19 @@ def flow_c6(app):
         app.wait(0.6)
         g_row1 = app.row_text(1)
         g_changed = g_row1 != top_row1
+        # Bottom anchor after G: the last content row still reads line 50.
+        g_bottom_anchor = app.row_text(last_content_row).strip() == "line 50"
         # M-< round trip after G.
         app.key("M-<")
         app.wait(0.6)
         g_roundtrip = app.row_text(1) == top_row1
-        ok = open_ok and m_gt_changed and m_lt_roundtrip and g_changed and g_roundtrip
+        ok = (open_ok and m_gt_changed and m_lt_roundtrip and g_changed
+              and g_roundtrip and m_gt_bottom_anchor and g_bottom_anchor)
         record("U-C6", "M->,M-<,G,M-<", ok,
                f"opened={open_ok} M-> scrolled={m_gt_changed} "
+               f"M-> bottom-anchor(line50)={m_gt_bottom_anchor} "
                f"M-< roundtrip={m_lt_roundtrip} G scrolled={g_changed} "
+               f"G bottom-anchor(line50)={g_bottom_anchor} "
                f"G→M-< roundtrip={g_roundtrip}")
     finally:
         try:
@@ -608,6 +631,13 @@ def flow_g3(app):
         # marker within ~0.5 s. After the fix, no marker appears.
         pump(app, 3.0)
         no_false_marker = "changed on disk" not in text(app)
+        # Typed-char precondition: the local edit (the typed 'x') must still
+        # be present in the notes buffer BEFORE the reload supersedes it —
+        # proves the edit actually landed and that the idle pump did not
+        # clobber it with a false reload.
+        typed_char_present = any(
+            app.row_text(r).strip() == "x" for r in range(1, app.rows - 2)
+        )
         # External disk edit: append a real line to the notes file.
         with open(notes_path, "a") as f:
             f.write("\nexternal_change_marker\n")
@@ -628,10 +658,11 @@ def flow_g3(app):
         local_edit_superseded = not any(
             app.row_text(r).strip() == "x" for r in range(1, app.rows - 2)
         )
-        ok = (notes_open and no_false_marker and marker_landed and only_match
-              and marker_cleared and reloaded and local_edit_superseded)
+        ok = (notes_open and no_false_marker and typed_char_present and marker_landed
+              and only_match and marker_cleared and reloaded and local_edit_superseded)
         record("U-G3", "C-x n,x;idle 3s;disk-append;M-x reload-buffer,RET", ok,
                f"notes-open={notes_open} no-false-marker-after-idle={no_false_marker} "
+               f"typed-char-present-before-reload={typed_char_present} "
                f"marker-from-real-append={marker_landed} command-unique={only_match} "
                f"marker-cleared-by-reload={marker_cleared} "
                f"disk-edit-reloaded={reloaded} "
@@ -1037,6 +1068,207 @@ def flow_g5():
            f"lands-in-new-project-find-file={landed} project-message={msg}")
 
 
+# ── plan-003-03 new windowing/scroll sweep legs ────────────────────────────────
+# Thin sweep legs that point at the deep drives in tools/drive_windowing_panes.py
+# (which build their own disposable git fixtures). Each builds its own throwaway
+# repo (WIN_DIFF_REPO / WIN_NOTES_REPO) so REPO's baseline is never touched.
+
+def _ensure_win_diff_repo():
+    """A throwaway repo with a base commit and one tall commit (big.txt -> 60
+    lines). Wiped each run so history never grows. Feeds the commit-diff and
+    blame sweep legs (deep drives: tools/drive_windowing_panes.py:drive_commit_diff
+    / :drive_blame)."""
+    shutil.rmtree(WIN_DIFF_REPO, ignore_errors=True)
+    os.makedirs(WIN_DIFF_REPO, exist_ok=True)
+
+    def git(*a):
+        subprocess.run(["git", "-C", WIN_DIFF_REPO, *a], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "T")
+    git("config", "user.email", "t@e.com")
+    with open(os.path.join(WIN_DIFF_REPO, "big.txt"), "w") as f:
+        f.write("l1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    with open(os.path.join(WIN_DIFF_REPO, "big.txt"), "w") as f:
+        for i in range(1, 60):
+            f.write(f"line {i}\n")
+        f.write("BOTTOM_SENTINEL\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "tall-lines")
+
+
+def _ensure_win_notes_repo():
+    """A throwaway repo whose notes file is pre-seeded with 30 lines (no
+    trailing newline) so opening notes loads a buffer taller than the viewport.
+    Wiped each run. Feeds the notes-scroll sweep leg (deep drive:
+    tools/drive_windowing_panes.py:drive_notes)."""
+    shutil.rmtree(WIN_NOTES_REPO, ignore_errors=True)
+    os.makedirs(WIN_NOTES_REPO, exist_ok=True)
+
+    def git(*a):
+        subprocess.run(["git", "-C", WIN_NOTES_REPO, *a], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "T")
+    git("config", "user.email", "t@e.com")
+    with open(os.path.join(WIN_NOTES_REPO, "README.md"), "w") as f:
+        f.write("# notes fixture\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    with open(os.path.join(WIN_NOTES_REPO, ".redline-notes.md"), "w") as f:
+        for i in range(1, 30):
+            f.write(f"note line {i}\n")
+        f.write("note line 30")  # last line, no trailing newline
+
+
+def flow_commit_diff_scroll():
+    """NEW (plan-003-03) commit-diff scroll leg (thin): the commit-diff pane
+    scrolls past the 80x24 viewport — M-> lands on the last page (the sentinel
+    row shows), M-< round-trips to the top (the sentinel hides). The deep drive
+    (full-last-page semantic + C-n/C-p stepping) is
+    tools/drive_windowing_panes.py:drive_commit_diff."""
+    _ensure_win_diff_repo()
+    app = App(WIN_DIFF_REPO, rows=ROWS, cols=COLS)
+    try:
+        app.key("C-x g")
+        app.wait(0.8)
+        app.key("l")      # log
+        app.wait(0.8)
+        app.key("RET")    # open the newest (tall) commit's diff
+        app.wait(1.2)
+        top_hidden = "BOTTOM_SENTINEL" not in app.screen_text()
+        app.key("M->")
+        app.wait(0.8)
+        bottom_shown = "BOTTOM_SENTINEL" in app.screen_text()
+        app.key("M-<")
+        app.wait(0.8)
+        roundtrip = "BOTTOM_SENTINEL" not in app.screen_text()
+        ok = top_hidden and bottom_shown and roundtrip
+        record("U-CDS", "C-x g,l,RET;M->;M-<", ok,
+               f"top-hidden={top_hidden} M->-bottom-shown={bottom_shown} "
+               f"M-<-roundtrip={roundtrip} (deep drive: drive_windowing_panes.py)")
+    finally:
+        app.kill()
+
+
+def flow_blame_windowing():
+    """NEW (plan-003-03) blame windowing leg (thin): the cursor-following blame
+    window keeps the (single) cursor row in view across C-n moves past the
+    bottom and M-> to the last line. The deep drive is
+    tools/drive_windowing_panes.py:drive_blame."""
+    _ensure_win_diff_repo()
+    app = App(WIN_DIFF_REPO, rows=ROWS, cols=COLS)
+    try:
+        app.key("C-c p i")   # re-walk so big.txt is listed
+        app.wait(1.0)
+        app.key("C-x C-f")
+        app.wait(0.8)
+        for ch in "big":
+            app.key(ch, settle=0.25)
+        app.key("RET")
+        app.wait(1.0)
+        app.key("C-x g")
+        app.key("b")         # blame the current buffer's file
+        app.wait(1.2)
+        in_window = []
+        for _ in range(20):
+            b = app.blue_rows()
+            in_window.append(len(b) == 1 and 1 <= b[0] <= app.rows - 3)
+            app.key("C-n")
+        app.key("M->")
+        app.wait(0.6)
+        b = app.blue_rows()
+        last_ok = len(b) == 1 and 1 <= b[0] <= app.rows - 3
+        ok = all(in_window) and last_ok
+        record("U-BLW", "C-c p i;C-x C-f,big,RET;C-x g,b;C-n x20;M->", ok,
+               f"cursor-in-view {sum(in_window)}/{len(in_window)}, M->-last-line "
+               f"{last_ok} (deep drive: drive_windowing_panes.py)")
+    finally:
+        app.kill()
+
+
+def flow_notes_scroll():
+    """NEW (plan-003-03) notes-scroll leg (thin): a notes buffer taller than the
+    viewport keeps the active (insertion) row in view — typing near the bottom
+    scrolls the last line into view. The deep drive is
+    tools/drive_windowing_panes.py:drive_notes."""
+    _ensure_win_notes_repo()
+    app = App(WIN_NOTES_REPO, rows=ROWS, cols=COLS)
+    try:
+        app.key("C-x n")    # open notes (loads the 30-line file)
+        app.wait(1.2)
+        before = app.screen_text()
+        bottom_hidden = "note line 30" not in before
+        app.key("Z")        # type one char at the end (the insertion row)
+        app.wait(0.8)
+        after = app.screen_text()
+        bottom_shown = "note line 30" in after
+        edited = "note line 30Z" in after
+        ok = bottom_hidden and bottom_shown and edited
+        record("U-NSL", "C-x n;Z", ok,
+               f"bottom-hidden-before={bottom_hidden} bottom-shown-after={bottom_shown} "
+               f"self-insert={edited} (deep drive: drive_windowing_panes.py)")
+    finally:
+        app.kill()
+
+
+def flow_banner_hint():
+    """NEW (plan-003-03) banner-hint check, driven per kind.
+
+    Reachable case (the bug report's actual case): on the notes buffer (the
+    only key-editable, locally-owned buffer) an external disk append raises the
+    "changed on disk" banner, and the hint must read "M-x reload-buffer" (plain
+    `g` self-inserts by design on an editable buffer) — and must NOT say
+    "press g to reload".
+
+    The plain-file "g" hint is NOT PTY-banner-reachable: plain file buffers are
+    read-only (editable=false) and never locally-owned, so a plain file
+    auto-reloads and never renders the banner (flow_f4's no-marker leg asserts
+    exactly this). That hint text is unit-covered via the
+    changed_on_disk_hint(false) helper, not PTY-driven.
+    """
+    notes_path = os.path.join(REPO, ".redline-notes.md")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        try:
+            app.key("C-x n")
+            app.wait(0.8)
+            notes_open = ".redline-notes.md" in row0(app)
+            # One keystroke: the notes buffer becomes locally-owned.
+            app.key("x", settle=0.3)
+            # External disk edit: append a real line to the notes file.
+            with open(notes_path, "a") as f:
+                f.write("\nbanner_hint_marker\n")
+            # Wait for the watcher to raise the "changed on disk" banner.
+            banner_landed = wait_for(app, lambda: "changed on disk" in text(app), 4.0)
+            # The banner is a single row; capture it to assert the per-kind hint.
+            hint = ""
+            for r in range(app.rows):
+                rt = app.row_text(r)
+                if "changed on disk" in rt:
+                    hint = rt
+                    break
+            editable_hint = "M-x reload-buffer" in hint
+            no_plain_g = "press g to reload" not in hint
+            ok = notes_open and banner_landed and editable_hint and no_plain_g
+            record("U-BHN", "C-x n,x;disk-append", ok,
+                   f"notes-open={notes_open} banner-landed={banner_landed} "
+                   f"hint-says-M-x-reload-buffer={editable_hint} "
+                   f"no-press-g-to-reload={no_plain_g} "
+                   f"[plain-file 'g' hint: unit-covered via changed_on_disk_hint(false), "
+                   f"not PTY-banner-reachable — plain files auto-reload (flow_f4 no-marker)] "
+                   f"(hint={hint!r})")
+        finally:
+            app.kill()
+    finally:
+        try:
+            os.remove(notes_path)
+        except FileNotFoundError:
+            pass
+
+
 NOT_APPLICABLE = [
     "U-A2 (non-git folder) — needs a non-git repo fixture",
     "U-A3/A3b (10k-file index progress) — needs a 10k+ file repo",
@@ -1046,7 +1278,7 @@ NOT_APPLICABLE = [
     "U-C5 (CRLF/binary/empty files) — needs nasty-file fixtures",
     "U-C7/J4 (resize reflow/storm) — needs a live resize driver",
     "U-D1/D2/D3/D4/D5/D6/D7 (xref/imenu/which-function) — symbol-index dependent; "
-    "covered by unit tests + the index, not a single-PTY pyte assertion",
+    "covered by unit tests + the index",
     "U-E4/E5/E6/E7 (count hand-check, references, occur, rapid re-search) — "
     "E7/generation + E5/E6 have store-level unit tests",
     # U-J3, U-F3/F4/F5/F6/F7/F8, and U-G1/G2/G3/G5/G6 are now DRIVEN (see the
@@ -1174,6 +1406,14 @@ def main():
     # U-G5 project switch: needs a second registered project + an isolated
     # cache so the real user registry is never touched (own App inside).
     flow_g5()
+
+    # plan-003-03 new windowing/scroll sweep legs: commit-diff scroll, blame
+    # windowing, notes scroll (each self-contained on a throwaway repo; the
+    # deep drives are tools/drive_windowing_panes.py).
+    flow_commit_diff_scroll()
+    flow_blame_windowing()
+    flow_notes_scroll()
+    flow_banner_hint()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

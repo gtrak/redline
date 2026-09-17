@@ -211,6 +211,20 @@ pub struct FileViewProps {
     /// The current buffer has an un-reconciled disk change (the "changed on
     /// disk" conflict marker; issue 04).
     pub changed_on_disk: bool,
+    /// Whether the current buffer is editable (drives the "changed on disk"
+    /// banner hint: editable → `M-x reload-buffer`, plain → `g`).
+    pub buffer_editable: bool,
+}
+
+/// The "changed on disk" banner hint, accurate per buffer kind: on an
+/// editable buffer plain `g` self-inserts by design (the reachable reload
+/// path is `M-x reload-buffer`), while a plain file buffer reloads with `g`.
+fn changed_on_disk_hint(buffer_editable: bool) -> &'static str {
+    if buffer_editable {
+        "  ⚠ changed on disk — press M-x reload-buffer to reload"
+    } else {
+        "  ⚠ changed on disk — press g to reload"
+    }
 }
 
 /// The virtualized file view: titled, renders visible lines with
@@ -234,7 +248,7 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                 #(if props.changed_on_disk {
                     Some(element! {
                         Text(
-                            content: "  ⚠ changed on disk — press g to reload",
+                            content: changed_on_disk_hint(props.buffer_editable),
                             color: crate::ui::face_color(t.preview),
                         )
                     })
@@ -330,6 +344,34 @@ mod tests {
         let line = FileViewLine::default();
         assert!(line.text.is_empty());
         assert!(line.spans.is_empty());
+    }
+
+    /// The "changed on disk" banner hint is accurate per buffer kind: a plain
+    /// file buffer says `g`, an editable buffer says `M-x reload-buffer`
+    /// (plain `g` self-inserts by design on editable buffers).
+    #[test]
+    fn changed_on_disk_hint_plain_says_g() {
+        let hint = changed_on_disk_hint(false);
+        assert!(hint.contains("press g to reload"), "plain hint must say g: {hint}");
+        assert!(hint.contains("changed on disk"), "hint must keep the marker: {hint}");
+        assert!(
+            !hint.contains("M-x reload-buffer"),
+            "plain hint must not say M-x reload-buffer: {hint}"
+        );
+    }
+
+    #[test]
+    fn changed_on_disk_hint_editable_says_reload_buffer() {
+        let hint = changed_on_disk_hint(true);
+        assert!(
+            hint.contains("M-x reload-buffer"),
+            "editable hint must say M-x reload-buffer: {hint}"
+        );
+        assert!(hint.contains("changed on disk"), "hint must keep the marker: {hint}");
+        assert!(
+            !hint.contains("press g to reload"),
+            "editable hint must not say press g: {hint}"
+        );
     }
 
     /// Static render test: the FileView renders the title and content.

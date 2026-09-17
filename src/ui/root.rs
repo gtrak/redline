@@ -121,6 +121,9 @@ struct Snapshot {
     // File watching (issue 04): the current buffer's "changed on disk"
     // conflict marker.
     file_view_changed_on_disk: bool,
+    // issue 03 (sweep): whether the current buffer is editable, driving the
+    // per-kind "changed on disk" banner hint (M-x reload-buffer vs g).
+    file_view_current_buffer_editable: bool,
     // Tree sidebar (issue 09).
     tree_visible: bool,
     tree_rows: Vec<crate::app::store::TreeRow>,
@@ -360,6 +363,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_total_lines: total_lines,
             file_view_viewport_lines: viewport_lines,
             file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
+            file_view_current_buffer_editable: s.current_buffer_editable(),
             tree_visible: s.tree_visible(),
             tree_rows: s.tree_rows(),
             tree_selected: s.tree_selected(),
@@ -389,6 +393,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 top_line: snap.file_view_top_line,
                 viewport_lines: snap.file_view_viewport_lines,
                 changed_on_disk: snap.file_view_changed_on_disk,
+                buffer_editable: snap.file_view_current_buffer_editable,
             )
         }
         .into()),

@@ -4476,6 +4476,16 @@ impl AppStore {
             .unwrap_or(false)
     }
 
+    /// Whether the current buffer is editable (drives the "changed on disk"
+    /// banner hint: editable buffers reload via `M-x reload-buffer`, plain
+    /// file buffers via `g`; on an editable buffer plain `g` self-inserts).
+    pub fn current_buffer_editable(&self) -> bool {
+        self.buffers
+            .current_buffer()
+            .map(|b| b.editable)
+            .unwrap_or(false)
+    }
+
     // ── symbol navigation (issue 05) ─────────────────────────────────
 
     /// Capture the current position as a `JumpEntry` (for use as the
@@ -6983,6 +6993,58 @@ mod tests {
             !s.buffers.get(&key).unwrap().changed_on_disk,
             "no conflict marker for a clean buffer"
         );
+    }
+
+    #[test]
+    fn apply_project_change_tracked_path_refreshes_magit_counts() {
+        // F4 carried leg: the classifier (any_tracked) is tested separately;
+        // this drives the magit-REFRESH leg inside apply_project_change —
+        // a tracked-path change must update the dirty counts.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fn git_cli(d: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(d)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@e.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@e.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_cli(root, &["init", "-q", "-b", "main"]);
+        git_cli(root, &["config", "user.name", "T"]);
+        git_cli(root, &["config", "user.email", "t@e.com"]);
+        std::fs::write(root.join("tracked.rs"), "fn a() {}\n").unwrap();
+        git_cli(root, &["add", "tracked.rs"]);
+        git_cli(root, &["commit", "-q", "-m", "init"]);
+
+        let mut s = store(root);
+        // Prime the repo (git=Some) and refresh (clean repo → all-zero counts).
+        s.open_magit_status();
+        let clean = s.dirty_counts().expect("magit status must populate dirty counts");
+        assert_eq!(
+            clean.staged + clean.unstaged + clean.untracked,
+            0,
+            "clean repo must report zero dirty: {clean:?}"
+        );
+
+        // A tracked file changes on disk → an unstaged modification appears.
+        let proj_root = s.project.as_ref().unwrap().root.clone();
+        std::fs::write(proj_root.join("tracked.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+
+        // The watcher's apply_project_change must run the refresh leg.
+        s.apply_project_change(&change(vec![proj_root.join("tracked.rs")]));
+        let d = s.dirty_counts().expect("refresh leg must keep dirty counts populated");
+        assert!(d.unstaged >= 1, "tracked-path change must show an unstaged count: {d:?}");
     }
 
     #[test]
