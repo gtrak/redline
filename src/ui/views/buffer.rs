@@ -68,23 +68,30 @@ pub fn BufferListView(props: &BufferListViewProps, mut _hooks: Hooks) -> impl In
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
-                #(props.rows.iter().enumerate().map(|(i, row)| {
-                    let face = if i == props.selected {
-                        t.list_item_selected
-                    } else {
-                        t.list_item
-                    };
-                    let marker = if row.current { "*" } else { " " };
-                    element! {
-                        Text(
-                            key: format!("{i}"),
-                            content: format!("{marker}{} ({} lines)", row.name, row.lines),
-                            color: face_color(face),
-                            invert: i == props.selected,
-                            weight: face_weight(face),
-                        )
-                    }
-                }))
+                #({
+                    // One unambiguous cursor treatment (shared with the magit
+                    // family): the selected row's face background is drawn on a
+                    // per-row View (no invert), so the highlight is an explicit
+                    // white-on-blue bar independent of the theme background.
+                    props.rows.iter().enumerate().map(|(i, row)| {
+                        let face = if i == props.selected {
+                            t.list_item_selected
+                        } else {
+                            t.list_item
+                        };
+                        let bg = if i == props.selected { face_bg(face) } else { face_bg(t.view) };
+                        let marker = if row.current { "*" } else { " " };
+                        element! {
+                            View(key: format!("{i}"), background_color: bg) {
+                                Text(
+                                    content: format!("{marker}{} ({} lines)", row.name, row.lines),
+                                    color: face_color(face),
+                                    weight: face_weight(face),
+                                )
+                            }
+                        }
+                    })
+                })
                 Text(
                     content: "RET open · C-n/C-p or arrows move · q close",
                     color: face_color(t.preview),

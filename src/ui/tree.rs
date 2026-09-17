@@ -95,6 +95,10 @@ pub fn TreeSidebar(props: &TreeSidebarProps, mut _hooks: Hooks) -> impl Into<Any
                 weight: face_weight(t.view_title),
             )
             #({
+                // One unambiguous cursor treatment (shared with the magit
+                // family): the selected row's face background is drawn on a
+                // per-row View (no invert), so the highlight is an explicit
+                // white-on-blue bar independent of the theme background.
                 visible
                     .iter()
                     .map(|(i, row)| {
@@ -104,16 +108,17 @@ pub fn TreeSidebar(props: &TreeSidebarProps, mut _hooks: Hooks) -> impl Into<Any
                         } else {
                             t.list_item
                         };
+                        let bg = if selected { face_bg(face) } else { face_bg(t.view) };
                         let indent = "  ".repeat(row.depth.min(8));
                         let marker = if row.is_dir { "▸ " } else { "  " };
                         element! {
-                            Text(
-                                key: i.to_string(),
-                                content: format!("{indent}{marker}{}", row.name),
-                                color: face_color(face),
-                                invert: selected,
-                                weight: face_weight(face),
-                            )
+                            View(key: i.to_string(), background_color: bg) {
+                                Text(
+                                    content: format!("{indent}{marker}{}", row.name),
+                                    color: face_color(face),
+                                    weight: face_weight(face),
+                                )
+                            }
                         }
                     })
             })

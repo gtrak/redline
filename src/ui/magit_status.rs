@@ -12,7 +12,13 @@ use crate::ui::{face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct MagitStatusViewProps {
+    /// The visible window of status rows (pre-computed by the store; the
+    /// cursor row is always inside it).
     pub rows: Vec<MagitRow>,
+    /// The scroll offset (index of the first visible row in the full list).
+    pub top_row: usize,
+    /// The total number of status rows (drives the scroll indicators).
+    pub total_rows: usize,
 }
 
 #[cfg(test)]
@@ -119,18 +125,43 @@ pub fn MagitStatusView(
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
-                #(props.rows.iter().enumerate().map(|(i, row)| {
-                    let face = row_face(row.role, row.selected, &t);
-                    element! {
-                        Text(
-                            key: i.to_string(),
-                            content: &row.text,
-                            color: face_color(face),
-                            invert: row.selected,
-                            weight: face_weight(face),
-                        )
+                #({
+                    // One unambiguous cursor treatment: the selected row gets
+                    // its face's explicit background (white-on-blue bar) with NO
+                    // invert. A per-row View carries the background so it is
+                    // independent of the theme's view background — an invert
+                    // would swap the face's white foreground with the view
+                    // background, which is white in the light theme and would
+                    // erase the cursor. Unselected rows keep the view background.
+                    props.rows.iter().enumerate().map(|(i, row)| {
+                        let face = row_face(row.role, row.selected, &t);
+                        let bg = if row.selected { face_bg(face) } else { face_bg(t.view) };
+                        element! {
+                            View(key: i.to_string(), background_color: bg) {
+                                Text(
+                                    content: &row.text,
+                                    color: face_color(face),
+                                    weight: face_weight(face),
+                                )
+                            }
+                        }
+                    })
+                })
+                #({
+                    // Scroll indicators (same convention as the file view).
+                    let mut ind = String::new();
+                    if props.top_row > 0 {
+                        ind.push('↑');
                     }
-                }))
+                    if props.top_row + props.rows.len() < props.total_rows {
+                        ind.push('↓');
+                    }
+                    if ind.is_empty() {
+                        None
+                    } else {
+                        Some(element! { Text(content: ind, color: face_color(t.preview)) })
+                    }
+                })
                 Text(
                     content: "s stage · u unstage · TAB fold · RET visit · n/p move · g refresh · q back",
                     color: face_color(t.preview),

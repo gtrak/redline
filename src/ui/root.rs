@@ -94,6 +94,8 @@ struct Snapshot {
     total: usize,
     preview: String,
     magit_rows: Vec<MagitRow>,
+    magit_top_row: usize,
+    magit_total_rows: usize,
     // issue 002: transient menu overlay
     menu_open: bool,
     menu_rows: Vec<TransientMenuRow>,
@@ -304,6 +306,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
         let (search_rows, search_top_row, search_total_rows, search_selected_row) =
             s.search_view_info();
+        let (magit_rows, magit_top_row, magit_total_rows) = s.magit_view_info();
         Snapshot {
             quit: s.quit,
             project: s.project_display().to_string(),
@@ -325,7 +328,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .collect(),
             total: s.picker_count().1,
             preview: s.picker_preview().to_string(),
-            magit_rows: s.magit_rows(),
+            magit_rows,
+            magit_top_row,
+            magit_total_rows,
             menu_open: s.menu_open(),
             menu_rows: s.menu_rows(),
             menu_height: s.menu_height(),
@@ -384,7 +389,11 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         .into()),
         ViewId::MagitStatus => Some(element! {
-            MagitStatusView(rows: snap.magit_rows.clone())
+            MagitStatusView(
+                rows: snap.magit_rows.clone(),
+                top_row: snap.magit_top_row,
+                total_rows: snap.magit_total_rows,
+            )
         }
         .into()),
         ViewId::Log => Some(element! {

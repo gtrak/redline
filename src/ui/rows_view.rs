@@ -113,18 +113,26 @@ pub fn MagitRowsView(
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
-                #(props.rows.iter().enumerate().map(|(i, row)| {
-                    let face = row_face(row.role, row.selected, &t);
-                    element! {
-                        Text(
-                            key: i.to_string(),
-                            content: &row.text,
-                            color: face_color(face),
-                            invert: row.selected,
-                            weight: face_weight(face),
-                        )
-                    }
-                }))
+                #({
+                    // One unambiguous cursor treatment (shared with the magit
+                    // status buffer): the selected row's face background is
+                    // drawn on a per-row View (no invert), so the highlight is
+                    // an explicit white-on-blue bar independent of the theme's
+                    // view background. Unselected rows keep the view background.
+                    props.rows.iter().enumerate().map(|(i, row)| {
+                        let face = row_face(row.role, row.selected, &t);
+                        let bg = if row.selected { face_bg(face) } else { face_bg(t.view) };
+                        element! {
+                            View(key: i.to_string(), background_color: bg) {
+                                Text(
+                                    content: &row.text,
+                                    color: face_color(face),
+                                    weight: face_weight(face),
+                                )
+                            }
+                        }
+                    })
+                })
                 Text(
                     content: &props.help,
                     color: face_color(t.preview),

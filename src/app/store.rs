@@ -730,6 +730,10 @@ pub struct AppStore {
     git: Option<GitRepo>,
     /// The magit status section tree (issue 07), when built.
     status_tree: Option<StatusTree>,
+    /// The magit status window's top row (issue 002-02): a scroll offset into
+    /// `visible_rows()` so long status buffers keep the cursor in view and the
+    /// help line stays pinned. Kept in range by `magit_keep_visible`.
+    magit_scroll: usize,
     /// Live dirty counts for the status line, updated on each magit
     /// refresh (watcher-driven live refresh is issue 04).
     dirty: Option<DirtyCounts>,
@@ -977,6 +981,7 @@ impl AppStore {
             file_matcher: Matcher::new(nucleo_matcher::Config::DEFAULT.match_paths()),
             git: None,
             status_tree: None,
+            magit_scroll: 0,
             dirty: None,
             grammar_registry: GrammarRegistry::build(),
             highlight_cache: HighlightCache::new(),
@@ -2828,6 +2833,7 @@ impl AppStore {
         if let Some(t) = self.status_tree.as_mut() {
             t.toggle_fold();
         }
+        self.magit_keep_visible();
     }
 
     /// `n` / `C-n`: move the cursor to the next visible section.
@@ -2835,6 +2841,7 @@ impl AppStore {
         if let Some(t) = self.status_tree.as_mut() {
             t.move_down();
         }
+        self.magit_keep_visible();
     }
 
     /// `p` / `C-p`: move the cursor to the previous visible section.
@@ -2842,6 +2849,7 @@ impl AppStore {
         if let Some(t) = self.status_tree.as_mut() {
             t.move_up();
         }
+        self.magit_keep_visible();
     }
 
     /// `RET`: visit the file under the cursor through the buffer model
@@ -2938,6 +2946,62 @@ impl AppStore {
             .as_ref()
             .map(|t| t.visible_rows())
             .unwrap_or_default()
+    }
+
+    /// The number of magit status rows that fit in the content area:
+    /// `viewport_lines - 2` (room for the pinned title, a scroll indicator,
+    /// and the help line), at least one. `viewport_lines` is the file-view
+    /// content height set on resize.
+    fn magit_window(&self) -> usize {
+        self.viewport_lines.saturating_sub(2).max(1)
+    }
+
+    /// Keep the magit cursor row inside the visible window (issue 002-02
+    /// windowing for long status buffers). Called on every cursor move, fold,
+    /// and refresh; persists `magit_scroll` so the window tracks the cursor in
+    /// both directions. Clamped to the row count.
+    fn magit_keep_visible(&mut self) {
+        let rows = self
+            .status_tree
+            .as_ref()
+            .map(|t| t.visible_rows())
+            .unwrap_or_default();
+        let total = rows.len();
+        if total == 0 {
+            self.magit_scroll = 0;
+            return;
+        }
+        let Some(cursor) = rows.iter().position(|r| r.selected) else {
+            // No cursor row (shouldn't happen once the tree is built); just
+            // clamp the offset.
+            self.magit_scroll = self.magit_scroll.min(total.saturating_sub(1));
+            return;
+        };
+        let window = self.magit_window();
+        let scroll = &mut self.magit_scroll;
+        if cursor < *scroll {
+            *scroll = cursor;
+        } else if cursor >= *scroll + window {
+            *scroll = cursor + 1 - window; // cursor lands on the last visible row
+        }
+        *scroll = (*scroll).min(total.saturating_sub(1));
+    }
+
+    /// The magit status window (visible rows + top row index + total row
+    /// count) for long status buffers (issue 002-02). The cursor row is always
+    /// inside the window (kept by `magit_keep_visible`); the view renders the
+    /// window plus a scroll indicator and a pinned help line so neither is
+    /// clipped.
+    pub fn magit_view_info(&self) -> (Vec<MagitRow>, usize, usize) {
+        let rows = self.magit_rows();
+        let total = rows.len();
+        if total == 0 {
+            return (Vec::new(), 0, 0);
+        }
+        let window = self.magit_window();
+        let scroll = self.magit_scroll.min(total.saturating_sub(1));
+        let end = (scroll + window).min(total);
+        (rows[scroll..end].to_vec(), scroll, total)
     }
 
     /// Live dirty counts for the status line (`None` until the first
@@ -3050,6 +3114,7 @@ impl AppStore {
             untracked: status.untracked_count(),
         });
         self.status_tree = Some(tree);
+        self.magit_keep_visible();
         true
     }
 
@@ -8450,6 +8515,72 @@ mod tests {
 
     /// A store rooted in a fresh single-commit git repo (a.txt committed),
     /// with the project set so the git ops resolve the repo.
+    /// Windowing (issue 002-02): a status buffer taller than the viewport
+    /// keeps the cursor row inside the visible window while pressing `n`, and
+    /// the window's top advances (scrolls) as the cursor moves past it. This
+    /// is the store-level regression guard for the cursor-following window
+    /// (the pyte PTY check drives the same path end-to-end).
+    #[test]
+    fn magit_status_window_keeps_cursor_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(dir).args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "t@e.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "t@e.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        git_cli(dir.path(), &["init", "-q", "-b", "main"]);
+        git_cli(dir.path(), &["config", "user.name", "Test"]);
+        git_cli(dir.path(), &["config", "user.email", "t@e.com"]);
+        git_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        for i in 0..20 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "x\n").unwrap();
+        }
+        git_cli(dir.path(), &["add", "-A"]);
+        git_cli(dir.path(), &["commit", "-q", "-m", "init"]);
+        for i in 0..20 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), format!("x\nchanged {i}\n")).unwrap();
+        }
+        git_cli(dir.path(), &["add", "-A"]);
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.set_viewport_lines(8); // small viewport -> magit_window() == 6
+        s.open_magit_status();
+
+        let total = s.magit_rows().len();
+        assert!(total > 6, "status buffer must overflow the window: {total} rows");
+
+        // The cursor (first changed file) is inside the window, and the window
+        // is bounded by magit_window().
+        let (win, top, tot) = s.magit_view_info();
+        assert_eq!(tot, total);
+        assert!(win.len() <= 6, "window must be bounded: {} rows", win.len());
+        let cursor = s.magit_rows().iter().position(|r| r.selected).unwrap();
+        assert!((top..top + win.len()).contains(&cursor),
+            "cursor row {cursor} must be in window [{top},{}): top={top}", top + win.len());
+
+        // Press `n` until the cursor moves past the first window; the window's
+        // top must advance and the cursor must stay visible.
+        let first_top = s.magit_view_info().1;
+        for _ in 0..12 {
+            s.key_event(key("n"));
+        }
+        let (win2, top2, _) = s.magit_view_info();
+        assert!(top2 > first_top, "window must scroll down: {first_top} -> {top2}");
+        let cursor2 = s.magit_rows().iter().position(|r| r.selected).unwrap();
+        assert!((top2..top2 + win2.len()).contains(&cursor2),
+            "cursor row {cursor2} must stay in window [{top2},{}): top={top2}", top2 + win2.len());
+    }
+
     fn git_store(dir: &std::path::Path) -> AppStore {
         fn git_cli(dir: &std::path::Path, args: &[&str]) {
             let out = std::process::Command::new("git")

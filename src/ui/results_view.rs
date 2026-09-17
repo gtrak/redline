@@ -77,26 +77,33 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
                 } else {
                     None
                 })
-                #(props.rows.iter().enumerate().map(|(i, row)| {
-                    let selected = props.selected_row == Some(i);
-                    let face = if selected {
-                        t.list_item_selected
-                    } else {
-                        match row {
-                            ResultRow::Header { .. } => t.section_heading,
-                            ResultRow::Hit { .. } => t.view,
+                #({
+                    // One unambiguous cursor treatment (shared with the magit
+                    // family): the selected row's face background is drawn on a
+                    // per-row View (no invert), so the highlight is an explicit
+                    // white-on-blue bar independent of the theme background.
+                    props.rows.iter().enumerate().map(|(i, row)| {
+                        let selected = props.selected_row == Some(i);
+                        let face = if selected {
+                            t.list_item_selected
+                        } else {
+                            match row {
+                                ResultRow::Header { .. } => t.section_heading,
+                                ResultRow::Hit { .. } => t.view,
+                            }
+                        };
+                        let bg = if selected { face_bg(face) } else { face_bg(t.view) };
+                        element! {
+                            View(key: i.to_string(), background_color: bg) {
+                                Text(
+                                    content: row_text(row),
+                                    color: face_color(face),
+                                    weight: face_weight(face),
+                                )
+                            }
                         }
-                    };
-                    element! {
-                        Text(
-                            key: i.to_string(),
-                            content: row_text(row),
-                            color: face_color(face),
-                            invert: selected,
-                            weight: face_weight(face),
-                        )
-                    }
-                }))
+                    })
+                })
                 #({
                     // Scroll indicators (same convention as the file view).
                     let mut ind = String::new();
