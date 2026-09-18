@@ -1001,6 +1001,19 @@ pub struct AppStore {
     /// change: its next matching event is ignored so we don't flag the
     /// buffer "changed on disk" over our own write (issue 05, finding 2).
     created_paths: HashSet<String>,
+    /// Buffer keys (absolute path strings) we saved in place this session
+    /// (plan 005 issue 01), with the mtime the file had right after our
+    /// write. A watcher event for our own save (the file's mtime still
+    /// matches the recorded one) is not an external change; a genuinely
+    /// later external write changes the mtime and still conflicts.
+    /// Mirrors `created_paths` (which covers files we CREATED) for files
+    /// we merely SAVED.
+    saved_paths: HashMap<String, std::time::SystemTime>,
+    /// A toggle-read-only confirm is armed (plan 005 issue 01): toggling a
+    /// file buffer back to read-only with unsaved edits awaits a
+    /// `y`/`n`/C-g decision (every key routes to `toggle_ro_key`). Holds
+    /// the buffer key to confirm.
+    toggle_ro_confirm: Option<String>,
     // ── plan 004 issue 03: mark/region + kill ring ──────────────────────
     /// The shared kill ring (emacs depth 60; shared across all buffers).
     kill_ring: KillRing,
@@ -1058,6 +1071,10 @@ impl AppStore {
             .unwrap();
         global
             .bind(&[Key::ctrl_char('x'), Key::ctrl_char('s')], "save-buffer")
+            .unwrap();
+        // plan 005 issue 01: file edit mode (emacs `toggle-read-only`).
+        global
+            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('q')], "toggle-read-only")
             .unwrap();
         // Magit status (issue 07).
         global
@@ -1196,6 +1213,8 @@ impl AppStore {
             menu: TransientMenuState::default(),
             discard_confirm: None,
             created_paths: HashSet::new(),
+            saved_paths: HashMap::new(),
+            toggle_ro_confirm: None,
             kill_ring: KillRing::default(),
             yank_pos: None,
             yank_len: None,
@@ -1536,6 +1555,13 @@ impl AppStore {
                     buf.locally_modified = false;
                     buf.changed_on_disk = false;
                 }
+                // Watcher self-write suppression (plan 005 issue 01): the
+                // next watcher event for this path is OUR own save. Record
+                // the post-save mtime so `apply_project_change` can tell
+                // our write (mtime still matches → suppress) from a
+                // genuinely later external write (mtime differs → still
+                // conflicts).
+                self.saved_paths.insert(key.to_string(), mtime);
                 self.invalidate_highlight_for_key(key);
                 self.minibuffer_message(&format!("wrote {}", path.display()));
                 true
@@ -1545,6 +1571,126 @@ impl AppStore {
                 false
             }
         }
+    }
+
+    /// `C-x C-q` (emacs `toggle-read-only`, plan 005 issue 01): flip the
+    /// current FILE buffer between read-only and edit mode. File-backed
+    /// buffers start read-only; this is the first mid-session editability
+    /// flip. Toggling an editable file buffer with unsaved edits arms the
+    /// discard confirm (`y` discards + goes read-only, `n`/C-g/ESC cancel
+    /// and keep edit mode) instead of silently losing the edits.
+    /// Non-file buffers (scratch) and non-buffer views are no-ops with a
+    /// minibuffer message.
+    pub fn toggle_read_only(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            self.minibuffer_message("toggle-read-only: not a buffer view");
+            return;
+        }
+        let Some(key) = self.buffers.current().map(str::to_string) else {
+            self.minibuffer_message("toggle-read-only: no current buffer");
+            return;
+        };
+        let (editable, locally_modified) = {
+            let buf = match self.buffers.get(&key) {
+                Some(b) => b,
+                None => {
+                    self.minibuffer_message("toggle-read-only: no current buffer");
+                    return;
+                }
+            };
+            if buf.path.is_none() {
+                // Scratch (no on-disk path): nothing to toggle.
+                self.minibuffer_message("toggle-read-only: scratch has no file");
+                return;
+            }
+            (buf.editable, buf.locally_modified)
+        };
+        if editable {
+            if locally_modified {
+                // Unsaved edits must not be lost silently: confirm first
+                // (the display name keeps the prompt inside one minibuffer
+                // row at 80 columns).
+                self.toggle_ro_confirm = Some(key.clone());
+                self.minibuffer_message(&format!(
+                    "Discard unsaved edits in {} to make it read-only? (y or n)",
+                    self.buffer_display(&key)
+                ));
+                return;
+            }
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.editable = false;
+            }
+            self.minibuffer_message("read-only (C-x C-q to edit)");
+        } else {
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.editable = true;
+            }
+            self.minibuffer_message("editable (C-x C-s to save)");
+        }
+    }
+
+    /// Whether a toggle-read-only discard confirm is armed.
+    pub fn toggle_ro_active(&self) -> bool {
+        self.toggle_ro_confirm.is_some()
+    }
+
+    /// The confirm's state machine (plan 005 issue 01): `y` discards the
+    /// unsaved edits (re-reads the on-disk content) and makes the buffer
+    /// read-only; `n`, C-g, and ESC cancel and keep edit mode (the text is
+    /// untouched). Every other key is swallowed (no "unbound key" echo
+    /// mid-prompt, matching the quit save-prompt discipline).
+    pub fn toggle_ro_key(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+            self.toggle_ro_cancel();
+            return;
+        }
+        let Some(c) = key.char_value() else { return };
+        match c {
+            'y' => {
+                self.toggle_ro_accept();
+            }
+            'n' => {
+                self.toggle_ro_cancel();
+            }
+            _ => {}
+        }
+    }
+
+    /// The confirm's `y`: discard the local edits (re-read the file from
+    /// disk, clearing `locally_modified`/`changed_on_disk`) and turn the
+    /// buffer read-only. A failed re-read keeps the confirm armed (no
+    /// silent state half-change).
+    fn toggle_ro_accept(&mut self) {
+        let Some(key) = self.toggle_ro_confirm.clone() else {
+            return;
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            self.toggle_ro_confirm = None;
+            return;
+        };
+        let (rope, mtime) = match load_file(&path) {
+            Ok(x) => x,
+            Err(e) => {
+                self.minibuffer_message(&format!("cannot discard: {e}"));
+                return;
+            }
+        };
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope = rope;
+            buf.mtime = mtime;
+            buf.locally_modified = false;
+            buf.changed_on_disk = false;
+            buf.editable = false;
+        }
+        self.toggle_ro_confirm = None;
+        self.ensure_highlight_for_key(&key);
+        self.minibuffer_message("read-only (C-x C-q to edit)");
+    }
+
+    /// The confirm's `n` / C-g / ESC: cancel; edit mode and the text stay.
+    fn toggle_ro_cancel(&mut self) {
+        self.toggle_ro_confirm = None;
+        self.minibuffer_message("cancel (edit mode kept)");
     }
 
     /// Append a character to the current buffer at its end (bounded
@@ -5301,6 +5447,22 @@ impl AppStore {
             if self.created_paths.remove(&key) {
                 continue;
             }
+            // The watcher event for a file WE saved in place (plan 005
+            // issue 01): suppress only when the on-disk mtime still matches
+            // the one recorded right after our write — that is our own
+            // write. A genuinely later external write changes the mtime; the
+            // marker is consumed either way and the event falls through to
+            // the normal conflict / reload handling below.
+            if let Some(expected) = self.saved_paths.get(&key) {
+                let now = std::fs::metadata(path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                if now == Some(*expected) {
+                    self.saved_paths.remove(&key);
+                    continue;
+                }
+                self.saved_paths.remove(&key);
+            }
             // Read the buffer's state without holding a borrow across the
             // mutable reload / conflict update below.
             let (matches, locally_owned) = match self.buffers.get(&key) {
@@ -5427,6 +5589,26 @@ impl AppStore {
             .current_buffer()
             .map(|b| b.editable)
             .unwrap_or(false)
+    }
+
+    /// The status-line mode word for the buffer view (plan 005 issue 01):
+    /// `Edit` while the current buffer is editable, `Read-only` otherwise.
+    /// Empty outside the buffer view (the other views have no buffer-mode
+    /// notion; a constant word there would just be noise).
+    pub fn buffer_mode_display(&self) -> String {
+        if self.top_view() != ViewId::Buffer {
+            return String::new();
+        }
+        match self.buffers.current_buffer() {
+            Some(b) => {
+                if b.editable {
+                    "Edit".to_string()
+                } else {
+                    "Read-only".to_string()
+                }
+            }
+            None => String::new(),
+        }
     }
 
     // ── symbol navigation (issue 05) ─────────────────────────────────
@@ -6426,6 +6608,14 @@ impl AppStore {
         // cancel; other keys are swallowed.
         if self.discard_armed() {
             self.discard_key_event(key);
+            return;
+        }
+        // Toggle-read-only discard confirm (plan 005 issue 01): `y` discards
+        // the unsaved edits and makes the buffer read-only, `n`/C-g/ESC
+        // cancel and keep edit mode; every other key is swallowed (no
+        // "unbound key" echo mid-prompt).
+        if self.toggle_ro_active() {
+            self.toggle_ro_key(key);
             return;
         }
         if self.picker.is_some() {
@@ -7502,6 +7692,281 @@ mod tests {
         assert!(s.buffers.current_buffer().unwrap().text().ends_with("x"));
     }
 
+    // ── plan 005 issue 01: file edit mode (C-x C-q / C-x C-s) ─────────
+
+    /// A store with a real file buffer open (`src/f.rs`): the toggle/save
+    /// tests' fixture. The file content is `fn old() {}\n`.
+    fn file_buffer_store() -> (tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), "fn old() {}\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs");
+        (dir, s)
+    }
+
+    #[test]
+    fn c_x_c_q_and_c_x_c_s_are_bound() {
+        let (_dir, s) = file_buffer_store();
+        use crate::app::keymap::{Lookup, parse_sequence};
+        assert_eq!(
+            s.engine.resolve(&parse_sequence("C-x C-q").unwrap()),
+            Some(Lookup::Command("toggle-read-only")),
+            "C-x C-q must resolve to toggle-read-only"
+        );
+        assert_eq!(
+            s.engine.resolve(&parse_sequence("C-x C-s").unwrap()),
+            Some(Lookup::Command("save-buffer")),
+            "C-x C-s must resolve to save-buffer"
+        );
+    }
+
+    #[test]
+    fn toggle_read_only_flips_file_buffer_on_and_off() {
+        let (_dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        assert!(!s.buffers.get(&bufk).unwrap().editable,
+            "file buffers must start read-only");
+        assert_eq!(s.buffer_mode_display(), "Read-only");
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert!(s.buffers.get(&bufk).unwrap().editable,
+            "C-x C-q must flip the file buffer into edit mode");
+        assert_eq!(s.buffer_mode_display(), "Edit");
+        assert!(s.message.contains("editable"), "msg: {}", s.message);
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert!(!s.buffers.get(&bufk).unwrap().editable,
+            "second C-x C-q must flip back to read-only");
+        assert_eq!(s.buffer_mode_display(), "Read-only");
+    }
+
+    #[test]
+    fn toggle_read_only_noop_on_scratch_and_non_buffer_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        // Scratch (no path): no-op with a message, flag untouched.
+        s.toggle_read_only();
+        assert!(s.message.contains("scratch"), "msg: {}", s.message);
+        let scratch_key = SCRATCH_NAME.to_string();
+        assert!(s.buffers.get(&scratch_key).unwrap().editable);
+
+        // Non-buffer view: no-op even though a file buffer is current.
+        let (_dir2, mut s2) = file_buffer_store();
+        s2.push_view(ViewId::BufferList);
+        let bufk = s2.buffers.current().unwrap().to_string();
+        s2.toggle_read_only();
+        assert!(s2.message.contains("not a buffer view"), "msg: {}", s2.message);
+        assert!(!s2.buffers.get(&bufk).unwrap().editable,
+            "the toggle must not fire outside the buffer view");
+    }
+
+    #[test]
+    fn edit_mode_file_buffer_accepts_typing_and_set_locally_modified() {
+        let (_dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        // The file buffer in edit mode takes the same self-insert path as
+        // notes (a printable that binds nothing appends at the end).
+        assert!(s.insert_text("X"), "edit-mode file buffer must accept typing");
+        assert!(
+            s.buffers.get(&bufk).unwrap().locally_modified,
+            "an edit must set locally_modified"
+        );
+        assert_eq!(s.buffers.get(&bufk).unwrap().text(), "fn old() {}\nX");
+        // Backspace goes through the shared bounded-edit path too.
+        s.notes_backspace();
+        assert_eq!(s.buffers.get(&bufk).unwrap().text(), "fn old() {}\n");
+    }
+
+    #[test]
+    fn save_buffer_clears_locally_modified_and_writes_disk() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("X");
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified);
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-s"));
+        let on_disk = std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap();
+        assert_eq!(on_disk, "fn old() {}\nX", "C-x C-s must write the edit to disk");
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(!buf.locally_modified, "save must clear locally_modified");
+        assert!(!buf.changed_on_disk, "save must clear changed_on_disk");
+        assert!(s.message.contains("wrote"), "msg: {}", s.message);
+    }
+
+    #[test]
+    fn save_read_only_buffer_refuses() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        // Still read-only: C-x C-s must refuse and leave the disk untouched.
+        s.key_event(key("C-x"));
+        s.key_event(key("C-s"));
+        assert!(s.message.contains("read-only"), "msg: {}", s.message);
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+        let on_disk = std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap();
+        assert_eq!(on_disk, "fn old() {}\n");
+    }
+
+    #[test]
+    fn toggle_back_to_read_only_with_unsaved_edits_arms_confirm() {
+        let (_dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("X");
+
+        // C-x C-q while the buffer is editable+modified: no flip, confirm armed.
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert!(s.toggle_ro_active(), "the discard confirm must be armed");
+        assert!(s.message.contains("Discard unsaved edits"), "msg: {}", s.message);
+        assert!(s.buffers.get(&bufk).unwrap().editable,
+            "the flip must not happen before the answer");
+        // Stray keys are swallowed and the text is untouched.
+        s.key_event(key("z"));
+        assert!(s.toggle_ro_active());
+        assert_eq!(s.buffers.get(&bufk).unwrap().text(), "fn old() {}\nX");
+    }
+
+    #[test]
+    fn toggle_ro_confirm_cancel_keeps_edit_mode_and_text() {
+        for cancel_key in ["n", "C-g", "ESC"] {
+            let (_dir, mut s) = file_buffer_store();
+            let bufk = s.buffers.current().unwrap().to_string();
+            s.key_event(key("C-x"));
+            s.key_event(key("C-q"));
+            s.insert_text("X");
+            s.key_event(key("C-x"));
+            s.key_event(key("C-q"));
+            assert!(s.toggle_ro_active());
+            s.key_event(key(cancel_key));
+            assert!(!s.toggle_ro_active(), "{} must close the confirm", cancel_key);
+            assert!(s.buffers.get(&bufk).unwrap().editable,
+                "cancel must keep edit mode");
+            assert!(!s.message.contains("read-only"), "msg: {}", s.message);
+            assert_eq!(s.buffers.get(&bufk).unwrap().text(), "fn old() {}\nX",
+                "cancel must keep the unsaved text");
+        }
+    }
+
+    #[test]
+    fn toggle_ro_confirm_accept_discards_and_makes_read_only() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("X");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert!(s.toggle_ro_active());
+
+        s.key_event(key("y"));
+        assert!(!s.toggle_ro_active());
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(!buf.editable, "accept must make the buffer read-only");
+        assert!(!buf.locally_modified, "accept must clear locally_modified");
+        assert!(!buf.changed_on_disk);
+        assert_eq!(buf.text(), "fn old() {}\n",
+            "accept must re-read the on-disk content (the edit is discarded)");
+        let on_disk = std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap();
+        assert_eq!(on_disk, "fn old() {}\n", "accept must not write to disk");
+    }
+
+    #[test]
+    fn saved_path_suppresses_own_watcher_event() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("X");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-s"));
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+
+        // The watcher's event for our own save must not flag the buffer.
+        let path = dir.path().join("src/f.rs");
+        s.apply_project_change(&change(vec![path.clone()]));
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(!buf.changed_on_disk,
+            "our own save must not flag changed_on_disk");
+        assert_eq!(buf.text(), "fn old() {}\nX", "the buffer must be untouched");
+
+        // The marker was consumed: a repeat event now behaves like a
+        // normal external change (the buffer is in edit mode → locally
+        // owned → the conflict marker lands instead of a silent clobber).
+        s.apply_project_change(&change(vec![path]));
+        assert!(
+            s.buffers.get(&bufk).unwrap().changed_on_disk,
+            "a second event after the suppression must conflict"
+        );
+    }
+
+    #[test]
+    fn genuine_external_write_after_save_still_conflicts() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        let path = dir.path().join("src/f.rs");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("X");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-s"));
+
+        // A genuinely later external write (new mtime) must NOT be
+        // suppressed: the mtime recorded at save no longer matches.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, "fn old() {}\n\nexternal\n").unwrap();
+        s.apply_project_change(&change(vec![path]));
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(
+            buf.changed_on_disk,
+            "a later external write after our save must flag changed_on_disk"
+        );
+        assert_eq!(buf.text(), "fn old() {}\nX",
+            "the buffer must not be auto-clobbered while in edit mode");
+    }
+
+    #[test]
+    fn read_only_file_buffer_still_auto_reloads_on_external_change() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        let path = dir.path().join("src/f.rs");
+        // Untouched (read-only) file buffer: the existing auto-reload
+        // behavior is unchanged by edit mode.
+        std::fs::write(&path, "fn fresh() {}\n").unwrap();
+        s.apply_project_change(&change(vec![path]));
+        assert!(s.buffer_text().contains("fresh"), "auto-reload must land");
+        assert!(!s.buffers.get(&bufk).unwrap().changed_on_disk);
+        assert!(!s.buffers.get(&bufk).unwrap().editable);
+    }
+
+    #[test]
+    fn edit_mode_without_edits_is_locally_owned() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        // Edit mode ON, zero edits: the reload guard now keys off the mode,
+        // not just locally_modified.
+        assert!(s.buffers.get(&bufk).unwrap().is_locally_owned());
+        let path = dir.path().join("src/f.rs");
+        std::fs::write(&path, "fn fresh() {}\n").unwrap();
+        s.apply_project_change(&change(vec![path]));
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(buf.changed_on_disk,
+            "an external change while in edit mode must conflict, not auto-reload");
+        assert_eq!(buf.text(), "fn old() {}\n",
+            "the buffer content must not be reloaded under the cursor");
+    }
+
     #[test]
     fn issue_02_bindings_resolve_including_c_c_p_prefix() {
         let dir = tempfile::tempdir().unwrap();
@@ -8009,7 +8474,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 101);
+        assert_eq!(store.picker_count().0, 102);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -8027,14 +8492,14 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 100);
+        assert_eq!(store.picker_selected(), 101);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 99);
+        assert_eq!(store.picker_selected(), 100);
 
         // RET runs the candidate at the selected index (the last command —
-        // a no-op close, *scratch* is not editable, so just a message).
+        // a no-op on *scratch*, so just a message).
         store.key_event(key("RET"));
         assert!(!store.picker_open());
         assert!(!store.quit);
@@ -8066,7 +8531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 101);
+        assert_eq!(store.picker_count().0, 102);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

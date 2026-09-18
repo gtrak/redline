@@ -247,6 +247,9 @@ struct Snapshot {
     // issue 03 (sweep): whether the current buffer is editable, driving the
     // per-kind "changed on disk" banner hint (M-x reload-buffer vs g).
     file_view_current_buffer_editable: bool,
+    // plan 005 issue 01: the status-line buffer mode word (Edit / Read-only;
+    // empty outside the buffer view).
+    buffer_mode: String,
     // Tree sidebar (issue 09).
     tree_visible: bool,
     tree_rows: Vec<crate::app::store::TreeRow>,
@@ -515,6 +518,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_point_col: s.file_view_point().1,
             file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
             file_view_current_buffer_editable: s.current_buffer_editable(),
+            buffer_mode: s.buffer_mode_display(),
             tree_visible: s.tree_visible(),
             tree_rows: s.tree_rows(),
             tree_selected: s.tree_selected(),
@@ -689,6 +693,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             StatusLine(
                 project: snap.project,
                 view: snap.view_name,
+                mode: snap.buffer_mode,
                 pending: snap.pending,
                 activity: snap.activity,
                 dirty: snap.dirty,
@@ -730,6 +735,9 @@ fn Minibuffer(props: &MinibufferProps, mut _hooks: Hooks) -> impl Into<AnyElemen
 struct StatusLineProps {
     pub project: String,
     pub view: String,
+    /// The buffer mode word (`Edit` / `Read-only`; empty outside the buffer
+    /// view, plan 005 issue 01).
+    pub mode: String,
     pub pending: String,
     pub activity: String,
     pub dirty: Option<DirtyCounts>,
@@ -751,6 +759,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
         t.status_line_active
     };
     let mut text = format!("* {} *  {}", props.project, props.view);
+    if !props.mode.is_empty() {
+        text.push_str(&format!("  {}", props.mode));
+    }
     if !props.pending.is_empty() {
         text.push_str(&format!("  [{}]", props.pending));
     }
@@ -853,6 +864,36 @@ mod tests {
         assert!(s.contains(&format!("* {name} *")), "project name missing:\n{s}");
     }
 
+    /// plan 005 issue 01: the status line shows the current buffer's mode
+    /// word — `Read-only` for a file buffer, `Edit` after `toggle-read-only`
+    /// (and `Edit` on scratch, which is always editable).
+    #[test]
+    fn status_line_shows_buffer_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let s1 = store(dir.path());
+        {
+            let mut s = s1;
+            s.open_path("src/main.rs");
+            let rendered = render_frame(s);
+            assert!(
+                rendered.contains("Read-only"),
+                "file buffer must show Read-only:\n{rendered}"
+            );
+        }
+
+        // C-x C-q flips the file buffer into edit mode.
+        let mut store2 = store(dir.path());
+        store2.open_path("src/main.rs");
+        store2.key_event(crate::app::keymap::Key::ctrl_char('x'));
+        store2.key_event(crate::app::keymap::Key::ctrl_char('q'));
+        let s2 = render_frame(store2);
+        assert!(
+            s2.contains("Edit") && !s2.contains("Read-only"),
+            "edit mode must show Edit, not Read-only:\n{s2}"
+        );
+    }
+
     /// M-x palette: the prompt + typed query, the surviving nucleo
     /// candidate, and the picker's count line are all in the frame.
     #[test]
@@ -865,7 +906,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 101"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 102"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }
@@ -1091,6 +1132,7 @@ mod tests {
             file_view_title: String::new(),
             file_view_changed_on_disk: false,
             file_view_current_buffer_editable: false,
+            buffer_mode: String::new(),
             tree_visible: false,
             tree_rows: Vec::new(),
             tree_selected: 0,

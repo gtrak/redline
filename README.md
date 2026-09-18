@@ -42,6 +42,7 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `C-x k` | kill-buffer | Kill the selected buffer |
 | `C-x n` | open-notes | Open the per-project notes buffer |
 | `C-x C-s` | save-buffer | Save the current buffer to disk |
+| `C-x C-q` | toggle-read-only | Toggle a file buffer between edit and read-only |
 | `C-x C-c` | quit | Quit redline |
 | `C-x g` | magit-status | Show/refresh git status |
 | `C-c p p` | switch-project | Switch project (projectile) |

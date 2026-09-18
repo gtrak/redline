@@ -1893,6 +1893,154 @@ def flow_quit_prompt_bang():
                 pass
 
 
+# ── plan-005-issue-01 file edit-mode legs (own App; a dedicated
+# src/edit.rs is created before startup and removed after so the fixture
+# baseline is never mutated). ────────────────────────────────────────────
+
+EDIT_PATH = os.path.join(REPO, "src", "edit.rs")
+
+
+def _open_edit_file(app):
+    """Open the dedicated edit.rs file via the find-file picker."""
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in "edit.rs":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.8)
+
+
+def flow_edit_toggle(app):
+    """C-x C-q toggles a file buffer between Read-only and Edit; the status
+    line shows the mode word; with no edits the toggle back is immediate
+    (no confirm prompt)."""
+    opened = "edit.rs" in row0(app)
+    ro = "Read-only" in app.row_text(app.rows - 1)
+    app.key("C-x C-q")
+    app.wait(0.5)
+    edit_on = "Edit" in app.row_text(app.rows - 1)
+    editable_msg = "editable" in app.row_text(app.rows - 2)
+    # No edits yet: toggle straight back (no confirm prompt).
+    app.key("C-x C-q")
+    app.wait(0.5)
+    ro_again = "Read-only" in app.row_text(app.rows - 1)
+    no_confirm = "Discard unsaved edits" not in app.row_text(app.rows - 2)
+    app.key("C-x C-q")
+    app.wait(0.5)
+    edit_again = "Edit" in app.row_text(app.rows - 1)
+    ok = (opened and ro and edit_on and editable_msg and ro_again
+          and no_confirm and edit_again)
+    record("edit-toggle", "C-x C-f,edit.rs,RET;C-x C-q ×3", ok,
+           f"file-open={opened} status-read-only={ro} status-edit={edit_on} "
+           f"editable-message={editable_msg} toggle-back={ro_again} "
+           f"no-confirm-without-edits={no_confirm} edit-again={edit_again}")
+
+
+def flow_edit_save(app):
+    """Type + save: the edit lands in the buffer, C-x C-s writes it to disk
+    (asserted byte-for-byte), and a pump past the watcher debounce must NOT
+    raise a false 'changed on disk' marker (the saved-path self-write
+    suppression for our own in-place save)."""
+    for ch in "zz":
+        app.key(ch, settle=0.3)
+    typed = any("zz" in app.row_text(r) for r in range(1, app.rows - 2))
+    app.key("C-x C-s")
+    app.wait(0.6)
+    wrote = "wrote" in app.row_text(app.rows - 2)
+    disk = open(EDIT_PATH).read()
+    disk_ok = disk.endswith("zz")
+    pump(app, 1.5)  # well past the 400 ms debounce
+    no_false_marker = "changed on disk" not in text(app)
+    ok = typed and wrote and disk_ok and no_false_marker
+    record("edit-save", "zz;C-x C-s;idle 1.5s", ok,
+           f"typed-landed={typed} wrote-message={wrote} disk-bytes-{disk_ok=} "
+           f"no-false-marker-after-save={no_false_marker}")
+
+
+def flow_edit_toggle_confirm(app):
+    """Toggle back with unsaved edits arms the discard confirm; C-g cancels
+    (edit mode + the text are kept); re-arming and `y` accepts: the unsaved
+    text is discarded (the buffer re-reads the disk content) and the buffer
+    goes read-only — the disk is never written on the confirm."""
+    for ch in "qq":
+        app.key(ch, settle=0.3)
+    app.key("C-x C-q")
+    app.wait(0.5)
+    prompt = "Discard unsaved edits" in text(app)
+    still_edit = "Edit" in app.row_text(app.rows - 1)
+    app.key("C-g")
+    app.wait(0.5)
+    cancel_kept_edit = "Edit" in app.row_text(app.rows - 1)
+    cancel_kept_text = any("zzqq" in app.row_text(r) for r in range(1, app.rows - 2))
+    # Re-arm and accept: y discards the unsaved 'qq'.
+    app.key("C-x C-q")
+    app.wait(0.5)
+    prompt_again = "Discard unsaved edits" in text(app)
+    app.key("y")
+    app.wait(0.8)
+    read_only = "Read-only" in app.row_text(app.rows - 1)
+    discarded = not any("zzqq" in app.row_text(r) for r in range(1, app.rows - 2))
+    disk_untouched = open(EDIT_PATH).read().endswith("zz")
+    ok = (prompt and still_edit and cancel_kept_edit and cancel_kept_text
+          and prompt_again and read_only and discarded and disk_untouched)
+    record("edit-confirm", "qq;C-x C-q,C-g;C-x C-q,y", ok,
+           f"confirm-armed={prompt} flip-deferred={still_edit} "
+           f"cancel-keeps-edit={cancel_kept_edit} cancel-keeps-text={cancel_kept_text} "
+           f"re-armed={prompt_again} y-reads={read_only} y-discards={discarded} "
+           f"disk-untouched={disk_untouched}")
+
+
+def flow_edit_conflict(app):
+    """External change while in edit mode: the buffer is locally owned
+    (edit mode) → 'changed on disk' marker and NO auto-reload (the buffer
+    text stays intact). Contrast leg first: a plain read-only file buffer
+    still auto-reloads with no marker — the pre-005 behavior is preserved.
+    The buffer is Read-only here (flow_edit_toggle_confirm accepted)."""
+    with open(EDIT_PATH, "a") as f:
+        f.write("EXT1")
+    reloaded_ro = wait_for(app, lambda: "EXT1" in text(app), 4.0)
+    no_marker_ro = "changed on disk" not in text(app)
+    # Now edit mode (read-only, clean → immediate toggle), type, then an
+    # external append must CONFLICT, not clobber.
+    app.key("C-x C-q")
+    app.wait(0.4)
+    for ch in "qq":
+        app.key(ch, settle=0.3)
+    with open(EDIT_PATH, "a") as f:
+        f.write("EXT2")
+    marker = wait_for(app, lambda: "changed on disk" in text(app), 4.0)
+    edit_intact = any("EXT1qq" in app.row_text(r) for r in range(1, app.rows - 2))
+    no_clobber = "EXT2" not in text(app)
+    ok = reloaded_ro and no_marker_ro and marker and edit_intact and no_clobber
+    record("edit-conflict", "disk-append;C-x C-q,qq;disk-append", ok,
+           f"read-only-auto-reload-preserved={reloaded_ro} "
+           f"no-marker-while-read-only={no_marker_ro} "
+           f"marker-while-editing={marker} edit-intact={edit_intact} "
+           f"no-auto-clobber={no_clobber}")
+
+
+def flow_edit_mode_suite():
+    """plan-005 issue 01: the file edit-mode legs (toggle, save + saved-path
+    self-write suppression, discard confirm, conflict while editing). Own
+    App; the dedicated src/edit.rs is created before startup and removed
+    after so the fixture baseline is never mutated."""
+    with open(EDIT_PATH, "w") as f:
+        f.write("edit line one\nedit line two\n")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        _open_edit_file(app)
+        flow_edit_toggle(app)
+        flow_edit_save(app)
+        flow_edit_toggle_confirm(app)
+        flow_edit_conflict(app)
+        app.kill()
+    finally:
+        try:
+            os.remove(EDIT_PATH)
+        except FileNotFoundError:
+            pass
+
+
 def main():
     _reset_fixture()
     app = App(REPO, rows=ROWS, cols=COLS)
@@ -2035,6 +2183,9 @@ def main():
     flow_quit_prompt_cg()
     flow_quit_prompt_save_fail()
     flow_quit_prompt_bang()
+
+    # plan-005-issue-01 file edit-mode legs (own App + dedicated edit.rs).
+    flow_edit_mode_suite()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

@@ -718,6 +718,12 @@ impl CommandRegistry {
             "buffers",
             |store, _arg| store.save_buffer(),
         ));
+        reg.register(Command::new(
+            "toggle-read-only",
+            "Toggle the current file buffer between edit and read-only (C-x C-q); confirms before discarding unsaved edits",
+            "buffers",
+            |store, _arg| store.toggle_read_only(),
+        ));
         // ── plan 004 issue 03: mark/region + kill ring ─────────────────
         reg.register(Command::new(
             "set-mark",
@@ -775,7 +781,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 101, "expected 101 seed commands: {names:?}");
+        assert_eq!(names.len(), 102, "expected 102 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -869,6 +875,7 @@ mod tests {
             "search-cancel",
             "close-search-view",
             "save-buffer",
+            "toggle-read-only",
             "toggle-tree-follow",
             "set-mark",
             "kill-region",

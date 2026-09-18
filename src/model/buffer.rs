@@ -12,10 +12,14 @@
 //! Light-editing flag path (plan decision #6): a buffer carries an
 //! `editable` flag and a `locally_modified` flag. A buffer is *locally
 //! owned* (never auto-clobbered by a disk change) when it has no on-disk
-//! path (the scratch buffer) or it has unsaved local edits
-//! (`locally_modified`). When a disk change lands on a locally-owned
-//! buffer, `changed_on_disk` is set so the view can show a conflict marker
-//! instead of overwriting; `g` forces a reload.
+//! path (the scratch buffer), it has unsaved local edits
+//! (`locally_modified`), or it is a file buffer in edit mode
+//! (`editable`, plan 005 issue 01: a file the user is actively editing is
+//! guarded even before the first keystroke, so a disk change can never
+//! silently rewrite it under the cursor mid-edit-session). When a disk
+//! change lands on a locally-owned buffer, `changed_on_disk` is set so the
+//! view can show a conflict marker instead of overwriting; `g` forces a
+//! reload.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -86,10 +90,13 @@ impl Buffer {
     }
 
     /// Whether this buffer is locally owned (never auto-clobbered by a disk
-    /// change): it has no on-disk path (scratch) or it carries unsaved local
-    /// edits.
+    /// change): it has no on-disk path (scratch), it carries unsaved local
+    /// edits, or it is a file buffer in edit mode (plan 005 issue 01: edit
+    /// mode guards the reload even before the first edit lands).
     pub fn is_locally_owned(&self) -> bool {
-        self.path.is_none() || self.locally_modified
+        self.path.is_none()
+            || self.locally_modified
+            || (self.editable && self.path.is_some())
     }
 
     /// The number of lines in the buffer.
@@ -510,6 +517,33 @@ mod tests {
         let k = t.insert(key("/p/a.rs"), "hello\nworld\n".into());
         let buf = t.get(&k).unwrap();
         assert_eq!(buf.text(), "hello\nworld\n");
+    }
+
+    /// plan 005 issue 01: `is_locally_owned` covers the three guards —
+    /// pathless (scratch), locally modified, and edit-mode file buffer
+    /// (even before the first edit lands).
+    #[test]
+    fn is_locally_owned_edit_mode_file_buffer() {
+        let mut t = BufferTable::new();
+        let k = t.insert(key("/p/a.rs"), "fn a() {}\n".into());
+        let buf = t.get(&k).unwrap();
+        assert!(!buf.is_locally_owned(), "read-only file buffer is not locally owned");
+
+        // Edit mode ON (a mid-session `editable` flip): locally owned even
+        // with no edits yet.
+        t.get_mut(&k).unwrap().editable = true;
+        assert!(
+            t.get(&k).unwrap().is_locally_owned(),
+            "an edit-mode file buffer must be locally owned"
+        );
+
+        // Back to read-only with no edits: no longer locally owned.
+        t.get_mut(&k).unwrap().editable = false;
+        assert!(!t.get(&k).unwrap().is_locally_owned());
+
+        // Scratch (no path) is locally owned regardless of the flag.
+        let scratch = t.get(SCRATCH_NAME).unwrap();
+        assert!(scratch.is_locally_owned());
     }
 
     #[test]
