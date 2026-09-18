@@ -44,11 +44,11 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   (middle→top→bottom, reset on other commands); M-f/M-b emacs word motion.
   Word motion and C-l order were found WRONG by the differential probe
   (tools/probe_emacs_diff.py) and fixed; review VERDICT PASS.
-- **05d** (IN FLIGHT; spec: .agents/tasks/issue-004-05d-wide-chars.md):
+- **05d** (DONE, fc505aa, review PASS; 438 tests):
   display-width cursor/click columns + the dropped-space render bug (found
   by UX sweep); also folds the carried 004-04 review P2 (prompt redisplay
   after a failed save).
-- **05e** (spec: .agents/tasks/issue-004-05e-tree-click-offset.md):
+- **05e** (IN FLIGHT; spec: .agents/tasks/issue-004-05e-tree-click-offset.md):
   clicks must subtract the fixed 34-column tree sidebar offset (found by
   UX sweep: with the tree visible, a click at terminal col 40 lands the
   point at col 22 — wrong char; clicks inside the tree also move the code
