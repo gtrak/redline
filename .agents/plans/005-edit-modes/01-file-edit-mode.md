@@ -24,11 +24,37 @@ saved to disk with C-x C-s under the existing conflict discipline.
 
 | File | Change |
 |---|---|
-| `src/model/buffer.rs` | per-buffer edit-mode flag. |
+| `src/app/store.rs` (`Buffer.editable` already exists) | per-buffer edit-mode flag is ALREADY the `editable` field; the toggle flips it. There is no `src/model/buffer.rs` — the buffer type lives in `src/app/store.rs`. |
 | `src/app/store.rs` | toggle command, save command + watcher suppression, conflict integration. |
 | `src/app/command.rs` / keymap | C-x C-q, C-x C-s bindings. |
 | `src/ui/root.rs` | status-line mode indicator. |
 | tests + tools/ flows | toggle, save, suppression, conflict, discard-guard. |
+
+## Orchestrator pre-check (2026-09-18, against committed tree)
+
+Confirmed building blocks already exist; this issue is mostly wiring + one
+new suppression path:
+
+- `Buffers::insert_rope(Some(path), rope, mtime, editable)` — the 4th arg
+  is the per-buffer editable flag; `open_notes` passes `true`. Toggling a
+  file buffer = flipping that flag (add a setter if none).
+- `save_buffer()` (`store.rs` ~1458) already saves ANY editable buffer
+  with a path (writes `rope.to_string()`, updates `mtime`, clears
+  `locally_modified`/`changed_on_disk`, re-highlights). Reusable as-is for
+  `C-x C-s`; the only reason notes worked is `editable=true` — a file
+  buffer with the flag flipped will save with no new code path.
+- **The real gap**: watcher self-write suppression exists ONLY for files
+  we *created* (`self.created_paths` + the `created_by_us` logic in
+  `open_notes`, store.rs ~1418/5050). There is NO suppression for a path
+  we *save in place*, so `C-x C-s` on a real file would false-flag
+  "changed on disk". The fix is the named work: record saved paths (and
+  ideally expected mtime/content) in a suppression set consulted by the
+  reload/conflict path, mirroring `created_paths`.
+- External-change → conflict marker already exists (`changed_on_disk`,
+  reload/conflict sweep ~5039); edit mode must keep it (do not
+  auto-reload a buffer with `locally_modified`).
+- `C-x C-q` / `C-x C-s` are unbound today (no collisions) — new Buffer
+  keymap bindings + command registrations (palette count updated).
 
 ## Verification
 
