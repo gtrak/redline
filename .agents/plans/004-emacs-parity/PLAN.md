@@ -62,6 +62,12 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   absolute with the tree visible (measured before: CUP col 3 over the
   sidebar; after: 37, verified live), plus the TREE_* consts moved to
   model/tree_layout (zero app→ui refs).
+- **LANE ORDER REVISED (2026-09-18, orchestrator)**: the user's stated
+  intent is editing files + inline annotations + a dump they can hand to an
+  agent (plan 005). 004-06 (discovery home) is the largest and riskiest
+  remaining 004 item (`BufferTable::new` auto-creates scratch; empty-table
+  audit). So 005-01/02/03 go FIRST, then 004-06, then 006-02. Small UX-bug
+  lanes 05f/05h finish first since they are already in flight/queued.
 - **Battery 3/4 harnesses**: column-level emacs comparison + differential
   probes (tools/drive_*_battery3.py, tools/probe_emacs_diff{,2}.py). Probe
   #2 logged parity rows 32-34 (scroll-model divergence is NOT emacs — kept
