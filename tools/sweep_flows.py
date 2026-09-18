@@ -1306,8 +1306,9 @@ def flow_buffer_list_np():
         count_after = _buffer_row_count(app)
         d_dropped = count_after == count_before - 1
         blue_after_d = app.blue_rows()
+        # Valid list screen rows are 1..=count_after (row 0 is the title).
         d_clamped = (len(blue_after_d) == 1
-                     and 1 <= blue_after_d[0] <= 1 + count_after)
+                     and 1 <= blue_after_d[0] <= count_after)
         no_kill_echo = "unbound key" not in text(app)
 
         # q still closes the list.
