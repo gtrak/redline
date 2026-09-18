@@ -3871,14 +3871,21 @@ impl AppStore {
         else {
             return;
         };
+        // plan 005 issue 02b: annotated lines render their code at cell 1
+        // (the 1-cell gutter for the \u{258e} marker). A click in the gutter
+        // (col 0) maps to char 0; a click at code cell k maps to char
+        // display_col_to_char_index(text, k - 1).
+        let annotated = rows
+            .iter()
+            .any(|r| !r.is_note && r.line == target_line && r.annotated);
+        let code_col = if annotated { col.saturating_sub(1) } else { col };
         let line_len = self.line_char_len(target_line);
-        // Display column -> char index (the file view renders from cell 0
-        // with no gutter; plan 004 issue 05d).
+        // Display column -> char index (plan 004 issue 05d).
         let char_col = self
             .buffers
             .current_buffer()
             .and_then(|b| b.line_text(target_line))
-            .map(|t| crate::model::text_width::display_col_to_char_index(&t, col))
+            .map(|t| crate::model::text_width::display_col_to_char_index(&t, code_col))
             .unwrap_or(0)
             .min(line_len);
         let p = self.file_point();
@@ -3988,8 +3995,8 @@ impl AppStore {
             return Vec::new();
         };
         let top = self.scroll_top();
-        let start = top.min(total.saturating_sub(1));
-        let end = (top + self.viewport_lines).min(total);
+        let mut start = top.min(total.saturating_sub(1));
+        let mut end = (top + self.viewport_lines).min(total);
         if start >= end {
             return Vec::new();
         }
@@ -4012,7 +4019,31 @@ impl AppStore {
             .filter(|a| rel.as_deref() == Some(a.path.as_str()))
             .collect();
 
-        let mut out = Vec::with_capacity(end - start + records.len());
+        // plan 005 issue 02b: cap the code-row span so total rendered rows
+        // (code + notes) <= viewport_lines. The canvas has exactly
+        // viewport_lines rows; note rows steal canvas rows, so the code
+        // rows must be reduced. If the point's line is excluded by the cap,
+        // advance start so the point is always drawn.
+        if self.show_note_rows && !records.is_empty() {
+            let n_notes: usize = records
+                .iter()
+                .filter(|a| a.line >= start && a.line < end)
+                .count();
+            if n_notes > 0 {
+                let code_span = self.viewport_lines.saturating_sub(n_notes);
+                end = (start + code_span).min(total);
+                // Ensure the point's line is in the emitted range: if the
+                // cap excluded it, advance start so the point is the last
+                // code row.
+                let point_line = self.file_point().line.min(total.saturating_sub(1));
+                if point_line >= end {
+                    start = point_line.saturating_add(1).saturating_sub(code_span);
+                    end = (start + code_span).min(total);
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(end.saturating_sub(start) + records.len());
         for line in start..end {
             let text = buf.line_text(line).unwrap_or_default().to_string();
             let spans = highlight

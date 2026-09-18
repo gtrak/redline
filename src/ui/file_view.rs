@@ -95,17 +95,29 @@ impl Component for FileViewCanvas {
             }
             if r.is_note {
                 // A virtual annotation note row (plan 005 issue 02): dim
-                // and italic, directly under the anchored code row.
+                // and italic, directly under the anchored code row. The
+                // note aligns under the same 1-cell gutter as annotated
+                // code (plan 005 issue 02b): the `\u{25b8}` sits at cell 1,
+                // not cell 0, so the visual gutter reads as one column.
                 let style = text_style_italic(t.preview.foreground);
-                let display = truncate(&r.text, w);
+                let display = truncate(&r.text, w.saturating_sub(1));
                 if !display.is_empty() {
-                    canvas.set_text(0, row as isize, &display, style);
+                    canvas.set_text(1, row as isize, &display, style);
                 }
             } else {
-                draw_line(&mut canvas, row as isize, w, &r.text, &r.spans, &t);
-                // The annotation margin marker (plan 005 issue 02): always
-                // on for annotated lines, independent of the note-row
-                // toggle (C-c a). Overlaid at cell 0.
+                // plan 005 issue 02b: annotated lines get a 1-cell left
+                // gutter (the \u{258e} marker at cell 0); code starts at
+                // cell 1. Non-annotated lines keep starting at cell 0.
+                let gutter = if r.annotated { 1 } else { 0 };
+                draw_line(
+                    &mut canvas,
+                    row as isize,
+                    gutter,
+                    w.saturating_sub(gutter),
+                    &r.text,
+                    &r.spans,
+                    &t,
+                );
                 if r.annotated {
                     canvas.set_text(
                         0,
@@ -143,22 +155,27 @@ impl Component for FileViewCanvas {
 
 /// Render one line on the canvas: the base text in the default face,
 /// then overlay each span with its face color.
+///
+/// `x_start` is the terminal cell where the text begins (the annotation
+/// gutter offset, plan 005 issue 02b). `width` is the available cell count
+/// from `x_start` to the right edge (the truncation budget).
 fn draw_line(
     canvas: &mut iocraft::CanvasSubviewMut<'_>,
     row: isize,
+    x_start: usize,
     width: usize,
     text: &str,
     spans: &[crate::syntax::highlight::LineSpan],
     t: &theme::Theme,
 ) {
-    if text.is_empty() {
+    if text.is_empty() || width == 0 {
         return;
     }
     if spans.is_empty() {
         let face = t.view;
         let style = text_style(face.foreground, face.bold);
         let display = truncate(text, width);
-        canvas.set_text(0, row, &display, style);
+        canvas.set_text(x_start as isize, row, &display, style);
         return;
     }
 
@@ -189,14 +206,15 @@ fn draw_line(
         }
     }
 
-    let mut x = 0isize;
+    let mut x = x_start as isize;
     for (cs, ce, face_idx) in &segments {
         if *cs >= *ce || *cs >= total_chars {
             continue;
         }
         let end = (*ce).min(total_chars);
         let segment: String = chars[*cs..end].iter().collect();
-        let remaining = width.saturating_sub(x as usize);
+        let used = (x - x_start as isize) as usize;
+        let remaining = width.saturating_sub(used);
         let segment = truncate(&segment, remaining);
         if segment.is_empty() {
             continue;
@@ -212,7 +230,7 @@ fn draw_line(
         // next segment must start where the terminal actually is
         // (plan 004 issue 05d — the dropped-space-after-wide-char bug).
         x += display_width(&segment) as isize;
-        if x >= width as isize {
+        if (x - x_start as isize) >= width as isize {
             break;
         }
     }
