@@ -17,6 +17,59 @@ import pyte
 BIN = os.environ.get("REDLINE_BIN", "/home/gary/dev/red/target/debug/redline")
 COLS = int(os.environ.get("COLS", "80"))
 ROWS = int(os.environ.get("ROWS", "24"))
+
+# ── Shared-fixture mutual exclusion ──────────────────────────────────────
+# Every PTY suite drives the SAME fixture repo (/tmp/redline_pyte_repo) and
+# several of them mutate it (flow legs create/save/delete files, magit
+# stages things). Two suites running at once therefore corrupt each other
+# and produce PHANTOM failures — observed live on 2026-09-18: an
+# independent `sweep.py` gave 10/14 while the worker's own run gave 13/14
+# purely because both were driving the fixture concurrently.
+#
+# Fail fast instead: take an exclusive flock on a lock file keyed to the
+# repo path when an App starts, and release it on kill(). A second suite
+# aborts with a clear message rather than silently producing bad results.
+# Set REDLINE_NO_PTY_LOCK=1 to opt out (e.g. a deliberate two-fixture run
+# using REDLINE_REPO).
+_LOCK_FD = None
+
+def _acquire_fixture_lock(repo):
+    global _LOCK_FD
+    if os.environ.get("REDLINE_NO_PTY_LOCK"):
+        return
+    if _LOCK_FD is not None:
+        return
+    import fcntl as _f
+    import hashlib as _h
+    # NOTE: do NOT use the builtin hash() — string hashing is randomized per
+    # process (PYTHONHASHSEED), so two runs would compute different lock
+    # paths and never contend.
+    digest = _h.sha1(os.path.abspath(repo).encode()).hexdigest()[:16]
+    path = "/tmp/redline_pty_%s.lock" % digest
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        _f.flock(fd, _f.LOCK_EX | _f.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        sys.stderr.write(
+            "\n*** shared PTY fixture is busy (another suite is running).\n"
+            "*** Refusing to start to avoid phantom failures.\n"
+            "*** Wait for it to finish, or set REDLINE_NO_PTY_LOCK=1.\n\n")
+        raise SystemExit(3)
+    os.write(fd, str(os.getpid()).encode())
+    _LOCK_FD = fd
+
+def _release_fixture_lock():
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        try:
+            os.close(_LOCK_FD)
+        finally:
+            _LOCK_FD = None
+
+import atexit as _atexit
+_atexit.register(_release_fixture_lock)
+
 # pyte's rendering of the selected-row bar background, per color mode:
 #   256-color (default / no COLORTERM): 48;5;12  -> '5c5cff'
 #   truecolor (COLORTERM=truecolor):    48;2;0;0;255 -> '0000ff'
@@ -64,6 +117,10 @@ def encode_key(seq):
 
 class App:
     def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None):
+        # The whole suite process owns the shared fixture (released at exit),
+        # not just one App: a suite that released between Apps would still
+        # interleave with a rival.
+        _acquire_fixture_lock(repo)
         self.repo = repo
         self.rows = rows
         self.cols = cols
