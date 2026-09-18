@@ -84,10 +84,22 @@ stdout annotation dump that fits shell workflows.
   text, and at the window bottom under an annotation `tall_20` is drawn
   with the cursor on it. Also: tools now flock the shared fixture
   (8f0375e) after concurrent suites produced phantom failures.
-- 02c (largest-span canvas fill, backlog #14) — reviewer-recommended
-  follow-up: choose the largest span s with s + notes_in_window(s) <=
-  viewport so a densely-annotated file fills the canvas instead of
-  showing 2 rows of 21. QUEUED as a small focused change.
+- 02c (largest-span canvas fill, backlog #14) — **DONE (eb5be7c, review
+  PASS; 479 tests)**. 005-02c and 005-02d converged into ONE delivery
+  (sequencing overlap on my part; both reported the same design + commit).
+  Largest-span downward scan (monotone `s + notes_in_window(s)`), floor at
+  1 kept as the blank-view guarantee, point-advance + final recount/cap +
+  `↑` semantics preserved byte-for-byte. All-annotated repro: 3 → 20 of 21
+  content rows. Reviewer hand-traced all four legs (incl. proving s=6
+  can't fit in the 22-records case) and judged all four worker deviations
+  in-scope: new cursor-stream leg 5 (all-annotated fill, 80/80 total),
+  `C-c p i` re-walk necessity (→ backlog #15: watcher create-events don't
+  invalidate the file walk), post-leg annotation-file hygiene (second-run
+  menu@30 flake fixed), reshaped unit legs with preserved properties.
+  Gates re-run by orchestrator (reviewer had no shell): 479/0/2, sweep
+  14/14, sweep_flows 65/65, drive_all 6/6, windowing 28/28, panes 4/4,
+  cursor-stream 80/80, ux_sweep 3 pre-existing findings. Backlog #14
+  CLOSED.
 - 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
   so a redirect needs /dev/tty rendering).
 
