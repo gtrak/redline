@@ -902,6 +902,7 @@ dependencies = [
  "notify-debouncer-full",
  "nucleo-matcher",
  "rayon",
+ "redline-resolve",
  "ropey",
  "serde",
  "serde_json",

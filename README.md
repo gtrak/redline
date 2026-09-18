@@ -77,7 +77,7 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `C-c p t` | toggle-tree | Toggle the file-tree sidebar |
 | `M-x` | toggle-tree-follow | Toggle tree buffer-follow (off by default) |
 | `M-x` | open-palette | Command palette |
-| `M-.` | xref-find-definitions | Jump to definition under point |
+| `M-.` | xref-find-definitions | Jump to the definition of the symbol AT the cursor: the identifier run at the point's column (a `::`-path like `tokio::spawn` is read as one token; a cursor parked right after the name counts). Same-file definitions are jumpable and listed first (struct + impl in one file is the normal case); one candidate jumps, several open the picker. When the workspace has no definition, the jump falls through to the language tooling (Rust: `cargo metadata` → registry source dir, `cargo fetch` if needed — status line shows `resolving …`) and the resolved external source opens READ-ONLY; a miss reports `no provider resolution for …` |
 | `M-,` | jump-back | Pop back in the jump stack |
 | `C-i` / `Tab` | jump-forward | Walk forward in the jump stack |
 | `M-i` | imenu | Open the imenu outline |

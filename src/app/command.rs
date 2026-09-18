@@ -606,7 +606,7 @@ impl CommandRegistry {
         // ── issue 05: symbol navigation ─────────────────────────────
         reg.register(Command::new(
             "xref-find-definitions",
-            "Jump to the definition of the symbol under point (M-.)",
+            "Jump to the definition of the symbol at the cursor (same-file first; workspace misses fall through to the language tooling, e.g. cargo — M-.)",
             "navigation",
             |store, _arg| store.xref_find_definitions(),
         ));

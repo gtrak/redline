@@ -76,6 +76,12 @@ thiserror = "2.0.20"
 dirs = "7.0"
 rayon = "1.12"
 
+# ── tooling-aware jump fall-through (plan 006) ─────────────────────────────
+# M-. workspace misses fall through to this resolver chain (cargo metadata →
+# registry source dir, cargo fetch on demand). Path dep: the crate lives in
+# this workspace and is reviewed separately.
+redline-resolve = { path = "crates/redline-resolve" }
+
 [dev-dependencies]
 tempfile = "3.27"
 insta = "1.48"

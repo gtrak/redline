@@ -267,6 +267,8 @@ struct Snapshot {
     // Symbol navigation (issue 05): which-function and indexing indicator.
     which_function: String,
     indexing: String,
+    // Tooling-aware jump (plan 006 issue 02): resolving indicator.
+    resolving: String,
     // Search (issue 06): results view + status-line indicator.
     search_title: String,
     search_rows: Vec<ResultRow>,
@@ -438,6 +440,29 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // Tooling-resolve drain (plan 006 issue 02): the M-. workspace-miss
+    // fall-through publishes its result here (a `watch` channel, latest-
+    // value-wins, like the index bus). Applying the event lands the jump or
+    // reports the miss on the input path — the (slow) provider chain itself
+    // already ran off it via `spawn_blocking`.
+    let resolve_store = store.clone();
+    let resolve_rx = resolve_store.lock().unwrap().resolve_bus.subscribe();
+    hooks.use_future(async move {
+        let mut rx = resolve_rx;
+        while let Ok(()) = rx.changed().await {
+            // Coalesce: drain all immediately-available resolve events before
+            // one repaint (a superseded M-. request can burst two sends).
+            loop {
+                let event = rx.borrow_and_update().clone();
+                resolve_store.lock().unwrap().apply_resolve_event(&event);
+                if !rx.has_changed().unwrap_or(false) {
+                    break;
+                }
+            }
+            tick.set(tick.get() + 1);
+        }
+    });
+
     // Search drain (issue 06): take the store's SearchBus receiver out of
     // the store (exactly once; `UnboundedReceiver` is not cloneable, so no
     // subscription is needed) and apply each event to the store. Because
@@ -536,6 +561,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             terminal_width: tw_raw,
             which_function: s.which_function(),
             indexing: s.indexing_display(),
+            resolving: s.resolving_display(),
             search_title: s.search_title(),
             search_rows,
             search_top_row,
@@ -711,6 +737,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 dirty: snap.dirty,
                 which_function: snap.which_function,
                 indexing: snap.indexing,
+                resolving: snap.resolving,
                 searching: snap.searching,
                 position: snap.position,
                 annotations: snap.annotations,
@@ -756,6 +783,9 @@ struct StatusLineProps {
     pub dirty: Option<DirtyCounts>,
     pub which_function: String,
     pub indexing: String,
+    /// Tooling-aware jump (plan 006 issue 02): active while an M-. miss is
+    /// being resolved by the provider chain (`resolving …`).
+    pub resolving: String,
     pub searching: String,
     pub position: String,
     /// The current file's annotation count ("1 note" / "3 notes"; empty
@@ -796,6 +826,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     }
     if !props.indexing.is_empty() {
         text.push_str(&format!("  *{}", props.indexing));
+    }
+    if !props.resolving.is_empty() {
+        text.push_str(&format!("  *{}", props.resolving));
     }
     if !props.searching.is_empty() {
         text.push_str(&format!("  *{}", props.searching));
@@ -1127,6 +1160,7 @@ mod tests {
             view_name: String::new(),
             pending: String::new(),
             activity: String::new(),
+            resolving: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
@@ -1264,6 +1298,7 @@ mod tests {
             view_name: String::new(),
             pending: String::new(),
             activity: String::new(),
+            resolving: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
@@ -1376,6 +1411,7 @@ mod tests {
             view_name: String::new(),
             pending: String::new(),
             activity: String::new(),
+            resolving: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,

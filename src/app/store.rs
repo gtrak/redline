@@ -16,8 +16,10 @@ use std::time::Duration;
 use nucleo_matcher::{
     Matcher, pattern::{CaseMatching, Normalization, Pattern},
 };
+use redline_resolve::{CargoProvider, ResolvedSource, Resolver, SymbolContext};
 use ropey::Rope;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
@@ -41,6 +43,54 @@ use crate::syntax::cache::{CacheKey, HighlightCache};
 use crate::syntax::highlight::{self, HighlightResult};
 use crate::syntax::registry::GrammarRegistry;
 use crate::theme::Theme;
+
+/// The result the background tooling-resolver job publishes to the app via
+/// the [`ResolveBus`] (plan 006 issue 02). Mirrors the [`IndexBus`] pattern:
+/// a `watch` channel, latest-value-wins. `cargo metadata` / `cargo fetch`
+/// shell out (network, seconds) and MUST never block the input path, so the
+/// M-. workspace-miss fall-through runs on `spawn_blocking` and lands here.
+#[derive(Clone, Debug, Default)]
+pub struct ResolveEvent {
+    /// Generation tag (matches the store's `resolve_generation`); stale
+    /// events (a superseded M-. request or a previous project) are
+    /// discarded by [`AppStore::apply_resolve_event`].
+    pub generation: usize,
+    /// The symbol the job was asked to resolve (result/report text).
+    pub symbol: String,
+    /// Where to open (read-only) on a hit.
+    pub source: Option<ResolvedSource>,
+    /// The failure report on a miss (the provider-chain error text).
+    pub error: Option<String>,
+}
+
+/// The resolve-result bus (plan 006 issue 02): a `watch` channel over
+/// [`ResolveEvent`]. The store owns the sender; the UI's drain task in
+/// `Root` subscribes and applies each event to the store.
+#[derive(Clone)]
+pub struct ResolveBus {
+    tx: watch::Sender<ResolveEvent>,
+}
+
+impl std::fmt::Debug for ResolveBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolveBus").finish()
+    }
+}
+
+impl ResolveBus {
+    pub fn new() -> Self {
+        let (tx, _rx) = watch::channel(ResolveEvent::default());
+        Self { tx }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<ResolveEvent> {
+        self.tx.subscribe()
+    }
+
+    pub fn send(&self, event: ResolveEvent) {
+        let _ = self.tx.send(event);
+    }
+}
 
 /// A view on the stack. The top of the stack is what the main view
 /// renders.
@@ -1309,6 +1359,19 @@ pub struct AppStore {
     /// The symbol name being looked up by the Xref picker (set by
     /// `xref_find_definitions` when the lookup is ambiguous).
     xref_lookup_name: String,
+    // ── tooling-aware jump fall-through (plan 006 issue 02) ─────────────
+    /// The resolve-result bus: a background M-. fall-through job publishes
+    /// here; the UI's drain task applies each event (mirrors `index_bus`).
+    pub resolve_bus: ResolveBus,
+    /// Generation counter for resolve jobs: bumped on every new fall-through
+    /// request (a stale in-flight result is then discarded) and on project
+    /// switch, mirroring `index_generation`.
+    resolve_generation: usize,
+    /// Status-line activity while a resolve job is in flight:
+    /// `(text, generation)`; the display hides it when the generation no
+    /// longer matches (superseded request or project switch), so it can
+    /// never hang on a stale job.
+    resolving: Option<(String, usize)>,
     /// The search-event bus (issue 06): the store keeps the sender side
     /// for its lifetime; each search job clones a sender for its worker
     /// thread. The receiver is kept in the store and handed out exactly
@@ -1576,6 +1639,9 @@ impl AppStore {
             index_generation: 0,
             pending_index_changes: HashSet::new(),
             xref_lookup_name: String::new(),
+            resolve_bus: ResolveBus::new(),
+            resolve_generation: 0,
+            resolving: None,
             search_bus,
             search_rx,
             index_rx: None,
@@ -2917,33 +2983,44 @@ impl AppStore {
             return;
         };
         let abs = project.root.join(rel);
+        if let Err(e) = self.open_project_path(&abs, rel) {
+            self.minibuffer_message(&e);
+        }
+    }
+
+    /// The load + install core of `open_path`: `abs` = `project.root.join(rel)`
+    /// (already resolved by the caller). Returns the error report on failure
+    /// so a caller (the tooling-resolver landing, plan 006 issue 02) can
+    /// decide whether a jump entry is recorded.
+    fn open_project_path(&mut self, abs: &Path, rel: &str) -> Result<(), String> {
         let key = abs.to_string_lossy().into_owned();
         if self.buffers.get(&key).is_none() {
-            match load_file(&abs) {
+            match load_file(abs) {
                 Ok((rope, mtime)) => {
-                    self.buffers.insert_rope(Some(abs.clone()), rope, mtime, false);
+                    self.buffers.insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
                 }
                 Err(e) => {
-                    self.minibuffer_message(&format!("cannot open {rel}: {e}"));
-                    return;
+                    return Err(format!("cannot open {rel}: {e}"));
                 }
             }
         } else {
             // Re-stat on reopen: reload when mtime changed (spec: "highlight
             // cache invalidates when a file changes on disk (pre-watcher: on
             // reopen)"). Issue-03 buffers are read-only, so this is safe.
-            if let Ok(new_mtime) = std::fs::metadata(&abs).and_then(|m| m.modified()) {
+            if let Ok(new_mtime) = std::fs::metadata(abs).and_then(|m| m.modified()) {
                 let old_mtime = self
                     .buffers
                     .get(&key)
                     .map(|b| b.mtime)
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 if new_mtime != old_mtime {
-                    match load_file(&abs) {
+                    match load_file(abs) {
                         Ok((rope, mtime)) => {
                             self.buffers
-                                .insert_rope(Some(abs.clone()), rope, mtime, false);
+                                .insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
                         }
+                        // Reload failure is non-fatal (the buffer stays current
+                        // on its stale content); keep `open_path`'s report.
                         Err(e) => {
                             self.minibuffer_message(&format!("cannot reload {rel}: {e}"));
                         }
@@ -2960,6 +3037,57 @@ impl AppStore {
         self.reanchor_for_key(&key);
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
+        Ok(())
+    }
+
+    /// Open an ABSOLUTE path as a READ-ONLY buffer (plan 006 issue 02):
+    /// the tooling-resolver lands external sources (registry source dirs)
+    /// that are NOT project files. Unlike `open_path` it never records the
+    /// file in the project's recents, never touches the tree/file-walk
+    /// state, and inserts with `editable = false` so an external source
+    /// can never enter edit mode (per-session, like other external jumps).
+    /// Returns the buffer key, or `None` when the file cannot be read.
+    fn open_external_path(&mut self, abs: &Path) -> Option<String> {
+        let (rope, mtime) = load_file(abs).ok()?;
+        let key = self.buffers.insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
+        self.buffers.set_current(&key);
+        // Build (or update) the highlight for the new current buffer.
+        self.ensure_highlight();
+        Some(key)
+    }
+
+    /// Land a tooling-resolver result (plan 006 issue 02): open the resolved
+    /// source and record a jump like any M-. landing. A source inside the
+    /// workspace opens through the project-relative path (recents, tree
+    /// follow); an external source opens READ-ONLY via
+    /// `open_external_path` (never in the project recents / file walk). On a
+    /// load failure the failure is reported and no jump is recorded.
+    fn open_resolved_source(&mut self, source: &ResolvedSource, symbol: &str) {
+        let origin = self.current_jump_entry();
+        let (display, opened) = if let Some(project) = self.project.as_ref()
+            && let Ok(rel) = source.file.strip_prefix(&project.root)
+        {
+            let rel = rel.to_string_lossy().into_owned();
+            (rel.clone(), self.open_project_path(&source.file, &rel).is_ok())
+        } else {
+            (
+                source.file.display().to_string(),
+                self.open_external_path(&source.file).is_some(),
+            )
+        };
+        if !opened {
+            self.minibuffer_message(&format!(
+                "no provider resolution for `{symbol}`: cannot open {display}"
+            ));
+            return;
+        }
+        // Land on the resolved line (1-based; when the provider could not
+        // pin one, the top of the file) and record the jump.
+        let line = source.line.map(|l| (l - 1) as usize).unwrap_or(0);
+        self.set_point_line(line);
+        self.ensure_highlight();
+        self.record_jump(&origin, "M-.");
+        self.minibuffer_message(&format!("jumped to {display}:{}", line + 1));
     }
 
     /// Record `rel` in the current project's recents and persist.
@@ -3625,6 +3753,9 @@ impl AppStore {
         self.index = SymbolIndex::new();
         self.index_generation += 1;
         self.pending_index_changes.clear();
+        // A resolve job in flight belonged to the previous project: bump the
+        // generation so its event is discarded (mirrors the index bump above).
+        self.resolve_generation += 1;
         // Invalidate any in-flight search job (its root was the previous
         // project): bump the generation so its events are discarded, and
         // stop it. Results belong to the old project.
@@ -5963,6 +6094,9 @@ impl AppStore {
                 self.index = SymbolIndex::new();
                 self.index_generation += 1;
                 self.pending_index_changes.clear();
+                // A resolve job in flight belonged to the pre-checkout tree:
+                // its event is discarded (mirrors the index bump).
+                self.resolve_generation += 1;
                 self.start_indexing();
                 if self.log.is_some() {
                     self.refresh_log_page();
@@ -6846,11 +6980,30 @@ impl AppStore {
         });
     }
 
-    /// `M-.`: find the definition of the symbol under point.
-    /// Extracts identifiers from the current line and looks them up in the
-    /// cross-file index. If exactly one definition is found, jumps directly;
-    /// if multiple, opens the Picker. Falls back to the enclosing symbol
-    /// when no identifier on the line is a known definition.
+    /// `M-.`: jump to the definition of the symbol UNDER THE POINT
+    /// (plan 006 issue 02 selection rule).
+    ///
+    /// Selection rule (the user's report: "doesn't use my cursor position"): the
+    /// lookup keys off the point's COLUMN, not "every identifier on the line".
+    /// 1. The identifier run at the point's column on the point line (a cursor
+    ///    parked right after the name counts, the usual call-site spot); when
+    ///    it sits inside a `::`-path (`tokio::spawn`), the full path token is
+    ///    kept for the tooling-resolver fall-through and the workspace index —
+    ///    which is name-keyed — is tried with BOTH the last segment and the
+    ///    full path.
+    /// 2. Same-file definitions are first-class (the old cross-file filter made
+    ///    the normal struct+impl-in-one-file case unjumpable): candidates are
+    ///    ordered same-file-first, then (file, line, name). Exactly one → jump
+    ///    directly (same-file OR cross-file); several → the Xref picker so the
+    ///    user chooses.
+    /// 3. No symbol-at-point with a definition → the enclosing-symbol fallback
+    ///    (unchanged): the enclosing symbol's definitions take over, and a
+    ///    workspace hit on THAT never triggers the resolver (no resolver spam).
+    /// 4. Still nothing (and the point sits on a symbol) → tooling-resolver
+    ///    fall-through (plan 006): `SymbolContext { workspace_root,
+    ///    symbol: <path-shaped token>, from_file }` runs OFF the input path
+    ///    (`spawn_blocking` + `ResolveBus`, like the symbol indexer) because
+    ///    `cargo fetch` is a network shell-out that must never block a keypress.
     pub fn xref_find_definitions(&mut self) {
         // Get the current file's project-relative path.
         let Some(key) = self.buffers.current().map(String::from) else {
@@ -6876,47 +7029,35 @@ impl AppStore {
         let rel = rel.to_string_lossy().into_owned();
 
         let line = self.point_line();
-
-        // Step 1: try to find an identifier on the current line that is a
-        // known definition in the index (the "symbol under point").
-        // PART A fix (item 5): include uppercase-initial names too (types /
-        // constants like `Foo`, `CONSTANT`), not just lowercase — the old
-        // filter skipped them, so `M-.` on a type fell back to the enclosing
-        // symbol.
         let line_text = buf.line_text(line).unwrap_or_default();
-        let identifiers: Vec<&str> = line_text
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|w| !w.is_empty() && w.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_'))
-            .collect();
+        // (1) The symbol under the point: identifier run around the point's
+        // column, plus the `::`-path token it belongs to (raw, for the
+        // resolver).
+        let at = Self::symbol_at_point(&line_text, self.point_col());
 
-        let mut all_defs: Vec<crate::nav::index::Location> = Vec::new();
-        for id in &identifiers {
-            let defs = self.index.definitions_of(id);
-            // Exclude definitions in the current file: the user is at a call
-            // site and wants to jump to the *callee* (cross-file), not the
-            // enclosing definition (same file). Same-file jumps use imenu.
-            let cross_file: Vec<_> = defs
-                .into_iter()
-                .filter(|d| d.file != rel)
-                .collect();
-            all_defs.extend(cross_file);
-        }
-
-        // Deduplicate by (file, line) so the same definition isn't listed
-        // twice if two identifiers on the line resolve to it.
-        all_defs.sort_by(|a, b| (a.file.as_str(), a.symbol.line, &a.symbol.name).cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name)));
-        all_defs.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+        let defs: Option<Vec<crate::nav::index::Location>> = at
+            .as_ref()
+            .and_then(|(ident, path_token)| self.xref_definition_candidates(ident, path_token, &rel));
+        let defs = defs.unwrap_or_default();
 
         let lookup_name: String;
-        let defs: Vec<crate::nav::index::Location> = if !all_defs.is_empty() {
-            // Use the first identifier that has a cross-file definition.
-            lookup_name = all_defs[0].symbol.name.clone();
-            all_defs
+        let defs: Vec<crate::nav::index::Location> = if !defs.is_empty() {
+            // (2) Symbol-at-point with definitions: first candidate after the
+            // same-file-first order (the picker's lookup label).
+            lookup_name = defs[0].symbol.name.clone();
+            defs
         } else {
-            // Fall back to the enclosing symbol (by line).
+            // (3) Enclosing-symbol fallback (unchanged: by line, not by the
+            // point's column).
             let outline = self.index.outline(&rel);
             let Some(sym) = crate::nav::index::enclosing_symbol(outline, line) else {
-                self.minibuffer_message("no symbol under point");
+                // (4) Nothing the workspace knows about under/near the point:
+                // fall through to the tooling resolver when the point sits on
+                // a symbol (otherwise behave as before: no symbol under point).
+                match &at {
+                    Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
+                    None => self.minibuffer_message("no symbol under point"),
+                }
                 return;
             };
             lookup_name = sym.name.clone();
@@ -6924,25 +7065,31 @@ impl AppStore {
         };
 
         if defs.is_empty() {
-            self.minibuffer_message(&format!("no definition for `{lookup_name}`"));
+            // The enclosing symbol has no indexed definition: same (4) seam,
+            // but the point's own token (path-shaped) is what the resolver
+            // gets — not the enclosing name.
+            match &at {
+                Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
+                None => self.minibuffer_message(&format!("no definition for `{lookup_name}`")),
+            }
             return;
         }
 
         if defs.len() == 1 {
-            // Unique: capture origin, navigate, record jump.
+            // Unique (same-file or cross-file): capture origin, navigate,
+            // record jump.
             let origin = self.current_jump_entry();
             let def = &defs[0];
             self.open_path(&def.file);
             // Move the point to the definition's line; the window follows.
-            let new_key = self.buffers.current().map(String::from).unwrap_or_default();
             self.set_point_line(def.symbol.line);
-            let _ = new_key;
             self.ensure_highlight();
             self.record_jump(&origin, "M-.");
-            self.minibuffer_message(&format!("jumped to {}:{}", def.file, def.symbol.line + 1));
+            self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
         } else {
-            // Ambiguous: open the Xref picker. The jump entry is recorded
-            // when the user selects a candidate (run_selected for Xref).
+            // Ambiguous: open the Xref picker (same-file candidates first).
+            // The jump entry is recorded when the user selects a candidate
+            // (run_selected for Xref).
             self.xref_lookup_name = lookup_name;
             let candidates: Vec<PickerCandidate> = defs
                 .iter()
@@ -6955,6 +7102,180 @@ impl AppStore {
                 .collect();
             self.open_picker(PickerKind::Xref, "Definition: ", candidates);
         }
+    }
+
+    /// (M-., selection rule 2) The definition candidates for the symbol at the
+    /// point: the workspace index tried with BOTH the last segment and the
+    /// full `::`-path (the index is name-keyed), deduplicated, ordered
+    /// SAME-FILE-FIRST then (file, line, name) — a same-file match (struct +
+    /// impl in one file is the normal case) wins the direct jump, and when
+    /// several remain the picker lists them in that order.
+    fn xref_definition_candidates(
+        &self,
+        ident: &str,
+        path_token: &str,
+        rel: &str,
+    ) -> Option<Vec<crate::nav::index::Location>> {
+        if ident.is_empty() {
+            return None;
+        }
+        let mut all: Vec<crate::nav::index::Location> = self.index.definitions_of(ident);
+        if path_token != ident {
+            all.extend(self.index.definitions_of(path_token));
+        }
+        all.sort_by(|a, b| {
+            // Same-file candidates first (false < true), then deterministic
+            // (file, line, name).
+            (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                (a.file.as_str(), a.symbol.line, &a.symbol.name).cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+            })
+        });
+        all.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+        (!all.is_empty()).then_some(all)
+    }
+
+    /// (M., selection rule 4) Start the tooling-resolver fall-through OFF the
+    /// input path (plan 006 issue 02): `spawn_blocking` + `ResolveBus`,
+    /// mirroring the symbol-indexer pattern (`start_indexing`). `cargo
+    /// metadata` / `cargo fetch` shell out (network, seconds) and must never
+    /// block a keypress. A new request supersedes any in-flight one (the
+    /// generation bump makes the stale event discard itself in
+    /// `apply_resolve_event`). No-op-ish without a tokio runtime (plain unit
+    /// tests): the indicator is cleared and a miss message reported, so the
+    /// status line can never hang.
+    pub fn start_symbol_resolution(&mut self, symbol: &str, from_file: &str) {
+        let Some(project) = self.project.as_ref() else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        let root = project.root.clone();
+        let symbol_owned = symbol.to_string();
+        self.resolve_generation += 1;
+        let generation = self.resolve_generation;
+        self.resolving = Some((format!("resolving `{symbol}`…"), generation));
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.resolving = None;
+            self.minibuffer_message(&format!("no provider resolution for `{symbol}` (no background runtime)"));
+            return;
+        }
+        let bus = self.resolve_bus.clone();
+        let from = std::path::PathBuf::from(from_file);
+        tokio::task::spawn_blocking(move || {
+            // The provider chain (Rust first: cargo metadata → registry
+            // source dir, cargo fetch on demand). Adding more languages is a
+            // one-line `chain.add(…)` here.
+            let mut chain = Resolver::new();
+            chain.add(CargoProvider::new());
+            let ctx = SymbolContext {
+                workspace_root: root,
+                symbol: symbol_owned.clone(),
+                from_file: from,
+            };
+            let (source, error) = match chain.resolve_traced(&ctx) {
+                Ok(outcome) => (Some(outcome.source), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+            bus.send(ResolveEvent { generation, symbol: symbol_owned, source, error });
+        });
+    }
+
+    /// Install a resolve event into the store (called by the UI's ResolveBus
+    /// drain in `Root`). Discards events from a stale generation (a
+    /// superseded M-. request or a previous project — mirroring
+    /// `apply_index_event`); otherwise clears the status activity and lands
+    /// the result (jump) or reports the miss.
+    pub fn apply_resolve_event(&mut self, event: &ResolveEvent) {
+        if event.generation != self.resolve_generation {
+            return;
+        }
+        self.resolving = None;
+        match (&event.source, &event.error) {
+            (Some(source), _) => self.open_resolved_source(source, &event.symbol),
+            (None, Some(e)) => {
+                self.minibuffer_message(&format!(
+                    "no provider resolution for `{}`: {}",
+                    event.symbol, e
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// The resolving indicator for the activity display (empty when idle;
+    /// hidden automatically when the generation no longer matches — a
+    /// superseded request or project switch).
+    pub fn resolving_display(&self) -> String {
+        match &self.resolving {
+            Some((text, g)) if *g == self.resolve_generation => text.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The identifier run at the point's column (char offset) on `text`, plus
+    /// the `::`-path token it belongs to (plan 006 issue 02, selection rule
+    /// 1). Returns `(identifier, path_token)` — e.g. the cursor inside
+    /// `tokio::spawn` → `("spawn", "tokio::spawn")`; on `obj.name` →
+    /// `("name", "name")`. A cursor parked just AFTER the name (before
+    /// `(`, `.`, or whitespace — the usual call-site spot) counts. `None`
+    /// when the point is not on (or immediately after) an identifier run.
+    fn symbol_at_point(text: &str, col: usize) -> Option<(String, String)> {
+        let chars: Vec<char> = text.chars().collect();
+        if col > chars.len() {
+            return None;
+        }
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        // The run the point belongs to: the char AT the point when it is an
+        // identifier char, else the run ending immediately BEFORE it.
+        let start = if col < chars.len() && is_ident(chars[col]) {
+            let mut i = col;
+            while i > 0 && is_ident(chars[i - 1]) {
+                i -= 1;
+            }
+            i
+        } else if col > 0 && is_ident(chars[col - 1]) {
+            let mut i = col - 1;
+            while i > 0 && is_ident(chars[i - 1]) {
+                i -= 1;
+            }
+            i
+        } else {
+            return None;
+        };
+        let mut end = start;
+        while end < chars.len() && is_ident(chars[end]) {
+            end += 1;
+        }
+        let identifier: String = chars[start..end].iter().collect();
+        // Extend left across `::` separators to the full path token (kept for
+        // the tooling resolver; the workspace index stays name-keyed and is
+        // tried with both the last segment and this token).
+        let mut pstart = start;
+        while pstart >= 3 && chars[pstart - 1] == ':' && chars[pstart - 2] == ':' {
+            // The segment before the `::`: the identifier run ending at index
+            // `pstart - 3`. A non-identifier there means a leading `::` — stop.
+            let after_sep = pstart - 3;
+            if !is_ident(chars[after_sep]) {
+                break;
+            }
+            let mut i = after_sep;
+            while i > 0 && is_ident(chars[i - 1]) {
+                i -= 1;
+            }
+            pstart = i;
+        }
+        let mut pend = end;
+        while pend + 2 < chars.len()
+            && chars[pend] == ':'
+            && chars[pend + 1] == ':'
+            && is_ident(chars[pend + 2])
+        {
+            pend += 3;
+            while pend < chars.len() && is_ident(chars[pend]) {
+                pend += 1;
+            }
+        }
+        let path_token: String = chars[pstart..pend].iter().collect();
+        Some((identifier, path_token))
     }
 
     /// `M-i`: imenu — open a picker over the current file's outline.
@@ -11051,19 +11372,84 @@ mod tests {
     #[test]
     fn xref_cross_file_definition_jumps_directly() {
         let (mut s, _dir) = store_with_index(&[
-            ("src/main.rs", "mod lib {\n    pub fn target() {}\n}\nfn main() { lib::target(); }\n"),
+            ("src/main.rs", "fn main() { lib::target(); }\n"),
             ("src/lib.rs", "pub fn target() {}\npub fn other() {}\n"),
         ]);
-        // Open main.rs and position the point at the call site line (line 3).
+        // Open main.rs and position the point at the call site: line 0, the
+        // column of `target` (the cursor-aware selection: `lib` before the
+        // `::` is NOT the lookup, `target` is).
         s.open_path("src/main.rs");
-        s.set_point_line(3);
-        // `target` is defined in main.rs (same file, excluded) and lib.rs
-        // (cross-file). Only the cross-file definition is considered →
-        // unique → jump directly to src/lib.rs.
+        s.set_point(0, 17, 17);
+        // `target` is only defined in lib.rs: unique → jump directly.
         s.xref_find_definitions();
         assert!(!s.picker_open(), "unique cross-file: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "target is at line 0 in lib.rs");
+        assert_eq!(s.resolve_generation, 0, "a workspace hit never fires the resolver");
+    }
+
+    #[test]
+    fn xref_symbol_at_point_wins_over_other_line_identifiers() {
+        // Two KNOWN definitions on one line: the old rule took
+        // all_defs[0] after (file, line, name) sort — an arbitrary
+        // identifier on the line. The cursor-aware rule must follow the
+        // point's column.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { foo(); bar(); }\n"),
+            ("src/a.rs", "pub fn foo() {}\n"),
+            ("src/b.rs", "pub fn bar() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Cursor on `foo` (col 12): jumps to a.rs, not b.rs.
+        s.set_point(0, 12, 12);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/a.rs", "cursor on foo → foo's definition");
+        // Back to the call site, cursor on `bar` (col 20): jumps to b.rs.
+        s.open_path("src/main.rs");
+        s.set_point(0, 20, 20);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/b.rs", "cursor on bar → bar's definition");
+    }
+
+    #[test]
+    fn xref_same_file_definition_jumps() {
+        // The user's report: struct + impl in one file is the normal case
+        // and must be jumpable (the old cross-file filter made it not).
+        // Cursor on the `new` of `Foo::new()`: the path token `Foo::new`
+        // is kept for the resolver, the index (name-keyed) is tried with
+        // the last segment `new` — the same-file impl method wins.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "pub struct Foo {}\nimpl Foo {\n    pub fn new() -> Self { Foo {} }\n}\nfn use_it() {\n    let f = Foo::new();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        // Line 5: "    let f = Foo::new();" — `new` starts at col 17.
+        s.set_point(5, 17, 17);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 2, "jumped to the same-file impl method");
+        assert_eq!(s.jump_stack.len(), 2, "origin + destination recorded");
+    }
+
+    #[test]
+    fn xref_trait_definition_jumps() {
+        // The user's report: on a Trait, jump into the trait definition.
+        // `trait_item` is captured by the index, so a cursor on the trait
+        // name at a use site lands on the definition.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "pub trait Tr {\n    fn m(&self);\n}\n"),
+            ("src/main.rs", "fn use_it<T: Tr>() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // "fn use_it<T: Tr>() {}" — the `Tr` bound starts at col 13.
+        s.set_point(0, 13, 13);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique trait: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 0, "jumped to `pub trait Tr` (msg: {})", s.message);
     }
 
     #[test]
@@ -11074,8 +11460,8 @@ mod tests {
             ("src/b.rs", "pub fn target() {}\n"),
         ]);
         s.open_path("src/main.rs");
-        s.set_point_line(0);
-        // `target` is defined in a.rs and b.rs (both cross-file) → ambiguous.
+        // Cursor on `target` (col 12): defined in a.rs and b.rs → ambiguous.
+        s.set_point(0, 12, 12);
         s.xref_find_definitions();
         assert!(s.picker_open(), "ambiguous: picker should be open");
         assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
@@ -11083,18 +11469,21 @@ mod tests {
     }
 
     #[test]
-    fn xref_single_definition_jumps_cross_file() {
+    fn xref_ambiguous_same_file_first_in_picker() {
+        // Same-file candidate sorts first in the picker (selection rule 2).
         let (mut s, _dir) = store_with_index(&[
-            ("src/main.rs", "fn main() { other(); }\n"),
-            ("src/lib.rs", "pub fn other() {}\n"),
+            ("src/main.rs", "mod lib {\n    pub fn target() {}\n}\nfn main() { lib::target(); }\n"),
+            ("src/lib.rs", "pub fn target() {}\n"),
         ]);
         s.open_path("src/main.rs");
-        s.set_point_line(0);
-        // `other` is only defined in lib.rs: unique → jump directly.
+        // Line 3: "fn main() { lib::target(); }" — `target` starts at col 17.
+        s.set_point(3, 17, 17);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique: no picker");
-        assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(s.point_line(), 0);
+        assert!(s.picker_open(), "two candidates: picker");
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered[0].0.name.starts_with("src/main.rs:"), "same-file candidate listed first: {}", filtered[0].0.name);
+        assert!(filtered[1].0.name.starts_with("src/lib.rs:"), "cross-file candidate second: {}", filtered[1].0.name);
     }
 
     #[test]
@@ -11103,13 +11492,249 @@ mod tests {
             ("src/main.rs", "fn main() {\n    let x = 1;\n}\n"),
         ]);
         s.open_path("src/main.rs");
-        // Line 1: "    let x = 1;" — no known definition on this line.
-        // Fall back to enclosing symbol: `main`.
+        // Line 1: "    let x = 1;" col 0 — no identifier AT the point.
+        // Fall back to enclosing symbol: `main` (unchanged behavior).
         s.set_point_line(1);
         s.xref_find_definitions();
         // `main` is defined only in main.rs: unique → jump to main's definition (line 0).
         assert!(!s.picker_open());
         assert_eq!(s.point_line(), 0, "jumped to main's definition");
+        assert_eq!(s.resolve_generation, 0, "enclosing-symbol hit never fires the resolver");
+    }
+
+    // ── plan 006 issue 02: tooling-resolver fall-through ─────────────────────────
+
+    /// The point-line token extractor: identifier run at the column + the
+    /// `::`-path token around it.
+    fn satp(text: &str, col: usize) -> Option<(String, String)> {
+        AppStore::symbol_at_point(text, col)
+    }
+
+    #[test]
+    fn symbol_at_point_identifier_and_path_token() {
+        let line = "    let h = tokio::spawn(f);";
+        // Cursor inside `tokio` (col 12) → ident `tokio`, path `tokio::spawn`.
+        assert_eq!(satp(line, 12), Some(("tokio".into(), "tokio::spawn".into())));
+        // Cursor inside `spawn` (col 19) → same path token.
+        assert_eq!(satp(line, 19), Some(("spawn".into(), "tokio::spawn".into())));
+        // Cursor parked right after `spawn` (before the `)` — the usual
+        // call-site spot) still counts.
+        assert_eq!(satp(line, 24), Some(("spawn".into(), "tokio::spawn".into())));
+    }
+
+    #[test]
+    fn symbol_at_point_field_access_stays_bare() {
+        // A `.`-accessed field: the token is the bare field name (fields are
+        // NOT in the index yet — plan 007-01 will capture them).
+        let line = "    let n = obj.name;";
+        assert_eq!(satp(line, 17), Some(("name".into(), "name".into())));
+        assert_eq!(satp(line, 20), Some(("name".into(), "name".into())));
+    }
+
+    #[test]
+    fn symbol_at_point_boundaries_and_garbage() {
+        assert_eq!(satp("fn main() {}", 0), Some(("fn".into(), "fn".into())));
+        // Punctuation (the `(` after a name): the run before the point.
+        assert_eq!(satp("call(1)", 4), Some(("call".into(), "call".into())));
+        // Whitespace with nothing identifier-ish around: no symbol.
+        assert_eq!(satp("let a = 1;", 7), None);
+        assert_eq!(satp("{ ", 1), None);
+        // A leading `::` does not extend past itself (empty path segment).
+        assert_eq!(satp("::inner", 3), Some(("inner".into(), "inner".into())));
+        // Column at the very end of the line: the trailing run counts.
+        assert_eq!(satp("let x = 1;", 9), Some(("1".into(), "1".into())));
+        // Mid-line identifier.
+        assert_eq!(satp("let x = 1;", 4), Some(("x".into(), "x".into())));
+        // Deep path: `a::b::c` under the middle segment.
+        assert_eq!(satp("use a::b::c;", 7), Some(("b".into(), "a::b::c".into())));
+    }
+
+    #[test]
+    fn xref_workspace_miss_fires_resolver_fallthrough() {
+        // `tokio::spawn` at top level: no index definition, no enclosing
+        // symbol → the M-. workspace miss falls through to the resolver.
+        // Plain (no runtime) unit test: the spawn is skipped, the
+        // generation is bumped, and the miss is reported synchronously.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2); // cursor inside `tokio`
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 1, "fall-through fired exactly once");
+        assert!(
+            s.resolving_display().is_empty(),
+            "no runtime: the indicator must not hang"
+        );
+        assert!(
+            s.message.contains("no provider resolution for `tokio::spawn`"),
+            "graceful miss message, got: {}", s.message
+        );
+    }
+
+    #[test]
+    fn xref_workspace_hit_and_enclosing_hit_skip_resolver() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { target(); }\n"),
+            ("src/lib.rs", "pub fn target() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Direct hit under the point → no fall-through.
+        s.set_point(0, 12, 12);
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 0, "direct hit: no resolver");
+        // Enclosing hit → no fall-through either.
+        s.open_path("src/lib.rs");
+        s.set_point(0, 0, 0);
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 0, "enclosing hit: no resolver");
+    }
+
+    #[tokio::test]
+    async fn xref_resolver_hit_lands_read_only_jump() {
+        // A resolve event with a resolved source (outside the project root,
+        // external) lands as a jump: read-only buffer, point on the
+        // resolved line, jump entry recorded, status cleared, and the
+        // external path never enters the project recents.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\n"),
+        ]);
+        // An "external" source file outside the project root.
+        let ext = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ext.path(), "extern crate dep;\npub fn spawn<F>(f: F) {}\n").unwrap();
+        let root = s.project.as_ref().map(|p| p.root.to_string_lossy().into_owned()).unwrap();
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2);
+        let origin_key = s.buffers.current().map(String::from).unwrap();
+        let recents_before = s.project_store.recents.list(&root).to_vec();
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 1);
+        assert!(s.resolving_display().contains("`tokio::spawn`"), "status activity while pending");
+        // Land a fabricated (provider-shaped) hit for the in-flight job.
+        let event = ResolveEvent {
+            generation: 1,
+            symbol: "tokio::spawn".into(),
+            source: Some(ResolvedSource {
+                file: ext.path().to_path_buf(),
+                source_root: ext.path().parent().unwrap().to_path_buf(),
+                external: true,
+                line: Some(2),
+            }),
+            error: None,
+        };
+        s.apply_resolve_event(&event);
+        let key = s.buffers.current().map(String::from).unwrap();
+        assert_eq!(key, ext.path().to_string_lossy().into_owned(), "external buffer is current");
+        let buf = s.buffers.get(&key).unwrap();
+        assert!(!buf.editable, "external source is read-only");
+        assert_eq!(s.point_line(), 1, "point on the resolved (1-based line 2) definition");
+        assert!(s.message.contains("jumped to"), "jump report, got: {}", s.message);
+        assert!(s.resolving_display().is_empty(), "status activity cleared");
+        assert_eq!(
+            s.project_store.recents.list(&root).to_vec(),
+            recents_before,
+            "external landing never records a recent"
+        );
+        // Jump entry recorded: back lands on the origin buffer/line.
+        s.jump_back();
+        assert_eq!(s.buffers.current().map(String::from).unwrap(), origin_key, "jump-back returns to the origin");
+    }
+
+    #[tokio::test]
+    async fn xref_resolver_miss_reports_graceful_message() {
+        // All providers miss → the event carries the error; the message
+        // reports it and nothing else changes (no buffer, no jump, no panic).
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2);
+        let before = s.buffers.current().map(String::from).unwrap();
+        s.xref_find_definitions();
+        let event = ResolveEvent {
+            generation: 1,
+            symbol: "tokio::spawn".into(),
+            source: None,
+            error: Some("no tooling provider could resolve symbol `tokio::spawn` (tried 1 provider(s): rust): no crate `tokio`".into()),
+        };
+        s.apply_resolve_event(&event);
+        assert!(
+            s.message.starts_with("no provider resolution for `tokio::spawn`:"),
+            "got: {}", s.message
+        );
+        assert_eq!(s.buffers.current().map(String::from).unwrap(), before, "view unchanged on a miss");
+        assert!(s.resolving_display().is_empty());
+    }
+
+    #[tokio::test]
+    async fn xref_resolver_event_end_to_end_miss_without_cargo() {
+        // Real fall-through end to end (no network): a project WITHOUT a
+        // Cargo.toml (`.projectile` is a root marker, not one) makes the
+        // cargo provider fail fast, and the event published on the
+        // ResolveBus lands the graceful report.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join(".projectile"), "\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "tokio::spawn(f);\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = s.resolve_bus.subscribe();
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2);
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 1, "fall-through started");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("resolve event published within 30s");
+        assert!(event.is_ok());
+        let event = rx.borrow_and_update().clone();
+        assert_eq!(event.generation, 1);
+        assert!(event.source.is_none(), "miss: no source, got error: {:?}", event.error);
+        s.apply_resolve_event(&event);
+        assert!(
+            s.message.starts_with("no provider resolution for `tokio::spawn`"),
+            "got: {}", s.message
+        );
+        assert!(
+            s.message.contains("tried 1 provider(s): rust"),
+            "provider chain named in the report: {}", s.message
+        );
+        assert!(s.resolving_display().is_empty());
+    }
+
+    #[test]
+    fn xref_resolver_stale_generation_event_discarded() {
+        // An event from a superseded request (or a previous project) must be
+        // discarded: no state change, and the current activity text stays.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2);
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, 1);
+        // Simulate a superseded request bumping the generation (as a second
+        // M-. would), then deliver the OLD job's event.
+        s.resolve_generation += 1;
+        s.resolving = Some(("resolving `other`…".into(), 2));
+        let before = s.message.clone();
+        let stale = ResolveEvent {
+            generation: 1,
+            symbol: "tokio::spawn".into(),
+            source: None,
+            error: Some("boom".into()),
+        };
+        s.apply_resolve_event(&stale);
+        assert_eq!(s.message, before, "stale event changed no state");
+        assert_eq!(
+            s.resolving_display(),
+            "resolving `other`…",
+            "the CURRENT job's activity is untouched by a stale event"
+        );
+        // And the stale job's own activity text (gen 1) is hidden by the
+        // display gate once the generation no longer matches.
+        s.resolving = Some(("resolving `tokio::spawn`…".into(), 1));
+        assert!(s.resolving_display().is_empty(), "stale-generation activity hidden by the display gate");
     }
 
     // ── issue 05: which-function test (finding: enclosing-symbol) ──────
