@@ -47,52 +47,51 @@ functionality. We don't need *scratch*."
 6. Its own parity-log row: divergence from the emacs splash is deliberate
    (KEEP) — append to `docs/emacs-parity-log.md`.
 
-## Orchestrator pre-check (2026-09-18, against the committed tree)
+## Orchestrator pre-check (refreshed 2026-09-18 late, against HEAD 88e245f)
 
 - **Derive machinery already exists — reuse, never hand-write**: `store.rs`
   has `menu_entries_for_path(&KeySeq)`, `menu_entries()`, `menu_rows()`,
-  `menu_height()`, `menu_bindings()` (~4034-4195) turning the live
-  keymap × command registry into grouped rows (prefixes first, then leaf
-  commands by registry category, headers per group). Home = the all-groups
-  view of exactly this; add an "all top-level groups" query rather than a
-  new formatter.
-- **`open_scratch` call sites to change** (auto-create paths):
-  `command.rs:154` (the explicit `open-scratch` command — may stay, but
-  should now open HOME instead of a buffer), `store.rs:2602`
-  (`kill_buffer` when the last buffer dies → must show HOME, not create
-  scratch), `store.rs:5411` (stale-reference fallback in the buffer-list
-  open path → HOME). Also the boot path. Tests call
-  `store.open_scratch()` directly (`store.rs:7503`) — expect those to be
-  reworked to the home state.
+  `menu_height()`, `menu_bindings()` turning the live keymap × command
+  registry into grouped rows (prefixes first, then leaf commands by
+  registry category, headers per group). Home = the all-groups view of
+  exactly this; add an "all top-level groups" query rather than a new
+  formatter. (grep these names; they have drifted from any old line range.)
+- **`open_scratch` call sites to change** (refreshed): the explicit
+  command `command.rs:156` (`open-scratch` — may stay, but should now open
+  HOME instead of a buffer), `store.rs:3976`, `store.rs:7081` (auto-create
+  fallbacks → HOME), and `store.rs:2024` is the definition. Tests call
+  `store.open_scratch()` directly (grep `open_scratch` in tests) — expect
+  those to be reworked to the home state.
+- **`ViewId` has NO `Home` variant today** (`store.rs:173-205`): add
+  `ViewId::Home` (and its `name()` arm) — home is a view, not a buffer.
+- **`q` is not dangerous to inherit**: on `ViewId::Buffer`, bare `q` is
+  bound to `close-view` (an explicit no-op when it is the only view — see
+  the comment at the `ViewId::Buffer` keymap arm), NOT to `quit`. So home
+  must simply NOT bind `q` at all (or bind nothing that closes/quits);
+  `C-x C-c` remains the only quit. Verify the home keymap has no `q`.
 - **`*scratch*` appears in existing assertions**: it is a buffer key in
-  `BufferTable` and in buffer-list/picker expectations (the parity log's
-  `C-x b` leg saw "3 of 3" including `*scratch*`). Those move to the home
-  state (no scratch entry, so the counts change).
+  `BufferTable` (`src/model/buffer.rs:32` `SCRATCH_NAME`); tests
+  `new_table_has_current_scratch` (`buffer.rs:~328`), the buffer-order
+  tests (`:~354`), and root render tests (`root.rs:939`, `:1029`, `:1118`)
+  assert it. Those move to the home state (no scratch entry, so any
+  buffer-list counts change).
 - **THE REAL COST (found 2026-09-18, do not underestimate)**: `BufferTable::new()`
-  in `src/model/buffer.rs:180-193` itself inserts a fresh `*scratch*`
-  (`insert_rope(None, Rope::new(), UNIX_EPOCH, true)`) and sets it
+  (`src/model/buffer.rs:188`) itself inserts a fresh `*scratch*` and sets it
   `current`. So "drop *scratch*" is NOT merely removing the `open_scratch`
   call sites: `BufferTable::new()` must start EMPTY, `Buffers::current`
   becomes `None` at boot, and the UI must render HOME for that state.
-  There are 35 `current_buffer()` uses in store.rs and many `None`-guarded
+  There are **37** `current_buffer()` uses in store.rs and many `None`-guarded
   paths already exist (`unwrap_or(0)`, `unwrap_or(false)`, `unwrap_or_default`)
   — but each boot-path consumer must be checked for a `None` that used to
   be impossible. Suggested shape: keep `SCRATCH_NAME` only as a legacy
   key (do not create it), add an explicit `ViewId::Home`, and have the
   root render switch on "no current buffer ⇒ Home". Tests that assert
-  `*scratch*` in the initial frame (`root.rs:817`, `:877`, `:966`; parity
-  log `C-x b` "3 of 3") must be reworked to the home state.
+  `*scratch*` in the initial frame must be reworked to the home state.
   If this proves larger than a single issue, STOP and report — do not
   silently leave half the invariants; I will split it (e.g. "empty table +
   Home view render" then "remove scratch affordances/commands").
-- **`q` on home must be unbound**: find where the bare-`q` → quit/close
-  binding lives (the root/buffer view keymap) so home does not inherit it;
-  `C-x C-c` must still quit immediately (no buffers ⇒ nothing to save, per
-  004-04).
-- `?` already opens the descendable transient menu and works (verified
-  live: `?` then `C-x` descends into the C-x submenu; a bare prefix shows
-  `[C-x]` pending in the status line and `C-g` cancels) — home's `?` should
-  do the same.
+- `?` already opens the descendable transient menu and works; home's `?`
+  should do the same.
 
 ## Constraints
 
@@ -104,8 +103,11 @@ functionality. We don't need *scratch*."
   point motion, kill/yank, or 004-04 quit machinery.
 - All suites green (counts change where scratch tests were updated):
   `cargo test`, `sweep.py` 14/14, `sweep_flows.py` (boot-state flow
-  updated), `drive_all` 6/6, `drive_windowing` 28/28,
-  `drive_windowing_panes` 4/4, `check_cursor_stream` all.
+  updated), `drive_all` 8/8, `drive_windowing` 28/28,
+  `drive_windowing_panes` 4/4, `check_cursor_stream` 80/80, and the rest
+  of the battery via `tools/gate.sh full`. NOTE: `tools/gate.sh` is the
+  current gate runner (fast = rust-only, full = whole battery at the safe
+  read-quiet).
 
 ## Verification (iterate until ALL pass)
 
