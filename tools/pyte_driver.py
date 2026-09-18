@@ -171,6 +171,8 @@ class App:
         self.master = master
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
+        # Terminal-query state (DA1 — see _answer_terminal_queries).
+        self._queries_answered = False
         # Wait for the app to fully start (config + index + watcher) and the
         # root buffer to render. Poll until the mode line reads `ready`
         # (the startup symbol-index build clears the screen while it runs).
@@ -205,10 +207,36 @@ class App:
                     break
                 if not data:
                     break
+                self._answer_terminal_queries(data)
                 self.stream.feed(data)
                 last = time.time()
             if quiet > 0 and (time.time() - last) >= quiet:
                 break
+
+    def _answer_terminal_queries(self, data):
+        """Reply to crossterm's startup terminal queries, like a real terminal.
+
+        At startup crossterm emits DA1 (`ESC [ c`) to identify the terminal
+        and then BLOCKS up to 2 s waiting for a reply. A dumb PTY fixture
+        never answers, so every App() start paid ~2.0 s of dead time before
+        the first real frame (measured: query at 346 ms, first frame at
+        2347 ms; answering it drops first frame to 354 ms). With ~45 App()
+        launches per gate battery that was ~90 s of pure waiting.
+
+        Answering is strictly closer to a real terminal than silence — it
+        can only make frames arrive sooner, never later, so it cannot change
+        any verdict. Once per App (the reply is deterministic).
+        """
+        if self._queries_answered:
+            return
+        # DA1: ESC [ c  (or ESC [ 0 c)
+        if b"\x1b[c" in data or b"\x1b[0c" in data:
+            # VT100 with advanced video option — what crossterm/xterm expect.
+            try:
+                os.write(self.master, b"\x1b[?1;2c")
+            except OSError:
+                pass
+            self._queries_answered = True
 
     def key(self, s, settle=1.0, quiet=None):
         """Send a key sequence and read until the stream is quiet.
