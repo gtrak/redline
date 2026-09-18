@@ -3,6 +3,7 @@
 
 pub mod cache;
 pub mod highlight;
+pub mod node;
 pub mod queries;
 pub mod registry;
 pub mod tokens;
