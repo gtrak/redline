@@ -58,6 +58,12 @@ run() {  # run <label> <cmd...>
   local label="$1"; shift
   printf '\n=== %s ===\n' "$label"
   local t0; t0=$(date +%s)
+  # Progress goes to STDERR, unbuffered, BEFORE the command runs. Without
+  # this a `gate.sh full | tail -N` invocation emits nothing for ~3 min
+  # and looks hung (it tripped a false long-running watchdog alarm in the
+  # orchestrator during 006-03b). stderr is line-buffered to a terminal
+  # and never swallowed by `| tail`.
+  printf '\n=== %s ... (t=0s) ===\n' "$label" >&2
   if "$@"; then
     printf '=== %s: OK (%ss) ===\n' "$label" "$(( $(date +%s) - t0 ))"
   else
