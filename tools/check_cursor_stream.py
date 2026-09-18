@@ -26,6 +26,12 @@ reconstruction:
     line start, the 1-based CUP column equals TREE_WIDTH + N + 1, and
     equals the code pane's actual start column read from the frame + N +
     1); tree-hidden stays 1:1.
+  * plan 004 issue 05g (carried P2): the list-view (magit) hardware cursor
+    (CUP) column with the tree sidebar visible equals the magit pane's start
+    column read from the frame (the 05g offset applies to every view arm).
+  * plan 004 issue 05f: the transient menu (`?`) renders two ellipsized
+    columns with a visible gutter at 80 cols (no two-cell collision) and
+    falls back to one full-width column at narrow widths.
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -45,11 +51,12 @@ def _set_winsize(fd, rows, cols):
 
 
 class Session:
-    def __init__(self, colorterm):
+    def __init__(self, colorterm, cols=COLS, rows=ROWS):
         self.colorterm = colorterm
+        self.cols, self.rows = cols, rows
         self.master, slave = pty.openpty()
-        _set_winsize(slave, ROWS, COLS)
-        _set_winsize(self.master, ROWS, COLS)
+        _set_winsize(slave, self.rows, self.cols)
+        _set_winsize(self.master, self.rows, self.cols)
         self.pid = os.fork()
         if self.pid == 0:
             os.setsid()
@@ -68,7 +75,7 @@ class Session:
             os.chdir(REPO)
             os.execvpe(BIN, [BIN], env)
         os.close(slave)
-        self.screen = pyte.Screen(COLS, ROWS)
+        self.screen = pyte.Screen(self.cols, self.rows)
         self.stream = pyte.ByteStream(self.screen)
         self._wait_ready()
 
@@ -109,18 +116,18 @@ class Session:
         return self._read(settle, quiet=0.15)
 
     def text(self):
-        return "\n".join("".join(self.screen.buffer[r][i].data for i in range(COLS)) for r in range(ROWS))
+        return "\n".join("".join(self.screen.buffer[r][i].data for i in range(self.cols)) for r in range(self.rows))
 
     def row_text(self, row):
-        return "".join(self.screen.buffer[row][i].data for i in range(COLS))
+        return "".join(self.screen.buffer[row][i].data for i in range(self.cols))
 
     def bar_rows(self):
-        return [r for r in range(ROWS - 1)
-                if any(str(self.screen.buffer[r][i].bg).lower() in BAR_BGS for i in range(COLS))]
+        return [r for r in range(self.rows - 1)
+                if any(str(self.screen.buffer[r][i].bg).lower() in BAR_BGS for i in range(self.cols))]
 
     def reverse_rows(self):
-        return [r for r in range(ROWS)
-                if any(self.screen.buffer[r][i].reverse for i in range(COLS))]
+        return [r for r in range(self.rows)
+                if any(self.screen.buffer[r][i].reverse for i in range(self.cols))]
 
     def kill(self):
         try:
@@ -712,6 +719,114 @@ def tree_cursor_offset_checks():
     return checks
 
 
+def _menu_rows(s):
+    """The rendered rows of the transient-menu overlay (title row to bottom)."""
+    rows = s.text().split("\n")
+    start = 0
+    for i, r in enumerate(rows):
+        if "Transient menu" in r:
+            start = i
+            break
+    return rows[start:]
+
+
+def _menu_collisions(rows):
+    """Rows containing a two-cell collision: '][' or a letter immediately
+    followed by '[' — the old hard-cut + no-gutter symptom."""
+    bad = []
+    for r in rows:
+        r2 = r.rstrip()
+        if re.search(r"\]\[", r2) or re.search(r"[a-zA-Z]\[", r2):
+            bad.append(r2)
+    return bad
+
+
+def transient_menu_checks():
+    """plan 004 issue 05f: the transient menu (`?`) renders two ellipsized
+    columns with a visible gutter at 80 cols (no two-cell collision, every
+    row <= width, long descriptions ellipsized) and falls back to ONE
+    full-width column at narrow widths (~30 cols) so a long description is
+    shown whole or ellipsized with no two-cell collision."""
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    # 80 cols: two columns, gutter, ellipsis.
+    s = Session(None)
+    s.key("C-x g", 1.2)
+    s.key("?", 0.7)
+    rows = _menu_rows(s)
+    rec("menu: title row present", any("Transient menu" in r for r in rows),
+        f"rows={len(rows)}")
+    collisions = _menu_collisions(rows)
+    rec("menu@80: no two-cell collision (no '][' / letter-then-'[')",
+        not collisions, "; ".join(collisions[:3]))
+    rec("menu@80: every row fits the width",
+        all(len(r) <= COLS for r in rows),
+        f"max row len={max(len(r) for r in rows)}")
+    rec("menu@80: long descriptions ellipsized",
+        any("…" in r for r in rows), "no '…' found")
+    s.kill()
+
+    # ~30 cols: single-column fallback (w < 40).
+    narrow_cols = 30
+    s2 = Session(None, cols=narrow_cols, rows=24)
+    s2.key("C-x g", 1.2)
+    s2.key("?", 0.7)
+    nrows = _menu_rows(s2)
+    nc = _menu_collisions(nrows)
+    rec(f"menu@{narrow_cols}: single column (no two-cell collision)",
+        not nc, "; ".join(nc[:3]))
+    # A long description must be present whole or ellipsized on its own row,
+    # and no row may overflow the width.
+    long_rows = [r for r in nrows if "Move to the" in r]
+    rec(f"menu@{narrow_cols}: long description on its own row (whole or …)",
+        len(long_rows) >= 1 and any("…" in r or "buffer" in r for r in long_rows),
+        "; ".join(r.rstrip() for r in long_rows[:2]))
+    rec(f"menu@{narrow_cols}: every row fits the width",
+        all(len(r) <= narrow_cols for r in nrows),
+        f"max row len={max(len(r) for r in nrows)}")
+    s2.kill()
+    return checks
+
+
+def list_view_cup_checks():
+    """plan 004 issue 05g (carried P2): with the tree sidebar visible the
+    LIST-view hardware cursor (CUP) column is offset by the tree width — the
+    surviving CUP column equals the magit pane's start column read from the
+    frame (0-based col 34). The 05g offset applies to every view arm; only
+    the Buffer arm was asserted before."""
+    s = Session(None)
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    s.key("C-x g", 1.2)
+    buf = s.key("C-c p t", 0.9)
+    if "*tree*" not in s.text():
+        rec("list view: tree visible (C-c p t)", False, "*tree* missing")
+        s.kill()
+        return checks
+    rec("list view: tree visible (C-c p t)", True, "")
+    # The magit pane's start column, read from the frame (the magit title
+    # '*magit-status*' begins where the pane begins).
+    start = s.row_text(0).find("*magit")
+    rec("list view: pane start column read from the frame (0-based = 34)",
+        start == 34, f"pane start (0-based)={start}")
+    # The CUP survives at the pane's first content column (char 0 of the
+    # selected row): 0-based CUP col == pane start (1-based CUP = start + 1).
+    row, col = last_cup_after_sync(buf)
+    rec("list view: surviving CUP column equals pane start (0-based)",
+        start is not None and col is not None and (col - 1) == start,
+        f"cup=({row},{col}) want 0-based col {start}")
+    s.kill()
+    return checks
+
+
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -743,6 +858,17 @@ def main():
     # sidebar visible (+ the tree-hidden regression leg).
     print("=== TREE-SIDEBAR HARDWARE-CURSOR OFFSET (tree visible) ===")
     all_checks += tree_cursor_offset_checks()
+    print()
+    # plan 004 issue 05g (carried P2): list-view hardware-cursor (CUP)
+    # offset with the tree sidebar visible (the 05g offset applies to every
+    # view arm; only the Buffer arm was asserted before).
+    print("=== LIST-VIEW HARDWARE-CURSOR OFFSET (tree visible) ===")
+    all_checks += list_view_cup_checks()
+    print()
+    # plan 004 issue 05f: transient-menu readability (two-column + gutter +
+    # ellipsis at 80 cols; single-column fallback at narrow widths).
+    print("=== TRANSIENT MENU READABILITY (two-col/gutter/ellipsis + narrow fallback) ===")
+    all_checks += transient_menu_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")
