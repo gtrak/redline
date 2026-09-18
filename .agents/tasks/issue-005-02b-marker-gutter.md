@@ -94,6 +94,49 @@ matches the file, which also corrupts the reading of the file being browsed.
   `tools/ux_sweep.py`.
 - Wrap EVERY python PTY invocation in `timeout`.
 
+## SECOND ROUND (re-review P1, orchestrator-reproduced) — the cap degenerates to a BLANK view
+
+`store.rs` (~4027-4044) caps the code span as
+`code_span = viewport_lines.saturating_sub(n_notes)` and then
+`end = start + code_span`. When EVERY line in the window is annotated
+(`n_notes == viewport_lines`), `code_span == 0`, so `end == start` and the
+emission loop `for line in start..end` runs ZERO times — and because the
+note rows are emitted INSIDE that loop, `rows` is EMPTY: the entire file
+view renders blank and the cursor parks on a blank content row.
+
+REPRODUCED LIVE (orchestrator): a 25-line file with all 25 lines
+annotated, viewport 21 → 25 code lines + 25 notes invisible, cursor at
+row 1, essentially nothing drawn.
+
+REQUIRED FIX (the reviewer's, and it must be exactly this shape — a bare
+`saturating_sub(..).max(1)` is NOT sufficient because it re-overflows):
+make the budget counts FINAL. After choosing `start`/`end`, recount the
+notes in the emitted range and cap the number of emitted NOTE rows so
+`code_rows + note_rows <= viewport_lines`, ALWAYS keeping the point's code
+row visible. The cleanest formulation: emit the code rows for the window
+first (>= 1 row, including the point's line), then fill note rows only up
+to the remaining budget (`viewport_lines - code_rows`). Add a leg for the
+all-lines-annotated case asserting the point's line IS drawn and the view
+is not blank.
+
+## Also in this round (re-review P2s, cheap and in-fence)
+
+- **`↑` indicator consistency**: the window now advances `start` above
+  `scroll_top` (to keep the point drawn) but `file_view_scroll_info`
+  still reports `scroll_top` and the renderer shows `↑` only when
+  `top_line > 0`. In the repro (scroll_top 0, window actually starts at
+  line 1) line 0 is hidden with no `↑`. Key the indicator off the emitted
+  window's first buffer line (it is already in `rows`) — do not change
+  `scroll_top` semantics for the other consumers.
+- **Tighten the regression leg**: `tools/check_cursor_stream.py` asserts
+  `1 <= r <= 21` for a 1-based CUP, but the canvas occupies CUP rows 2..22
+  (title CUP 1, 21 content rows). Tighten to `2 <= r <= 22`.
+- **Strengthen the leg's text check**: the cursor-row assertion must also
+  assert that the row UNDER the cursor contains the point's line text
+  (e.g. `row_text(cursor_row)` contains the expected `fn ...` text), not
+  just that the row is in-range — otherwise a future off-by-one that lands
+  the cursor on a NEIGHBOURING drawn row would pass.
+
 ## Verification (iterate until ALL pass)
 
 - Gates: build / `clippy --all-targets -- -D warnings` / cargo test green.
