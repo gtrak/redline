@@ -68,6 +68,23 @@ functionality. We don't need *scratch*."
   `BufferTable` and in buffer-list/picker expectations (the parity log's
   `C-x b` leg saw "3 of 3" including `*scratch*`). Those move to the home
   state (no scratch entry, so the counts change).
+- **THE REAL COST (found 2026-09-18, do not underestimate)**: `BufferTable::new()`
+  in `src/model/buffer.rs:180-193` itself inserts a fresh `*scratch*`
+  (`insert_rope(None, Rope::new(), UNIX_EPOCH, true)`) and sets it
+  `current`. So "drop *scratch*" is NOT merely removing the `open_scratch`
+  call sites: `BufferTable::new()` must start EMPTY, `Buffers::current`
+  becomes `None` at boot, and the UI must render HOME for that state.
+  There are 35 `current_buffer()` uses in store.rs and many `None`-guarded
+  paths already exist (`unwrap_or(0)`, `unwrap_or(false)`, `unwrap_or_default`)
+  — but each boot-path consumer must be checked for a `None` that used to
+  be impossible. Suggested shape: keep `SCRATCH_NAME` only as a legacy
+  key (do not create it), add an explicit `ViewId::Home`, and have the
+  root render switch on "no current buffer ⇒ Home". Tests that assert
+  `*scratch*` in the initial frame (`root.rs:817`, `:877`, `:966`; parity
+  log `C-x b` "3 of 3") must be reworked to the home state.
+  If this proves larger than a single issue, STOP and report — do not
+  silently leave half the invariants; I will split it (e.g. "empty table +
+  Home view render" then "remove scratch affordances/commands").
 - **`q` on home must be unbound**: find where the bare-`q` → quit/close
   binding lives (the root/buffer view keymap) so home does not inherit it;
   `C-x C-c` must still quit immediately (no buffers ⇒ nothing to save, per
