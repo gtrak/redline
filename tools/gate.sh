@@ -2,9 +2,11 @@
 # Redline gate runner — tiered so the inner dev loop doesn't pay for the
 # full PTY battery on every iteration (it is a RELEASE gate).
 #
-#   tools/gate.sh fast    Rust-only: build + clippy + unit tests      (~15 s)
-#   tools/gate.sh smoke   fast + one PTY chain (drive_all)            (~40 s)
-#   tools/gate.sh full    everything (the 13 suites we run at review) (~3 min)
+#   tools/gate.sh fast      Rust-only: build + clippy + unit tests      (~30 s)
+#   tools/gate.sh smoke     fast + one PTY chain (drive_all)            (~90 s)
+#   tools/gate.sh full      everything at the safe 0.2 quiet (~3 min)
+#   tools/gate.sh full-fast everything at 0.06 quiet (~2 min; see caveat)
+#   tools/gate.sh equiv     A/B the quiet window across the full battery
 #
 # Latency knobs (see tools/pyte_driver.py):
 #   REDLINE_PTY_QUIET  read-quiet window; default 0.2 = old behavior.
@@ -18,10 +20,20 @@ set -u
 cd "$(dirname "$0")/.."
 
 TIER="${1:-full}"
-# Fast read-quiet for PTY tiers unless the caller overrode it. Rust-only
-# tiers don't care. Kept opt-in at the driver level so nothing silently
-# changes when someone runs a suite by hand.
-export REDLINE_PTY_QUIET="${REDLINE_PTY_QUIET:-0.06}"
+# Latency policy is PER TIER, because the saving is not free everywhere:
+#   - Rust-only tiers: irrelevant.
+#   - smoke (drive_all): safe at 0.06 (verified verdict-identical).
+#   - full: sweep_flows has fixed-sleep orderings that assume the app has
+#     settled; a short quiet window exposes two latent races (U-BHN banner
+#     debounce, ann-delete message) and gives 64/65 instead of 65/65. So
+#     `full` runs at the proven 0.2 default; use `full-fast` to opt into
+#     0.06 for everything and accept the known sweep_flows caveat.
+# An explicit REDLINE_PTY_QUIET from the caller always wins.
+case "$TIER" in
+  full|equiv) _default_quiet=0.2 ;;
+  *)          _default_quiet=0.06 ;;
+esac
+export REDLINE_PTY_QUIET="${REDLINE_PTY_QUIET:-$_default_quiet}"
 
 # Shared-fixture suites: MUST run one at a time (the driver's flock enforces
 # this and exits 3 if a rival is live). Ordered cheapest-first for a fast fail.
@@ -80,6 +92,13 @@ case "$TIER" in
       REDLINE_PTY_QUIET="$q" bash "$0" full || fail=1
     done
     ;;
+  full-fast)
+    # Accelerated full battery: same suites, 0.06 quiet. Known to drop
+    # sweep_flows to 64/65 (timing-sensitive flows, NOT regressions — the
+    # old driver on the same binary gives 65/65). Use for the inner loop;
+    # gate releases on `full`.
+    REDLINE_PTY_QUIET=0.06 bash "$0" full || fail=1
+    ;;
   full)
     run "build"  cargo_build
     run "clippy" cargo_lint
@@ -88,8 +107,8 @@ case "$TIER" in
       run "$s" pty "$s"
     done
     ;;
-  *)
-    echo "usage: tools/gate.sh {fast|smoke|full|equiv}" >&2
+  *) 
+    echo "usage: tools/gate.sh {fast|smoke|full|full-fast|equiv}" >&2
     exit 2
     ;;
 esac
