@@ -80,6 +80,17 @@ render must be byte-faithful for all text).
   `tools/drive_windowing_panes.py`, `tools/check_cursor_stream.py`.
 - Wrap EVERY python PTY invocation in `timeout`.
 
+6. **(Carried 004-04 review P2, cosmetic)** After a FAILED save during the
+   quit save-prompt, the minibuffer shows only `save failed: ...` and the
+   `Save this buffer: <path>? (y, n, !, C-g)` decision line is never
+   redisplayed until the next key. In the failure branches of
+   `quit_prompt_key` (`store.rs:6800-6805` for `y`, `:6818-6823` for `!`),
+   after the failed `save_buffer_key`, restore the prompt text (compose
+   the error with the prompt, or call the prompt-show helper) so the
+   decision line stays visible alongside the error. State behavior is
+   unchanged; update/extend the save-failure test to assert the prompt
+   text is still present after the failure.
+
 ## Verification
 
 - Gates: build / `clippy --all-targets -- -D warnings` / cargo test green.
