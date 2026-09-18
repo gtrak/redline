@@ -56,6 +56,22 @@ the existing conflict discipline.
 - Typing/Backspace already work through `insert_text`/`notes_backspace`
   for `editable` buffers — verify a file buffer genuinely accepts them
   (do NOT assume; drive it). Set `locally_modified` on edits (existing).
+- **CRITICAL NUANCE (verified 2026-09-18)**: the conflict/auto-reload
+  guard is `Buffer::is_locally_owned()` = `path.is_none() ||
+  locally_modified` (`src/model/buffer.rs:91`) — driven by MODIFIED
+  state, NOT by `editable`. Consequences for this issue:
+  * A file toggled into edit mode but NOT yet edited is `!locally_owned`,
+    so an external change will still auto-reload and silently discard
+    nothing (no edits exist) — arguably fine, but it also means the
+    buffer could reload under the user's cursor mid-edit-session. DECIDE
+    and document: recommended = when `editable` is true for a file buffer
+    (edit mode on), treat it as locally owned (guard reloads) so the mode
+    is coherent; add `|| (self.editable && self.path.is_some())` to
+    `is_locally_owned` OR gate the reload branch on `!buf.editable` too.
+    Whichever you pick, state it in the report and test it.
+  * The reload suppression path (`apply_project_change`) also uses
+    `self.created_paths.remove(&key)` for our own writes. The saved-path
+    suppression from item 3 must slot into that same branch.
 - **External change while editing**: keep the existing conflict discipline
   — do NOT auto-reload a buffer with `locally_modified`; show the
   changed-on-disk marker. Auto-reload behavior for read-only buffers must
