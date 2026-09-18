@@ -60,6 +60,20 @@ stdout annotation dump that fits shell workflows.
   format) are preference-level: implemented as stated here, user can veto
   in review of the live app.
 
+## Status (2026-09-18)
+
+- **01 file edit mode — DONE (b31a494, review in flight; 465 tests)**: C-x C-q
+  toggle (Read-only ⇄ Edit in the status line), y/n confirm before a
+  read-only flip with unsaved edits, C-x C-s save-in-place with saved-path
+  self-write suppression (expected-mtime, same branch as created_paths),
+  and is_locally_owned now guards edit-mode file buffers so an external
+  change cannot reload under the cursor. Verified end-to-end by the
+  orchestrator: typed bytes landed on disk. Lane order note: 005 runs
+  BEFORE 004-06 (the user's stated priority is editing/annotating).
+- 02 inline annotations — QUEUED (spec + pre-check ready).
+- 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
+  so a redirect needs /dev/tty rendering).
+
 ## Success criteria
 
 - A file buffer toggled to edit mode accepts edits and `C-x C-s` writes
