@@ -55,6 +55,18 @@ there that it'll know what to do."
 - Re-anchoring must be stable and idempotent.
 
 ### 3. Inline visual cues (the point of the feature)
+
+**Exact current shape (verified 2026-09-18)**: `store.rs:3041
+file_view_lines()` returns a DENSE 1:1 `Vec<FileViewLine>` sliced from
+`scroll_top()..scroll_top()+viewport_lines` — every consumer assumes
+`rendered row i == buffer line start + i`. `FileViewLine` is just
+`{ text, spans }` (no line index). Inserting note rows therefore requires
+a new row representation (e.g. `RenderedRow { line: Option<usize>, … }`)
+or a parallel `row → buffer line` map; the renderer, `cursor_cell`, and
+`mouse_click_position` all consume the dense assumption today (note:
+click mapping ALSO needs the row offset, and `mouse_click_position`'s
+`row` is terminal-row based with a title-row assumption — do not add a
+second off-by-one).
 - Every annotated line renders a **margin marker** (e.g. `▎` at the left
   edge) — always visible.
 - The note text renders as a **dim/italic virtual row directly under the
