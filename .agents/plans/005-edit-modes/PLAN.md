@@ -72,9 +72,15 @@ stdout annotation dump that fits shell workflows.
   orchestrator (notes buffers DO toggle — toggle-read-only is
   buffer-agnostic — pinned by a new test; 466 tests). Lane order note: 005 runs
   BEFORE 004-06 (the user's stated priority is editing/annotating).
-- 02 inline annotations — IN FLIGHT (spec + pre-check; the rendered-row map
-  is the hard part: file_view_lines() is a dense 1:1 slice and note rows
-  break that assumption in the renderer, cursor_cell, and click mapping).
+- 02 inline annotations — DONE (f70fae7, review in flight; 476 tests).
+  Model + tolerant storage + content re-anchoring + A/d/C-c a + the
+  rendered-row map (file_view_rows with row_for_line/line_for_row).
+  DELETE is `d` in the buffer view (orchestrator ruling: `C-u A` would
+  preempt the user's pending C-u/numeric-prefix decision, parity row 22).
+  **KNOWN DEFECT → 02b**: the `▎` marker is overlaid at cell 0 and
+  CLOBBERS the first character of every annotated line (verified live:
+  `fn target_one() {}` → `▎n target_one() {}`); 02b adds a real gutter,
+  consistent across render/cursor/click.
 - 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
   so a redirect needs /dev/tty rendering).
 
