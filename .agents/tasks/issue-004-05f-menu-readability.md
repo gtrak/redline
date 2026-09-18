@@ -40,6 +40,15 @@ separator (`line[C-b]`), which is hard to read.
 4. If the fix is cheap, ensure a description that fits exactly is not
    ellipsized (off-by-one on the ellipsis budget).
 
+## Also in scope (carried 05g review P2)
+
+Add ONE PTY leg covering the list-view CUP with the tree visible (the
+05g offset applies to every view arm, but only the Buffer arm is
+asserted): open magit, toggle the tree on (`C-c p t` then `RET`, or
+`M-x toggle-tree`), and assert the surviving CUP column equals the pane's
+start column read from the frame (= 34). Low risk, but it is the one
+uncovered arm of a uniform mechanism.
+
 ## Constraints
 
 - Scope fence: `src/ui/transient_menu.rs`, tests, `docs/`. Layout only: no
