@@ -172,21 +172,45 @@ def flow_b4(app):
 
 
 def flow_c1(app):
-    """U-C1 Motion: C-d/C-u repaint (frame changes per press, view intact)."""
-    if "src/main.rs" not in row0(app):
-        app.key("C-c p t"); app.key("down"); app.key("down"); app.key("RET")
-        app.wait(0.8); app.key("C-c p t"); app.wait(0.4)
-    before = [app.row_text(r) for r in range(app.rows)]
-    app.key("C-d")
-    app.wait(0.6)
-    after = [app.row_text(r) for r in range(app.rows)]
-    repainted = before != after
-    intact = "src/main.rs" in row0(app)
-    ok = repainted and intact
-    record("U-C1", "C-d", ok, f"repainted-per-press={repainted} view-intact={intact}")
-    app.key("C-u")
-    app.wait(0.4)
-    _ = text
+    """U-C1 Motion: C-d scrolls (window moves, point's screen row held)."""
+    # Create a tall file (60 lines) so a half-page scroll is observable.
+    tall_path = os.path.join(REPO, "src", "tall_sweep.rs")
+    with open(tall_path, "w") as f:
+        for i in range(1, 61):
+            f.write(f"line {i}\n")
+    try:
+        app.key("C-c p i")
+        app.wait(1.0)
+        app.key("C-x C-f")
+        app.wait(0.8)
+        for ch in "tall_sweep":
+            app.key(ch, settle=0.2)
+        app.key("RET")
+        app.wait(0.8)
+        open_ok = "tall_sweep.rs" in row0(app)
+        # Point starts at line 0 (top of buffer); cursor at screen row 1.
+        top_before = app.row_text(1)
+        cursor_row_before = app.screen.cursor.y
+        # C-d: scroll down half a page (~11 rows with 22-row viewport).
+        app.key("C-d")
+        app.wait(0.6)
+        top_after = app.row_text(1)
+        cursor_row_after = app.screen.cursor.y
+        # (a) Real scroll: the top visible line changed (non-vacuous).
+        scrolled = top_before != top_after
+        # (b) Point's screen row preserved: cursor stayed at the same row.
+        row_held = (cursor_row_before == cursor_row_after)
+        ok = open_ok and scrolled and row_held
+        record("U-C1", "C-d", ok,
+               f"opened={open_ok} scrolled={scrolled} "
+               f"(top {top_before.strip()!r}->{top_after.strip()!r}) "
+               f"point-row-held={row_held} "
+               f"(cursor row {cursor_row_before}->{cursor_row_after})")
+    finally:
+        try:
+            os.remove(tall_path)
+        except FileNotFoundError:
+            pass
 
 
 def flow_e1(app):
@@ -1394,8 +1418,9 @@ def flow_mark_kill_yank(app):
 
 
 def flow_mark_exchange(app):
-    """U-M8: C-x C-x exchange point and mark (on the read-only file view)."""
-    # Open the read-only file (src/main.rs has multiple lines).
+    """U-M8: C-x C-x exchange point and mark (point moves to mark's line;
+    window follows so the point stays visible)."""
+    # Open the read-only file (src/main.rs, 16 lines — fits in 22-row viewport).
     app.key("C-x C-f")
     app.wait(0.8)
     for ch in "main":
@@ -1403,26 +1428,34 @@ def flow_mark_exchange(app):
     app.key("RET")
     app.wait(1.0)
     file_open = "src/main.rs" in row0(app)
-    # Set mark at line 0.
+    # Set mark at line 0 (point starts at line 0).
     app.feed(b"\x00", settle=0.6)
     mark_set = "Mark set" in app.row_text(app.rows - 2)
-    # Move down 2 lines.
+    # Move point to line 2 (C-n x2): cursor moves from row 1 to row 3.
     app.key("C-n")
     app.wait(0.4)
     app.key("C-n")
     app.wait(0.4)
-    top_before = app.row_text(1)
-    # C-x C-x: exchange point and mark.
+    cursor_at_b = app.screen.cursor.y
+    # C-x C-x: exchange point and mark → point moves to line 0 (mark's line),
+    # cursor returns to row 1. The window follows (no-op here since the
+    # file fits the viewport).
     app.key("C-x C-x")
     app.wait(0.6)
-    top_after = app.row_text(1)
-    # After exchange, the point should be where the mark was (line 0),
-    # so the view should scroll back to the top.
-    exchanged = top_before != top_after
-    ok = file_open and mark_set and exchanged
-    record("U-M8", "C-x C-f,main,RET;NUL;C-n x2;C-x C-x", ok,
-           f"file-open={file_open} mark-set={mark_set} exchange-scrolled={exchanged} "
-           f"(before={top_before.strip()!r} after={top_after.strip()!r})")
+    cursor_at_a = app.screen.cursor.y
+    exchanged_to_mark = (cursor_at_a != cursor_at_b)
+    # C-x C-x again: exchange back → point returns to line 2, cursor at row 3.
+    app.key("C-x C-x")
+    app.wait(0.6)
+    cursor_back = app.screen.cursor.y
+    roundtrip = cursor_back == cursor_at_b
+    ok = file_open and mark_set and exchanged_to_mark and roundtrip
+    record("U-M8", "C-x C-f,main,RET;NUL;C-n x2;C-x C-x;C-x C-x", ok,
+           f"file-open={file_open} mark-set={mark_set} "
+           f"point-at-mark-line={exchanged_to_mark} "
+           f"(cursor row {cursor_at_b}->{cursor_at_a}) "
+           f"roundtrip-back-to-point={roundtrip} "
+           f"(cursor row {cursor_at_a}->{cursor_back})")
 
 
 def flow_cross_buffer_kill(app):

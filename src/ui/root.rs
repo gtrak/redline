@@ -103,10 +103,32 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
         ViewId::CommitEditor => Some(cell(0)),
         ViewId::Buffer => {
             // The "changed on disk" banner (when present) pushes the content
-            // down one row; account for it so the cursor lands on the first
-            // visible line, not the banner.
+            // down one row; account for it so the cursor lands on the
+            // intended content row, not the banner.
             let banner = u16::from(snap.file_view_changed_on_disk);
-            Some((0, 1 + banner))
+            let total = snap.file_view_total_lines;
+            if snap.file_view_current_buffer_editable {
+                // Editable buffers (notes/scratch): the cursor stays on the
+                // insertion row (the last line) — append-at-end, unchanged
+                // and out of scope for 05b (the point may move internally but
+                // the hardware cursor does not).
+                let insert_line = total.saturating_sub(1);
+                let content_row = insert_line.saturating_sub(snap.file_view_top_line);
+                Some((0, 1 + banner + content_row as u16))
+            } else {
+                // Read-focused file view: the cursor tracks the point
+                // (plan 004 issue 05b). Row = the point's buffer line
+                // relative to the window top (clamped to the visible window;
+                // the window always follows the point so this is in range);
+                // col = the point's column. Cols beyond the pane width place
+                // the cursor off-screen (no horizontal scroll in 05b).
+                let line = snap
+                    .file_view_point_line
+                    .min(total.saturating_sub(1));
+                let content_row = line.saturating_sub(snap.file_view_top_line);
+                let col = snap.file_view_point_col as u16;
+                Some((col, 1 + banner + content_row as u16))
+            }
         }
     }
 }
@@ -155,6 +177,9 @@ struct Snapshot {
     file_view_top_line: usize,
     file_view_total_lines: usize,
     file_view_viewport_lines: usize,
+    // plan 004 issue 05b: the file-view point (line, col) the cursor tracks.
+    file_view_point_line: usize,
+    file_view_point_col: usize,
     // File watching (issue 04): the current buffer's "changed on disk"
     // conflict marker.
     file_view_changed_on_disk: bool,
@@ -405,6 +430,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             file_view_top_line: top_line,
             file_view_total_lines: total_lines,
             file_view_viewport_lines: viewport_lines,
+            file_view_point_line: s.file_view_point().0,
+            file_view_point_col: s.file_view_point().1,
             file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
             file_view_current_buffer_editable: s.current_buffer_editable(),
             tree_visible: s.tree_visible(),
@@ -756,7 +783,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 90"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 98"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

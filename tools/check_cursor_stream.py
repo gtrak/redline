@@ -131,6 +131,19 @@ def last_cup_row_after_sync(buf):
     return int(cups[-1][0]) if cups else None
 
 
+def last_cup_after_sync(buf):
+    """The (row, col) — 1-based terminal coordinates — of the last CUP issued
+    after the final ?2026l of this chunk, or (None, None) when absent."""
+    ends = [m.end() for m in re.finditer(rb"\x1b\[\?2026l", buf)]
+    if not ends:
+        return (None, None)
+    after = buf[ends[-1]:]
+    cups = re.findall(rb"\x1b\[(\d+);(\d+)[Hf]", after)
+    if not cups:
+        return (None, None)
+    return (int(cups[-1][0]), int(cups[-1][1]))
+
+
 def show_after_sync(buf):
     """Whether a ?25h (show) is issued after the final ?2026l of this chunk."""
     ends = [m.end() for m in re.finditer(rb"\x1b\[\?2026l", buf)]
@@ -200,6 +213,127 @@ def check(colorterm):
     return checks
 
 
+def file_view_checks():
+    """plan 004 issue 05b: the file-view cursor tracks a real (line, col)
+    point step by step under C-n/C-p/C-f/C-b/arrows/C-a/C-e, with EOL/BOL
+    wrapping, goal-column across short/long lines, C-v holding the point's
+    screen row, M->/M-< landing the point at the buffer end/start (window
+    follows), and the status line tracking the point line."""
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    # cursorleg.rs: 40 lines; even line = 20 'A's, odd line = 2 'b's.
+    # Written with NO trailing newline so the buffer is exactly 40 lines
+    # (ropey counts a trailing \n as an extra empty line).
+    clines = ["A" * 20 if i % 2 == 0 else "b" * 2 for i in range(40)]
+    with open(_os.path.join(src_dir, "cursorleg.rs"), "w") as f:
+        f.write("\n".join(clines))
+    # whichfn.rs: a couple of functions to drive the which-function display.
+    with open(_os.path.join(src_dir, "whichfn.rs"), "w") as f:
+        f.write("fn alpha() {\n    let x = 1;\n    let y = 2;\n}\n"
+                "fn beta() {\n    let z = 3;\n}\n")
+
+    s = Session(None)  # 256-color path; REPO is the module fixture repo
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:38s} {detail}")
+
+    def do(key, settle=0.6):
+        """Press `key` (possibly a multi-token sequence) and return the
+        surviving CUP (row, col) after the frame settles."""
+        return last_cup_after_sync(s.key(key, settle))
+
+    # Open cursorleg.rs: the cursor lands on the first content line, col 1.
+    s.key("C-x C-f", 1.0)
+    for ch in "cursorleg":
+        s.key(ch, 0.25)
+    buf = s.key("RET", 1.0)
+    row, col = last_cup_after_sync(buf)
+    rec("open file: cursor at (line 1, col 1)", (row, col) == (2, 1),
+        f"cup=({row},{col}) want (2,1)")
+
+    # C-f x3: col 1 -> 4.
+    r, c = do("C-f C-f C-f")
+    rec("C-f x3 (char right)", (r, c) == (2, 4), f"cup=({r},{c}) want (2,4)")
+    # C-b: col 4 -> 3.
+    r, c = do("C-b")
+    rec("C-b (char left)", (r, c) == (2, 3), f"cup=({r},{c}) want (2,3)")
+    # C-e: to end of line 0 (col 20).
+    r, c = do("C-e")
+    rec("C-e (line end)", (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+    # C-f at EOL wraps to the next line, col 0.
+    r, c = do("C-f")
+    rec("C-f EOL wrap -> line 2 col 1", (r, c) == (3, 1), f"cup=({r},{c}) want (3,1)")
+    # C-b at BOL wraps to the previous line's end (col 20).
+    r, c = do("C-b")
+    rec("C-b BOL wrap -> prev line end", (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+    # C-a: line start.
+    r, c = do("C-a")
+    rec("C-a (line start)", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
+
+    # Goal column: C-f x10 -> (0,10); C-n clamps to the short line's length;
+    # C-p restores the goal column on the longer line.
+    r, c = do("C-f " * 10)
+    rec("C-f x10 (col 10)", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    r, c = do("C-n")  # line 1 ("bb", len 2): col clamps to 2, goal stays 10
+    rec("C-n clamps goal on short line", (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
+    r, c = do("C-p")  # line 0 (len 20): goal 10 restored
+    rec("C-p restores goal column", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+
+    # Arrows join as point motion (Down==C-n, Up==C-p, Right==C-f, Left==C-b).
+    r, c = do("Down")
+    rec("Down == C-n", (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
+    r, c = do("Up")
+    rec("Up == C-p", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    r, c = do("Right")
+    rec("Right == C-f", (r, c) == (2, 12), f"cup=({r},{c}) want (2,12)")
+    r, c = do("Left")
+    rec("Left == C-b", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+
+    # C-v keeps the point's screen row: step to line 5 (row 6), then C-v.
+    r, c = do("C-n " * 4)
+    rec("C-n x4 -> line 5 (screen row 4)", (r, c) == (6, 11), f"cup=({r},{c}) want (6,11)")
+    before_row = r
+    r, c = do("C-v")
+    rec("C-v holds the point's screen row",
+        r == before_row and before_row == 6,
+        f"cup_row={r} before={before_row}")
+
+    # M-> lands the point at the buffer end; the window follows (screen row
+    # 20 of the 21-line window -> terminal row 22, col 3 on the 2-char line).
+    r, c = do("M->")
+    rec("M-> buffer end (window follows)", (r, c) == (22, 3),
+        f"cup=({r},{c}) want (22,3)")
+    # M-< lands the point at the buffer start.
+    r, c = do("M-<")
+    rec("M-< buffer start", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
+
+    # The status line's position display tracks the point's line: one line
+    # down from the top is the 2nd line ("L2,...").
+    s.key("C-n", 0.6)
+    rec("position display tracks the point line", "L2" in s.text(),
+        "")
+
+    # which-function matches the point line: open whichfn.rs, step into
+    # `fn alpha` (line 1) and the status line shows (alpha).
+    s.key("C-x C-f", 1.0)
+    for ch in "whichfn":
+        s.key(ch, 0.25)
+    s.key("RET", 1.2)
+    s.key("C-n", 0.8)  # line 1: inside fn alpha
+    # the index build is async; give it a moment to land whichfn.rs.
+    for _ in range(6):
+        if "(alpha)" in s.text():
+            break
+        s.wait(0.5)
+    rec("which-function matches the point line", "(alpha)" in s.text(), "")
+
+    s.kill()
+    return checks
+
+
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -209,6 +343,10 @@ def main():
         c = check(ct)
         all_checks += c
         print()
+    # plan 004 issue 05b: file-view point (line, col) + emacs motion leg.
+    print("=== FILE-VIEW POINT (line, col) + emacs motion ===")
+    all_checks += file_view_checks()
+    print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")
     for n, ok, d in all_checks:

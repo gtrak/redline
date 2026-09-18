@@ -248,6 +248,59 @@ impl CommandRegistry {
             "motion",
             |store, _arg| store.scroll_to_bottom(),
         ));
+        // ── plan 004 issue 05b: file-view point (line, col) + emacs motion ─
+        // These move the read-focused file-view's point; the window follows.
+        // They supersede the window-scroll bindings on C-n/C-p/arrows and add
+        // C-f/C-b/C-a/C-e and M-</M-> point motion (the plan-001 item-4
+        // arrows-scroll stopgap is retired by explicit user directive).
+        reg.register(Command::new(
+            "point-down",
+            "Point down one line, preserving the goal column (C-n / Down)",
+            "motion",
+            |store, _arg| store.point_down(),
+        ));
+        reg.register(Command::new(
+            "point-up",
+            "Point up one line, preserving the goal column (C-p / Up)",
+            "motion",
+            |store, _arg| store.point_up(),
+        ));
+        reg.register(Command::new(
+            "point-forward",
+            "Point forward one character, wrapping to the next line at EOL (C-f / Right)",
+            "motion",
+            |store, _arg| store.point_forward(),
+        ));
+        reg.register(Command::new(
+            "point-backward",
+            "Point backward one character, wrapping to the previous line end at BOL (C-b / Left)",
+            "motion",
+            |store, _arg| store.point_backward(),
+        ));
+        reg.register(Command::new(
+            "point-line-start",
+            "Point to the beginning of the line (C-a)",
+            "motion",
+            |store, _arg| store.point_line_start(),
+        ));
+        reg.register(Command::new(
+            "point-line-end",
+            "Point to the end of the line (C-e)",
+            "motion",
+            |store, _arg| store.point_line_end(),
+        ));
+        reg.register(Command::new(
+            "point-buffer-start",
+            "Point to the start of the buffer; the window follows (M-<)",
+            "motion",
+            |store, _arg| store.point_buffer_start(),
+        ));
+        reg.register(Command::new(
+            "point-buffer-end",
+            "Point to the end of the buffer; the window follows (M-> / G)",
+            "motion",
+            |store, _arg| store.point_buffer_end(),
+        ));
         reg.register(Command::new(
             "recenter",
             "Recenter: cycle cursor position top → middle → bottom (C-l)",
@@ -702,7 +755,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 90, "expected 90 seed commands: {names:?}");
+        assert_eq!(names.len(), 98, "expected 98 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -725,6 +778,14 @@ mod tests {
             "scroll-half-page-up",
             "scroll-top",
             "scroll-bottom",
+            "point-down",
+            "point-up",
+            "point-forward",
+            "point-backward",
+            "point-line-start",
+            "point-line-end",
+            "point-buffer-start",
+            "point-buffer-end",
             "recenter",
             "goto-line",
             "isearch-forward",

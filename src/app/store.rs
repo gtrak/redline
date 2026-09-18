@@ -92,33 +92,45 @@ impl ViewId {
                 km
                     .bind(&[Key::ctrl_char('x'), Key::char('o')], "open-scratch")
                     .unwrap();
-                // Motion (issue 03).
-                km.bind(&[Key::ctrl_char('n')], "scroll-line-down").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "scroll-line-up").unwrap();
+                // Motion (issue 03 + plan 004 issue 05b). Point motion:
+                // C-n/Down and C-p/Up move the point (goal column preserved);
+                // C-f/Right and C-b/Left move by character (wrap at EOL/BOL);
+                // C-a/C-e jump to line start/end. The window follows the
+                // point (the shipped follow-scroll pattern). This supersedes
+                // the plan-001 item-4 stopgap that bound the arrows to window
+                // scroll (the user directive is explicit: arrows move point).
+                km.bind(&[Key::ctrl_char('n')], "point-down").unwrap();
+                km.bind(&[Key::ctrl_char('p')], "point-up").unwrap();
+                km.bind(&[Key::down()], "point-down").unwrap();
+                km.bind(&[Key::up()], "point-up").unwrap();
+                km.bind(&[Key::ctrl_char('f')], "point-forward").unwrap();
+                km.bind(&[Key::ctrl_char('b')], "point-backward").unwrap();
+                km.bind(&[Key::new(KeyCode::Right)], "point-forward").unwrap();
+                km.bind(&[Key::new(KeyCode::Left)], "point-backward").unwrap();
+                km.bind(&[Key::ctrl_char('a')], "point-line-start").unwrap();
+                km.bind(&[Key::ctrl_char('e')], "point-line-end").unwrap();
+                // Window scroll (emacs paging + the non-emacs `j`/`k`):
+                // moves the window, the point's screen row stays fixed.
                 km.bind(&[Key::char('j')], "scroll-line-down").unwrap();
                 km.bind(&[Key::char('k')], "scroll-line-up").unwrap();
                 km.bind(&[Key::ctrl_char('v')], "scroll-page-down").unwrap();
                 km.bind(&[Key::alt_char('v')], "scroll-page-up").unwrap();
-                // PART A fix (item 4): arrow + page keys alongside the
-                // emacs keys, so navigation has a visible cursor everywhere.
-                km.bind(&[Key::down()], "scroll-line-down").unwrap();
-                km.bind(&[Key::up()], "scroll-line-up").unwrap();
                 km.bind(&[Key::new(KeyCode::PageDown)], "scroll-page-down").unwrap();
                 km.bind(&[Key::new(KeyCode::PageUp)], "scroll-page-up").unwrap();
                 km.bind(&[Key::ctrl_char('d')], "scroll-half-page-down").unwrap();
                 km.bind(&[Key::ctrl_char('u')], "scroll-half-page-up").unwrap();
                 // `g` = force-reload the current file buffer (issue 04's
-                // refresh role; scroll-top is still reachable via M-<).
+                // refresh role; M-< / M-> / G move the point to start/end).
                 km.bind(&[Key::char('g')], "reload-buffer").unwrap();
-                km.bind(&[Key::char('G')], "scroll-bottom").unwrap();
+                km.bind(&[Key::char('G')], "point-buffer-end").unwrap();
                 km
                     .bind(&[Key::alt_char('g'), Key::char('g')], "goto-line")
                     .unwrap();
                 km
-                    .bind(&[Key::alt_char('<')], "scroll-top")
+                    .bind(&[Key::alt_char('<')], "point-buffer-start")
                     .unwrap();
                 km
-                    .bind(&[Key::alt_char('>')], "scroll-bottom")
+                    .bind(&[Key::alt_char('>')], "point-buffer-end")
                     .unwrap();
                 // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
                 km.bind(&[Key::ctrl_char('l')], "recenter").unwrap();
@@ -321,6 +333,24 @@ pub enum PickerKind {
     /// `z` in the magit-status context (issue 08): stash list; RET pops, `x`
     /// drops the selected entry.
     Stash,
+}
+
+/// The file view's point for one buffer (plan 004 issue 05b): the
+/// `(line, col)` position of the cursor plus the emacs **goal column**.
+///
+/// * `line` — 0-based buffer line of the point.
+/// * `col` — 0-based *character* offset within the line (clamped to the
+///   line's length at EOL; emacs clamps). This is the horizontal position
+///   the cursor renders at.
+/// * `goal_col` — the emacs goal column: the horizontal position `C-n` /
+///   `C-p` (next/previous-line) try to keep across short lines. Moving to
+///   the end of a short line clamps `col` but `goal_col` is preserved, so
+///   returning to a longer line restores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FilePoint {
+    pub line: usize,
+    pub col: usize,
+    pub goal_col: usize,
 }
 
 /// One entry in the jump stack (issue 05): the buffer, line, and column
@@ -826,6 +856,12 @@ pub struct AppStore {
     /// Per-buffer scroll state: buffer key → top line (the first
     /// visible line). Preserved across view switches.
     scroll: HashMap<String, usize>,
+    /// Per-buffer file-view point (plan 004 issue 05b): buffer key →
+    /// `(line, col, goal_col)`. The read-focused cursor: C-n/C-p/C-f/C-b/
+    /// C-a/C-e/arrows move it, the window follows (and, for pure window
+    /// scrolls, the point's screen row is kept fixed). Edits (notes) keep
+    /// their append-at-end cursor and do not use this point.
+    point: HashMap<String, FilePoint>,
     /// Incremental in-buffer search state (C-s / C-r).
     isearch: IsearchState,
     /// Goto-line mode active (M-g g).
@@ -1084,6 +1120,7 @@ impl AppStore {
             grammar_registry: GrammarRegistry::build(),
             highlight_cache: HighlightCache::new(),
             scroll: HashMap::new(),
+            point: HashMap::new(),
             isearch: IsearchState::default(),
             goto_line_active: false,
             goto_line_input: String::new(),
@@ -1495,11 +1532,14 @@ impl AppStore {
     // ── plan 004 issue 03: mark / region / kill ring / yank ───────────
 
     /// The current buffer's "point" as a byte offset: the start of the line
-    /// at `scroll_top`. Returns `None` when there is no current buffer.
+    /// at the point's line (column 0). The region mark is a line-start byte
+    /// offset, so the point's column does not extend the region (plan 004
+    /// issue 05b: region semantics unchanged). Returns `None` when there is
+    /// no current buffer.
     fn current_point_byte(&self) -> Option<usize> {
         let key = self.buffers.current()?.to_string();
         let buf = self.buffers.get(&key)?;
-        let line = self.scroll_top();
+        let line = self.point_line();
         buf.rope.try_line_to_byte(line.min(buf.line_count().saturating_sub(1))).ok()
     }
 
@@ -1585,13 +1625,14 @@ impl AppStore {
             return;
         };
         let Some(point) = point else { return };
-        // Scroll to the line where the mark was (the new point).
+        // Move the point to the line where the mark was (the new point);
+        // the window follows.
         let mark_line = self
             .buffers
             .get(&key)
             .and_then(|b| b.rope.try_byte_to_line(mark).ok())
             .unwrap_or(0);
-        self.set_scroll_top(mark_line);
+        self.set_point_line(mark_line);
         // Set the mark to the old point.
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.mark = Some(point);
@@ -2446,7 +2487,7 @@ impl AppStore {
                     let origin = self.current_jump_entry();
                     self.open_path(file);
                     let key = self.buffers.current().map(String::from).unwrap_or_default();
-                    self.set_scroll_top(line - 1);
+                    self.set_point_line(line - 1);
                     self.ensure_highlight();
                     let _ = key;
                     self.record_jump(&origin, "M-.");
@@ -2460,7 +2501,7 @@ impl AppStore {
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();
-                    self.set_scroll_top(line - 1);
+                    self.set_point_line(line - 1);
                     self.ensure_highlight();
                     self.record_jump(&origin, "M-i");
                 }
@@ -2725,44 +2766,40 @@ impl AppStore {
         }
     }
 
-    /// Scroll down by one line.
+    /// Scroll down by one line (window motion; the point's screen row is
+    /// kept fixed — plan 004 issue 05b). Bound to `j` in the file view.
     pub fn scroll_line_down(&mut self) {
-        let top = self.scroll_top();
-        self.set_scroll_top(top + 1);
+        self.scroll_window_point(1);
     }
 
-    /// Scroll up by one line.
+    /// Scroll up by one line (window motion; the point's screen row is kept
+    /// fixed). Bound to `k` in the file view.
     pub fn scroll_line_up(&mut self) {
-        let top = self.scroll_top();
-        self.set_scroll_top(top.saturating_sub(1));
+        self.scroll_window_point(-1);
     }
 
     /// Scroll down by one page. PART A fix (item 5): keep a 2-line overlap
     /// (emacs `next-screen-context-lines`) so context carries over between
     /// pages.
     pub fn scroll_page_down(&mut self) {
-        let top = self.scroll_top();
-        let step = self.viewport_lines.saturating_sub(2).max(1);
-        self.set_scroll_top(top + step);
+        let step = self.viewport_lines.saturating_sub(2).max(1) as i64;
+        self.scroll_window_point(step);
     }
 
     /// Scroll up by one page (2-line overlap, matching page-down).
     pub fn scroll_page_up(&mut self) {
-        let top = self.scroll_top();
-        let step = self.viewport_lines.saturating_sub(2).max(1);
-        self.set_scroll_top(top.saturating_sub(step));
+        let step = self.viewport_lines.saturating_sub(2).max(1) as i64;
+        self.scroll_window_point(-step);
     }
 
     /// Scroll down by half a page.
     pub fn scroll_half_page_down(&mut self) {
-        let top = self.scroll_top();
-        self.set_scroll_top(top + self.viewport_lines / 2);
+        self.scroll_window_point((self.viewport_lines / 2) as i64);
     }
 
     /// Scroll up by half a page.
     pub fn scroll_half_page_up(&mut self) {
-        let top = self.scroll_top();
-        self.set_scroll_top(top.saturating_sub(self.viewport_lines / 2));
+        self.scroll_window_point(-((self.viewport_lines / 2) as i64));
     }
 
     // ── mouse support (issue 09, step 4: best-effort) ─────────────────
@@ -2772,8 +2809,7 @@ impl AppStore {
         const STEP: usize = 3;
         match self.top_view() {
             ViewId::Buffer => {
-                let top = self.scroll_top();
-                self.set_scroll_top(top.saturating_sub(STEP));
+                self.scroll_window_point(-(STEP as i64));
             }
             ViewId::BufferList => {
                 for _ in 0..STEP { self.buffer_list_prev(); }
@@ -2796,8 +2832,7 @@ impl AppStore {
         const STEP: usize = 3;
         match self.top_view() {
             ViewId::Buffer => {
-                let top = self.scroll_top();
-                self.set_scroll_top(top + STEP);
+                self.scroll_window_point(STEP as i64);
             }
             ViewId::BufferList => {
                 for _ in 0..STEP { self.buffer_list_next(); }
@@ -2824,7 +2859,9 @@ impl AppStore {
             return;
         }
         let target_line = self.scroll_top() + row;
-        self.set_scroll_top(target_line);
+        // Click-to-position lands the point at the clicked line (col 0);
+        // the window follows (plan 004 issue 05b).
+        self.set_point_line(target_line);
     }
 
     /// Scroll to the top (line 0).
@@ -2883,7 +2920,8 @@ impl AppStore {
     /// Compact position display for the status line (plan 004 row 11):
     /// `Top` at the first line, `Bot` at the last, otherwise
     /// `L{n},{pct}%` where `n` is the 1-based line number and `pct` is
-    /// the integer percentage through the buffer.
+    /// the integer percentage through the buffer. Tracks the point's line
+    /// (plan 004 issue 05b), not the window top.
     pub fn file_view_position_display(&self) -> String {
         let total = self
             .buffers
@@ -2893,7 +2931,7 @@ impl AppStore {
         if total == 0 {
             return String::new();
         }
-        let line = self.scroll_top(); // 0-based
+        let line = self.point_line(); // 0-based
         if line == 0 {
             return "Top".to_string();
         }
@@ -2945,6 +2983,226 @@ impl AppStore {
             .map(|b| b.line_count())
             .unwrap_or(0);
         (self.scroll_top(), total, self.viewport_lines)
+    }
+
+    /// The current buffer's file-view point `(line, col)` for the UI cursor
+    /// cell (plan 004 issue 05b). `(0, 0)` when there is no current buffer.
+    pub fn file_view_point(&self) -> (usize, usize) {
+        let p = self.file_point();
+        (p.line, p.col)
+    }
+
+    // ── plan 004 issue 05b: file-view point (line, col) + emacs motion ───
+
+    /// The line count of the current buffer (0 when none).
+    fn current_line_count(&self) -> usize {
+        self.buffers.current_buffer().map(|b| b.line_count()).unwrap_or(0)
+    }
+
+    /// The character length of buffer line `line` in the current buffer.
+    fn line_char_len(&self, line: usize) -> usize {
+        self.buffers
+            .current_buffer()
+            .and_then(|b| b.line_text(line))
+            .map(|t| t.chars().count())
+            .unwrap_or(0)
+    }
+
+    /// The current buffer's point, clamped to the buffer's bounds (a reload
+    /// that shrinks the buffer self-heals here). `(0,0)` when there is no
+    /// current buffer or it is empty. `goal_col` is not clamped to the
+    /// current line — it may target a longer line that a later C-n/C-p
+    /// moves onto.
+    fn file_point(&self) -> FilePoint {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return FilePoint::default();
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return FilePoint::default();
+        };
+        let total = buf.line_count();
+        if total == 0 {
+            return FilePoint::default();
+        }
+        let p = self.point.get(&key).copied().unwrap_or_default();
+        let line = p.line.min(total - 1);
+        let line_len = buf
+            .line_text(line)
+            .map(|t| t.chars().count())
+            .unwrap_or(0);
+        FilePoint {
+            line,
+            col: p.col.min(line_len),
+            goal_col: p.goal_col,
+        }
+    }
+
+    /// The point's line (0-based) for the current buffer.
+    fn point_line(&self) -> usize {
+        self.file_point().line
+    }
+
+    /// The point's column (0-based char offset) for the current buffer.
+    fn point_col(&self) -> usize {
+        self.file_point().col
+    }
+
+    /// Set the current buffer's point to `(line, col)` with goal column
+    /// `goal_col` (all clamped to the buffer's bounds), then make the window
+    /// follow so the point's line stays in the viewport (the shipped
+    /// follow-scroll pattern). No-op when there is no current buffer.
+    fn set_point(&mut self, line: usize, col: usize, goal_col: usize) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        let total = self
+            .buffers
+            .get(&key)
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        if total == 0 {
+            return;
+        }
+        let line = line.min(total - 1);
+        let line_len = self
+            .buffers
+            .get(&key)
+            .and_then(|b| b.line_text(line))
+            .map(|t| t.chars().count())
+            .unwrap_or(0);
+        let col = col.min(line_len);
+        // NOTE: `goal_col` is deliberately NOT clamped to the current line's
+        // length — it is the emacs goal column, which a short line clamps
+        // away from but a later C-n/C-p onto a longer line restores. It is
+        // only ever applied with `.min(line_len)` at the moment of use.
+        self.point
+            .insert(key.clone(), FilePoint { line, col, goal_col });
+        // Window follows: keep the point's line in the viewport.
+        let window = self.viewport_lines.max(1);
+        let top = self.scroll.get(&key).copied().unwrap_or(0);
+        let next = keep_cursor_visible(top, line, total, window);
+        if next != top {
+            self.scroll.insert(key, next);
+        }
+    }
+
+    /// A landing that moves the point to buffer line `line` at column 0
+    /// (isearch, goto-line, xref, imenu, jump, search-RET, click):
+    /// `set_point` with the point's column reset (the emacs landing is at the
+    /// start of the target line).
+    fn set_point_line(&mut self, line: usize) {
+        self.set_point(line, 0, 0);
+    }
+
+    /// Move the file-view window by `delta` lines (`delta > 0` = forward /
+    /// down, `delta < 0` = backward / up), keeping the point's **screen row**
+    /// fixed: the point's buffer line is recomputed from its on-screen row
+    /// after the window moves (emacs scroll behavior). The point's column is
+    /// re-clamped to the new line's length. Pure window motion — the cursor
+    /// does not move on screen. The window top clamps exactly like
+    /// `set_scroll_top` (so a buffer that fits the viewport still scrolls to
+    /// its last line, matching the pre-05b behavior).
+    fn scroll_window_point(&mut self, delta: i64) {
+        let total = self.current_line_count();
+        if total == 0 {
+            return;
+        }
+        let p = self.file_point();
+        let old_top = self.scroll_top();
+        let screen_row = p.line.saturating_sub(old_top);
+        let new_top = (old_top as i64 + delta).clamp(0, (total - 1) as i64) as usize;
+        self.set_scroll_top(new_top);
+        let new_line = (new_top + screen_row).min(total - 1);
+        let new_len = self.line_char_len(new_line);
+        let new_col = p.col.min(new_len);
+        let key = self.buffers.current().map(String::from).unwrap();
+        self.point.insert(
+            key,
+            FilePoint {
+                line: new_line,
+                col: new_col,
+                goal_col: p.goal_col,
+            },
+        );
+    }
+
+    /// C-n / Down: point down one line, preserving the goal column (emacs
+    /// `next-line`). No-op at the last line (buffer end).
+    pub fn point_down(&mut self) {
+        let p = self.file_point();
+        let total = self.current_line_count();
+        if total == 0 || p.line + 1 >= total {
+            return;
+        }
+        let nl = p.line + 1;
+        self.set_point(nl, p.goal_col.min(self.line_char_len(nl)), p.goal_col);
+    }
+
+    /// C-p / Up: point up one line, preserving the goal column (emacs
+    /// `previous-line`). No-op at the first line.
+    pub fn point_up(&mut self) {
+        let p = self.file_point();
+        if p.line == 0 {
+            return;
+        }
+        let nl = p.line - 1;
+        self.set_point(nl, p.goal_col.min(self.line_char_len(nl)), p.goal_col);
+    }
+
+    /// C-f / Right: point forward one character; wrap to the next line's
+    /// start at end-of-line (emacs `forward-char`). No-op at the buffer end.
+    pub fn point_forward(&mut self) {
+        let p = self.file_point();
+        let total = self.current_line_count();
+        let line_len = self.line_char_len(p.line);
+        if p.col < line_len {
+            self.set_point(p.line, p.col + 1, p.col + 1);
+        } else if p.line + 1 < total {
+            self.set_point(p.line + 1, 0, 0);
+        }
+    }
+
+    /// C-b / Left: point backward one character; wrap to the previous
+    /// line's end at beginning-of-line (emacs `backward-char`). No-op at the
+    /// buffer start.
+    pub fn point_backward(&mut self) {
+        let p = self.file_point();
+        if p.col > 0 {
+            self.set_point(p.line, p.col - 1, p.col - 1);
+        } else if p.line > 0 {
+            let prev_len = self.line_char_len(p.line - 1);
+            self.set_point(p.line - 1, prev_len, prev_len);
+        }
+    }
+
+    /// C-a: point to the beginning of the line (col 0).
+    pub fn point_line_start(&mut self) {
+        let p = self.file_point();
+        self.set_point(p.line, 0, 0);
+    }
+
+    /// C-e: point to the end of the line (col = the line's char length).
+    pub fn point_line_end(&mut self) {
+        let p = self.file_point();
+        let line_len = self.line_char_len(p.line);
+        self.set_point(p.line, line_len, line_len);
+    }
+
+    /// M-<: point to the buffer start (line 0, col 0); the window follows.
+    pub fn point_buffer_start(&mut self) {
+        self.set_point(0, 0, 0);
+    }
+
+    /// M->: point to the buffer end (last line, last col); the window
+    /// follows.
+    pub fn point_buffer_end(&mut self) {
+        let total = self.current_line_count();
+        if total == 0 {
+            return;
+        }
+        let line = total - 1;
+        let line_len = self.line_char_len(line);
+        self.set_point(line, line_len, line_len);
     }
 
     /// The highlight result for the current buffer, from the cache.
@@ -3035,7 +3293,7 @@ impl AppStore {
             direction,
             matches: Vec::new(),
             current: 0,
-            pre_search_line: self.scroll_top(),
+            pre_search_line: self.point_line(),
         };
         self.minibuffer_message("I-search: ");
     }
@@ -3074,7 +3332,7 @@ impl AppStore {
             self.minibuffer_message(&format!("I-search: {query} [no matches]"));
         } else {
             // Jump to the first match in the search direction.
-            let start_line = self.scroll_top();
+            let start_line = self.point_line();
             let start_byte = self
                 .buffers
                 .current_buffer()
@@ -3143,7 +3401,7 @@ impl AppStore {
             .current_buffer()
             .and_then(|b| b.try_byte_to_line(match_byte))
             .unwrap_or(0);
-        self.set_scroll_top(line);
+        self.set_point_line(line);
     }
 
     /// Confirm isearch (RET): keep the current position, deactivate.
@@ -3170,7 +3428,7 @@ impl AppStore {
         self.isearch.active = false;
         self.isearch.matches.clear();
         self.isearch.query.clear();
-        self.set_scroll_top(self.isearch.pre_search_line);
+        self.set_point_line(self.isearch.pre_search_line);
         self.minibuffer_message("cancel");
     }
 
@@ -3247,7 +3505,7 @@ impl AppStore {
                 .map(|b| b.line_count())
                 .unwrap_or(0);
             if line >= 1 && line <= total {
-                self.set_scroll_top(line - 1);
+                self.set_point_line(line - 1);
                 self.minibuffer_message("");
             } else {
                 self.minibuffer_message(&format!("line {line} out of range (1-{total})"));
@@ -4932,11 +5190,11 @@ impl AppStore {
     /// origin or destination in `record_jump`).
     fn current_jump_entry(&self) -> JumpEntry {
         let key = self.buffers.current().map(String::from).unwrap_or_else(|| SCRATCH_NAME.to_string());
-        let line = self.scroll_top();
+        let line = self.point_line();
         JumpEntry {
             buffer_key: key,
             line,
-            col: 0,
+            col: self.point_col(),
             label: String::new(),
         }
     }
@@ -4990,7 +5248,7 @@ impl AppStore {
             return;
         }
         self.buffers.set_current(&entry.buffer_key);
-        self.set_scroll_top(entry.line);
+        self.set_point(entry.line, entry.col, entry.col);
         self.ensure_highlight();
     }
 
@@ -5124,7 +5382,7 @@ impl AppStore {
         };
         let rel = rel.to_string_lossy().into_owned();
 
-        let line = self.scroll_top();
+        let line = self.point_line();
 
         // Step 1: try to find an identifier on the current line that is a
         // known definition in the index (the "symbol under point").
@@ -5182,9 +5440,9 @@ impl AppStore {
             let origin = self.current_jump_entry();
             let def = &defs[0];
             self.open_path(&def.file);
-            // Scroll to the definition's line.
+            // Move the point to the definition's line; the window follows.
             let new_key = self.buffers.current().map(String::from).unwrap_or_default();
-            self.set_scroll_top(def.symbol.line);
+            self.set_point_line(def.symbol.line);
             let _ = new_key;
             self.ensure_highlight();
             self.record_jump(&origin, "M-.");
@@ -5335,7 +5593,7 @@ impl AppStore {
             return String::new();
         };
         let rel = rel.to_string_lossy();
-        let line = self.scroll_top();
+        let line = self.point_line();
         let outline = self.index.outline(&rel);
         crate::nav::index::enclosing_symbol(outline, line)
             .map(|s| s.name.clone())
@@ -5488,7 +5746,7 @@ impl AppStore {
         let file = hit.file.clone();
         let line_no = hit.line_no as usize;
         self.open_path(&file);
-        self.set_scroll_top(line_no.saturating_sub(1));
+        self.set_point_line(line_no.saturating_sub(1));
         self.ensure_highlight();
         // Leave the results view so the jumped file is what's on screen;
         // `M-,` (the sentinel entry) pushes the results back on top.
@@ -5712,8 +5970,8 @@ impl AppStore {
             self.minibuffer_message("no project");
             return;
         }
-        let line = self.scroll_top();
-        let col = 0; // no column cursor yet (see the method's note)
+        let line = self.point_line();
+        let col = self.point_col(); // the point's column (plan 004 issue 05b)
         let line_text = buf.line_text(line).unwrap_or_default().to_string();
         let index = &self.index;
         let known = move |id: &str| !index.definitions_of(id).is_empty();
@@ -6997,7 +7255,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 90);
+        assert_eq!(store.picker_count().0, 98);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -7015,11 +7273,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 89);
+        assert_eq!(store.picker_selected(), 97);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 88);
+        assert_eq!(store.picker_selected(), 96);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op close, *scratch* is not editable, so just a message).
@@ -7054,7 +7312,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 90);
+        assert_eq!(store.picker_count().0, 98);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -7116,6 +7374,122 @@ mod tests {
         let (mut s, _dir) = store_with_lines(100);
         s.scroll_line_up();
         assert_eq!(s.scroll_top(), 0, "cannot scroll above top");
+    }
+
+    // ── plan 004 issue 05b: file-view point (line, col) + emacs motion ──
+
+    /// A store with a file buffer whose lines have varying lengths (for
+    /// goal-column / EOL-BOL-wrap coverage): a 2-char line between two
+    /// 12-char lines.
+    fn store_with_varied_lines() -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "aaaaaaaaaaaa\nbb\ncccccccccccc"; // 12 / 2 / 12 (3 lines)
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/v.rs"), content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/v.rs");
+        s.set_viewport_lines(10);
+        (s, dir)
+    }
+
+    #[test]
+    fn point_down_up_preserves_goal_column() {
+        let (mut s, _dir) = store_with_varied_lines();
+        // Start at line 0, col 5 (goal 5).
+        s.set_point(0, 5, 5);
+        // C-n to line 1 ("bb", len 2): col clamps to 2, goal stays 5.
+        s.point_down();
+        assert_eq!((s.point_line(), s.point_col()), (1, 2));
+        // C-p back to line 0 (len 12): the goal column (5) is restored.
+        s.point_up();
+        assert_eq!((s.point_line(), s.point_col()), (0, 5));
+    }
+
+    #[test]
+    fn point_forward_wraps_at_eol() {
+        let (mut s, _dir) = store_with_varied_lines();
+        s.set_point(0, 12, 12); // line 0 end (col == len 12)
+        s.point_forward(); // wrap to line 1, col 0
+        assert_eq!((s.point_line(), s.point_col()), (1, 0));
+    }
+
+    #[test]
+    fn point_backward_wraps_at_bol() {
+        let (mut s, _dir) = store_with_varied_lines();
+        s.set_point(1, 0, 0); // line 1, col 0 (BOL)
+        s.point_backward(); // wrap to line 0 end (col 12)
+        assert_eq!((s.point_line(), s.point_col()), (0, 12));
+    }
+
+    #[test]
+    fn point_line_start_end() {
+        let (mut s, _dir) = store_with_varied_lines();
+        s.set_point(2, 5, 5);
+        s.point_line_start();
+        assert_eq!((s.point_line(), s.point_col()), (2, 0));
+        s.point_line_end();
+        assert_eq!((s.point_line(), s.point_col()), (2, 12));
+    }
+
+    #[test]
+    fn point_buffer_start_end() {
+        let (mut s, _dir) = store_with_varied_lines();
+        s.set_point(1, 1, 1);
+        s.point_buffer_end();
+        assert_eq!((s.point_line(), s.point_col()), (2, 12));
+        s.point_buffer_start();
+        assert_eq!((s.point_line(), s.point_col()), (0, 0));
+    }
+
+    #[test]
+    fn motion_saturates_at_buffer_bounds() {
+        let (mut s, _dir) = store_with_varied_lines();
+        s.point_buffer_start();
+        s.point_up(); // at line 0: no-op
+        assert_eq!(s.point_line(), 0);
+        s.point_buffer_end();
+        s.point_down(); // at the last line: no-op
+        assert_eq!(s.point_line(), 2);
+    }
+
+    #[test]
+    fn motion_window_follows_point() {
+        let (mut s, _dir) = store_with_lines(100);
+        // Point far from the window: the window must follow to keep it in view.
+        s.set_point(90, 0, 0);
+        assert!(
+            s.scroll_top() <= 90 && 90 < s.scroll_top() + 10,
+            "window keeps the point in view: top={}",
+            s.scroll_top()
+        );
+        // Moving back to line 0 scrolls the window up.
+        s.set_point(0, 0, 0);
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn window_scroll_keeps_point_screen_row() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_point(5, 3, 3);
+        // The point's screen row is 5 (window top 0). C-v keeps that row.
+        let screen_row_before = s.point_line().saturating_sub(s.scroll_top());
+        s.scroll_page_down();
+        assert_eq!(
+            s.point_line().saturating_sub(s.scroll_top()),
+            screen_row_before,
+            "C-v keeps the point's screen row fixed"
+        );
+    }
+
+    #[test]
+    fn goto_line_lands_point_at_col_zero() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.goto_line_start();
+        s.goto_line_digit('7');
+        s.goto_line_confirm();
+        assert_eq!((s.point_line(), s.point_col()), (6, 0));
     }
 
     #[test]
@@ -7261,15 +7635,16 @@ mod tests {
     #[test]
     fn position_display_bot() {
         let (mut s, _dir) = store_with_lines(100);
-        // M-> equivalent: scroll_to_bottom lands at total - viewport_lines
-        s.scroll_to_bottom();
+        // M-> (point-buffer-end): the point lands on the last line; the
+        // window follows, so the position display reports "Bot".
+        s.point_buffer_end();
         assert_eq!(s.file_view_position_display(), "Bot");
     }
 
     #[test]
     fn position_display_middle() {
         let (mut s, _dir) = store_with_lines(100);
-        s.set_scroll_top(50); // line 51 (1-based), 50/101 → 50% (rounded)
+        s.set_point_line(50); // line 51 (1-based), 50/101 → 50% (rounded)
         assert_eq!(s.file_view_position_display(), "L51,50%");
     }
 
@@ -7384,14 +7759,14 @@ mod tests {
         s.set_viewport_lines(10);
         s.scroll_line_down();
         s.scroll_line_down();
-        let pre_line = s.scroll_top();
-        assert_eq!(pre_line, 2);
+        let pre_point = s.point_line();
+        assert_eq!(pre_point, 2);
         s.isearch_start(IsearchDirection::Forward);
         s.isearch_query_char('o'); // only in "omega" (line 4)
-        assert_ne!(s.scroll_top(), pre_line, "search must move the view");
+        assert_eq!(s.point_line(), 4, "search must land the point on the match");
         s.isearch_cancel();
         assert!(!s.isearch_active());
-        assert_eq!(s.scroll_top(), pre_line, "cancel must restore position");
+        assert_eq!(s.point_line(), pre_point, "cancel must restore the point");
     }
 
     #[test]
@@ -7550,13 +7925,13 @@ mod tests {
         assert_eq!(s.goto_line_input(), "50");
         s.goto_line_confirm();
         assert!(!s.goto_line_active());
-        assert_eq!(s.scroll_top(), 49, "line 50 (1-based) → scroll top 49");
+        assert_eq!(s.point_line(), 49, "line 50 (1-based) → point line 49");
 
         // Line 1 is the very top.
         s.goto_line_start();
         s.goto_line_digit('1');
         s.goto_line_confirm();
-        assert_eq!(s.scroll_top(), 0, "line 1 → scroll top 0");
+        assert_eq!(s.point_line(), 0, "line 1 → point line 0");
     }
 
     #[test]
@@ -7971,16 +8346,16 @@ mod tests {
             ("src/main.rs", "mod lib {\n    pub fn target() {}\n}\nfn main() { lib::target(); }\n"),
             ("src/lib.rs", "pub fn target() {}\npub fn other() {}\n"),
         ]);
-        // Open main.rs and scroll to the call site line (line 3).
+        // Open main.rs and position the point at the call site line (line 3).
         s.open_path("src/main.rs");
-        s.set_scroll_top(3);
+        s.set_point_line(3);
         // `target` is defined in main.rs (same file, excluded) and lib.rs
         // (cross-file). Only the cross-file definition is considered →
         // unique → jump directly to src/lib.rs.
         s.xref_find_definitions();
         assert!(!s.picker_open(), "unique cross-file: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(s.scroll_top(), 0, "target is at line 0 in lib.rs");
+        assert_eq!(s.point_line(), 0, "target is at line 0 in lib.rs");
     }
 
     #[test]
@@ -7991,7 +8366,7 @@ mod tests {
             ("src/b.rs", "pub fn target() {}\n"),
         ]);
         s.open_path("src/main.rs");
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         // `target` is defined in a.rs and b.rs (both cross-file) → ambiguous.
         s.xref_find_definitions();
         assert!(s.picker_open(), "ambiguous: picker should be open");
@@ -8006,12 +8381,12 @@ mod tests {
             ("src/lib.rs", "pub fn other() {}\n"),
         ]);
         s.open_path("src/main.rs");
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         // `other` is only defined in lib.rs: unique → jump directly.
         s.xref_find_definitions();
         assert!(!s.picker_open(), "unique: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(s.scroll_top(), 0);
+        assert_eq!(s.point_line(), 0);
     }
 
     #[test]
@@ -8022,11 +8397,11 @@ mod tests {
         s.open_path("src/main.rs");
         // Line 1: "    let x = 1;" — no known definition on this line.
         // Fall back to enclosing symbol: `main`.
-        s.set_scroll_top(1);
+        s.set_point_line(1);
         s.xref_find_definitions();
         // `main` is defined only in main.rs: unique → jump to main's definition (line 0).
         assert!(!s.picker_open());
-        assert_eq!(s.scroll_top(), 0, "jumped to main's definition");
+        assert_eq!(s.point_line(), 0, "jumped to main's definition");
     }
 
     // ── issue 05: which-function test (finding: enclosing-symbol) ──────
@@ -8039,13 +8414,13 @@ mod tests {
         s.open_path("src/main.rs");
         // Line 2 ("        g()"): inside fn f, inside mod outer.
         // The innermost enclosing symbol is `f`.
-        s.set_scroll_top(2);
+        s.set_point_line(2);
         assert_eq!(s.which_function(), "f");
         // Line 0 ("mod outer {"): inside mod outer, outside fn f.
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         assert_eq!(s.which_function(), "outer");
         // Line 99: outside everything.
-        s.set_scroll_top(99);
+        s.set_point_line(99);
         assert_eq!(s.which_function(), "");
     }
 
@@ -10203,8 +10578,8 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        // Scroll to line 5: point is at line 5's start.
-        s.set_scroll_top(5);
+        // Point at line 5: the region's end is line 5's start.
+        s.set_point_line(5);
         let range = s.region_byte_range().unwrap();
         let line5_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(5).unwrap();
         assert_eq!(range.0, line2_byte, "start = min(mark, point)");
@@ -10225,7 +10600,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         let size = s.region_size_bytes().unwrap();
         assert!(size > 0, "region must have a positive size");
     }
@@ -10238,7 +10613,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         let (start, end) = s.region_line_range().unwrap();
         assert_eq!(start, 2, "region starts at line 2");
         assert_eq!(end, 4, "region ends at line 4 (end byte is exclusive: line 5's start)");
@@ -10263,11 +10638,11 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        // Point is at line 0 (scroll_top = 0).
-        assert_eq!(s.scroll_top(), 0);
+        // Point is at line 0.
+        assert_eq!(s.point_line(), 0);
         s.exchange_point_and_mark();
         // After exchange: point should be at line 2, mark should be at line 0's byte.
-        assert_eq!(s.scroll_top(), 2, "point must move to where mark was");
+        assert_eq!(s.point_line(), 2, "point must move to where mark was");
         let line0_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(0).unwrap();
         assert_eq!(s.buffers.get(&key).unwrap().mark, Some(line0_byte), "mark must be at old point");
     }
@@ -10289,7 +10664,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&bkey) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         let region_text = s.buffers.get(&bkey).unwrap()
             .rope.slice(line2_byte..s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(5).unwrap())
             .to_string();
@@ -10308,7 +10683,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         let line5_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(5).unwrap();
         s.kill_region();
         let len_after = s.buffers.get(&key).unwrap().rope.len_bytes();
@@ -10340,7 +10715,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&bkey) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         s.kill_region();
         // Buffer is unchanged (read-only).
         assert_eq!(s.buffers.get(&bkey).unwrap().rope.len_bytes(), len_before);
@@ -10360,12 +10735,12 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&bkey) {
             buf.mark = Some(line1_byte);
         }
-        s.set_scroll_top(3);
+        s.set_point_line(3);
         s.copy_region();
         let yank_text = s.kill_ring.top().unwrap().to_string();
         let len_before = s.buffers.get(&bkey).unwrap().rope.len_bytes();
         // Now yank at line 0.
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         s.yank();
         let len_after = s.buffers.get(&bkey).unwrap().rope.len_bytes();
         assert_eq!(len_after - len_before, yank_text.len(), "yank must insert the ring text");
@@ -10390,7 +10765,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&file_key) {
             buf.mark = Some(0);
         }
-        s.set_scroll_top(1);
+        s.set_point_line(1);
         s.copy_region();
         assert!(!s.kill_ring.is_empty(), "kill ring must have an entry");
         // Switch to the read-only file (it's already current, but set it
@@ -10423,7 +10798,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&bkey) {
             buf.mark = Some(line1_byte);
         }
-        s.set_scroll_top(2);
+        s.set_point_line(2);
         s.copy_region();
         let first_entry = s.kill_ring.top().unwrap().to_string();
         assert!(first_entry.contains("AAAA"), "first entry: {first_entry}");
@@ -10433,13 +10808,13 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&bkey) {
             buf.mark = Some(line3_byte);
         }
-        s.set_scroll_top(4);
+        s.set_point_line(4);
         s.copy_region();
         let second_entry = s.kill_ring.top().unwrap().to_string();
         assert!(second_entry.contains("CCCC"), "second entry: {second_entry}");
         assert_ne!(first_entry, second_entry);
         // Now yank (inserts second_entry at line 0).
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         s.yank();
         let text_after_yank = s.buffers.get(&bkey).unwrap().rope.to_string();
         // The yanked text (CCCC) is now at the start.
@@ -10473,7 +10848,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&file_key) {
             buf.mark = Some(0);
         }
-        s.set_scroll_top(1);
+        s.set_point_line(1);
         s.copy_region();
         let copied = s.kill_ring.top().unwrap().to_string();
         assert!(!copied.is_empty());
@@ -10566,7 +10941,7 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line2_byte);
         }
-        s.set_scroll_top(5);
+        s.set_point_line(5);
         let size = s.region_size_bytes().unwrap();
         assert!(size > 0);
         // The status line should show the region size.
@@ -10594,7 +10969,7 @@ mod tests {
         if let Some(b) = s.buffers.get_mut(&key) {
             b.mark = Some(0); // byte 0 = char 0
         }
-        s.set_scroll_top(2);
+        s.set_point_line(2);
         // Region is bytes [0, byte_offset_of_line2) = "# Notes\ncafé\n"
         s.kill_region();
         // After kill, the buffer should contain "naïve\nend\n".
@@ -10624,12 +10999,12 @@ mod tests {
         if let Some(buf) = s.buffers.get_mut(&key) {
             buf.mark = Some(line1_byte);
         }
-        s.set_scroll_top(2);
+        s.set_point_line(2);
         s.copy_region();
         let yank_text = s.kill_ring.top().unwrap().to_string();
         assert_eq!(yank_text, "héllo\n");
         // Now yank at line 0 (start of buffer, before the multi-byte content).
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         s.yank();
         let buf_text = s.buffers.get(&key).unwrap().rope.to_string();
         // The yanked text is inserted at the start.
@@ -10654,16 +11029,16 @@ mod tests {
         let l1 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
         let _l2 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
         if let Some(buf) = s.buffers.get_mut(&key) { buf.mark = Some(l1); }
-        s.set_scroll_top(2);
+        s.set_point_line(2);
         s.copy_region();
         // Copy "naïve\n" (lines 2-3) to the ring (now on top).
         let l2b = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
         let _l3 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(3).unwrap();
         if let Some(buf) = s.buffers.get_mut(&key) { buf.mark = Some(l2b); }
-        s.set_scroll_top(3);
+        s.set_point_line(3);
         s.copy_region();
         // Yank at line 0 (inserts "naïve\n" at the start).
-        s.set_scroll_top(0);
+        s.set_point_line(0);
         s.yank();
         let after_yank = s.buffers.get(&key).unwrap().rope.to_string();
         assert!(after_yank.starts_with("naïve\n"), "yank: {after_yank:?}");
