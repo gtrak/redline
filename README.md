@@ -50,7 +50,10 @@ When stdout is redirected, redline renders the TUI to `/dev/tty` so stdout
 carries only the dump (zero escape bytes); if `/dev/tty` is unavailable the
 dump is skipped and reported on stderr. For grep/pipe use, `--notes=plain`
 prints the bare `path:line: text` form. No annotations ⇒ zero bytes on
-stdout.
+stdout. Caveat: plain output carries no orphan marker, so a stale line
+number is invisible to a grep consumer — if dumped lines look wrong,
+cross-check against the default (block) form, which marks orphaned notes
+explicitly.
 
 ## Keymap cheat sheet
 

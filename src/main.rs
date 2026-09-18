@@ -119,7 +119,11 @@ mod tty_stdout {
         let dup2 = unsafe { dup2(tty.as_raw_fd(), 1) };
         if dup2 < 0 {
             // The tty fd stays open (closed at process exit); report and
-            // degrade: the dump will go to /dev/tty instead.
+            // degrade: the dump will go to /dev/tty instead. The saved
+            // original fd is now dead weight (nothing will write to it,
+            // and `original_stdout: None` means `emit_dump` never sees
+            // it) — close it rather than leak it for the process life.
+            let _ = unsafe { close(original) };
             Ok(ReroutedStdout {
                 original_stdout: None,
                 dup2_error: Some(io::Error::last_os_error()),
@@ -142,8 +146,11 @@ enum DumpSink {
     Stdout,
     /// stdout was redirected: fd 1 was rerouted to /dev/tty before the
     /// render loop; the dump goes to the saved fd (or /dev/tty on reroute
-    /// failure).
-    Rerouted(#[cfg(unix)] tty_stdout::ReroutedStdout),
+    /// failure). The whole variant is unix-only: on non-unix targets the
+    /// reroute machinery (dup/dup2, /dev/tty) does not exist, and the
+    /// match in `emit_dump` stays exhaustive with Stdout/Skipped alone.
+    #[cfg(unix)]
+    Rerouted(tty_stdout::ReroutedStdout),
     /// stdout was redirected but /dev/tty could not be opened: the dump is
     /// SKIPPED (report + skip rather than corrupt the redirected stream).
     Skipped,
@@ -201,8 +208,10 @@ fn emit_dump(dump: &str, sink: &DumpSink) {
                     .is_ok()
             } else {
                 // dup2 failed: the dump goes to /dev/tty (fd 1 still
-                // carries the TUI frames).
-                let mut tty = std::io::BufWriter::new(&rerouted.tty);
+                // carries the TUI frames). Write directly to the file —
+                // a BufWriter would defer small writes to drop, whose
+                // error is ignored, silently losing a failed tty write.
+                let mut tty = &rerouted.tty;
                 tty.write_all(dump.as_bytes()).is_ok()
             }
         }

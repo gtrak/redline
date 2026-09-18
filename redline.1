@@ -23,6 +23,12 @@ See the README.md for the full keymap cheat sheet. Common bindings:
 \fBM-x\fR Command palette
 .TP
 \fBC-x C-c\fR Quit
+.SH OPTIONS
+.TP
+\fB\-\-notes=plain\fR
+On quit, print the annotation dump in the bare grep-addressable form
+`path:line: text` (no header, no code lines, no orphan marker). The
+default block form carries the orphan marker; see README.md.
 .SH FILES
 .TP
 .I ~/.config/redline/config.toml
