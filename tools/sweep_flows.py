@@ -2041,6 +2041,238 @@ def flow_edit_mode_suite():
             pass
 
 
+# ── plan-005 issue 02: inline annotations ───────────────────────────────
+ANN_PATH = os.path.join(REPO, "src", "notes_ann.rs")
+ANN2_PATH = os.path.join(REPO, "src", "notes_ann2.rs")
+NOTES_PATH = os.path.join(REPO, ".redline-notes.md")
+
+
+def _open_ann_file(app, name):
+    """Open a file via the find-file picker (the annotation suite's files)."""
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in name:
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.8)
+
+
+def flow_annotation_create(app):
+    """A on a line: the minibuffer prompt, RET commits — a ▎ marker on the
+    code row, the note as a dim row directly under it, the status count,
+    and a real record in .redline-notes.md."""
+    for _ in range(2):
+        app.key("C-n")
+        app.wait(0.3)
+    app.key("A")
+    app.wait(0.4)
+    prompt = "Note: " in app.row_text(app.rows - 2)
+    for ch in "check bounds":
+        # The PTY encoder splits key sequences on whitespace, so the space
+        # is fed as a raw byte (encode_key would drop a bare "").
+        if ch == " ":
+            app.feed(b" ", settle=0.2)
+        else:
+            app.key(ch, settle=0.2)
+    typed = "Note: check bounds" in app.row_text(app.rows - 2)
+    app.key("RET")
+    app.wait(0.6)
+    saved = "note saved" in app.row_text(app.rows - 2)
+    code_rows = rows_containing(app, "line three")
+    marker = any("\u258e" in app.row_text(r) for r in code_rows)
+    note_rows = rows_containing(app, "\u25b8 check bounds")
+    under = bool(code_rows) and bool(note_rows) and note_rows[0] == code_rows[0] + 1
+    count = "1 note" in app.row_text(app.rows - 1)
+    disk = open(NOTES_PATH).read() if os.path.exists(NOTES_PATH) else ""
+    disk_rec = ("[annotation]" in disk and "note: check bounds" in disk
+                and "anchor: ann line three" in disk and "line: 2" in disk)
+    ok = prompt and typed and saved and marker and under and count and disk_rec
+    record("ann-create", "C-n C-n,A,check bounds,RET", ok,
+           f"prompt={prompt} typed={typed} saved-msg={saved} marker={marker} "
+           f"note-row-under={under} status-count={count} disk-record={disk_rec}")
+
+
+def flow_annotation_toggle(app):
+    """C-c a hides the note rows (the marker stays) and shows them again."""
+    app.key("C-c a")
+    app.wait(0.4)
+    hidden_msg = "note rows: hidden" in app.row_text(app.rows - 2)
+    note_gone = not rows_containing(app, "\u25b8 check bounds")
+    marker_stays = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
+    app.key("C-c a")
+    app.wait(0.4)
+    shown_msg = "note rows: shown" in app.row_text(app.rows - 2)
+    note_back = bool(rows_containing(app, "\u25b8 check bounds"))
+    ok = hidden_msg and note_gone and marker_stays and shown_msg and note_back
+    record("ann-toggle", "C-c a ×2", ok,
+           f"hidden-msg={hidden_msg} note-gone={note_gone} marker-stays={marker_stays} "
+           f"shown-msg={shown_msg} note-back={note_back}")
+
+
+def flow_annotation_crossing(app):
+    """Map correctness: with the cursor on the annotated line, C-n lands on
+    the NEXT CODE line (L4, not the note row) and C-p returns (L3); the
+    note row still sits between the two code rows on screen. The file is
+    30 lines so the position display reads L*, not Bot (Bot is the
+    near-bottom position, viewport 21)."""
+    app.key("C-n")
+    app.wait(0.3)
+    l4 = "L4," in app.row_text(app.rows - 1)
+    app.key("C-p")
+    app.wait(0.3)
+    l3 = "L3," in app.row_text(app.rows - 1)
+    r3 = rows_containing(app, "line three")
+    r4 = rows_containing(app, "line four")
+    between = bool(r3) and bool(r4) and r4[0] == r3[0] + 2
+    ok = l4 and l3 and between
+    record("ann-crossing", "C-n,C-p on annotated line", ok,
+           f"c-n-lands-L4={l4} c-p-back-L3={l3} note-row-between={between}")
+
+
+def flow_annotation_notes_editable(app):
+    """In the EDITABLE notes buffer `d`/`A` self-insert as printables (the
+    line-anchored semantics are file-view only; no prompt, no silent
+    delete, no unbound-key echo)."""
+    app.key("C-x n")
+    app.wait(0.6)
+    edit_mode = "Edit" in app.row_text(app.rows - 1)
+    app.key("d")
+    app.wait(0.3)
+    no_delete = ("deleted annotation" not in app.row_text(app.rows - 2)
+                 and "no annotation" not in app.row_text(app.rows - 2))
+    self_inserted = any(app.row_text(i).rstrip().endswith("d")
+                        for i in range(1, app.rows - 2))
+    app.key("A")
+    app.wait(0.3)
+    no_prompt = "Note: " not in app.row_text(app.rows - 2)
+    ok = edit_mode and no_delete and self_inserted and no_prompt
+    record("ann-notes-editable", "C-x n;d;A", ok,
+           f"edit-mode={edit_mode} d-no-delete={no_delete} d-self-inserted={self_inserted} "
+           f"A-no-prompt={no_prompt}")
+
+
+def flow_annotation_drift(app):
+    """Out-of-band edit moves the anchored line: the auto-reload's
+    re-anchor pass moves the cue with the content (silent, by text)."""
+    app.key("C-x b")
+    app.wait(0.6)
+    for ch in "ann.rs":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.6)
+    with open(ANN_PATH, "r") as f:
+        old = f.read()
+    with open(ANN_PATH, "w") as f:
+        f.write("top extra line\n" + old)
+    reloaded = wait_for(app, lambda: "top extra line" in text(app), 4.0)
+    marker_moved = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
+    note_under = bool(rows_containing(app, "\u25b8 check bounds"))
+    count = "1 note" in app.row_text(app.rows - 1)
+    ok = reloaded and marker_moved and note_under and count
+    record("ann-drift", "disk prepend;top extra line", ok,
+           f"auto-reload={reloaded} cue-follows-content={marker_moved} "
+           f"note-row={note_under} count-kept={count}")
+
+
+def flow_annotation_orphan(app):
+    """Delete the anchored line out-of-band: the annotation is NOT lost —
+    it is flagged orphaned (the cue carries the tag) and the record stays
+    in the notes file."""
+    lines = [l for l in open(ANN_PATH).read().splitlines() if l != "ann line three"]
+    with open(ANN_PATH, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    orphaned = wait_for(app, lambda: "(orphaned)" in text(app), 4.0)
+    record_kept = "1 note" in app.row_text(app.rows - 1)
+    disk_kept = "note: check bounds" in open(NOTES_PATH).read()
+    ok = orphaned and record_kept and disk_kept
+    record("ann-orphan", "disk delete of anchor line", ok,
+           f"orphan-flag-shown={orphaned} status-count-kept={record_kept} "
+           f"disk-record-kept={disk_kept}")
+
+
+def flow_annotation_delete(app):
+    """d on the (orphaned) annotated line deletes the record with an echo
+    (cue gone, count gone, disk record gone); d on an unannotated line is
+    a no-op with a clear message."""
+    app.key("C-n")
+    app.wait(0.3)
+    app.key("d")
+    app.wait(0.5)
+    echo = "deleted annotation: check bounds" in app.row_text(app.rows - 2)
+    # Content rows only: the minibuffer's echo legitimately contains the
+    # note text, so the cue check excludes it.
+    cue_gone = not any("\u25b8 check bounds" in app.row_text(r)
+                       for r in range(1, app.rows - 2))
+    count_gone = "1 note" not in app.row_text(app.rows - 1)
+    disk_gone = "check bounds" not in open(NOTES_PATH).read()
+    app.key("C-p")
+    app.wait(0.3)
+    app.key("d")
+    app.wait(0.3)
+    no_ann_msg = "no annotation on this line" in app.row_text(app.rows - 2)
+    ok = echo and cue_gone and count_gone and disk_gone and no_ann_msg
+    record("ann-delete", "d on annotated line; d on clean line", ok,
+           f"echo={echo} cue-gone={cue_gone} count-gone={count_gone} "
+           f"disk-record-gone={disk_gone} unannotated-msg={no_ann_msg}")
+
+
+def flow_annotation_cu_still_scrolls(app):
+    """Guard: C-u is still half-page scroll (the annotate bindings did not
+    shadow it — there is no C-u A; the delete key is d). At the bottom of
+    a 30-line file the window top row is 'cu line 11'; C-u moves the window
+    up a half-page to 'cu line 1'. The file was created before startup so
+    the find-file picker (the cached walk) lists it."""
+    _open_ann_file(app, "notes_ann2.rs")
+    app.key("G")
+    app.wait(0.4)
+    at_bottom = "Bot" in app.row_text(app.rows - 1)
+    top_before = app.row_text(1)
+    app.key("C-u")
+    app.wait(0.4)
+    top_after = app.row_text(1)
+    moved_up = "cu line 11" in top_before and "cu line 1" in top_after
+    ok = at_bottom and moved_up and top_before != top_after
+    record("ann-cu-scroll", "G,C-u (30-line file)", ok,
+           f"at-bottom-first={at_bottom} top-row {top_before!r} → {top_after!r} "
+           f"c-u-moved-window-up={moved_up}")
+
+
+def flow_annotation_suite():
+    """plan-005 issue 02: the inline-annotation legs (create → toggle →
+    C-n/C-p map crossing → notes-buffer editable semantics → drift
+    re-anchor → orphan → delete → C-u guard). Own App; the dedicated
+    files are created before startup (the find-file picker lists the
+    cached walk) and removed after (the fixture's .redline-notes.md is
+    swept by the reset)."""
+    with open(ANN_PATH, "w") as f:
+        # 30 content lines: the four named lines + fillers (30 lines keeps
+        # the annotated line far enough from the bottom that the status
+        # position display reads L*, not Bot).
+        f.write("ann line one\nann line two\nann line three\n"
+                "ann line four\n" +
+                "".join(f"ann filler {i:02d}\n" for i in range(5, 31)))
+    with open(ANN2_PATH, "w") as f:
+        f.write("".join(f"cu line {i}\n" for i in range(1, 31)))
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        _open_ann_file(app, "notes_ann.rs")
+        flow_annotation_create(app)
+        flow_annotation_toggle(app)
+        flow_annotation_crossing(app)
+        flow_annotation_notes_editable(app)
+        flow_annotation_drift(app)
+        flow_annotation_orphan(app)
+        flow_annotation_delete(app)
+        flow_annotation_cu_still_scrolls(app)
+        app.kill()
+    finally:
+        for p in (ANN_PATH, ANN2_PATH):
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+
+
 def main():
     _reset_fixture()
     app = App(REPO, rows=ROWS, cols=COLS)
@@ -2186,6 +2418,9 @@ def main():
 
     # plan-005-issue-01 file edit-mode legs (own App + dedicated edit.rs).
     flow_edit_mode_suite()
+
+    # plan-005-issue-02 inline annotation legs (own App + dedicated files).
+    flow_annotation_suite()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

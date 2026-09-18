@@ -71,6 +71,9 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `M-b` | word-backward | Point backward to the START of the previous word |
 | `C-l` | recenter | Recenter (emacs `recenter-top-bottom`): the point stays put; a fresh C-l puts it on the MIDDLE row, and consecutive C-l's cycle middle → top → bottom (the cycle resets on any other command) |
 | `g` | reload-buffer | Force-reload the current file |
+| `A` | annotate | Annotate the line at point (minibuffer prompt; RET commits — a record in `.redline-notes.md`, the inline cue appears immediately; on an annotated line the existing note pre-fills for edit) |
+| `d` | annotate-delete | Delete the annotation on the line at point (echoes the removed note; a message on an unannotated line) |
+| `C-c a` | annotate-toggle | Show/hide the inline annotation note rows (the `▎` margin markers stay) |
 | `G` / `M->` | point-buffer-end | Point to the buffer end; the window follows |
 | `M-<` | point-buffer-start | Point to the buffer start; the window follows |
 | `C-g` | cancel | Cancel a pending key sequence |

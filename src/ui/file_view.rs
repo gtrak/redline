@@ -7,15 +7,22 @@
 
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
-use crate::app::store::FileViewLine;
+use crate::app::store::FileViewRow;
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::color;
 
 #[derive(Default, Props)]
 struct FileViewCanvasProps {
-    pub lines: Vec<FileViewLine>,
-    pub total_lines: usize,
+    /// The pre-computed rendered rows (code rows + the virtual annotation
+    /// note rows, plan 005 issue 02). Each row carries its buffer-line
+    /// index (`r.line`), NOT its slice offset — the rows are no longer a
+    /// dense 1:1 slice of buffer lines.
+    pub rows: Vec<FileViewRow>,
+    /// The total number of RENDERED rows for the buffer (buffer lines +
+    /// visible note rows; the bottom scroll indicator's bound).
+    pub total_rows: usize,
+    /// The first visible BUFFER line (window top).
     pub top_line: usize,
     /// The region's line range (start_line, end_line inclusive) in buffer
     /// line indices, or `None` when no mark is set. The store computes this
@@ -23,11 +30,11 @@ struct FileViewCanvasProps {
     pub region_lines: Option<(usize, usize)>,
 }
 
-/// Canvas-backed file view: renders the visible lines with colored
+/// Canvas-backed file view: renders the visible rows with colored
 /// spans and scroll indicators.
 struct FileViewCanvas {
-    lines: Vec<FileViewLine>,
-    total_lines: usize,
+    rows: Vec<FileViewRow>,
+    total_rows: usize,
     top_line: usize,
     region_lines: Option<(usize, usize)>,
 }
@@ -35,8 +42,8 @@ struct FileViewCanvas {
 impl FileViewCanvas {
     fn from_props(props: &FileViewCanvasProps) -> Self {
         Self {
-            lines: props.lines.clone(),
-            total_lines: props.total_lines,
+            rows: props.rows.clone(),
+            total_rows: props.total_rows,
             top_line: props.top_line,
             region_lines: props.region_lines,
         }
@@ -74,28 +81,52 @@ impl Component for FileViewCanvas {
         let w = layout.size.width.max(1.0) as usize;
         let h = layout.size.height.max(1.0) as usize;
 
-        for (row, line) in self.lines.iter().enumerate() {
+        for (row, r) in self.rows.iter().enumerate() {
             if row >= h {
                 break;
             }
-            let buffer_line = self.top_line + row;
-            // Paint the region background for lines within the region.
+            // Paint the region background for rows whose BUFFER line is
+            // within the region (note rows inherit their anchored line).
             if let Some((rl_start, rl_end)) = self.region_lines
-                && (rl_start..=rl_end).contains(&buffer_line)
+                && (rl_start..=rl_end).contains(&r.line)
             {
                 let bg = color(t.region.background);
                 canvas.set_background_color(0, row as isize, w, 1, bg);
             }
-            draw_line(&mut canvas, row as isize, w, &line.text, &line.spans, &t);
+            if r.is_note {
+                // A virtual annotation note row (plan 005 issue 02): dim
+                // and italic, directly under the anchored code row.
+                let style = text_style_italic(t.preview.foreground);
+                let display = truncate(&r.text, w);
+                if !display.is_empty() {
+                    canvas.set_text(0, row as isize, &display, style);
+                }
+            } else {
+                draw_line(&mut canvas, row as isize, w, &r.text, &r.spans, &t);
+                // The annotation margin marker (plan 005 issue 02): always
+                // on for annotated lines, independent of the note-row
+                // toggle (C-c a). Overlaid at cell 0.
+                if r.annotated {
+                    canvas.set_text(
+                        0,
+                        row as isize,
+                        "\u{258e}",
+                        text_style(t.view_title.foreground, false),
+                    );
+                }
+            }
         }
 
-        // Scroll indicators: show "↑" when scrolled past the top,
-        // "↓" when more lines remain below.
+        // Scroll indicators: show "↑" when scrolled past the top, "↓" when
+        // more rows remain below. The "↓" bound is in RENDERED-row space
+        // (plan 005 issue 02): note rows count as rows, and a slice row
+        // below the canvas bottom (the title/indicator overlap, as before)
+        // also implies more below.
         let mut indicators = String::new();
         if self.top_line > 0 {
             indicators.push('↑');
         }
-        if self.top_line + h < self.total_lines {
+        if self.rows.len() > h || self.rows.len() < self.total_rows {
             indicators.push('↓');
         }
         if !indicators.is_empty() {
@@ -208,6 +239,13 @@ fn text_style(foreground: theme::Color, bold: bool) -> CanvasTextStyle {
     style
 }
 
+/// A dim + italic face style (the annotation note rows, plan 005 issue 02).
+fn text_style_italic(foreground: theme::Color) -> CanvasTextStyle {
+    let mut style = text_style(foreground, false);
+    style.italic = true;
+    style
+}
+
 // ── plan 004 issue 05d: char-index <-> display-column conversion ──────────
 // The pure width helpers (char_display_width / display_width /
 // char_index_to_display_col / display_col_to_char_index) live in
@@ -238,8 +276,13 @@ fn truncate(s: &str, max: usize) -> String {
 #[derive(Default, Props)]
 pub struct FileViewProps {
     pub title: String,
-    pub lines: Vec<FileViewLine>,
-    pub total_lines: usize,
+    /// The pre-computed rendered rows (code rows + virtual annotation note
+    /// rows; each carries its buffer-line index — plan 005 issue 02).
+    pub rows: Vec<FileViewRow>,
+    /// The total number of rendered rows for the buffer (the canvas's
+    /// bottom scroll indicator; plan 005 issue 02).
+    pub total_rows: usize,
+    /// The first visible buffer line (window top).
     pub top_line: usize,
     pub viewport_lines: usize,
     /// The current buffer has an un-reconciled disk change (the "changed on
@@ -293,8 +336,8 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                     None
                 })
                 FileViewCanvas(
-                    lines: props.lines.clone(),
-                    total_lines: props.total_lines,
+                    rows: props.rows.clone(),
+                    total_rows: props.total_rows,
                     top_line: props.top_line,
                     region_lines: props.region_lines,
                 )
@@ -393,10 +436,66 @@ mod tests {
     }
 
     #[test]
-    fn file_view_line_default_is_empty() {
-        let line = FileViewLine::default();
-        assert!(line.text.is_empty());
-        assert!(line.spans.is_empty());
+    fn file_view_row_default_is_empty() {
+        let row = FileViewRow::default();
+        assert!(row.text.is_empty());
+        assert!(row.spans.is_empty());
+        assert!(!row.is_note);
+        assert!(!row.annotated);
+    }
+
+    /// plan 005 issue 02: the rendered-row map round-trips buffer_line ↔
+    /// rendered_row with interleaved note rows, both directions.
+    #[test]
+    fn file_view_row_map_round_trips_with_note_rows() {
+        // Rows: code 0, code 1 + note (line 1), code 2, code 3 + note (line
+        // 3) + note (line 3), code 4.
+        let code = |line: usize| FileViewRow {
+            line,
+            is_note: false,
+            annotated: true,
+            text: format!("line {line}"),
+            spans: Vec::new(),
+        };
+        let note = |line: usize| FileViewRow {
+            line,
+            is_note: true,
+            annotated: false,
+            text: format!("  \u{25b8} note {line}"),
+            spans: Vec::new(),
+        };
+        let rows = vec![
+            code(0),
+            code(1),
+            note(1),
+            code(2),
+            code(3),
+            note(3),
+            note(3),
+            code(4),
+        ];
+        // buffer_line → rendered_row (code rows only).
+        assert_eq!(FileViewRow::row_for_line(&rows, 0), Some(0));
+        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(1));
+        assert_eq!(FileViewRow::row_for_line(&rows, 2), Some(3));
+        assert_eq!(FileViewRow::row_for_line(&rows, 3), Some(4));
+        assert_eq!(FileViewRow::row_for_line(&rows, 4), Some(7));
+        assert_eq!(FileViewRow::row_for_line(&rows, 5), None);
+        // rendered_row → buffer_line (a note row maps to its anchored line).
+        assert_eq!(FileViewRow::line_for_row(&rows, 0), Some(0));
+        assert_eq!(FileViewRow::line_for_row(&rows, 1), Some(1));
+        assert_eq!(FileViewRow::line_for_row(&rows, 2), Some(1), "note row → anchored line");
+        assert_eq!(FileViewRow::line_for_row(&rows, 3), Some(2));
+        assert_eq!(FileViewRow::line_for_row(&rows, 4), Some(3));
+        assert_eq!(FileViewRow::line_for_row(&rows, 5), Some(3));
+        assert_eq!(FileViewRow::line_for_row(&rows, 6), Some(3));
+        assert_eq!(FileViewRow::line_for_row(&rows, 7), Some(4));
+        assert_eq!(FileViewRow::line_for_row(&rows, 8), None);
+        // Round-trip: for every code row, line_for_row(row_for_line(l)) == l.
+        for line in 0..=4 {
+            let r = FileViewRow::row_for_line(&rows, line).unwrap();
+            assert_eq!(FileViewRow::line_for_row(&rows, r), Some(line));
+        }
     }
 
     /// The "changed on disk" banner hint is accurate per buffer kind: a plain

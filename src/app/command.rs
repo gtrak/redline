@@ -724,6 +724,25 @@ impl CommandRegistry {
             "buffers",
             |store, _arg| store.toggle_read_only(),
         ));
+        // ── plan 005 issue 02: inline annotations ─────────────────
+        reg.register(Command::new(
+            "annotate",
+            "Annotate the line at point (A): prompts in the minibuffer, RET commits (a record in .redline-notes.md, the inline cue appears immediately); on an annotated line the existing note pre-fills for edit",
+            "annotations",
+            |store, _arg| store.annotate(),
+        ));
+        reg.register(Command::new(
+            "annotate-delete",
+            "Delete the annotation on the line at point (d in the buffer view); echoes the removed note",
+            "annotations",
+            |store, _arg| store.annotate_delete(),
+        ));
+        reg.register(Command::new(
+            "annotate-toggle",
+            "Show/hide the inline annotation note rows (C-c a); the margin markers stay",
+            "annotations",
+            |store, _arg| store.annotate_toggle(),
+        ));
         // ── plan 004 issue 03: mark/region + kill ring ─────────────────
         reg.register(Command::new(
             "set-mark",
@@ -781,7 +800,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 102, "expected 102 seed commands: {names:?}");
+        assert_eq!(names.len(), 105, "expected 105 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -876,6 +895,9 @@ mod tests {
             "close-search-view",
             "save-buffer",
             "toggle-read-only",
+            "annotate",
+            "annotate-delete",
+            "annotate-toggle",
             "toggle-tree-follow",
             "set-mark",
             "kill-region",

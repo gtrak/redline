@@ -153,6 +153,22 @@ impl ViewId {
                 // C-x C-x: exchange point and mark.
                 km.bind(&[Key::ctrl_char('x'), Key::ctrl_char('x')], "exchange-point-and-mark")
                     .unwrap();
+                // plan 005 issue 02: inline annotations. `A` prompts for a
+                // note on the line at point (minibuffer; RET commits and
+                // the cue appears immediately); on an annotated line it
+                // pre-fills for edit. `d` deletes the annotation on the
+                // line at point (a message on an unannotated line — and in
+                // EDIT buffers `A`/`d` self-insert as printables, the
+                // printable-leaf rule). `C-c a` toggles the inline note
+                // rows (the margin markers stay).
+                km.bind(&[Key::char('A')], "annotate").unwrap();
+                km.bind(&[Key::char('d')], "annotate-delete").unwrap();
+                km
+                    .bind(
+                        &[Key::ctrl_char('c'), Key::char('a')],
+                        "annotate-toggle",
+                    )
+                    .unwrap();
                 // Navigation (issue 05).
                 km
                     .bind(&[Key::alt_char('.')], "xref-find-definitions")
@@ -556,13 +572,270 @@ struct TreeState {
     follow: bool,
 }
 
-/// One visible line in the file view: the text (without trailing
-/// newline) and the highlight spans (byte offsets relative to the
-/// line start). Pre-computed by the store; the file view renders it.
+/// One RENDERED row of the file view (plan 005 issue 02): either a code
+/// row (the buffer line `line` itself) or a virtual annotation note row
+/// (the note rendered directly under the anchored code row `line`). Every
+/// row carries its buffer-line index so the renderer, the hardware-cursor
+/// math, and the click mapping translate `buffer_line` ↔ `rendered_row`
+/// both ways — the dense 1:1 "row i == line top+i" assumption of the
+/// pre-annotation slice is gone (note rows are extra rows).
 #[derive(Clone, Debug, Default)]
-pub struct FileViewLine {
+pub struct FileViewRow {
+    /// The buffer line this row belongs to: the code row itself for code
+    /// rows; the anchored line for a virtual note row.
+    pub line: usize,
+    /// True for a virtual annotation note row (not a buffer line).
+    pub is_note: bool,
+    /// Code rows only: the line carries at least one annotation (the
+    /// margin marker — independent of note-row visibility, `C-c a`).
+    pub annotated: bool,
+    /// The row's text (without trailing newline; an orphaned note row
+    /// carries an `(orphaned)` tag in its text).
     pub text: String,
+    /// Highlight spans (code rows only; byte offsets relative to the line
+    /// start). Empty for note rows.
     pub spans: Vec<crate::syntax::highlight::LineSpan>,
+}
+
+impl FileViewRow {
+    /// The rendered-row index of buffer line `line`'s CODE row (the note
+    /// rows under it never match: they are `is_note`).
+    pub fn row_for_line(rows: &[FileViewRow], line: usize) -> Option<usize> {
+        rows.iter().position(|r| !r.is_note && r.line == line)
+    }
+
+    /// The buffer line rendered at rendered row `row` (a note row maps to
+    /// its anchored code row).
+    pub fn line_for_row(rows: &[FileViewRow], row: usize) -> Option<usize> {
+        rows.get(row).map(|r| r.line)
+    }
+}
+
+/// One annotation anchored to a file line (plan 005 issue 02): the record
+/// stored in `.redline-notes.md`'s structured section and rendered inline
+/// in the file view. `path` is project-relative. `anchor` is the exact
+/// text of the anchored line at creation: automatic re-anchoring (±25
+/// lines) keeps `line` pointing at it as the file drifts, and `orphaned`
+/// flags the case where the anchor text is gone (the annotation stays at
+/// its last known line — NEVER moved to a guessed line).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Annotation {
+    pub path: String,
+    pub line: usize,
+    pub col: usize,
+    pub anchor: String,
+    pub text: String,
+    pub orphaned: bool,
+}
+
+/// One entry of the notes file's structured annotation section: either a
+/// parsed record or a verbatim raw block (malformed records are kept as
+/// raw blocks, never dropped — plan 005 issue 02).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotesEntry {
+    Record(Annotation),
+    Raw(String),
+}
+
+impl NotesEntry {
+    /// The record, if this entry is one.
+    pub fn as_record(&self) -> Option<&Annotation> {
+        match self {
+            NotesEntry::Record(a) => Some(a),
+            NotesEntry::Raw(_) => None,
+        }
+    }
+
+    /// The record (mutable), if this entry is one.
+    pub fn as_record_mut(&mut self) -> Option<&mut Annotation> {
+        match self {
+            NotesEntry::Record(a) => Some(a),
+            NotesEntry::Raw(_) => None,
+        }
+    }
+}
+
+/// The parsed `.redline-notes.md` document (plan 005 issue 02): free text
+/// BEFORE the structured annotation section, the section's entries, and
+/// free text AFTER it. Everything outside the section is preserved
+/// verbatim on re-serialization.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotesDoc {
+    pub before: Vec<String>,
+    pub entries: Vec<NotesEntry>,
+    pub after: Vec<String>,
+}
+
+/// The notes file's structured-section markers (plan 005 issue 02).
+pub const NOTES_BEGIN: &str = "<!-- redline-annotations:begin -->";
+pub const NOTES_END: &str = "<!-- redline-annotations:end -->";
+
+/// The record start line of the structured section.
+pub const NOTES_RECORD_START: &str = "[annotation]";
+
+/// The ±25-line content search window for annotation re-anchoring
+/// (plan 005 issue 02).
+pub const ANNOTATION_REANCHOR_WINDOW: usize = 25;
+
+/// Parse a notes file's text into a `NotesDoc` (plan 005 issue 02):
+/// free text outside the structured section is preserved verbatim; a
+/// record block (`[annotation]` + `key: value` lines) parses into an
+/// `Annotation` when the required fields (`path`, `line`, `anchor`,
+/// `note`) are present and well-formed; every other block (malformed
+/// records, stray lines) is kept verbatim as a `NotesEntry::Raw`, never
+/// dropped. No markers at all → the whole file is `before` (untouched).
+pub fn parse_notes(text: &str) -> NotesDoc {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // A trailing newline is a line terminator, not an empty last line:
+    // drop the final empty element so round-trips don't accumulate
+    // blank lines.
+    if text.ends_with('\n') && lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let begin = lines
+        .iter()
+        .position(|l| l.trim() == NOTES_BEGIN)
+        .and_then(|b| {
+            lines[b + 1..]
+                .iter()
+                .position(|l| l.trim() == NOTES_END)
+                .map(|e| (b, b + 1 + e))
+        });
+    let Some((b, e)) = begin else {
+        return NotesDoc {
+            before: lines.iter().map(|s| s.to_string()).collect(),
+            entries: Vec::new(),
+            after: Vec::new(),
+        };
+    };
+    NotesDoc {
+        before: lines[..b].iter().map(|s| s.to_string()).collect(),
+        entries: parse_notes_section(&lines[b + 1..e]),
+        after: lines[e + 1..].iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Parse the section body into entries: record blocks (`[annotation]`
+/// through the next `[annotation]` / end) that carry every required field
+/// become `Record`s; anything else is a verbatim `Raw` block (malformed
+/// records are kept, never dropped).
+fn parse_notes_section(lines: &[&str]) -> Vec<NotesEntry> {
+    // Split into (is_record_start, verbatim text) blocks: a block begins at
+    // every record start and runs to the next record start.
+    let starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == NOTES_RECORD_START)
+        .map(|(i, _)| i)
+        .collect();
+    let mut entries = Vec::new();
+    // Stray lines before the first record block → one verbatim block.
+    if !starts.is_empty() && starts[0] > 0 {
+        entries.push(NotesEntry::Raw(lines[..starts[0]].join("\n")));
+    }
+    for (i, start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(lines.len());
+        let block = &lines[*start..end];
+        match parse_record_block(block) {
+            Some(rec) => entries.push(NotesEntry::Record(rec)),
+            None => entries.push(NotesEntry::Raw(block.join("\n"))),
+        }
+    }
+    entries
+}
+
+/// Parse one `[annotation]` block into an `Annotation`. `None` when a
+/// required field (`path`, `line`, `anchor`, `note`) is missing or
+/// ill-formed (the caller keeps the block verbatim).
+fn parse_record_block(block: &[&str]) -> Option<Annotation> {
+    let mut rec = Annotation::default();
+    let mut have = [false; 4]; // path, line, anchor, note
+    for line in &block[1..] {
+        // Lines without a `:` (stray text, blank lines) are skipped, not
+        // fatal: a record stays valid as long as the required fields are
+        // present (tolerant parse — hand-edited blocks survive).
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        // Value: the remainder after the first ':' with one leading space
+        // stripped (anchor text is otherwise exact — it is the re-anchor
+        // key, so it must round-trip byte-for-byte).
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match key {
+            "path" => {
+                rec.path = value.to_string();
+                have[0] = true;
+            }
+            "line" => {
+                rec.line = value.trim().parse::<usize>().ok()?;
+                have[1] = true;
+            }
+            "col" => {
+                // `col` is optional metadata (not an anchor field): a
+                // malformed value defaults to 0 rather than demoting the
+                // whole record to raw.
+                rec.col = value.trim().parse::<usize>().unwrap_or(0);
+            }
+            "anchor" => {
+                rec.anchor = value.to_string();
+                have[2] = true;
+            }
+            "note" => {
+                rec.text = value.to_string();
+                have[3] = true;
+            }
+            "orphaned" => {
+                rec.orphaned = value.trim() == "true";
+            }
+            // Unknown keys inside a record block: the block stays valid
+            // (forward compatibility), they are simply not re-emitted.
+            _ => {}
+        }
+    }
+    if have.iter().all(|h| *h) {
+        Some(rec)
+    } else {
+        None
+    }
+}
+
+/// Serialize a `NotesDoc` back to file text (plan 005 issue 02): free text
+/// outside the section verbatim, records in canonical form, raw blocks
+/// verbatim, in the entries' order.
+pub fn serialize_notes(doc: &NotesDoc) -> String {
+    let mut out = String::new();
+    for line in &doc.before {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(NOTES_BEGIN);
+    out.push('\n');
+    for entry in &doc.entries {
+        match entry {
+            NotesEntry::Record(a) => {
+                out.push_str(NOTES_RECORD_START);
+                out.push('\n');
+                out.push_str(&format!("path: {}\n", a.path));
+                out.push_str(&format!("line: {}\n", a.line));
+                out.push_str(&format!("col: {}\n", a.col));
+                out.push_str(&format!("anchor: {}\n", a.anchor));
+                out.push_str(&format!("note: {}\n", a.text));
+                out.push_str(&format!("orphaned: {}\n", a.orphaned));
+            }
+            NotesEntry::Raw(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(NOTES_END);
+    out.push('\n');
+    for line in &doc.after {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Direction of an incremental search.
@@ -1014,6 +1287,29 @@ pub struct AppStore {
     /// `y`/`n`/C-g decision (every key routes to `toggle_ro_key`). Holds
     /// the buffer key to confirm.
     toggle_ro_confirm: Option<String>,
+    // ── plan 005 issue 02: inline annotations ──────────────────────────
+    /// The parsed `.redline-notes.md` document (plan 005 issue 02): free
+    /// text outside the structured annotation section is preserved
+    /// verbatim; malformed records are kept as raw blocks, never dropped.
+    notes_doc: NotesDoc,
+    /// Whether `notes_doc` has been loaded (from the open notes buffer or
+    /// from disk) this session.
+    notes_doc_loaded: bool,
+    /// The disk mtime recorded when `notes_doc` was loaded from disk (the
+    /// closed-buffer freshness check; while the notes buffer is open its
+    /// text is the source of truth).
+    notes_doc_mtime: Option<std::time::SystemTime>,
+    /// True while the open notes buffer's text has not yet been re-parsed
+    /// into `notes_doc` after a local edit / reload.
+    notes_buffer_dirty: bool,
+    /// The `A` annotation prompt state (plan 005 issue 02): the minibuffer
+    /// note entry. `note_prompt_line` is the annotated buffer line.
+    note_prompt_active: bool,
+    note_prompt_input: String,
+    note_prompt_line: usize,
+    /// Whether the inline annotation note rows render under annotated
+    /// lines (C-c a toggles; the margin markers stay either way).
+    show_note_rows: bool,
     // ── plan 004 issue 03: mark/region + kill ring ──────────────────────
     /// The shared kill ring (emacs depth 60; shared across all buffers).
     kill_ring: KillRing,
@@ -1215,6 +1511,14 @@ impl AppStore {
             created_paths: HashSet::new(),
             saved_paths: HashMap::new(),
             toggle_ro_confirm: None,
+            notes_doc: NotesDoc::default(),
+            notes_doc_loaded: false,
+            notes_doc_mtime: None,
+            notes_buffer_dirty: false,
+            note_prompt_active: false,
+            note_prompt_input: String::new(),
+            note_prompt_line: 0,
+            show_note_rows: true,
             kill_ring: KillRing::default(),
             yank_pos: None,
             yank_len: None,
@@ -1501,6 +1805,9 @@ impl AppStore {
             }
         }
         self.buffers.set_current(&key);
+        // plan 005 issue 02: on (re)open the notes buffer's text is the
+        // source of truth — re-parse the notes document from it.
+        self.notes_buffer_dirty = true;
         self.record_recent(NOTES_REL);
         self.ensure_highlight();
         self.minibuffer_message("notes: C-x C-s to save");
@@ -1563,6 +1870,18 @@ impl AppStore {
                 // conflicts).
                 self.saved_paths.insert(key.to_string(), mtime);
                 self.invalidate_highlight_for_key(key);
+                // plan 005 issue 02: the automatic anchoring runs in the
+                // same pass as the edit-mode save — the saved content is
+                // the anchor truth.
+                self.reanchor_for_key(key);
+                // Saving the notes file itself re-parses its structured
+                // section from the saved text (the buffer is the source
+                // of truth while open).
+                if self.notes_key().as_deref() == Some(key) {
+                    self.notes_doc_mtime = Some(mtime);
+                    self.notes_buffer_dirty = true;
+                    self.ensure_notes_doc();
+                }
                 self.minibuffer_message(&format!("wrote {}", path.display()));
                 true
             }
@@ -1571,6 +1890,422 @@ impl AppStore {
                 false
             }
         }
+    }
+
+    // ── plan 005 issue 02: inline annotations ────────────────────────
+
+    /// The absolute buffer key of the per-project notes file
+    /// (`.redline-notes.md`), when a project is open.
+    fn notes_key(&self) -> Option<String> {
+        let root = self.project.as_ref()?.root.clone();
+        Some(root.join(".redline-notes.md").to_string_lossy().into_owned())
+    }
+
+    /// Load / re-parse the notes document (plan 005 issue 02). While the
+    /// notes buffer is open, ITS text is the source of truth (re-parsed
+    /// when `notes_buffer_dirty` marks a local edit/reload); otherwise the
+    /// disk file is (re-read on mtime change). The lazy disk-load path runs
+    /// the re-anchor pass over every open buffer ("on load").
+    fn ensure_notes_doc(&mut self) {
+        let Some(key) = self.notes_key() else {
+            return;
+        };
+        if self.buffers.get(&key).is_some() {
+            if !self.notes_doc_loaded || self.notes_buffer_dirty {
+                let text = self
+                    .buffers
+                    .get(&key)
+                    .map(|b| b.text())
+                    .unwrap_or_default();
+                self.notes_doc = parse_notes(&text);
+                self.notes_doc_loaded = true;
+                self.notes_buffer_dirty = false;
+            }
+        } else {
+            let path = PathBuf::from(key.clone());
+            let mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            if !self.notes_doc_loaded || mtime != self.notes_doc_mtime {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                self.notes_doc = parse_notes(&text);
+                self.notes_doc_loaded = true;
+                self.notes_doc_mtime = mtime;
+                // On load: the anchors maintain themselves against every
+                // open buffer's current content.
+                self.reanchor_all_buffers();
+            }
+        }
+    }
+
+    /// The current buffer's project-relative path (annotation records are
+    /// keyed by it), `None` for pathless buffers (scratch) or no project.
+    fn current_buffer_rel(&self) -> Option<String> {
+        let key = self.buffers.current()?.to_string();
+        self.buffer_rel_path(&key)
+    }
+
+    /// The index of the FIRST structured-section record anchored at the
+    /// current buffer's line `line`, or `None` when the line carries no
+    /// annotation.
+    fn record_index_for_line(&self, line: usize) -> Option<usize> {
+        let rel = self.current_buffer_rel()?;
+        self.notes_doc
+            .entries
+            .iter()
+            .position(|e| matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line))
+    }
+
+    /// Re-anchor the annotations of the buffer at `key` against the
+    /// buffer's current content (plan 005 issue 02): for each record
+    /// anchored there whose stored line no longer holds `anchor` exactly,
+    /// search ±25 lines — a UNIQUE match re-anchors (updates `line`,
+    /// clears `orphaned`); zero or multiple matches set `orphaned = true`
+    /// and leave `line` unchanged (NEVER move an anchor to a guessed line).
+    /// Stable and idempotent: a record whose line holds the anchor is
+    /// untouched (its `orphaned` flag clears — the anchor came back).
+    fn reanchor_for_key(&mut self, key: &str) {
+        let Some(rel) = self.buffer_rel_path(key) else {
+            return;
+        };
+        let Some(buf) = self.buffers.get(key) else {
+            return;
+        };
+        let total = buf.line_count();
+        if total == 0 {
+            return;
+        }
+        let mut changed = false;
+        for entry in self.notes_doc.entries.iter_mut() {
+            let Some(a) = entry.as_record_mut() else {
+                continue;
+            };
+            if a.path != rel {
+                continue;
+            }
+            let held = a.line < total
+                && buf
+                    .line_text(a.line)
+                    .map(|t| t.as_ref() == a.anchor.as_str())
+                    .unwrap_or(false);
+            if held {
+                if a.orphaned {
+                    a.orphaned = false;
+                    changed = true;
+                }
+                continue;
+            }
+            // Drift: content search within ±ANNOTATION_REANCHOR_WINDOW.
+            let lo = a.line.saturating_sub(ANNOTATION_REANCHOR_WINDOW);
+            let hi = (a.line + ANNOTATION_REANCHOR_WINDOW).min(total - 1);
+            let matches: Vec<usize> = (lo..=hi)
+                .filter(|l| {
+                    buf.line_text(*l)
+                        .map(|t| t.as_ref() == a.anchor.as_str())
+                        .unwrap_or(false)
+                })
+                .collect();
+            if matches.len() == 1 {
+                a.line = matches[0];
+                a.orphaned = false;
+                changed = true;
+            } else if !a.orphaned {
+                // 0 or ambiguous matches: flag, never guess.
+                a.orphaned = true;
+                changed = true;
+            }
+        }
+        if changed {
+            // The re-anchored records are the truth: refresh the notes
+            // file (and the open notes buffer, when one is open).
+            self.sync_notes_from_doc();
+        }
+    }
+
+    /// Re-anchor every open file buffer's annotations (the "on load"
+    /// pass: runs after the notes document is (re)loaded from disk).
+    fn reanchor_all_buffers(&mut self) {
+        let keys: Vec<String> = self
+            .buffers
+            .list()
+            .into_iter()
+            .filter(|(_, b)| b.path.is_some())
+            .map(|(k, _)| k.to_string())
+            .collect();
+        for key in keys {
+            self.reanchor_for_key(&key);
+        }
+    }
+
+    /// Write the notes document back to disk (and into the open notes
+    /// buffer when one is open — the real-file surface stays in sync with
+    /// the in-memory records). Returns the post-write mtime on success;
+    /// the watcher self-write suppression (plan 005 issue 01) records the
+    /// write so our own event is not flagged "changed on disk".
+    fn sync_notes_from_doc(&mut self) -> Option<std::time::SystemTime> {
+        let key = self.notes_key()?;
+        let path = PathBuf::from(key.clone());
+        let text = serialize_notes(&self.notes_doc);
+        if std::fs::write(&path, &text).is_err() {
+            return None;
+        }
+        let mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if let Some(m) = mtime {
+            self.saved_paths.insert(key.clone(), m);
+            self.notes_doc_mtime = Some(m);
+        }
+        // The in-memory doc now equals the disk: loaded.
+        self.notes_doc_loaded = true;
+        if self.buffers.get(&key).is_some() {
+            self.replace_buffer_text(&key, &text);
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                if let Some(m) = mtime {
+                    buf.mtime = m;
+                }
+                buf.locally_modified = false;
+                buf.changed_on_disk = false;
+                buf.mark = None;
+            }
+            self.invalidate_highlight_for_key(&key);
+        }
+        mtime
+    }
+
+    /// Replace a buffer's text (the notes-buffer sync path).
+    fn replace_buffer_text(&mut self, key: &str, text: &str) {
+        let rope = Rope::from_str(text);
+        if let Some(buf) = self.buffers.get_mut(key) {
+            buf.rope = rope;
+        }
+    }
+
+    /// `A` (plan 005 issue 02): prompt for an annotation on the line at
+    /// point in the minibuffer. An existing record on the line pre-fills
+    /// the prompt (edit); RET commits (record written to
+    /// `.redline-notes.md`, cue appears immediately), C-g/ESC cancels.
+    pub fn annotate(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            self.minibuffer_message("annotate: not in the file view");
+            return;
+        }
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        if self.buffers.get(&key).map(|b| b.path.is_none()).unwrap_or(true) {
+            self.minibuffer_message("annotate: no file to annotate (scratch)");
+            return;
+        }
+        self.ensure_notes_doc();
+        let line = self.point_line();
+        let prefill = self.notes_doc.entries.iter().find_map(|e| {
+            e.as_record()
+                .filter(|a| a.line == line && a.path == self.current_buffer_rel().as_deref().unwrap_or(""))
+                .map(|a| a.text.clone())
+        });
+        self.note_prompt_line = line;
+        self.note_prompt_input = prefill.unwrap_or_default();
+        self.note_prompt_active = true;
+        self.minibuffer_message(&format!("Note: {}", self.note_prompt_input));
+    }
+
+    /// The `A` prompt state (for tests).
+    #[allow(dead_code)] // public API: used by tests
+    pub fn note_prompt_active(&self) -> bool {
+        self.note_prompt_active
+    }
+
+    /// The `A` prompt's current input (for tests + prefill verification).
+    #[allow(dead_code)] // public API: used by tests
+    pub fn note_prompt_input(&self) -> &str {
+        &self.note_prompt_input
+    }
+
+    fn note_prompt_char(&mut self, c: char) {
+        self.note_prompt_input.push(c);
+        self.minibuffer_message(&format!("Note: {}", self.note_prompt_input));
+    }
+
+    fn note_prompt_backspace(&mut self) {
+        self.note_prompt_input.pop();
+        self.minibuffer_message(&format!("Note: {}", self.note_prompt_input));
+    }
+
+    fn note_prompt_cancel(&mut self) {
+        if !self.note_prompt_active {
+            return;
+        }
+        self.note_prompt_active = false;
+        self.note_prompt_input.clear();
+        self.minibuffer_message("note cancelled");
+    }
+
+    /// RET in the `A` prompt (plan 005 issue 02): commit the record.
+    /// Empty input on an existing record deletes it; empty input on a
+    /// fresh prompt cancels.
+    pub fn note_prompt_confirm(&mut self) {
+        if !self.note_prompt_active {
+            return;
+        }
+        let line = self.note_prompt_line;
+        let text = self.note_prompt_input.trim().to_string();
+        self.note_prompt_active = false;
+        self.note_prompt_input.clear();
+        if text.is_empty() {
+            if self.record_index_for_line(line).is_some() {
+                self.delete_annotation_at(line);
+            } else {
+                self.minibuffer_message("note cancelled");
+            }
+            return;
+        }
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        let Some(rel) = self.buffer_rel_path(&key) else {
+            self.minibuffer_message("annotate: no file to annotate (scratch)");
+            return;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return;
+        };
+        let total = buf.line_count();
+        if total == 0 {
+            self.minibuffer_message("annotate: empty buffer");
+            return;
+        }
+        let line = line.min(total - 1);
+        let anchor = buf.line_text(line).map(|t| t.into_owned()).unwrap_or_default();
+        let col = self.point_col();
+        let existing = self.notes_doc.entries.iter().position(|e| {
+            matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line)
+        });
+        match existing {
+            Some(i) => {
+                // Edit: only the note text changes (the record's stored
+                // position stays — the re-anchor pass maintains it).
+                if let Some(a) = self.notes_doc.entries[i].as_record_mut() {
+                    a.text = text.clone();
+                }
+            }
+            None => {
+                self.notes_doc
+                    .entries
+                    .push(NotesEntry::Record(Annotation {
+                        path: rel.clone(),
+                        line,
+                        col,
+                        anchor,
+                        text: text.clone(),
+                        orphaned: false,
+                    }));
+            }
+        }
+        match self.sync_notes_from_doc() {
+            Some(_) => {
+                let n = self.current_buffer_annotation_count();
+                self.minibuffer_message(&format!(
+                    "note saved ({} note{} in {})",
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    rel
+                ));
+            }
+            None => self.minibuffer_message("note not saved: could not write the notes file"),
+        }
+    }
+
+    /// `d` in the buffer view (plan 005 issue 02): delete the annotation
+    /// on the line at point, echoing what was removed. A line with no
+    /// annotation gets a message (never a self-insert, never an unbound-key
+    /// echo).
+    pub fn annotate_delete(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            self.minibuffer_message("annotate-delete: not in the file view");
+            return;
+        }
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        if self.buffers.get(&key).map(|b| b.path.is_none()).unwrap_or(true) {
+            self.minibuffer_message("annotate-delete: no file (scratch)");
+            return;
+        }
+        self.ensure_notes_doc();
+        let line = self.point_line();
+        match self.record_index_for_line(line) {
+            Some(idx) => self.delete_annotation_at_index(idx),
+            None => self.minibuffer_message("no annotation on this line"),
+        }
+    }
+
+    /// Delete the record anchored at the current buffer's line `line` (the
+    /// empty-RET edit-path delete).
+    fn delete_annotation_at(&mut self, line: usize) {
+        match self.record_index_for_line(line) {
+            Some(idx) => self.delete_annotation_at_index(idx),
+            None => self.minibuffer_message("note cancelled"),
+        }
+    }
+
+    fn delete_annotation_at_index(&mut self, idx: usize) {
+        let removed = match self.notes_doc.entries.get(idx) {
+            Some(NotesEntry::Record(a)) => a.text.clone(),
+            _ => return,
+        };
+        self.notes_doc.entries.remove(idx);
+        match self.sync_notes_from_doc() {
+            Some(_) => {
+                let chars: Vec<char> = removed.chars().collect();
+                let echo: String = chars.iter().take(40).collect();
+                let echo = if chars.len() > 40 { format!("{echo}…") } else { echo };
+                self.minibuffer_message(&format!("deleted annotation: {echo}"));
+            }
+            None => self.minibuffer_message(
+                "annotation not deleted: could not write the notes file",
+            ),
+        }
+    }
+
+    /// `C-c a` in the buffer view (plan 005 issue 02): toggle the inline
+    /// annotation note rows; the margin markers stay either way.
+    pub fn annotate_toggle(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            return;
+        }
+        self.show_note_rows = !self.show_note_rows;
+        self.minibuffer_message(if self.show_note_rows {
+            "note rows: shown"
+        } else {
+            "note rows: hidden"
+        });
+    }
+
+    /// The annotation count for the current buffer's file (0 for
+    /// pathless buffers or when no record matches its path).
+    fn current_buffer_annotation_count(&self) -> usize {
+        let Some(rel) = self.current_buffer_rel() else {
+            return 0;
+        };
+        self.notes_doc
+            .entries
+            .iter()
+            .filter(|e| matches!(e, NotesEntry::Record(a) if a.path == rel))
+            .count()
+    }
+
+    /// The status-line annotation count for the current file (`"1 note"` /
+    /// `"3 notes"`; empty outside the buffer view or with no annotations).
+    pub fn annotation_count_display(&self) -> String {
+        if self.top_view() != ViewId::Buffer {
+            return String::new();
+        }
+        let n = self.current_buffer_annotation_count();
+        if n == 0 {
+            return String::new();
+        }
+        format!("{n} note{}", if n == 1 { "" } else { "s" })
     }
 
     /// `C-x C-q` (emacs `toggle-read-only`, plan 005 issue 01): flip the
@@ -1697,7 +2432,14 @@ impl AppStore {
     /// editing for notes, mirroring the commit-editor's insert path).
     /// Returns `true` when the character was inserted.
     pub fn notes_insert_char(&mut self, c: char) -> bool {
-        self.insert_text(&c.to_string())
+        let key = self.buffers.current().map(String::from);
+        let inserted = self.insert_text(&c.to_string());
+        // plan 005 issue 02: local edits to the OPEN notes buffer mark the
+        // notes document stale (it re-parses on the next ensure).
+        if inserted && key.as_deref() == self.notes_key().as_deref() {
+            self.notes_buffer_dirty = true;
+        }
+        inserted
     }
 
     /// Delete the last character of the current buffer (bounded editing
@@ -1717,6 +2459,11 @@ impl AppStore {
             buf.rope.remove((len - 1)..len);
             buf.locally_modified = true;
             self.invalidate_highlight_for_key(&key);
+        }
+        // plan 005 issue 02: a notes-buffer edit marks the notes document
+        // stale (re-parsed on the next ensure).
+        if key == self.notes_key().unwrap_or_default() {
+            self.notes_buffer_dirty = true;
         }
     }
 
@@ -2070,6 +2817,9 @@ impl AppStore {
         self.record_recent(rel);
         // Buffer-follow (issue 09, off by default): sync the tree cursor.
         self.tree_follow_opened(rel);
+        // plan 005 issue 02: on load, the annotation anchors for this file
+        // maintain themselves against the (possibly re-read) content.
+        self.reanchor_for_key(&key);
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
     }
@@ -3110,7 +3860,17 @@ impl AppStore {
         if self.top_view() != ViewId::Buffer {
             return;
         }
-        let target_line = self.scroll_top() + row;
+        // Map-aware (plan 005 issue 02): with note rows visible a rendered
+        // row is NOT `scroll_top + row` buffer lines — translate through
+        // the rendered-row list (a note row maps to its anchored code
+        // row). A click past the last rendered row maps to the last CODE
+        // row in the slice.
+        let rows = self.file_view_rows();
+        let Some(target_line) = FileViewRow::line_for_row(&rows, row)
+            .or_else(|| rows.iter().rev().find(|r| !r.is_note).map(|r| r.line))
+        else {
+            return;
+        };
         let line_len = self.line_char_len(target_line);
         // Display column -> char index (the file view renders from cell 0
         // with no gutter; plan 004 issue 05d).
@@ -3208,17 +3968,25 @@ impl AppStore {
         format!("L{},{}%", line + 1, pct)
     }
 
-    /// Pre-compute the visible lines for the file view: text from the
-    /// rope, spans from the highlight cache (or empty for plain text).
-    /// The visible range is `[top_line, top_line + viewport_lines)`.
-    pub fn file_view_lines(&self) -> Vec<FileViewLine> {
-        let Some(buf) = self.buffers.current_buffer() else {
-            return Vec::new();
-        };
-        let total = buf.line_count();
+    /// Pre-compute the rendered rows for the file view (plan 005 issue 02):
+    /// the code rows of the visible buffer lines
+    /// `[top_line, top_line + viewport_lines)`, with a virtual annotation
+    /// note row directly under each annotated line when note rows are shown
+    /// (`show_note_rows`; `C-c a` toggles — the `annotated` flag on the
+    /// code rows is independent, so the margin marker stays). Every row
+    /// carries its buffer-line index: the dense 1:1 "row i == line top+i"
+    /// assumption is gone, and the renderer / `cursor_cell` /
+    /// `mouse_click_position` translate `buffer_line` ↔ `rendered_row`
+    /// through `FileViewRow::row_for_line` / `line_for_row`.
+    pub fn file_view_rows(&mut self) -> Vec<FileViewRow> {
+        let total = self.current_line_count();
         if total == 0 {
             return Vec::new();
         }
+        self.ensure_notes_doc();
+        let Some(buf) = self.buffers.current_buffer() else {
+            return Vec::new();
+        };
         let top = self.scroll_top();
         let start = top.min(total.saturating_sub(1));
         let end = (top + self.viewport_lines).min(total);
@@ -3229,16 +3997,91 @@ impl AppStore {
         // Get the highlight result from the cache (if any).
         let highlight: Option<&HighlightResult> = self.buffer_highlight_result();
 
-        let mut out = Vec::with_capacity(end - start);
+        // This buffer's annotation records (matched by project-relative
+        // path), in record order. The marker flag is independent of
+        // note-row visibility.
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return Vec::new();
+        };
+        let rel = self.buffer_rel_path(&key);
+        let records: Vec<&Annotation> = self
+            .notes_doc
+            .entries
+            .iter()
+            .filter_map(|e| e.as_record())
+            .filter(|a| rel.as_deref() == Some(a.path.as_str()))
+            .collect();
+
+        let mut out = Vec::with_capacity(end - start + records.len());
         for line in start..end {
             let text = buf.line_text(line).unwrap_or_default().to_string();
             let spans = highlight
                 .and_then(|h| h.lines.get(line))
                 .map(|hl| hl.spans.clone())
                 .unwrap_or_default();
-            out.push(FileViewLine { text, spans });
+            let annotated = records.iter().any(|a| a.line == line);
+            out.push(FileViewRow {
+                line,
+                is_note: false,
+                annotated,
+                text,
+                spans,
+            });
+            if self.show_note_rows {
+                for a in records.iter().filter(|a| a.line == line) {
+                    let mut note = format!("  \u{25b8} {}", a.text);
+                    if a.orphaned {
+                        note.push_str(" (orphaned)");
+                    }
+                    out.push(FileViewRow {
+                        line,
+                        is_note: true,
+                        annotated: false,
+                        text: note,
+                        spans: Vec::new(),
+                    });
+                }
+            }
         }
         out
+    }
+
+    /// The total number of rendered rows for the current buffer
+    /// (plan 005 issue 02): the buffer's line count plus the visible
+    /// annotation note rows (zero when `C-c a` hid them). The renderer's
+    /// bottom scroll indicator compares the slice length against this in
+    /// rendered-row space.
+    pub fn file_view_total_rows(&mut self) -> usize {
+        let total = self
+            .buffers
+            .current_buffer()
+            .map(|b| b.line_count())
+            .unwrap_or(0);
+        if !self.show_note_rows {
+            return total;
+        }
+        self.ensure_notes_doc();
+        let key = self.buffers.current().map(String::from);
+        let Some(rel) = key.as_deref().and_then(|k| self.buffer_rel_path(k)) else {
+            return total;
+        };
+        total + self
+            .notes_doc
+            .entries
+            .iter()
+            .filter(|e| matches!(e, NotesEntry::Record(a) if a.path == rel))
+            .count()
+    }
+
+    /// The current buffer's project-relative path (for annotation lookup);
+    /// `None` for buffers without a path (scratch) or with no project.
+    fn buffer_rel_path(&self, key: &str) -> Option<String> {
+        let buf = self.buffers.get(key)?;
+        let abs = buf.path.as_ref()?;
+        let root = self.project.as_ref()?.root.clone();
+        abs.strip_prefix(root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().into_owned())
     }
 
     /// (top_line, total_lines, viewport_lines) for the file view.
@@ -5526,6 +6369,12 @@ impl AppStore {
         }
         self.scroll.insert(key.clone(), new_top);
         self.ensure_highlight_for_key(&key);
+        // plan 005 issue 02: auto-reload is a content change — the
+        // annotation anchors for this file maintain themselves.
+        self.reanchor_for_key(&key);
+        if self.notes_key().as_deref() == Some(key.as_str()) {
+            self.notes_buffer_dirty = true;
+        }
         true
     }
 
@@ -5560,6 +6409,13 @@ impl AppStore {
         }
         self.scroll.insert(key.clone(), new_top);
         self.ensure_highlight_for_key(&key);
+        // plan 005 issue 02: on reload, the annotation anchors for this
+        // file maintain themselves; reloading the notes file itself
+        // re-parses its structured section.
+        self.reanchor_for_key(&key);
+        if self.notes_key().as_deref() == Some(key.as_str()) {
+            self.notes_buffer_dirty = true;
+        }
         self.minibuffer_message("reloaded");
     }
 
@@ -6787,6 +7643,29 @@ impl AppStore {
                 return;
             }
             // Other keys: swallow.
+            return;
+        }
+        // Annotation prompt (plan 005 issue 02): printable chars build the
+        // note text, Backspace edits it, RET commits (record written to
+        // the notes file; the cue appears immediately), C-g/ESC cancel.
+        if self.note_prompt_active {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.note_prompt_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.note_prompt_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.note_prompt_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.note_prompt_char(c);
+                return;
+            }
+            // Other keys: swallow (no "unbound key" echo mid-prompt).
             return;
         }
         // Search-query prompt mode (C-c p s s / M-s o): printable chars
@@ -8500,7 +9379,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 102);
+        assert_eq!(store.picker_count().0, 105);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -8518,11 +9397,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 101);
+        assert_eq!(store.picker_selected(), 104);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 100);
+        assert_eq!(store.picker_selected(), 103);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op on *scratch*, so just a message).
@@ -8557,7 +9436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 102);
+        assert_eq!(store.picker_count().0, 105);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -11859,12 +12738,14 @@ mod tests {
             "insertion row {last} must be in view [top={top}, {viewport} rows)"
         );
         // The rendered window ends exactly on the last line (no gap).
-        let lines = s.file_view_lines();
+        // (No annotations here: every rendered row is a code row, so the
+        // row count equals the buffer-line count.)
+        let rows = s.file_view_rows();
         assert_eq!(
-            top + lines.len(),
+            top + rows.len(),
             total,
             "window must end at the last line: top={top} len={} total={total}",
-            lines.len()
+            rows.len()
         );
     }
 
@@ -12668,6 +13549,473 @@ mod tests {
         // The rest of the buffer is intact.
         assert!(after_pop.contains("naïve\n"), "original content must be preserved: {after_pop:?}");
         assert!(after_pop.contains("end\n"), "original content must be preserved: {after_pop:?}");
+    }
+
+    // ── plan 005 issue 02: inline annotations ─────────────────────────
+
+    /// A store rooted at a temp project WITH an open project (a Cargo.toml
+    /// marker), so notes-key / rel-path machinery works. The temp project
+    /// dir is leaked (OS-cleaned on exit, like the persistence base).
+    fn store_with_project() -> AppStore {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        let base = tempfile::tempdir().unwrap();
+        AppStore::at(&dir_path, base.path().to_path_buf())
+    }
+
+    /// Open a file buffer in the store via the open_path seam.
+    fn open_ann_file(store: &mut AppStore, rel: &str, content: &str) {
+        let root = store.project.as_ref().unwrap().root.clone();
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
+        store.open_path(rel);
+        assert_eq!(store.top_view(), ViewId::Buffer);
+    }
+
+    fn ann_records(store: &AppStore) -> Vec<&Annotation> {
+        store
+            .notes_doc
+            .entries
+            .iter()
+            .filter_map(|e| e.as_record())
+            .collect()
+    }
+
+    /// Parse → serialize → parse round-trip: records, raw blocks, and free
+    /// text on BOTH sides of the section survive verbatim.
+    #[test]
+    fn notes_parse_serialize_round_trip() {
+        let doc = NotesDoc {
+            before: vec!["# Notes".to_string(), "free line one".to_string()],
+            entries: vec![
+                NotesEntry::Raw("# a comment".to_string()),
+                NotesEntry::Record(Annotation {
+                    path: "src/main.rs".to_string(),
+                    line: 4,
+                    col: 2,
+                    anchor: "fn main() {".to_string(),
+                    text: "fix the off-by-one: it's: nasty".to_string(),
+                    orphaned: false,
+                }),
+                NotesEntry::Raw("[annotation]\npath: src/main.rs\nline: 9\n(no required fields)".to_string()),
+                NotesEntry::Record(Annotation {
+                    path: "README.md".to_string(),
+                    line: 0,
+                    col: 0,
+                    anchor: "Redline".to_string(),
+                    text: "top".to_string(),
+                    orphaned: true,
+                }),
+            ],
+            after: vec!["trailing free text".to_string()],
+        };
+        let text = serialize_notes(&doc);
+        let reparsed = parse_notes(&text);
+        assert_eq!(reparsed, doc, "round-trip must be exact");
+        // The anchor with a colon round-trips byte-for-byte (the value is
+        // the text after the FIRST colon of its field line).
+        let rec = &reparsed.entries[1];
+        let a = rec.as_record().unwrap();
+        assert_eq!(a.anchor, "fn main() {");
+        assert_eq!(a.text, "fix the off-by-one: it's: nasty");
+        // A file with NO section at all parses into pure `before` and
+        // re-serializes with the section appended, keeping the text.
+        let plain = "alpha\nbeta\n";
+        let d = parse_notes(plain);
+        assert_eq!(d.before, vec!["alpha".to_string(), "beta".to_string()]);
+        assert!(d.entries.is_empty());
+        let s = serialize_notes(&d);
+        assert!(s.starts_with("alpha\nbeta\n"));
+        assert!(s.contains(NOTES_BEGIN) && s.contains(NOTES_END));
+        assert_eq!(parse_notes(&s).before, d.before);
+    }
+
+    /// Tolerant parse: a malformed record (missing required fields) is
+    /// kept VERBATIM as a raw block, never dropped, and valid records
+    /// around it still parse.
+    #[test]
+    fn notes_tolerant_parse_keeps_malformed() {
+        let text = "before\n\
+                    <!-- redline-annotations:begin -->\n\
+                    [annotation]\n\
+                    path: a.rs\n\
+                    line: 1\n\
+                    note: missing anchor\n\
+                    stray line without colon\n\
+                    [annotation]\n\
+                    path: b.rs\n\
+                    line: 0\n\
+                    anchor: hello\n\
+                    note: ok\n\
+                    <!-- redline-annotations:end -->\n\
+                    after\n";
+        let doc = parse_notes(text);
+        assert_eq!(doc.before, vec!["before".to_string()]);
+        assert_eq!(doc.after, vec!["after".to_string()]);
+        // Two entries: the malformed block (raw, verbatim) + the good one.
+        assert_eq!(doc.entries.len(), 2);
+        assert!(matches!(doc.entries[0], NotesEntry::Raw(_)), "malformed kept verbatim: {:?}", doc.entries[0]);
+        let raw = match &doc.entries[0] {
+            NotesEntry::Raw(s) => s,
+            _ => unreachable!(),
+        };
+        assert!(raw.contains("missing anchor"), "{raw}");
+        assert!(raw.contains("stray line without colon"), "{raw}");
+        let a = doc.entries[1].as_record().unwrap();
+        assert_eq!(a.path, "b.rs");
+        assert_eq!(a.anchor, "hello");
+        // Re-serializing keeps the malformed block byte-for-byte.
+        let out = serialize_notes(&doc);
+        assert!(out.contains("note: missing anchor"), "{out}");
+        assert_eq!(parse_notes(&out).entries.len(), 2);
+    }
+
+    /// A record whose stored line no longer holds the anchor is re-anchored
+    /// by content within ±25 lines (the window bound is exclusive beyond
+    /// ±25: a match at exactly ±25 re-anchors, at ±26 it does not).
+    #[test]
+    fn notes_reanchor_on_drift_and_bounds() {
+        // 30 distinct filler lines + the anchor at line 29 (0-based).
+        let mut lines: Vec<String> = (0..30).map(|i| format!("filler {i}")).collect();
+        lines.push("THE ANCHOR LINE".to_string()); // line 30
+        let content = lines.join("\n") + "\n";
+
+        // Case 1: the stored line is 5 ABOVE the anchor (line 25 vs 30):
+        // drift → unique match within ±25 → re-anchor to 30.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann1.rs", &content);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann1.rs".to_string(),
+            line: 25,
+            col: 0,
+            anchor: "THE ANCHOR LINE".to_string(),
+            text: "n".to_string(),
+            orphaned: false,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 30, "unique match re-anchors");
+        assert!(!a.orphaned);
+        drop(s);
+
+        // Case 2 (boundary): a match exactly +25 away re-anchors.
+        let mut s = store_with_project();
+        let far: Vec<String> = (0..26).map(|i| format!("pad {i}")).collect();
+        let content = far.join("\n") + "\nEDGE\n"; // anchor at line 26 = 0 + 26? no: line 26
+        open_ann_file(&mut s, "src/ann2.rs", &content);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann2.rs".to_string(),
+            line: 1,
+            col: 0,
+            anchor: "EDGE".to_string(),
+            text: "n".to_string(),
+            orphaned: false,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        assert_eq!(ann_records(&s)[0].line, 26, "match at exactly +25 re-anchors");
+
+        // Case 3 (boundary): a match at +26 does NOT re-anchor → orphaned,
+        // line unchanged.
+        let mut s = store_with_project();
+        let far: Vec<String> = (0..27).map(|i| format!("pad {i}")).collect();
+        let content = far.join("\n") + "\nFAR\n"; // anchor at line 27
+        open_ann_file(&mut s, "src/ann3.rs", &content);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann3.rs".to_string(),
+            line: 1,
+            col: 0,
+            anchor: "FAR".to_string(),
+            text: "n".to_string(),
+            orphaned: false,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 1, "no move at +26 (never a guessed line)");
+        assert!(a.orphaned, "orphaned flag set");
+    }
+
+    /// Ambiguous drift (two identical anchor lines inside ±25) → orphaned,
+    /// no move; and an anchor that returns to its stored line clears the
+    /// orphan flag (idempotent/stable: a second pass changes nothing).
+    #[test]
+    fn notes_reanchor_ambiguous_and_idempotent() {
+        let content = "same line\nother\nsame line\n".to_string();
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann4.rs", &content);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann4.rs".to_string(),
+            line: 5, // out of range: drift for sure
+            col: 0,
+            anchor: "same line".to_string(),
+            text: "n".to_string(),
+            orphaned: false,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(a.orphaned, "ambiguous (2 matches) must not guess");
+        assert_eq!(a.line, 5);
+        // Idempotent: a second pass leaves the record exactly as-is.
+        let (a_line, a_orphaned) = (a.line, a.orphaned);
+        s.reanchor_for_key(&key);
+        let a2 = ann_records(&s)[0];
+        assert_eq!(a2.line, a_line);
+        assert_eq!(a2.orphaned, a_orphaned);
+        // Stable: when the anchor text returns to the STORED line (line 5,
+        // uniquely), the orphan flag clears.
+        let key = s.buffers.current().unwrap().to_string();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.rope = Rope::from_str("a\nb\nc\nd\ne\nsame line\n");
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        assert!(!ann_records(&s)[0].orphaned, "anchor back → orphan cleared");
+    }
+
+    /// `A` on a line prompts with an empty prefill; on an annotated line it
+    /// pre-fills the existing note for edit; RET commits the record to the
+    /// notes file (and the in-memory doc); `d` deletes with an echo; a `d`
+    /// on an unannotated line is a no-op with a message.
+    #[test]
+    fn notes_a_flow_prefill_commit_delete() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann5.rs", "one\ntwo\nthree\n");
+        // A on line 1 (fresh): prompt opens, empty input.
+        s.set_point_line(1);
+        s.annotate();
+        assert!(s.note_prompt_active());
+        assert_eq!(s.note_prompt_input(), "");
+        s.note_prompt_char('f');
+        s.note_prompt_char('i');
+        s.note_prompt_confirm();
+        assert!(!s.note_prompt_active());
+        assert_eq!(ann_records(&s).len(), 1);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.path, "src/ann5.rs");
+        assert_eq!(a.line, 1);
+        assert_eq!(a.anchor, "two", "anchor = the exact anchored-line text");
+        assert_eq!(a.text, "fi");
+        // The record is on disk in the notes file, in the structured
+        // section.
+        let disk = std::fs::read_to_string(
+            s.project.as_ref().unwrap().root.join(".redline-notes.md"),
+        )
+        .unwrap();
+        assert!(disk.contains(NOTES_BEGIN), "{disk}");
+        assert!(disk.contains("path: src/ann5.rs"), "{disk}");
+        assert!(disk.contains("note: fi"), "{disk}");
+        // A on the annotated line pre-fills for edit.
+        s.set_point_line(1);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "fi", "prefill for edit");
+        s.note_prompt_cancel();
+        // d on the annotated line deletes with an echo.
+        s.set_point_line(1);
+        s.annotate_delete();
+        assert!(s.message.contains("deleted annotation: fi"), "{}", s.message);
+        assert_eq!(ann_records(&s).len(), 0);
+        // d on an unannotated line: message, no record, no unbound-key echo.
+        s.set_point_line(0);
+        s.annotate_delete();
+        assert_eq!(s.message, "no annotation on this line");
+        assert!(ann_records(&s).is_empty());
+    }
+
+    /// Empty RET while editing an existing record deletes it (the
+    /// pre-filled-for-edit cancel path); empty RET on a fresh prompt just
+    /// cancels.
+    #[test]
+    fn notes_empty_ret_edits_delete_cancels() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann6.rs", "a\nb\n");
+        s.set_point_line(0);
+        s.annotate();
+        s.note_prompt_char('x');
+        s.note_prompt_confirm();
+        assert_eq!(ann_records(&s).len(), 1);
+        // Pre-fill for edit, clear it, RET → delete.
+        s.set_point_line(0);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "x");
+        s.note_prompt_backspace();
+        s.note_prompt_confirm();
+        assert_eq!(ann_records(&s).len(), 0, "empty RET on existing record deletes");
+        // Fresh prompt, RET with nothing → cancel, no record.
+        s.set_point_line(1);
+        s.annotate();
+        s.note_prompt_confirm();
+        assert_eq!(ann_records(&s).len(), 0);
+        assert_eq!(s.message, "note cancelled");
+    }
+
+    /// The rendered-row map round-trips buffer_line ↔ rendered_row through
+    /// the STORE's file_view_rows (the real viewport, interleaved note
+    /// rows), and mouse_click_position maps a code row under an annotation
+    /// to the right buffer line.
+    #[test]
+    fn notes_row_map_store_and_click_mapping() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann7.rs", "c0\nc1\nc2\nc3\nc4\n");
+        // Two annotations: line 1 and line 3 (both note rows visible).
+        for (line, note) in [(1, "n1"), (3, "n3")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                path: "src/ann7.rs".to_string(),
+                line,
+                col: 0,
+                anchor: format!("c{line}"),
+                text: note.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        let rows = s.file_view_rows();
+        // Row list: c0, c1, note1, c2, c3, note3, c4, (empty last line
+        // from the trailing newline — ropey's len_lines counts it).
+        let shape: Vec<(usize, bool)> = rows
+            .iter()
+            .map(|r| (r.line, r.is_note))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, false),
+                (1, false),
+                (1, true),
+                (2, false),
+                (3, false),
+                (3, true),
+                (4, false),
+                (5, false)
+            ],
+            "row shape: {shape:?}"
+        );
+        // Marker flags: code rows 1 and 3 annotated, others not.
+        assert!(rows[1].annotated && rows[4].annotated);
+        assert!(!rows[0].annotated && !rows[3].annotated);
+        // Both directions of the map.
+        for line in 0..6 {
+            let r = FileViewRow::row_for_line(&rows, line).unwrap();
+            assert_eq!(FileViewRow::line_for_row(&rows, r), Some(line));
+        }
+        assert_eq!(FileViewRow::line_for_row(&rows, 2), Some(1), "note row → anchored line");
+        assert_eq!(FileViewRow::line_for_row(&rows, 5), Some(3));
+        // Total rendered rows = 6 code + 2 note.
+        assert_eq!(s.file_view_total_rows(), 8);
+        // Click mapping: rendered row 4 (c3, the code row UNDER a note row
+        // above it… here row 2) and rendered row 2 (the note row) both map
+        // to their line; the old dense math (scroll_top + row) would have
+        // sent row 4 to line 4.
+        let mut s2 = s;
+        s2.mouse_click_position(4, 0); // c3
+        assert_eq!(s2.point_line(), 3, "click on c3's rendered row → line 3");
+        s2.mouse_click_position(2, 0); // note row under c1
+        assert_eq!(s2.point_line(), 1, "click on a note row → anchored line");
+        // C-c a hides the note rows: the map collapses back to 1:1, the
+        // marker flags stay.
+        s2.annotate_toggle();
+        let rows2 = s2.file_view_rows();
+        assert_eq!(rows2.len(), 6, "note rows hidden");
+        assert!(rows2[1].annotated && rows2[3].annotated, "markers stay");
+        assert_eq!(s2.file_view_total_rows(), 6);
+        // C-c a again: back.
+        s2.annotate_toggle();
+        assert_eq!(s2.file_view_rows().len(), 8);
+    }
+
+    /// C-n/C-p across a virtual note row: the point walks BUFFER lines
+    /// (never a note row), so from the annotated line C-n lands on the
+    /// NEXT CODE line and C-p returns — the status position display is the
+    /// buffer line (map correctness).
+    #[test]
+    fn notes_point_motion_crosses_note_rows_on_code_lines() {
+        let mut s = store_with_project();
+        let content: String = (0..30).map(|i| format!("k{i}\n")).collect();
+        open_ann_file(&mut s, "src/ann8.rs", &content);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann8.rs".to_string(),
+            line: 1,
+            col: 0,
+            anchor: "k1".to_string(),
+            text: "note".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        // Point on the annotated line (1). C-n → line 2 (the CODE line,
+        // never "stuck" on the note row); the position display is the
+        // BUFFER line (map correctness).
+        s.set_point_line(1);
+        s.point_down();
+        assert_eq!(s.point_line(), 2, "C-n crosses the note row → next code line");
+        assert_eq!(
+            s.file_view_position_display(),
+            "L3,6%",
+            "status shows the code line: {}",
+            s.file_view_position_display()
+        );
+        s.point_up();
+        assert_eq!(s.point_line(), 1, "C-p back onto the annotated line");
+        assert_eq!(s.file_view_position_display(), "L2,3%");
+        // The rendered slice has 4 rows (3 code + 1 note) and the cursor
+        // row for point line 1 is 1 (not 2 — the note row comes AFTER it).
+        let rows = s.file_view_rows();
+        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(1));
+        assert!(rows[2].is_note);
+    }
+
+    /// The status line shows the current file's annotation count (and an
+    /// edit-mode save of the anchored file re-anchors in the same pass).
+    #[test]
+    fn notes_status_count_and_save_reanchors() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann9.rs", "p0\np1\n");
+        assert_eq!(s.annotation_count_display(), "");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann9.rs".to_string(),
+            line: 1,
+            col: 0,
+            anchor: "p1".to_string(),
+            text: "a".to_string(),
+            orphaned: false,
+        }));
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann9.rs".to_string(),
+            line: 0,
+            col: 0,
+            anchor: "p0".to_string(),
+            text: "b".to_string(),
+            orphaned: false,
+        }));
+        assert_eq!(s.annotation_count_display(), "2 notes");
+        // Edit-mode save re-anchors: flip the file to edit mode, change
+        // p1's line content elsewhere… simplest: the buffer already holds
+        // the anchor at line 1, so save is a no-op re-anchor (count stable).
+        let key = s.buffers.current().unwrap().to_string();
+        s.buffers.get_mut(&key).unwrap().editable = true;
+        s.save_buffer();
+        assert_eq!(s.annotation_count_display(), "2 notes", "save keeps the records");
+        // Now delete the anchor line out-of-band + save: p0 gone → orphan
+        // flag, record NOT lost.
+        let key = s.buffers.current().unwrap().to_string();
+        s.buffers.get_mut(&key).unwrap().rope = Rope::from_str("x\np1\n");
+        s.buffers.get_mut(&key).unwrap().locally_modified = true;
+        s.save_buffer();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2, "orphaned records are not lost");
+        let o = recs.iter().find(|a| a.anchor == "p0").unwrap();
+        assert!(o.orphaned, "p0's anchor text is gone → orphaned");
+        let k = recs.iter().find(|a| a.anchor == "p1").unwrap();
+        assert!(!k.orphaned);
+        assert_eq!(s.annotation_count_display(), "2 notes");
     }
 }
 

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 
 use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
-use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewLine, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
+use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::file_view::FileView;
@@ -121,47 +121,45 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
             let max_content_row = snap
                 .file_view_viewport_lines
                 .saturating_sub(banner as usize + 1);
-            if snap.file_view_current_buffer_editable {
-                // Editable buffers (notes/scratch): the cursor stays on the
-                // insertion row (the last line) — append-at-end, unchanged
-                // and out of scope for 05b (the point may move internally but
-                // the hardware cursor does not).
-                let insert_line = total.saturating_sub(1);
-                let content_row = insert_line
-                    .saturating_sub(snap.file_view_top_line)
-                    .min(max_content_row);
-                Some((0, 1 + banner + content_row as u16))
+            // The target BUFFER line: the point (read-focused) or the
+            // insertion row (the last line, editable buffers — the cursor
+            // stays there; plan 004 05b/05c). plan 005 issue 02: that
+            // buffer line is translated to its RENDERED row through the row
+            // list (note rows are extra rows; the dense `line - top`
+            // offset is gone). When the target line is outside the visible
+            // slice (the window can sit off the point), fall back to the
+            // pre-annotation clamp.
+            let target_line = if snap.file_view_current_buffer_editable {
+                total.saturating_sub(1)
             } else {
-                // read-focused file view: the cursor tracks the point
-                // (plan 004 issue 05b). Row = the point's buffer line
-                // relative to the window top (clamped to the visible window,
-                // issue 05c); col = the point's display column (05d).
-                // Cols beyond the pane width place the cursor off-screen (no
-                // horizontal scroll in 05b).
-                let line = snap
-                    .file_view_point_line
-                    .min(total.saturating_sub(1));
-                let content_row = line
-                    .saturating_sub(snap.file_view_top_line)
-                    .min(max_content_row);
+                snap.file_view_point_line.min(total.saturating_sub(1))
+            };
+            let rows = &snap.file_view_rows;
+            let content_row = match FileViewRow::row_for_line(rows, target_line) {
+                Some(i) => i,
+                None => target_line.saturating_sub(snap.file_view_top_line),
+            }
+            .min(max_content_row);
+            let col = if snap.file_view_current_buffer_editable {
+                0
+            } else {
                 // The terminal cursor is positioned in CELLS, not char
                 // indexes: the display column is the width of the point
                 // line's prefix [0, point_col) (plan 004 issue 05d). Fall
                 // back to the char index when the point line is outside
                 // the pre-computed visible slice (the cursor row is
                 // clamped off the point in that case too).
-                let col = snap
-                    .file_view_lines
-                    .get(line.saturating_sub(snap.file_view_top_line))
-                    .map(|l| {
+                FileViewRow::row_for_line(rows, target_line)
+                    .and_then(|i| rows.get(i))
+                    .map(|r| {
                         crate::model::text_width::char_index_to_display_col(
-                            &l.text,
+                            &r.text,
                             snap.file_view_point_col,
                         )
                     })
-                    .unwrap_or(snap.file_view_point_col);
-                Some((col as u16, 1 + banner + content_row as u16))
-            }
+                    .unwrap_or(snap.file_view_point_col)
+            };
+            Some((col as u16, 1 + banner + content_row as u16))
         }
     };
     // Plan 004 issue 05g: the terminal cursor is in ABSOLUTE screen
@@ -233,7 +231,13 @@ struct Snapshot {
     commit_editor_rows: Vec<MagitRow>,
     dirty: Option<DirtyCounts>,
     // File view (issue 03).
-    file_view_lines: Vec<FileViewLine>,
+    /// The pre-computed rendered rows: code rows + the virtual annotation
+    /// note rows (plan 005 issue 02). Each row carries its buffer-line
+    /// index; the cursor/click math translate through them.
+    file_view_rows: Vec<FileViewRow>,
+    /// The total number of rendered rows for the buffer (canvas bottom
+    /// scroll indicator; plan 005 issue 02).
+    file_view_total_rows: usize,
     file_view_title: String,
     file_view_top_line: usize,
     file_view_total_lines: usize,
@@ -271,6 +275,9 @@ struct Snapshot {
     searching: String,
     // Plan 004 row 11: file-view position display (Top/Bot/L{n},{pct}%).
     position: String,
+    // plan 005 issue 02: the current file's annotation count ("1 note" /
+    // "3 notes"; empty when there are none).
+    annotations: String,
     // Plan 004 issue 03: region line range for the file view's region face.
     region_lines: Option<(usize, usize)>,
     // Plan 004 issue 03: region size for the status line display.
@@ -459,7 +466,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // are invisible (written but never observed) and the UI stays on its
         // first frame.
         let _revision = tick.get();
-        let s = store.lock().unwrap();
+        let mut s = store.lock().unwrap();
         let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
         let (search_rows, search_top_row, search_total_rows, search_selected_row) =
             s.search_view_info();
@@ -509,7 +516,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             commit_editor_title: s.commit_editor_title(),
             commit_editor_rows: s.commit_editor_rows(),
             dirty: s.dirty_counts(),
-            file_view_lines: s.file_view_lines(),
+            file_view_rows: s.file_view_rows(),
+            file_view_total_rows: s.file_view_total_rows(),
             file_view_title: s.view_name_display(),
             file_view_top_line: top_line,
             file_view_total_lines: total_lines,
@@ -534,6 +542,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             search_error: s.search_error(),
             searching: s.search_display(),
             position: s.file_view_position_display(),
+            annotations: s.annotation_count_display(),
             region_lines: s.region_line_range(),
             region_size: s.region_size_bytes(),
         }
@@ -584,8 +593,8 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ViewId::Buffer => Some(element! {
             FileView(
                 title: snap.file_view_title.clone(),
-                lines: snap.file_view_lines.clone(),
-                total_lines: snap.file_view_total_lines,
+                rows: snap.file_view_rows.clone(),
+                total_rows: snap.file_view_total_rows,
                 top_line: snap.file_view_top_line,
                 viewport_lines: snap.file_view_viewport_lines,
                 changed_on_disk: snap.file_view_changed_on_disk,
@@ -701,6 +710,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 indexing: snap.indexing,
                 searching: snap.searching,
                 position: snap.position,
+                annotations: snap.annotations,
                 region_size: snap.region_size,
             )
         }
@@ -745,6 +755,9 @@ struct StatusLineProps {
     pub indexing: String,
     pub searching: String,
     pub position: String,
+    /// The current file's annotation count ("1 note" / "3 notes"; empty
+    /// when there are none — plan 005 issue 02).
+    pub annotations: String,
     /// Region size in bytes (plan 004 issue 03); shown when a region is active.
     pub region_size: Option<usize>,
 }
@@ -786,6 +799,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     }
     if !props.position.is_empty() {
         text.push_str(&format!("  {}", props.position));
+    }
+    if !props.annotations.is_empty() {
+        text.push_str(&format!("  {}", props.annotations));
     }
     if let Some(size) = props.region_size {
         text.push_str(&format!("  [{}B]", size));
@@ -906,7 +922,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 102"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 105"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }
@@ -1083,15 +1099,21 @@ mod tests {
     /// with the given lines at window top 0. All fields `cursor_cell` does
     /// not read stay at inert defaults.
     fn buffer_snapshot(lines: &[&str], point_line: usize, point_col: usize) -> Snapshot {
+        let rows: Vec<FileViewRow> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, t)| FileViewRow {
+                line: i,
+                is_note: false,
+                annotated: false,
+                text: (*t).to_string(),
+                spans: Vec::new(),
+            })
+            .collect();
         Snapshot {
             view: ViewId::Buffer,
-            file_view_lines: lines
-                .iter()
-                .map(|t| FileViewLine {
-                    text: (*t).to_string(),
-                    spans: Vec::new(),
-                })
-                .collect(),
+            file_view_rows: rows.clone(),
+            file_view_total_rows: lines.len(),
             file_view_top_line: 0,
             file_view_total_lines: lines.len(),
             file_view_viewport_lines: 21,
@@ -1148,6 +1170,7 @@ mod tests {
             search_error: None,
             searching: String::new(),
             position: String::new(),
+            annotations: String::new(),
             region_lines: None,
             region_size: None,
         }
