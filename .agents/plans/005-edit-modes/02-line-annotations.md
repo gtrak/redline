@@ -53,6 +53,27 @@ that it'll know what to do."
   content in the same pass.
 - Status line shows the current file's annotation count.
 
+## Orchestrator risk note (2026-09-18) — the row map is the hard part
+
+The file view is **virtualized**: the store pre-computes `FileViewLine`s for
+the viewport and `file_view.rs` draws them 1:1 with rows; the hardware
+cursor is placed by `cursor_cell` = `point_line − scroll_top + title_offset`
+(05b/05c). Inserting a **virtual note row** under an annotated line breaks
+that 1:1 assumption. The fix must be a real mapping, not an offset fudge:
+
+- Build the viewport as an ordered list of `RenderedRow` (either a code line
+  with its buffer-line index, or a note row); `cursor_cell` and any
+  click-to-line mapping (05c's `mouse_click_position`) must translate
+  through `buffer_line ↔ rendered_row`, both directions.
+- `mouse_click_position` currently does `target_line = scroll_top + row` —
+  that is exactly the arithmetic that must become map-aware.
+- Add regression legs: with the cursor on an annotated line, `C-n`/`C-p`
+  cross the virtual note row and land the cursor on a CODE row with the
+  correct buffer line shown in the status/which-function; clicking a code
+  row under an annotation still maps to the right line.
+This is the single most likely place for a subtle regression, so it gets
+its own tests before the visual polish.
+
 ## Files
 
 | File | Change |
