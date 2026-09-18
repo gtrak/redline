@@ -133,9 +133,14 @@ impl Component for FileViewCanvas {
         // more rows remain below. The "↓" bound is in RENDERED-row space
         // (plan 005 issue 02): note rows count as rows, and a slice row
         // below the canvas bottom (the title/indicator overlap, as before)
-        // also implies more below.
+        // also implies more below. The "↑" keys off the EMITTED window's
+        // first buffer line (rows[0].line), not the raw scroll_top: the
+        // window may have advanced start above scroll_top to keep the
+        // point drawn (plan 005 issue 02b), and a hidden line 0 must still
+        // read as scrolled-past-top. scroll_top semantics for the other
+        // consumers are unchanged.
         let mut indicators = String::new();
-        if self.top_line > 0 {
+        if self.rows.first().map_or(self.top_line, |r| r.line) > 0 {
             indicators.push('↑');
         }
         if self.rows.len() > h || self.rows.len() < self.total_rows {

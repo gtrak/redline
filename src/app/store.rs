@@ -3977,10 +3977,13 @@ impl AppStore {
 
     /// Pre-compute the rendered rows for the file view (plan 005 issue 02):
     /// the code rows of the visible buffer lines
-    /// `[top_line, top_line + viewport_lines)`, with a virtual annotation
-    /// note row directly under each annotated line when note rows are shown
-    /// (`show_note_rows`; `C-c a` toggles — the `annotated` flag on the
-    /// code rows is independent, so the margin marker stays). Every row
+    /// `[top_line, top_line + viewport_lines)`, capped so that
+    /// `code_rows + note_rows <= viewport_lines` always holds (plan 005
+    /// issue 02b: at least one code row, the point's line always drawn),
+    /// with a virtual annotation note row directly under each annotated
+    /// line as the note-row budget allows (`show_note_rows`; `C-c a`
+    /// toggles — the `annotated` flag on the code rows is independent, so
+    /// the margin marker stays). Every row
     /// carries its buffer-line index: the dense 1:1 "row i == line top+i"
     /// assumption is gone, and the renderer / `cursor_cell` /
     /// `mouse_click_position` translate `buffer_line` ↔ `rendered_row`
@@ -4022,15 +4025,18 @@ impl AppStore {
         // plan 005 issue 02b: cap the code-row span so total rendered rows
         // (code + notes) <= viewport_lines. The canvas has exactly
         // viewport_lines rows; note rows steal canvas rows, so the code
-        // rows must be reduced. If the point's line is excluded by the cap,
-        // advance start so the point is always drawn.
+        // rows must be reduced. The span is at least 1 (round 2 P1): when
+        // EVERY line in the window is annotated (`n_notes ==
+        // viewport_lines`), a 0 span emitted ZERO rows and blanked the
+        // whole view. If the point's line is excluded by the cap, advance
+        // start so the point is always drawn.
         if self.show_note_rows && !records.is_empty() {
             let n_notes: usize = records
                 .iter()
                 .filter(|a| a.line >= start && a.line < end)
                 .count();
             if n_notes > 0 {
-                let code_span = self.viewport_lines.saturating_sub(n_notes);
+                let code_span = self.viewport_lines.saturating_sub(n_notes).max(1);
                 end = (start + code_span).min(total);
                 // Ensure the point's line is in the emitted range: if the
                 // cap excluded it, advance start so the point is the last
@@ -4043,7 +4049,18 @@ impl AppStore {
             }
         }
 
-        let mut out = Vec::with_capacity(end.saturating_sub(start) + records.len());
+        // Round 2 (budget counts are FINAL): the cap above is sized from
+        // the FULL window's note count, but the emitted range — shrunk to
+        // `code_span` and possibly advanced for the point — can hold a
+        // different (larger) note count, e.g. many records on one line.
+        // Recount in the emitted range and cap the emitted NOTE rows so
+        // `code_rows + note_rows <= viewport_lines` always holds; the
+        // code rows (>= 1, including the point's line) are emitted first
+        // and never reduced further.
+        let code_rows = end - start;
+        let mut notes_left = self.viewport_lines.saturating_sub(code_rows);
+
+        let mut out = Vec::with_capacity(end.saturating_sub(start) + notes_left);
         for line in start..end {
             let text = buf.line_text(line).unwrap_or_default().to_string();
             let spans = highlight
@@ -4060,6 +4077,10 @@ impl AppStore {
             });
             if self.show_note_rows {
                 for a in records.iter().filter(|a| a.line == line) {
+                    if notes_left == 0 {
+                        break; // the note-row budget is final: stop here
+                    }
+                    notes_left -= 1;
                     let mut note = format!("  \u{25b8} {}", a.text);
                     if a.orphaned {
                         note.push_str(" (orphaned)");
@@ -14001,6 +14022,164 @@ mod tests {
         let rows = s.file_view_rows();
         assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(1));
         assert!(rows[2].is_note);
+    }
+
+    /// plan 005 issue 02b (round 2): the budget counts are FINAL. The
+    /// all-lines-annotated window (where `code_span = viewport_lines -
+    /// n_notes` collapsed to 0 rows and a BLANK view) still emits the
+    /// point's code row, never exceeds `viewport_lines` rendered rows, and
+    /// the emitted-range note recount keeps `code + note <= viewport`
+    /// even when many records share one line (where the full-window note
+    /// count underestimates the advanced range's note count).
+    #[test]
+    fn notes_all_lines_annotated_budget_is_final() {
+        // Leg 1 (the repro): 25-line file, ALL 25 lines annotated,
+        // viewport 21, scroll_top 0 → n_notes == viewport, the span must
+        // stay >= 1 and the point's line must be drawn (not blank).
+        let mut s = store_with_project();
+        let content: String = (0..25).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        open_ann_file(&mut s, "src/ann10.rs", &content);
+        for line in 0..25 {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                path: "src/ann10.rs".to_string(),
+                line,
+                col: 0,
+                anchor: format!("line{line}"),
+                text: "note".to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(21);
+        s.set_scroll_top(0);
+        s.set_point_line(0);
+        let rows = s.file_view_rows();
+        assert!(!rows.is_empty(), "view must not blank: {rows:?}");
+        assert!(
+            rows.len() <= 21,
+            "budget exceeded: {} rows",
+            rows.len()
+        );
+        // The point's line IS drawn (as a code row, with its text intact).
+        assert_eq!(FileViewRow::row_for_line(&rows, 0), Some(0));
+        assert!(!rows[0].is_note);
+        assert_eq!(rows[0].text, "line0");
+        assert!(rows[0].annotated);
+        // Every note row sits directly under its anchored code row.
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_note {
+                assert!(!rows[i - 1].is_note);
+                assert_eq!(rows[i - 1].line, r.line);
+            }
+        }
+
+        // Leg 2: the point is NOT at the window top: the cap's span is 1
+        // (n_notes == viewport), so start advances to keep the point's
+        // line drawn — the point is still the only code row, with its
+        // note under it, and the view is not blank.
+        let mut s2 = store_with_project();
+        let content: String = (0..25).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        open_ann_file(&mut s2, "src/ann11.rs", &content);
+        for line in 0..25 {
+            s2.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                path: "src/ann11.rs".to_string(),
+                line,
+                col: 0,
+                anchor: format!("line{line}"),
+                text: "note".to_string(),
+                orphaned: false,
+            }));
+        }
+        s2.sync_notes_from_doc();
+        s2.set_viewport_lines(21);
+        s2.set_scroll_top(0);
+        s2.set_point_line(10);
+        let rows = s2.file_view_rows();
+        assert!(!rows.is_empty(), "view must not blank: {rows:?}");
+        assert_eq!(
+            FileViewRow::row_for_line(&rows, 10),
+            Some(0),
+            "point's line is drawn first: {:?}",
+            rows.iter().map(|r| (r.line, r.is_note)).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].text, "line10");
+        // The emitted window's first buffer line (10) is above scroll_top
+        // (0) — the \u{2191} indicator keys off rows[0].line.
+        assert_eq!(rows[0].line, 10, "window advanced above scroll_top");
+
+        // Leg 3 (the re-overflow): 22 records on ONE line (more than the
+        // viewport) — the full-window note count sizes the span to 1,
+        // and the advanced range holds all 22 notes. The emitted-range
+        // recount caps the note rows so code + note <= 21 always.
+        let mut s3 = store_with_project();
+        let content: String = (0..30).map(|i| format!("k{i}")).collect::<Vec<_>>().join("\n");
+        open_ann_file(&mut s3, "src/ann12.rs", &content);
+        for i in 0..22 {
+            s3.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                path: "src/ann12.rs".to_string(),
+                line: 5,
+                col: 0,
+                anchor: "k5".to_string(),
+                text: format!("note {i}"),
+                orphaned: false,
+            }));
+        }
+        s3.sync_notes_from_doc();
+        s3.set_viewport_lines(21);
+        s3.set_scroll_top(0);
+        s3.set_point_line(5);
+        let rows = s3.file_view_rows();
+        assert_eq!(rows.len(), 21, "1 code row + 20 capped note rows");
+        assert_eq!(FileViewRow::row_for_line(&rows, 5), Some(0), "point's line drawn");
+        assert_eq!(rows.iter().filter(|r| r.is_note).count(), 20);
+
+        // Leg 4 (non-degenerate regression): a single note in a 31-line
+        // file, viewport 21 → the span stays 20 code rows + the 1 note
+        // (the pre-round-2 behavior, unchanged): the note row is drawn.
+        let mut s4 = store_with_project();
+        let content: String = (0..30).map(|i| format!("k{i}")).collect::<Vec<_>>().join("\n");
+        open_ann_file(&mut s4, "src/ann13.rs", &content);
+        s4.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/ann13.rs".to_string(),
+            line: 2,
+            col: 0,
+            anchor: "k2".to_string(),
+            text: "note".to_string(),
+            orphaned: false,
+        }));
+        s4.sync_notes_from_doc();
+        s4.set_viewport_lines(21);
+        s4.set_scroll_top(0);
+        s4.set_point_line(2);
+        let rows = s4.file_view_rows();
+        let shape: Vec<(usize, bool)> = rows.iter().map(|r| (r.line, r.is_note)).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, false),
+                (1, false),
+                (2, false),
+                (2, true),
+                (3, false),
+                (4, false),
+                (5, false),
+                (6, false),
+                (7, false),
+                (8, false),
+                (9, false),
+                (10, false),
+                (11, false),
+                (12, false),
+                (13, false),
+                (14, false),
+                (15, false),
+                (16, false),
+                (17, false),
+                (18, false),
+                (19, false)
+            ],
+            "20 code rows + 1 note = 21: {shape:?}"
+        );
     }
 
     /// The status line shows the current file's annotation count (and an

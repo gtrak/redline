@@ -921,11 +921,22 @@ def annotation_gutter_checks():
         s.key("C-n", 0.15)
     s._read(0.5, quiet=0.15)
     r, c = last_cup_after_sync(s.key("C-a", 0.6))
-    # The cursor row must be within the canvas (rows 1 to 21, 1-based).
-    # With the note-row cap, the point's rendered row is within the viewport.
-    cursor_in_canvas = r is not None and 1 <= r <= 21
+    # The cursor row must be within the canvas: the title occupies CUP row
+    # 1, so the 21 content rows are CUP rows 2..=22 (1-based).
+    cursor_in_canvas = r is not None and 2 <= r <= 22
     rec("C-n x20: cursor row within canvas (not off-screen)",
-        cursor_in_canvas, f"cup_row={r} (want 1..=21)")
+        cursor_in_canvas, f"cup_row={r} (want 2..=22)")
+    # The row UNDER the cursor must CONTAIN the point's line text (line 20
+    # is "filler line 20") — a range check alone would also pass a future
+    # off-by-one that lands the cursor on a NEIGHBOURING drawn row.
+    # (row_text is 0-based; the CUP row r is 1-based.)
+    cursor_row_text = s.row_text(r - 1) if r is not None else None
+    cursor_on_point_line = (
+        cursor_row_text is not None and "filler line 20" in cursor_row_text
+    )
+    rec("C-n x20: cursor row contains the point's line text",
+        cursor_on_point_line,
+        f"row={cursor_row_text!r} (want a row containing 'filler line 20')")
     # The point's line IS drawn: verify the cursor is NOT at the top (the
     # point moved down from line 0) and is in the lower half of the canvas.
     # The exact line number depends on the file length and note-row cap,
