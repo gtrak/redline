@@ -1473,9 +1473,11 @@ pub struct AppStore {
     /// (mirrors `resolve_bus`).
     pub crate_index_bus: CrateIndexBus,
     /// Status-line activity while a crate-index job is in flight: one
-    /// `(source_root, label)` per build; cleared when its final event
-    /// lands (`apply_crate_index_event`).
-    crate_indexing: Vec<(PathBuf, String)>,
+    /// `(source_root, label, progress)` per build (the publisher-less
+    /// progress counter feeds the `indexing crate <dir> (i/N)…` status,
+    /// 006-03b item 5); cleared when its final event lands
+    /// (`apply_crate_index_event`).
+    crate_indexing: Vec<(PathBuf, String, Arc<IndexProgress>)>,
     /// The `source_root` the Xref picker's candidates are keyed against
     /// (`None` = the project index): set when M-. inside an EXTERNAL
     /// buffer opens the ambiguous picker, so query re-computation,
@@ -3191,6 +3193,9 @@ impl AppStore {
         // for exactly these buffers.
         self.external_buffers.insert(key.clone());
         self.buffers.set_current(&key);
+        // 006-03b item 1: the landed crate is now the crate we are IN —
+        // keep it MRU so it can never be the LRU eviction victim.
+        self.bump_current_crate_recency();
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
         Some(key)
@@ -3835,7 +3840,12 @@ impl AppStore {
                 let _ = self.dispatch(&name, None);
             }
             PickerKind::FindFile | PickerKind::RecentFiles => self.open_path(&name),
-            PickerKind::Buffers => self.buffers.set_current(&name),
+            PickerKind::Buffers => {
+                self.buffers.set_current(&name);
+                // 006-03b item 1: a switched-to external buffer keeps its
+                // owning crate MRU.
+                self.bump_current_crate_recency();
+            }
             PickerKind::KillBuffer => self.kill_buffer(&name),
             PickerKind::Projects => self.switch_project_root(&name),
             PickerKind::Xref | PickerKind::Symbols => {
@@ -3985,6 +3995,9 @@ impl AppStore {
             None => return,
         };
         self.buffers.set_current(&key);
+        // 006-03b item 1: a switched-to external buffer keeps its owning
+        // crate MRU.
+        self.bump_current_crate_recency();
         self.close_view();
     }
 
@@ -7082,6 +7095,9 @@ impl AppStore {
             return;
         }
         self.buffers.set_current(&entry.buffer_key);
+        // 006-03b item 1: a jump-back into an external buffer keeps its
+        // owning crate MRU.
+        self.bump_current_crate_recency();
         self.set_point(entry.line, entry.col, entry.col);
         self.ensure_highlight();
     }
@@ -7472,7 +7488,7 @@ impl AppStore {
         if self.external_indexes.iter().any(|(r, _)| r == root) {
             return; // already indexed
         }
-        if self.crate_indexing.iter().any(|(r, _)| r == root) {
+        if self.crate_indexing.iter().any(|(r, _, _)| r == root) {
             return; // a build is already in flight for this root
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -7494,11 +7510,16 @@ impl AppStore {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        self.crate_indexing.push((root.to_path_buf(), label.clone()));
+        // 006-03b item 5: the N/M file counter — the same publisher-less
+        // `IndexProgress` the project indexer uses (no `nav/index.rs`
+        // change: `new` / `done` / `total` are already public).
+        let progress = Arc::new(IndexProgress::new(files.len()));
+        self.crate_indexing
+            .push((root.to_path_buf(), label.clone(), progress.clone()));
         let bus = self.crate_index_bus.clone();
         let root_clone = root.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let index = build_index(&root_clone, &files, None);
+            let index = build_index(&root_clone, &files, Some(progress.as_ref()));
             bus.send(CrateIndexEvent {
                 source_root: root_clone,
                 index,
@@ -7528,8 +7549,12 @@ impl AppStore {
 
     /// Install a crate-index event into the store (called by the UI's
     /// CrateIndexBus drain). LRU: the root's entry becomes the newest;
-    /// the oldest are evicted past `EXT_INDEX_CAP`; the root's in-flight
-    /// indicator clears (it can never stick past its own final event).
+    /// the oldest are evicted past `EXT_INDEX_CAP` — and then the current
+    /// buffer's owning crate is bumped back to the newest slot, so the
+    /// crate the user is IN is never the eviction victim (006-03b item
+    /// 1: the arrival is where the eviction happens). The root's
+    /// in-flight indicator clears (it can never stick past its own final
+    /// event).
     pub fn apply_crate_index_event(&mut self, event: &CrateIndexEvent) {
         let index = Arc::new(std::sync::Mutex::new(event.index.clone()));
         // A duplicate entry for the same root (a stale re-build; never
@@ -7540,17 +7565,21 @@ impl AppStore {
         while self.external_indexes.len() > EXT_INDEX_CAP {
             self.external_indexes.remove(0); // evict the oldest
         }
+        self.bump_current_crate_recency();
         self.crate_indexing
-            .retain(|(r, _)| r != &event.source_root);
+            .retain(|(r, _, _)| r != &event.source_root);
     }
 
-    /// The `indexing crate …` indicator for the activity display (empty
-    /// when idle): mirrors the project indexing indicator on the status
-    /// line.
+    /// The `indexing crate <dir> (i/N)…` indicator for the activity
+    /// display (empty when idle; the N/M counter is the build's file
+    /// progress, 006-03b item 5): mirrors the project indexing indicator
+    /// on the status line.
     pub fn crate_indexing_display(&self) -> String {
         self.crate_indexing
             .first()
-            .map(|(_, label)| format!("indexing crate {label}…"))
+            .map(|(_, label, p)| {
+                format!("indexing crate {label} ({}/{})…", p.done(), p.total())
+            })
             .unwrap_or_default()
     }
 
@@ -7585,6 +7614,71 @@ impl AppStore {
         Some((root, arc))
     }
 
+    /// The crate-relative index key for `path` under `root` —
+    /// forward-slash normalized (006-03b item 3): the SAME key shape
+    /// `crate_rs_files` builds with, so a native-`\`-separated `rel`
+    /// never breaks the same-file-first ordering or the `outline` lookup
+    /// (the Windows separator case). `None` when `path` is not under
+    /// `root` (callers treat that as the empty result, never a panic —
+    /// 006-03b item 4).
+    fn crate_rel(path: &Path, root: &Path) -> Option<String> {
+        path.strip_prefix(root)
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// 006-03b item 1: keep the current buffer's OWNING crate MRU — the
+    /// crate the user is IN is never the LRU eviction victim. Called on
+    /// every transition that can put an external buffer current (the
+    /// `open_external_path` landing, the buffer-list / picker / jump-back
+    /// switches) and at every index arrival (the eviction point, in
+    /// `apply_crate_index_event`).
+    fn bump_current_crate_recency(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            return;
+        };
+        let Some((root, _)) = self
+            .external_indexes
+            .iter()
+            .find(|(r, _)| path.starts_with(r))
+            .cloned()
+        else {
+            return;
+        };
+        let _ = self.crate_index_arc(&root);
+    }
+
+    /// 006-03b item 2: the resolver fall-through's `from_file` for an
+    /// EXTERNAL buffer. `SymbolContext.from_file` is documented
+    /// root-relative (the project path passes the project-relative
+    /// `rel`), so the absolute path never goes: the crate-relative key
+    /// shape (the index's own key) when the owning root is known —
+    /// cached, or still in flight — else the bare file name (relative,
+    /// never absolute; the root is genuinely unknown when a build was
+    /// refused or no runtime is present).
+    fn resolver_from_file(&self, path: &Path) -> String {
+        let root = self
+            .external_indexes
+            .iter()
+            .find(|(r, _)| path.starts_with(r))
+            .map(|(r, _)| r.clone())
+            .or_else(|| {
+                self.crate_indexing
+                    .iter()
+                    .find(|(r, _, _)| path.starts_with(r))
+                    .map(|(r, _, _)| r.clone())
+            });
+        root.and_then(|root| Self::crate_rel(path, &root))
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            })
+    }
+
     /// M-. inside an EXTERNAL (registry / tooling) buffer (plan 006
     /// issue 03): the SAME selection rule as the project path (symbol at
     /// point + `::`-path token, same-file-first candidate ordering,
@@ -7615,8 +7709,11 @@ impl AppStore {
             // or no runtime): the miss behaves as the project's — the
             // resolver fall-through (or "no symbol under point").
             match &at {
-                Some((_, path_token)) => self
-                    .start_symbol_resolution(path_token, &path.display().to_string()),
+                // 006-03b item 2: a root-relative `from_file` (never the
+                // absolute path).
+                Some((_, path_token)) => {
+                    self.start_symbol_resolution(path_token, &self.resolver_from_file(path))
+                }
                 None => self.minibuffer_message("no symbol under point"),
             }
             return;
@@ -7658,7 +7755,9 @@ impl AppStore {
                 self.open_picker(PickerKind::Xref, "Definition: ", candidates);
             }
             ExternalXrefOutcome::Resolver(token) => {
-                self.start_symbol_resolution(&token, &path.display().to_string())
+                // 006-03b item 2: a root-relative `from_file` (never the
+                // absolute path).
+                self.start_symbol_resolution(&token, &self.resolver_from_file(path))
             }
             ExternalXrefOutcome::NoDefinition(name) => {
                 self.minibuffer_message(&format!("no definition for `{name}`"))
@@ -7681,11 +7780,8 @@ impl AppStore {
     ) -> Option<(PathBuf, ExternalXrefOutcome)> {
         let (root, arc) = self.crate_index_arc_for_path(path)?;
         let idx = arc.lock().unwrap();
-        let rel = path
-            .strip_prefix(&root)
-            .ok()?
-            .to_string_lossy()
-            .into_owned();
+        // 006-03b item 3: the index key shape (forward-slash normalized).
+        let rel = Self::crate_rel(path, &root)?;
         // (2) Symbol-at-point definitions (the same selection rule as the
         // project path).
         let defs = at
@@ -7876,14 +7972,13 @@ impl AppStore {
             Ok(rel) => self.index.outline(&rel.to_string_lossy()).to_vec(),
             Err(_) if self.external_buffers.contains(&key) => self
                 .crate_index_arc_for_path(&path)
-                .map(|(root, arc)| {
+                .and_then(|(root, arc)| {
+                    // 006-03b item 4: a `strip_prefix` miss yields the
+                    // empty outline (the existing fallback), never a
+                    // panic.
+                    let crel = Self::crate_rel(&path, &root)?;
                     let idx = arc.lock().unwrap();
-                    let crel = path
-                        .strip_prefix(&root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
-                    idx.outline(&crel).to_vec()
+                    Some(idx.outline(&crel).to_vec())
                 })
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
@@ -12561,6 +12656,13 @@ mod tests {
             "{}",
             s.crate_indexing_display()
         );
+        // 006-03b item 5: the N/M file counter (2 .rs files in the
+        // fixture; `done` may have already advanced by now).
+        assert!(
+            s.crate_indexing_display().ends_with("/2)…"),
+            "N/M counter: {}",
+            s.crate_indexing_display()
+        );
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
             .await
             .expect("crate index event published within 30s");
@@ -12790,6 +12892,120 @@ mod tests {
             ordered,
             vec![roots[3].path(), roots[1].path(), r5.path()],
             "recency bump changed the eviction victim (roots[2] evicted)"
+        );
+    }
+
+    #[test]
+    fn external_landed_crate_survives_eviction_while_current() {
+        // 006-03b item 1: land in crate A (its buffer becomes current),
+        // then three other crates' indexes land while A's buffer stays
+        // current → A is never the eviction victim, and the next M-. in
+        // A still jumps in-crate. Discriminating: without the recency
+        // bump A is the OLDEST entry, the third arrival evicts it, and
+        // the M-. falls through to the resolver (`no provider
+        // resolution`).
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let roots: Vec<tempfile::TempDir> =
+            (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let root_a = roots[0].path();
+        std::fs::create_dir_all(root_a.join("src")).unwrap();
+        std::fs::write(
+            root_a.join("src/lib.rs"),
+            "pub fn use_helper() {\n    helper();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root_a.join("src/other.rs"), "pub fn helper() {}\n").unwrap();
+        // Land in A: its index arrives, its buffer becomes current.
+        s.apply_crate_index_event(&CrateIndexEvent {
+            source_root: root_a.to_path_buf(),
+            index: build_index(root_a, &AppStore::crate_rs_files(root_a), None),
+        });
+        s.open_external_path(&root_a.join("src/lib.rs")).unwrap();
+        // Consult the three other crates: their indexes land while A's
+        // buffer stays current (the cap is 3 — each arrival evicts the
+        // oldest).
+        for r in &roots[1..] {
+            s.apply_crate_index_event(&CrateIndexEvent {
+                source_root: r.path().to_path_buf(),
+                index: SymbolIndex::default(),
+            });
+        }
+        let ordered: Vec<&Path> =
+            s.external_indexes.iter().map(|(r, _)| r.as_path()).collect();
+        assert_eq!(s.external_indexes.len(), 3, "cap holds");
+        assert!(
+            ordered.contains(&root_a),
+            "crate A (the current buffer's crate) survived eviction: {ordered:?}"
+        );
+        // The next M-. in A still jumps in-crate.
+        s.set_point(1, 4, 4); // "    helper();" — `helper` starts at col 4.
+        s.xref_find_definitions();
+        assert!(
+            s.message.contains("jumped to src/other.rs:1"),
+            "in-crate jump intact, got: {}",
+            s.message
+        );
+    }
+
+    #[test]
+    fn external_rel_normalizes_backslash_separators() {
+        // 006-03b item 3: a `\`-containing relative path resolves the
+        // same index key as its `/` form (the Windows native-separator
+        // case; on Linux a backslash-bearing component simulates it,
+        // on Windows `src\lib.rs` is the real two-component path).
+        let (mut s, _dir, root) = store_with_crate_index(&[(
+            "src/lib.rs",
+            "pub fn helper() {}\n",
+        )]);
+        let root_path = root.path();
+        let slashy = root_path.join("src/lib.rs");
+        let backslashed = root_path.join("src\\lib.rs");
+        let r_slash = AppStore::crate_rel(&slashy, root_path);
+        let r_back = AppStore::crate_rel(&backslashed, root_path);
+        assert_eq!(r_slash.as_deref(), Some("src/lib.rs"));
+        assert_eq!(r_slash, r_back, "the \\ form normalizes to the / key");
+        // Both forms outline the same file through the cached index
+        // (the `current_buffer_outline` lookup site).
+        let arc = s.crate_index_arc(root_path).unwrap();
+        let idx = arc.lock().unwrap();
+        let outline_slash = idx.outline(&r_slash.unwrap());
+        assert!(!outline_slash.is_empty());
+        assert_eq!(idx.outline(&r_back.unwrap()), outline_slash);
+        // A non-nested path is a clean miss (the 006-03b item 4
+        // no-panic path), never an unwrap.
+        assert!(AppStore::crate_rel(
+            Path::new("elsewhere/lib.rs"),
+            root_path
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn external_resolver_from_file_is_crate_relative() {
+        // 006-03b item 2: the resolver fall-through's `from_file` for an
+        // external buffer is crate-relative (the index's own key shape),
+        // never the absolute path.
+        let (mut s, _dir, root) = store_with_crate_index(&[("src/probe.rs", "pub fn helper() {}\n")]);
+        let path = root.path().join("src/probe.rs");
+        s.open_external_path(&path).unwrap();
+        assert_eq!(s.resolver_from_file(&path), "src/probe.rs");
+        // A still-in-flight root (not yet installed) is crate-relative
+        // too…
+        let inflight = tempfile::tempdir().unwrap();
+        s.crate_indexing.push((
+            inflight.path().to_path_buf(),
+            "inflight".to_string(),
+            Arc::new(IndexProgress::new(1)),
+        ));
+        assert_eq!(
+            s.resolver_from_file(&inflight.path().join("src/lib.rs")),
+            "src/lib.rs"
+        );
+        // …and a path under NO known root falls back to the file name
+        // (relative, never absolute).
+        assert_eq!(
+            s.resolver_from_file(Path::new("/tmp/stray/lib.rs")),
+            "lib.rs"
         );
     }
 
