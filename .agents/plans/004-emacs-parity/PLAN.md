@@ -55,7 +55,10 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   point). QUEUED after 05d (same files: root.rs/tree.rs/store.rs).
 - **05f** (spec: .agents/tasks/issue-004-05f-menu-readability.md): menu
   truncation mid-word + columns colliding (7 rows at 80 cols). QUEUED.
-- **05g** (DONE, badaf9b, review in flight; 444 tests): hardware cursor
+- **05h** (spec: .agents/tasks/issue-004-05h-buffer-list-keys.md):
+  buffer-list `n`/`p`/`d` echo unbound (inconsistent with magit/log `n`/`p`
+  and the dired `d`-kill convention); found by tools/ux_sweep.py. QUEUED.
+- **05g** (DONE, badaf9b, review PASS; 444 tests): hardware cursor
   absolute with the tree visible (measured before: CUP col 3 over the
   sidebar; after: 37, verified live), plus the TREE_* consts moved to
   model/tree_layout (zero app→ui refs).
