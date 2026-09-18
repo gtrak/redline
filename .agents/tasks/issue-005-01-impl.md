@@ -58,8 +58,13 @@ the existing conflict discipline.
   them**: confirm first (reuse the existing discard-guard/confirm
   machinery if one exists; otherwise a minibuffer y/n confirm in the same
   style as the 004-04 save-prompt). Cancel leaves edit mode on.
-- Non-file buffers (notes are already editable) and non-buffer views:
-  no-op with a minibuffer message. `*scratch*`/home if present: no-op.
+- Non-file buffers and non-buffer views: no-op with a minibuffer message.
+  `*scratch*`/home if present: no-op.
+- DECIDED (2026-09-18, orchestrator, resolving a spec ambiguity the 05h-style
+  review flagged): a NOTES buffer is a real file-backed buffer, so `C-x C-q`
+  DOES toggle it (emacs `toggle-read-only` is buffer-agnostic). The earlier
+  parenthetical saying notes "no-op" is superseded; the behavior is
+  recoverable and now pinned by `toggle_read_only_also_flips_a_real_file_backed_notes_buffer`.
 
 ### 2. Editing while in edit mode
 - Typing/Backspace already work through `insert_text`/`notes_backspace`

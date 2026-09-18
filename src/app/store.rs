@@ -7745,6 +7745,32 @@ mod tests {
     }
 
     #[test]
+    fn toggle_read_only_also_flips_a_real_file_backed_notes_buffer() {
+        // DECISION (2026-09-18, orchestrator): a notes buffer is a real
+        // file-backed buffer, so `C-x C-q` toggles it like any other file
+        // (emacs `toggle-read-only` is buffer-agnostic). The earlier spec
+        // wording said notes "no-op"; that was the ambiguous half and is
+        // superseded. The behavior is recoverable (toggle back) and now
+        // pinned by this test.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let notes_key = s.buffers.current().unwrap().to_string();
+        assert!(s.buffers.get(&notes_key).unwrap().editable,
+            "notes start editable");
+
+        s.toggle_read_only();
+        assert!(!s.buffers.get(&notes_key).unwrap().editable,
+            "C-x C-q puts the notes buffer into read-only mode like any file");
+
+        s.toggle_read_only();
+        assert!(s.buffers.get(&notes_key).unwrap().editable,
+            "and back into edit mode");
+    }
+
+    #[test]
     fn toggle_read_only_noop_on_scratch_and_non_buffer_views() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
