@@ -68,9 +68,13 @@ stdout annotation dump that fits shell workflows.
   self-write suppression (expected-mtime, same branch as created_paths),
   and is_locally_owned now guards edit-mode file buffers so an external
   change cannot reload under the cursor. Verified end-to-end by the
-  orchestrator: typed bytes landed on disk. Lane order note: 005 runs
+  orchestrator: typed bytes landed on disk. Review PASS; P2 resolved by the
+  orchestrator (notes buffers DO toggle — toggle-read-only is
+  buffer-agnostic — pinned by a new test; 466 tests). Lane order note: 005 runs
   BEFORE 004-06 (the user's stated priority is editing/annotating).
-- 02 inline annotations — QUEUED (spec + pre-check ready).
+- 02 inline annotations — IN FLIGHT (spec + pre-check; the rendered-row map
+  is the hard part: file_view_lines() is a dense 1:1 slice and note rows
+  break that assumption in the renderer, cursor_cell, and click mapping).
 - 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
   so a redirect needs /dev/tty rendering).
 
