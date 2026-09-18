@@ -1,6 +1,20 @@
 # 006 — Redline: tooling-aware jump-to-definition
 
-Status: planned
+Status: 01+02 complete; 03 folded into 02 (see task record)
+
+## Outcome record
+
+- **01 PASS** (reviewer-gated), **02 PASS** (`d9e181b`, reviewer verdict 2026-09-18:
+  all 8 claims verified; 498 tests / 0 failed / 2 ignored; drive_xref 7/7).
+  02 absorbed 03's polish (read-only landing, no recents/tree-follow, absolute
+  paths out of the watcher). Issue 03 has no remaining independent scope.
+- Review follow-ups queued as **006-02b** (non-blocking, small): P2 registry
+  edit-mode write via C-x C-q override (guard toggle_read_only/save_buffer_key
+  on path ownership), P2 watch latest-wins drain race (clear resolving on any
+  event for gen <= current), P2 workspace hit should supersede an in-flight
+  resolve (bump generation in the hit path), P3 second-colon boundary in
+  symbol_at_point, P3 vacuous m_dot_includes_uppercase_identifiers test, P3
+  line==0 guard in open_resolved_source.
 Phases: 1 · Issues: 01–02
 Depends on: plan 005 (edit modes) — sequencing only; no code dependency
 
