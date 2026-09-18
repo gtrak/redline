@@ -45,6 +45,15 @@ the existing conflict discipline.
 ### 1. The toggle
 - `C-x C-q` on a file-backed buffer flips `editable` true/false
   (emacs `toggle-read-only`). Add a setter on `Buffers` if none exists.
+  **VERIFIED (2026-09-18)**: `C-q` is currently UNBOUND anywhere in the
+  app (no `ctrl_char('q')` binds), and `Buffer.editable` is NEVER mutated
+  after construction today (`grep '\.editable = '` → no hits). So this is
+  the first mid-session editability flip — check anything that was
+  derived from `editable` at construction time and re-derive it on
+  toggle (e.g. any per-buffer view/highlight state, whether the buffer is
+  treated as editable by the cursor `cursor_cell` editable arm, and the
+  `changed on disk` banner's editable-vs-plain hint wording, which keys
+  off editability).
 - **Toggling back to read-only with unsaved edits must not silently lose
   them**: confirm first (reuse the existing discard-guard/confirm
   machinery if one exists; otherwise a minibuffer y/n confirm in the same
