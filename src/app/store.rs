@@ -109,6 +109,9 @@ impl ViewId {
                 km.bind(&[Key::new(KeyCode::Left)], "point-backward").unwrap();
                 km.bind(&[Key::ctrl_char('a')], "point-line-start").unwrap();
                 km.bind(&[Key::ctrl_char('e')], "point-line-end").unwrap();
+                // Word motion (plan 004 issue 05c): M-f / M-b.
+                km.bind(&[Key::alt_char('f')], "word-forward").unwrap();
+                km.bind(&[Key::alt_char('b')], "word-backward").unwrap();
                 // Window scroll (emacs paging + the non-emacs `j`/`k`):
                 // moves the window, the point's screen row stays fixed.
                 km.bind(&[Key::char('j')], "scroll-line-down").unwrap();
@@ -2804,7 +2807,13 @@ impl AppStore {
 
     // ── mouse support (issue 09, step 4: best-effort) ─────────────────
 
-    /// Mouse wheel up: scroll the current view up by 3 lines.
+    /// Mouse wheel up (plan 004 issue 05c): in the file view this is a
+    /// WINDOW scroll of 3 lines with the point's screen row pinned (emacs
+    /// `mwheel-scroll` — the same primitive C-v/M-v use after issue 05b).
+    /// The point's buffer line advances only because the window moves under
+    /// it; the wheel never drags the point's line (the pre-05b
+    /// window-scroll behavior). List views keep their cursor model: the
+    /// selection moves by 3 rows.
     pub fn mouse_scroll_up(&mut self) {
         const STEP: usize = 3;
         match self.top_view() {
@@ -2827,7 +2836,9 @@ impl AppStore {
         }
     }
 
-    /// Mouse wheel down: scroll the current view down by 3 lines.
+    /// Mouse wheel down: the mirror of `mouse_scroll_up` — a 3-line window
+    /// scroll with the point's screen row pinned in the file view; the
+    /// selection moves by 3 rows in list views.
     pub fn mouse_scroll_down(&mut self) {
         const STEP: usize = 3;
         match self.top_view() {
@@ -2850,18 +2861,24 @@ impl AppStore {
         }
     }
 
-    /// Click-to-position in the file view: map a click row (0-based within
-    /// the visible file area) to a buffer line and scroll there.
-    /// `row` is the terminal row of the click; the caller subtracts the
-    /// file view's top offset (title line) before calling this.
-    pub fn mouse_click_position(&mut self, row: usize) {
+    /// Click-to-position in the file view (plan 004 issue 05c): set the
+    /// point to the clicked `(line, col)` — both are clamped to the buffer's
+    /// bounds, so a click past EOL lands at EOL and a click on an empty line
+    /// lands at col 0. `row` is the click's row within the visible file area
+    /// (the caller subtracts the file view's title-line offset); `col` is
+    /// the terminal column, which maps 1:1 to the line's char index (the
+    /// file view renders from column 0 — no gutter). The existing goal
+    /// column is preserved (a mouse set-point does not touch it, emacs
+    /// model); the window follows (05b behavior). No-op outside the file
+    /// view.
+    pub fn mouse_click_position(&mut self, row: usize, col: usize) {
         if self.top_view() != ViewId::Buffer {
             return;
         }
         let target_line = self.scroll_top() + row;
-        // Click-to-position lands the point at the clicked line (col 0);
-        // the window follows (plan 004 issue 05b).
-        self.set_point_line(target_line);
+        let line_len = self.line_char_len(target_line);
+        let p = self.file_point();
+        self.set_point(target_line, col.min(line_len), p.goal_col);
     }
 
     /// Scroll to the top (line 0).
@@ -2880,41 +2897,64 @@ impl AppStore {
         self.set_scroll_top(top);
     }
 
-    /// `C-l` recenter cycle (plan 004 row 8): cycles the cursor position
-    /// through top → middle → bottom of the buffer. Emacs `C-l`
-    /// (`recenter-top-of-window`) cycles point's position within the
-    /// window; in our read-focused model the cursor IS the top of the
-    /// window, so the cycle operates on the scroll position relative to
-    /// the buffer extent.
+    /// `C-l` (plan 004 issue 05c): emacs `recenter-top-bottom`. The point
+    /// does NOT move; the window repositions so the point's screen row
+    /// cycles top → middle → bottom → top within the viewport: the next
+    /// target row is `0`, `viewport/2`, or `viewport-1` chosen by the zone
+    /// the point's current screen row is in, and `scroll_top =
+    /// point_line - desired_row` clamped to `[0, max_scroll]`. (The retired
+    /// cursor-is-window-top model cycled the WINDOW through buffer thirds
+    /// while the point stayed put, so the window scrolled off the point —
+    /// the observed misbehavior this replaces.)
+    ///
+    /// Degenerate ranges: `third` keeps a `.max(1)` (the plan-004-02
+    /// protection, reworked to screen-row space) so tiny viewports still
+    /// have a distinct top/bottom zone and C-l self-heals — it never leaves
+    /// the window off the point. When the buffer barely scrolls, the
+    /// clamps pin the point near its edge and the cycle collapses to the
+    /// reachable positions (emacs recenter on a barely-scrolling buffer
+    /// behaves the same way).
     pub fn recenter(&mut self) {
-        let total = self
-            .buffers
-            .current_buffer()
-            .map(|b| b.line_count())
-            .unwrap_or(0);
+        let p = self.file_point();
+        let total = self.current_line_count();
         if total <= 1 {
             return;
         }
-        let top = self.scroll_top();
-        let max_scroll = total.saturating_sub(self.viewport_lines);
+        let vp = self.viewport_lines.max(1);
+        let max_scroll = total.saturating_sub(vp);
         if max_scroll == 0 {
             // The whole buffer fits in the viewport; nothing to recenter.
             return;
         }
-        // Clamp the third so tiny scroll ranges (max_scroll 1-2) still
-        // cycle: with third=0 the bottom zone would be unreachable and C-l
-        // could never return to top after M-> on a barely-scrolling buffer.
-        let third = (max_scroll / 3).max(1);
-        if top <= third {
-            // At (or near) top → move to middle.
-            self.set_scroll_top(max_scroll / 2);
-        } else if top <= max_scroll - third {
-            // In the middle zone → move to bottom.
-            self.set_scroll_top(max_scroll);
-        } else {
-            // At (or near) bottom → move to top.
-            self.set_scroll_top(0);
+        let screen_row = p.line.saturating_sub(self.scroll_top());
+        // Zone boundaries in screen-row space (the cycle lives inside the
+        // viewport, not the buffer range). `third.max(1)` keeps tiny
+        // viewports cycling without dead ends (see the doc above).
+        let third = (vp / 3).max(1);
+        let mid = vp / 2;
+        let bottom = vp - 1;
+        // For `mid == bottom` (2-row viewport) the cycle collapses to
+        // top ↔ middle; handle it directly so row 0 is never a dead end.
+        if mid == bottom {
+            let desired_row = if screen_row == 0 { mid } else { 0 };
+            let new_top = (p.line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize;
+            self.set_scroll_top(new_top);
+            return;
         }
+        // Zone for `screen_row`: top zone [0, third) → middle; middle zone
+        // [third, bottom - third) → bottom; bottom zone [bottom - third, ∞)
+        // → top. (A point whose row sits past the viewport — the window off
+        // the point — is in the bottom zone and C-l brings it back to the
+        // window top.)
+        let desired_row = if screen_row < third {
+            mid
+        } else if screen_row < bottom.saturating_sub(third) {
+            bottom
+        } else {
+            0
+        };
+        let new_top = (p.line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize;
+        self.set_scroll_top(new_top);
     }
 
     /// Compact position display for the status line (plan 004 row 11):
@@ -3006,6 +3046,26 @@ impl AppStore {
             .and_then(|b| b.line_text(line))
             .map(|t| t.chars().count())
             .unwrap_or(0)
+    }
+
+    /// The current buffer's line `line` as chars (empty when out of range or
+    /// no current buffer).
+    fn line_chars(&self, line: usize) -> Vec<char> {
+        self.buffers
+            .current_buffer()
+            .and_then(|b| b.line_text(line))
+            .map_or_else(Vec::new, |t| t.chars().collect())
+    }
+
+    /// Word-constituent for word motion (plan 004 issue 05c): an
+    /// alphanumeric or `_`. This is a fixed rule, NOT the emacs syntax
+    /// table: emacs decides word-ness per buffer from its syntax table
+    /// (where e.g. `?` and `!` can be word-constituents and whitespace,
+    /// symbol, and word categories are distinct). Redline treats every
+    /// other character — punctuation AND whitespace — as one "non-word"
+    /// class; newlines are non-word.
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
     }
 
     /// The current buffer's point, clamped to the buffer's bounds (a reload
@@ -3186,6 +3246,110 @@ impl AppStore {
         let p = self.file_point();
         let line_len = self.line_char_len(p.line);
         self.set_point(p.line, line_len, line_len);
+    }
+
+    /// M-f (plan 004 issue 05c; emacs `forward-word`): if the char at point
+    /// is a word char, advance to the end of that word run; otherwise skip
+    /// the non-word run (punctuation/whitespace) up to the first char of
+    /// the next word. Newlines are non-word, so the non-word skip continues
+    /// across line boundaries (emacs: the skip stops on the next word's
+    /// first char, which may sit on a later line; at the end of the buffer
+    /// it is a no-op). A word motion sets `goal_col` to the landing column
+    /// (emacs), and the window follows the point.
+    pub fn point_word_forward(&mut self) {
+        let p = self.file_point();
+        let total = self.current_line_count();
+        if total == 0 {
+            return;
+        }
+        let mut line = p.line;
+        let mut col = p.col;
+        let chars = self.line_chars(line);
+        if col < chars.len() && Self::is_word_char(chars[col]) {
+            // In a word: advance to its end (a word run cannot span a line
+            // — the newline is non-word).
+            while col < chars.len() && Self::is_word_char(chars[col]) {
+                col += 1;
+            }
+            self.set_point(line, col, col);
+            return;
+        }
+        // Not in a word: skip the non-word run (punctuation/whitespace)
+        // up to the next word's first char. Newlines are non-word, so the
+        // skip crosses to the next line and keeps skipping there.
+        let mut moved = false;
+        loop {
+            let chars = self.line_chars(line);
+            let len = chars.len();
+            while col < len && !Self::is_word_char(chars[col]) {
+                col += 1;
+                moved = true;
+            }
+            if col < len {
+                // Landed on the next word's first char.
+                break;
+            }
+            // The run reaches EOL: cross to the next line (the newline is
+            // part of the non-word run) or stop at the buffer end.
+            if line + 1 < total {
+                line += 1;
+                col = 0;
+                moved = true;
+            } else {
+                break;
+            }
+        }
+        if moved {
+            self.set_point(line, col, col);
+        }
+    }
+
+    /// M-b (plan 004 issue 05c; emacs `backward-word`): if the char before
+    /// point is a word char, retreat to the first char of that word run;
+    /// otherwise skip the non-word run (punctuation/whitespace) backward.
+    /// Newlines are non-word, so the non-word skip crosses to the previous
+    /// line and continues through its trailing punctuation/whitespace, until
+    /// it lands just past the previous word's last char (or the start of the
+    /// buffer: no-op). A word motion sets `goal_col` to the landing column
+    /// (emacs), and the window follows the point.
+    pub fn point_word_backward(&mut self) {
+        let p = self.file_point();
+        let total = self.current_line_count();
+        if total == 0 || (p.line == 0 && p.col == 0) {
+            return;
+        }
+        if p.col > 0 && Self::is_word_char(self.line_chars(p.line)[p.col - 1]) {
+            // Preceded by a word: retreat to its first char.
+            let chars = self.line_chars(p.line);
+            let mut col = p.col;
+            while col > 0 && Self::is_word_char(chars[col - 1]) {
+                col -= 1;
+            }
+            self.set_point(p.line, col, col);
+            return;
+        }
+        // Non-word before point (or point at a line start, where the
+        // preceding char is the newline): skip the non-word run backward,
+        // crossing lines (the newline is part of the run).
+        let mut line = p.line;
+        let mut col = p.col;
+        loop {
+            if col > 0 {
+                let chars = self.line_chars(line);
+                while col > 0 && !Self::is_word_char(chars[col - 1]) {
+                    col -= 1;
+                }
+                if col > 0 {
+                    self.set_point(line, col, col);
+                    return;
+                }
+            }
+            if line == 0 {
+                return; // reached the start of the buffer
+            }
+            line -= 1;
+            col = self.line_char_len(line);
+        }
     }
 
     /// M-<: point to the buffer start (line 0, col 0); the window follows.
@@ -7255,7 +7419,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 98);
+        assert_eq!(store.picker_count().0, 100);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -7273,11 +7437,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 97);
+        assert_eq!(store.picker_selected(), 99);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 96);
+        assert_eq!(store.picker_selected(), 98);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op close, *scratch* is not editable, so just a message).
@@ -7312,7 +7476,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 98);
+        assert_eq!(store.picker_count().0, 100);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -7483,6 +7647,234 @@ mod tests {
         );
     }
 
+    // ── plan 004 issue 05c: mouse (line,col) click, wheel parity, words ──
+
+    #[test]
+    fn mouse_click_sets_point_line_and_col() {
+        let (mut s, _dir) = store_with_lines(100);
+        // Lines are "lineN" — line 2 is "line2" (5 chars). The click row is
+        // 0-based within the visible area (window top 0 here).
+        s.mouse_click_position(2, 3);
+        assert_eq!((s.point_line(), s.point_col()), (2, 3), "click lands (line, col)");
+        // The window stays put: the clicked row is visible.
+        assert_eq!(s.scroll_top(), 0);
+    }
+
+    #[test]
+    fn mouse_click_past_eol_clamps_to_eol() {
+        let (mut s, _dir) = store_with_varied_lines();
+        // Line 1 is "bb" (len 2): a click far past EOL lands at EOL.
+        s.mouse_click_position(1, 99);
+        assert_eq!((s.point_line(), s.point_col()), (1, 2), "clamped to EOL");
+    }
+
+    #[test]
+    fn mouse_click_empty_line_lands_col_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        // Line 1 is empty.
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/e.rs"), "aaaa\n\nbbbb").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/e.rs");
+        s.set_viewport_lines(10);
+        s.mouse_click_position(1, 40);
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "empty line → col 0");
+    }
+
+    #[test]
+    fn mouse_click_maps_through_scroll_top() {
+        let (mut s, _dir) = store_with_lines(100);
+        // Scroll down, then click the last visible row: row + top = line.
+        s.set_scroll_top(50);
+        s.mouse_click_position(9, 2);
+        assert_eq!(s.point_line(), 59, "click row maps through the window top");
+    }
+
+    #[test]
+    fn mouse_click_preserves_goal_column() {
+        let (mut s, _dir) = store_with_varied_lines();
+        // Goal 7 on the 12-char line; the click sets (line 1, col 1) but
+        // keeps the goal column (emacs: a mouse set-point does not touch it).
+        s.set_point(0, 7, 7);
+        s.mouse_click_position(1, 1);
+        assert_eq!((s.point_line(), s.point_col()), (1, 1));
+        // C-p back to line 0 restores the goal column (7), not the click's 1.
+        s.point_up();
+        assert_eq!((s.point_line(), s.point_col()), (0, 7), "goal column preserved across the click");
+    }
+
+    #[test]
+    fn mouse_click_position_noop_outside_buffer_view() {
+        let (mut s, _dir) = store_with_lines(100);
+        s.push_view(ViewId::BufferList);
+        s.mouse_click_position(3, 4);
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "click outside the file view is a no-op");
+    }
+
+    #[test]
+    fn mouse_wheel_is_a_window_scroll_with_the_screen_row_pinned() {
+        // File view: the wheel is the C-v primitive at a 3-line step — the
+        // point's screen row is pinned and its buffer line advances only
+        // because the window moved under it.
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_point(5, 2, 2);
+        s.mouse_scroll_down();
+        assert_eq!(s.scroll_top(), 3, "wheel down scrolls the window 3 lines");
+        assert_eq!(s.point_line(), 8, "point line advanced under the window");
+        assert_eq!(s.point_line() - s.scroll_top(), 5, "screen row pinned");
+        s.mouse_scroll_up();
+        assert_eq!(s.scroll_top(), 0, "wheel up scrolls back");
+        assert_eq!(s.point_line(), 5, "point line advanced back");
+        assert_eq!(s.point_line() - s.scroll_top(), 5, "screen row still pinned");
+        // At the top, wheel-up saturates: the window cannot go above 0.
+        s.mouse_scroll_up();
+        assert_eq!(s.scroll_top(), 0);
+        assert_eq!(s.point_line(), 5);
+    }
+
+    #[test]
+    fn mouse_wheel_clamps_the_point_col_to_the_new_line() {
+        // A short line sits three rows down: the screen-row-pinned wheel
+        // drag moves the point onto it and re-clamps the col.
+        let dir = tempfile::tempdir().unwrap();
+        let content = "aaaaaaaaaaaa\naaaaaaaaaaaa\naaaaaaaaaaaa\nbb\ncccccccccccc\ncccccccccccc";
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/wl.rs"), content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/wl.rs");
+        s.set_viewport_lines(10);
+        s.set_point(0, 5, 5);
+        s.mouse_scroll_down(); // top 3: the point's row 0 drags onto line 3 ("bb")
+        assert_eq!((s.point_line(), s.point_col()), (3, 2), "point line advanced, col clamped to the short line");
+        s.mouse_scroll_up(); // top 0: back to line 0, col clamped from 2 (≤ 12)
+        assert_eq!((s.point_line(), s.point_col()), (0, 2), "wheel back: point line advanced back, col re-clamped");
+    }
+
+    /// A store with a word-motion fixture: words, punctuation runs, an
+    /// empty-line boundary, and wrap cases (no trailing newline).
+    fn store_with_words() -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        // Line 0: "hello world_foo!!"  (words: hello, world_foo)
+        // Line 1: "x"                  (single-char word)
+        // Line 2: "ab cd"              (two words)
+        let content = "hello world_foo!!\nx\nab cd";
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/w.rs"), content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/w.rs");
+        s.set_viewport_lines(10);
+        (s, dir)
+    }
+
+    #[test]
+    fn word_forward_walks_words_and_punctuation() {
+        let (mut s, _dir) = store_with_words();
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 5), "end of `hello`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 6), "skip the space, land on `world_foo`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 15), "end of `world_foo` (underscore is word)");
+        s.point_word_forward();
+        // "!!" + newline are one non-word run: crosses to line 1, col 0.
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "skip punctuation run across the newline");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (1, 1), "end of `x`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 0), "wrap across lines to `ab`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 2), "end of `ab`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 3), "land on `cd`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 5), "end of `cd` (buffer end)");
+        // At the buffer end M-f is a no-op.
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 5), "no-op at buffer end");
+    }
+
+    #[test]
+    fn word_backward_walks_words_and_punctuation() {
+        let (mut s, _dir) = store_with_words();
+        // From the end of `cd` (line 2, col 5):
+        s.set_point(2, 5, 5);
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 3), "start of `cd`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 2), "skip the space, end of `ab`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 0), "start of `ab`");
+        s.point_word_backward();
+        // Newline + " " are one non-word run back to the end of `x` (line 1, col 1).
+        assert_eq!((s.point_line(), s.point_col()), (1, 1), "cross the newline through the space");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "start of `x`");
+        s.point_word_backward();
+        // Cross to line 0, skip "!!" back to the end of `world_foo` (col 15).
+        assert_eq!((s.point_line(), s.point_col()), (0, 15), "cross the newline, skip `!!`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 6), "start of `world_foo`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 5), "skip the space, end of `hello`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "start of `hello` (buffer start)");
+        // At the buffer start M-b is a no-op.
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "no-op at buffer start");
+    }
+
+    #[test]
+    fn word_motion_over_empty_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        // "word\n\n\nnext" — two empty lines between the words.
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/e2.rs"), "word\n\n\nnext").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/e2.rs");
+        s.set_viewport_lines(10);
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 4), "end of `word`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (3, 0), "M-f skips blank lines to `next`");
+        // M-b from the start of `next`: the char before point is the newline
+        // (non-word); the run back through the blank lines lands just past
+        // `word`'s last char (line 0, col 4).
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 4), "M-b back across the blank lines");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "M-b back to the start of `word`");
+    }
+
+    #[test]
+    fn word_motion_sets_goal_column_to_landing_col() {
+        let (mut s, _dir) = store_with_words();
+        // Landing on `world_foo`'s end sets the goal column to 15; C-n onto
+        // the short line clamps col to 1, and C-p back restores goal 15
+        // (clamped to line 0's length — 17 — so 15).
+        s.set_point(0, 0, 0);
+        for _ in 0..3 {
+            s.point_word_forward(); // → (0,15)
+        }
+        s.point_down();
+        assert_eq!((s.point_line(), s.point_col()), (1, 1), "C-n clamps to the short line");
+        s.point_up();
+        assert_eq!((s.point_line(), s.point_col()), (0, 15), "C-p restores the word's landing column");
+        // M-b lands on `cd`'s start (line 2, col 3) with goal 3.
+        s.set_point(2, 5, 5);
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (2, 3));
+    }
+
     #[test]
     fn goto_line_lands_point_at_col_zero() {
         let (mut s, _dir) = store_with_lines(100);
@@ -7543,66 +7935,104 @@ mod tests {
         assert_eq!(s.scroll_top(), 0);
     }
 
-    // ── plan 004 row 8: recenter cycle ────────────────────────────────
+    // ── plan 004 issue 05c: recenter-top-bottom contract ─────────────
+    // store_with_lines(100) writes 100 "lineN\n" lines → ropey 101 lines;
+    // viewport=10 → max_scroll=91. Zones for the point's screen row:
+    // top [0,3) → middle (row 5); middle [3,6) → bottom (row 9);
+    // bottom [6,∞) → top (row 0). The point's line never moves.
 
     #[test]
-    fn recenter_cycles_top_to_middle() {
-        // viewport=10, total=100 → max_scroll=90, third=30.
-        // scroll_top=0 is in the top zone → move to middle (45).
+    fn recenter_from_bottom_zone_to_top() {
+        // Point line 50 (the window follows: top 41 → screen row 9, the
+        // bottom zone) → C-l moves the window so the point sits on row 0.
         let (mut s, _dir) = store_with_lines(100);
+        s.set_point(50, 0, 0);
+        assert_eq!(s.scroll_top(), 41);
         s.recenter();
-        assert_eq!(s.scroll_top(), 45, "top → middle");
+        assert_eq!(s.scroll_top(), 50, "bottom zone → top");
+        assert_eq!(s.point_line(), 50, "the point does not move");
     }
 
     #[test]
-    fn recenter_cycles_middle_to_bottom() {
-        // viewport=10, total=101 (100\n → ropey len_lines=101), max_scroll=91, third=30.
-        // scroll_top=45 is in the middle zone (30 < 45 <= 61) → move to bottom (91).
+    fn recenter_from_top_zone_to_middle() {
+        // Point line 50 at screen row 0 (top zone) → C-l moves it to row 5.
         let (mut s, _dir) = store_with_lines(100);
-        s.set_scroll_top(45);
+        s.set_point(50, 0, 0);
+        s.set_scroll_top(50); // screen row 0
         s.recenter();
-        assert_eq!(s.scroll_top(), 91, "middle → bottom");
+        assert_eq!(s.scroll_top(), 45, "top zone → middle (row 5)");
+        assert_eq!(s.point_line(), 50, "the point does not move");
     }
 
     #[test]
-    fn recenter_cycles_bottom_to_top() {
-        // scroll_top=91 is in the bottom zone (91 > 61) → move to top (0).
+    fn recenter_from_middle_zone_to_bottom() {
+        // Point line 50 at screen row 5 (middle zone) → C-l moves it to
+        // row 9 (the last screen row).
         let (mut s, _dir) = store_with_lines(100);
-        s.set_scroll_top(91);
+        s.set_point(50, 0, 0);
+        s.set_scroll_top(45); // screen row 5
         s.recenter();
-        assert_eq!(s.scroll_top(), 0, "bottom → top");
+        assert_eq!(s.scroll_top(), 41, "middle zone → bottom (row 9)");
+        assert_eq!(s.point_line(), 50, "the point does not move");
     }
 
     #[test]
     fn recenter_full_cycle_returns_to_start() {
         let (mut s, _dir) = store_with_lines(100);
-        s.recenter(); // top → middle (45)
-        s.recenter(); // middle → bottom (91)
-        s.recenter(); // bottom → top (0)
-        assert_eq!(s.scroll_top(), 0, "full cycle returns to top");
+        s.set_point(50, 0, 0);
+        s.set_scroll_top(50); // screen row 0
+        s.recenter(); // top → middle (row 5)
+        assert_eq!(s.scroll_top(), 45);
+        s.recenter(); // middle → bottom (row 9)
+        assert_eq!(s.scroll_top(), 41);
+        s.recenter(); // bottom → top (row 0)
+        assert_eq!(s.scroll_top(), 50, "full cycle returns to row 0");
+        assert_eq!(s.point_line(), 50, "the point never moved");
+        s.recenter(); // and the cycle repeats
+        assert_eq!(s.scroll_top(), 45);
     }
 
     #[test]
-    fn recenter_tiny_scroll_ranges_still_cycle() {
-        // Regression (plan-004-02 review): max_scroll in {1,2} made the
-        // bottom zone unreachable (third=0), so C-l could never return to
-        // top after M-> on a buffer 1-2 lines taller than the viewport.
-        // Regression (review): with third=0 the bottom zone was unreachable,
-        // so C-l could never return to top after M-> when the buffer is only
-        // 1-2 lines taller than the viewport. The clamp restores bottom->top.
-        // (A full positional 3-zone cycle is mathematically impossible for
-        // max_scroll <= 2 — the middle target lands inside the top zone — so
-        // the pinned contract is exactly the bottom->top edge.)
-        // store_with_lines(n) writes n lines + trailing \n -> ropey n+1
-        // lines; viewport=10 → max_scroll = n+1-10.
-        let (mut s, _dir) = store_with_lines(11); // max_scroll=2
-        s.set_scroll_top(2); // at bottom (M->)
+    fn recenter_tiny_scroll_ranges_keep_the_point_in_view() {
+        // Regression (plan-004-02 review, reworked to the 05c contract):
+        // when the buffer barely scrolls (max_scroll in {1,2}) the
+        // top/middle/bottom screen rows are unreachable, so the clamps pin
+        // the point where it is — C-l must never leave the window off the
+        // point and must keep the scroll in range (no dead ends, no
+        // out-of-range writes, no oscillation). store_with_lines(n) writes
+        // n lines + trailing \n → ropey n+1 lines; viewport=10.
+        for n in [10, 11] { // max_scroll in {1, 2}
+            let (mut s, _dir) = store_with_lines(n);
+            let total = s.buffers.current_buffer().unwrap().line_count();
+            let max_scroll = total - 10;
+            s.set_point(5, 0, 0);
+            for _ in 0..6 {
+                s.recenter();
+                assert!(
+                    s.scroll_top() <= max_scroll,
+                    "top in [0, {max_scroll}] (n={n})"
+                );
+                // The point's screen row must stay inside the viewport.
+                let row = s.point_line().saturating_sub(s.scroll_top());
+                assert!(row < 10, "point screen row {row} in the viewport (n={n})");
+            }
+        }
+    }
+
+    #[test]
+    fn recenter_tiny_viewports_still_cycle() {
+        // A 3-row viewport (third=1, mid=1, bottom=2) must cycle without a
+        // dead end: row 0 → middle (row 1); row 1 is in the bottom zone
+        // (bottom-third = 1) → top (row 0).
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_viewport_lines(3);
+        s.set_point(50, 0, 0);
+        s.set_scroll_top(50); // screen row 0
         s.recenter();
-        assert_eq!(s.scroll_top(), 0, "max_scroll=2: bottom -> top");
-        let (mut s, _dir) = store_with_lines(10); // max_scroll=1
-        s.set_scroll_top(1);
+        assert_eq!(s.scroll_top(), 49, "row 0 → middle (row 1)");
         s.recenter();
-        assert_eq!(s.scroll_top(), 0, "max_scroll=1: bottom -> top");
+        assert_eq!(s.scroll_top(), 50, "row 1 → top (row 0)");
+        assert_eq!(s.point_line(), 50);
     }
 
     #[test]

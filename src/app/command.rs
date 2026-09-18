@@ -302,8 +302,20 @@ impl CommandRegistry {
             |store, _arg| store.point_buffer_end(),
         ));
         reg.register(Command::new(
+            "word-forward",
+            "Point forward one word, wrapping across lines (M-f; emacs forward-word)",
+            "motion",
+            |store, _arg| store.point_word_forward(),
+        ));
+        reg.register(Command::new(
+            "word-backward",
+            "Point backward one word, wrapping across lines (M-b; emacs backward-word)",
+            "motion",
+            |store, _arg| store.point_word_backward(),
+        ));
+        reg.register(Command::new(
             "recenter",
-            "Recenter: cycle cursor position top → middle → bottom (C-l)",
+            "Recenter (C-l; emacs recenter-top-bottom): the point stays put and its screen row cycles top → middle → bottom",
             "motion",
             |store, _arg| store.recenter(),
         ));
@@ -755,7 +767,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 98, "expected 98 seed commands: {names:?}");
+        assert_eq!(names.len(), 100, "expected 100 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -786,6 +798,8 @@ mod tests {
             "point-line-end",
             "point-buffer-start",
             "point-buffer-end",
+            "word-forward",
+            "word-backward",
             "recenter",
             "goto-line",
             "isearch-forward",

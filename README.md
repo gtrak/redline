@@ -60,13 +60,18 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `C-s` | isearch-forward | Incremental search forward |
 | `C-r` | isearch-backward | Incremental search backward |
 | `M-g g` | goto-line | Jump to a line number |
-| `C-v` / `PageDown` | scroll-page-down | Scroll down one page |
+| `C-v` / `PageDown` | scroll-page-down | Scroll down one page (point's screen row pinned) |
 | `M-v` / `PageUp` | scroll-page-up | Scroll up one page |
-| `j` / `C-n` / `↓` | scroll-line-down | Scroll down one line |
-| `k` / `C-p` / `↑` | scroll-line-up | Scroll up one line |
+| `j` | scroll-line-down | Scroll down one line |
+| `k` | scroll-line-up | Scroll up one line |
+| `C-n` / `↓` | point-down | Point down one line (goal column preserved) |
+| `C-p` / `↑` | point-up | Point up one line |
+| `M-f` | word-forward | Point forward one word (wraps across lines) |
+| `M-b` | word-backward | Point backward one word |
+| `C-l` | recenter | Recenter: the point's screen row cycles top → middle → bottom |
 | `g` | reload-buffer | Force-reload the current file |
-| `G` / `M->` | scroll-bottom | Scroll to the bottom |
-| `M-<` | scroll-top | Scroll to the top |
+| `G` / `M->` | point-buffer-end | Point to the buffer end; the window follows |
+| `M-<` | point-buffer-start | Point to the buffer start; the window follows |
 | `C-g` | cancel | Cancel a pending key sequence |
 
 ### Magit status view (C-x g)

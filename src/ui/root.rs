@@ -76,10 +76,9 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
 
 /// The hardware-cursor position (0-based column, 0-based row — crossterm's
 /// `MoveTo(col, row)` order) for the current view. The row is the view's cursor
-/// row — the blue-bar (selected) row for list views, the top visible line for
-/// the read-focused buffer view — and the column is a sane default of 0 (the
-/// logical start of the row/content), per the plan-004 issue-05 decision ("a
-/// sane column default is fine, document it").
+/// row — the blue-bar (selected) row for list views, the point's screen row for
+/// the read-focused buffer view (clamped to the viewport, plan 004 issue 05c)
+/// — and the column is the point's column (or 0 for list views).
 ///
 /// Layout (0-based terminal rows): the main view's title is row 0 and its first
 /// content row is row 1, so content row `i` (0-based within the window) is at
@@ -107,25 +106,37 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
             // intended content row, not the banner.
             let banner = u16::from(snap.file_view_changed_on_disk);
             let total = snap.file_view_total_lines;
+            // The canvas gets `viewport - banner` rows; the cursor row must
+            // never be placed outside the file area (plan 004 issue 05c —
+            // the window can sit off the point, e.g. after a recenter clamp
+            // or a resize, and C-l no longer moves the window off the point
+            // in the first place).
+            let max_content_row = snap
+                .file_view_viewport_lines
+                .saturating_sub(banner as usize + 1);
             if snap.file_view_current_buffer_editable {
                 // Editable buffers (notes/scratch): the cursor stays on the
                 // insertion row (the last line) — append-at-end, unchanged
                 // and out of scope for 05b (the point may move internally but
                 // the hardware cursor does not).
                 let insert_line = total.saturating_sub(1);
-                let content_row = insert_line.saturating_sub(snap.file_view_top_line);
+                let content_row = insert_line
+                    .saturating_sub(snap.file_view_top_line)
+                    .min(max_content_row);
                 Some((0, 1 + banner + content_row as u16))
             } else {
                 // Read-focused file view: the cursor tracks the point
                 // (plan 004 issue 05b). Row = the point's buffer line
-                // relative to the window top (clamped to the visible window;
-                // the window always follows the point so this is in range);
-                // col = the point's column. Cols beyond the pane width place
-                // the cursor off-screen (no horizontal scroll in 05b).
+                // relative to the window top (clamped to the visible window,
+                // issue 05c); col = the point's column. Cols beyond the pane
+                // width place the cursor off-screen (no horizontal scroll in
+                // 05b).
                 let line = snap
                     .file_view_point_line
                     .min(total.saturating_sub(1));
-                let content_row = line.saturating_sub(snap.file_view_top_line);
+                let content_row = line
+                    .saturating_sub(snap.file_view_top_line)
+                    .min(max_content_row);
                 let col = snap.file_view_point_col as u16;
                 Some((col, 1 + banner + content_row as u16))
             }
@@ -266,7 +277,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Mouse support (issue 09, step 4: best-effort). Wheel scroll in
         // all list views; click-to-position in the file view (Buffer).
         // Limitations: no drag-select, no click in pickers/menus, no
-        // click-to-position in list views (v1).
+        // click-to-select in list views (v1); with the tree sidebar
+        // visible, a file-view click's column is shifted by the tree's
+        // width (best-effort: the col is clamped to EOL at worst).
         if let TerminalEvent::FullscreenMouse(mouse) = &event {
             use iocraft::MouseEventKind;
             match mouse.kind {
@@ -282,9 +295,15 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // Click-to-position: the file view's content area starts
                     // at terminal row 0 (the title is part of the view's
                     // first line). The row is 0-based from the top.
-                    // Subtract 1 for the title line offset.
+                    // Subtract 1 for the title line offset. The column is the
+                    // terminal column, which maps 1:1 to the line's char
+                    // index (the file view renders from column 0 — no gutter,
+                    // plan 004 issue 05c).
                     let row = (mouse.row as usize).saturating_sub(1);
-                    event_store.lock().unwrap().mouse_click_position(row);
+                    event_store
+                        .lock()
+                        .unwrap()
+                        .mouse_click_position(row, mouse.column as usize);
                     tick.set(tick.get() + 1);
                 }
                 _ => {}
@@ -783,7 +802,7 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("M-x qu"), "palette prompt+query missing:\n{s}");
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
-        assert!(s.contains("of 98"), "picker count line missing:\n{s}");
+        assert!(s.contains("of 100"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

@@ -98,6 +98,9 @@ class Session:
     def text(self):
         return "\n".join("".join(self.screen.buffer[r][i].data for i in range(COLS)) for r in range(ROWS))
 
+    def row_text(self, row):
+        return "".join(self.screen.buffer[row][i].data for i in range(COLS))
+
     def bar_rows(self):
         return [r for r in range(ROWS - 1)
                 if any(str(self.screen.buffer[r][i].bg).lower() in BAR_BGS for i in range(COLS))]
@@ -208,6 +211,147 @@ def check(colorterm):
     shows = settled.count(b"\x1b[?25h")
     rec("settled frame: no net hide (shows >= hides)", shows >= hides,
         f"settled ?25l={hides} ?25h={shows}")
+
+    s.kill()
+    return checks
+
+
+def mouse_recenter_word_checks():
+    """plan 004 issue 05c: raw-PTY legs — click at a non-zero column (CUP
+    col equals it; past-EOL clamps to EOL), wheel scroll with the point's
+    screen row pinned (the top line changes AND the point line advances
+    under the window), C-l x3 cycling the point's screen row 1 -> mid ->
+    last with the point line fixed (then #4 back to 1), and M-f/M-b landing
+    the cursor column on word boundaries (exact columns).
+
+    Mouse events are SGR-encoded: left-click press is ESC[<0;COL;ROWM with
+    1-based COL/ROW (crossterm decodes to 0-based row/column); wheel up is
+    ESC[<64;1;1M, wheel down ESC[<65;1;1M.
+    """
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    # leg.rs: 60 lines; even line = 20 'A's, odd line = 2 'b's. NO trailing
+    # newline (ropey would count a trailing \n as an extra empty line).
+    llines = ["A" * 20 if i % 2 == 0 else "b" * 2 for i in range(60)]
+    with open(_os.path.join(src_dir, "leg.rs"), "w") as f:
+        f.write("\n".join(llines))
+    # wordleg.rs: 3 lines of words/punctuation for the M-f/M-b legs.
+    with open(_os.path.join(src_dir, "wordleg.rs"), "w") as f:
+        f.write("hello world_foo!!\nx\nab cd")
+
+    s = Session(None)
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    def do(key, settle=0.6):
+        """Press `key` and return the surviving CUP (row, col) after settle."""
+        return last_cup_after_sync(s.key(key, settle))
+
+    def feed_mouse(data, settle=0.6):
+        """Send raw SGR mouse bytes and return the surviving CUP."""
+        os.write(s.master, data)
+        buf = s._read(settle, quiet=0.15)
+        return last_cup_after_sync(buf)
+
+    # ── click at a non-zero column (leg.rs: window top 0) ──────────────────
+    s.key("C-x C-f", 1.0)
+    for ch in "leg.rs":
+        s.key(ch, 0.25)
+    s.key("RET", 1.0)
+    # Click terminal (row 5, col 10) 0-based: content row 4 → buffer line 4,
+    # col 10. SGR is 1-based: ESC[<0;11;6M → CUP (6, 11) 1-based.
+    row, col = feed_mouse(b"\x1b[<0;11;6M")
+    rec("click at col 10: CUP col equals it", (row, col) == (6, 11),
+        f"cup=({row},{col}) want (6,11)")
+    # Click past EOL on short line 1 ("bb"): terminal row 2 (0-based) is
+    # SGR row 3, col 30 is SGR col 31 → clamped to col 2 → CUP (3, 3).
+    row, col = feed_mouse(b"\x1b[<0;31;3M")
+    rec("click past EOL clamps to EOL", (row, col) == (3, 3),
+        f"cup=({row},{col}) want (3,3)")
+
+    # ── wheel: window scroll with the point's screen row pinned ────────────
+    # Reset the point to (0,0) at window top 0.
+    s.key("M-<", 0.8)
+    top_line_before = s.row_text(1)        # content row 0 (terminal row 1)
+    r0, c0 = last_cup_after_sync(s.key("C-a", 0.6))
+    r, c = feed_mouse(b"\x1b[<65;1;1M")   # wheel down (3-line step)
+    top_line_after = s.row_text(1)
+    rec("wheel down: top line changed, screen row pinned",
+        (r, c) == (r0, c0) and top_line_before != top_line_after,
+        f"cup=({r},{c}) before=({r0},{c0}) top row now={top_line_after[:8]!r} was={top_line_before[:8]!r}")
+    # The point line advanced under the window: the window top is now line 3
+    # (a "bb" line) and the status line shows the point at L4 (1-based).
+    rec("wheel down: point line advanced under the window",
+        s.row_text(1).strip().startswith("bb") and "L4," in s.text(),
+        f"top row={s.row_text(1)[:8]!r} status L4={('L4,' in s.text())}")
+    r, c = feed_mouse(b"\x1b[<64;1;1M")   # wheel back up
+    rec("wheel up: original top line back, row pinned",
+        (r, c) == (r0, c0) and s.row_text(1).strip().startswith("AAAA"),
+        f"cup=({r},{c}) top row={s.row_text(1)[:8]!r}")
+
+    # ── C-l x3: point line fixed, screen row 1 -> mid -> last ─────────────
+    # Viewport = 24 - 3 = 21 (0-based screen rows: mid = 10, last = 20).
+    # Point to line 25 (C-n x25 from the top); the window follows to top 5
+    # → screen row 20 (bottom zone). C-l #1 → row 0 (CUP row 2); #2 → row 10
+    # (CUP 12); #3 → row 20 (CUP 22); #4 → row 0 again.
+    for _ in range(25):
+        s.key("C-n", 0.15)
+    s._read(0.5, quiet=0.15)
+    r1, _ = do("C-l")
+    r2, _ = do("C-l")
+    r3, _ = do("C-l")
+    point_fixed = "L26," in s.text()
+    rec("C-l x3: screen row 1 -> mid -> last (point line fixed)",
+        (r1, r2, r3) == (2, 12, 22) and point_fixed,
+        f"rows={r1},{r2},{r3} want 2,12,22 L26={point_fixed}")
+    r4, _ = do("C-l")
+    rec("C-l #4: cycle returns to row 1", r4 == 2, f"row={r4} want 2")
+
+    # ── M-f / M-b: cursor column on word boundaries (wordleg.rs) ──────────
+    s.key("C-x C-f", 1.0)
+    for ch in "wordleg":
+        s.key(ch, 0.25)
+    s.key("RET", 1.0)
+    r0, c0 = last_cup_after_sync(s.key("C-a", 0.6))
+    rec("wordleg open: cursor at (line 1, col 1)", (r0, c0) == (2, 1),
+        f"cup=({r0},{c0}) want (2,1)")
+    fw = [
+        ("M-f", (2, 6), "end of `hello`"),
+        ("M-f", (2, 7), "skip space, land on `world_foo`"),
+        ("M-f", (2, 16), "end of `world_foo` (underscore is word)"),
+        ("M-f", (3, 1), "skip `!!` across the newline to `x`"),
+        ("M-f", (3, 2), "end of `x`"),
+        ("M-f", (4, 1), "wrap across lines to `ab`"),
+        ("M-f", (4, 3), "end of `ab`"),
+        ("M-f", (4, 4), "land on `cd`"),
+        ("M-f", (4, 6), "end of `cd` (buffer end)"),
+    ]
+    fw_ok, fw_detail = True, []
+    for key, want, why in fw:
+        r, c = do(key)
+        ok = (r, c) == want
+        fw_ok = fw_ok and ok
+        fw_detail.append(f"{key}:{(r,c)}{'=' if ok else '!='}{want} ({why})")
+    r, c = do("M-f")
+    fw_ok = fw_ok and (r, c) == (4, 6)
+    fw_detail.append(f"M-f(noop @ end):{(r,c)}== (4,6)")
+    rec("M-f x9: forward-word lands on exact columns", fw_ok, "; ".join(fw_detail))
+    bw = [
+        (4, 4), (4, 3), (4, 1), (3, 2), (3, 1), (2, 16), (2, 7), (2, 6), (2, 1),
+    ]
+    bw_ok, bw_detail = True, []
+    for i, want in enumerate(bw):
+        r, c = do("M-b")
+        ok = (r, c) == want
+        bw_ok = bw_ok and ok
+        bw_detail.append(f"M-b{i+1}:{(r,c)}{'=' if ok else '!='}{want}")
+    rec("M-b x9: backward-word lands on exact columns", bw_ok, "; ".join(bw_detail))
+    r, c = do("M-b M-b M-b")
+    rec("M-b at buffer start: no-op", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
 
     s.kill()
     return checks
@@ -346,6 +490,11 @@ def main():
     # plan 004 issue 05b: file-view point (line, col) + emacs motion leg.
     print("=== FILE-VIEW POINT (line, col) + emacs motion ===")
     all_checks += file_view_checks()
+    print()
+    # plan 004 issue 05c: mouse (line, col) click, wheel parity, C-l
+    # recenter-top-bottom, word motion legs.
+    print("=== MOUSE CLICK COL / WHEEL PARITY / C-L RECENTER / WORD MOTION ===")
+    all_checks += mouse_recenter_word_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")
