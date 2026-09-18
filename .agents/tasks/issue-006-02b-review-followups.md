@@ -94,3 +94,23 @@ Baseline facts you can rely on (reviewer-verified against `d9e181b`):
 
 Per-item: what changed (file:line), test added/rewritten, size vs. budget.
 Gate counts (honest). Deviations (any STOPped item + why).
+
+## Addendum: 008-01 review P3s (fold in, same pass)
+
+The 008-01 review (PASS) left five trivial items; fold them into this
+pass:
+
+7. **Stale doc — the `Annotation` struct doc (~store.rs:666)** still says
+   "`path` is project-relative"; false since 008-01 (external records key
+   absolute). One-line doc fix aligning with the new docs at ~2098-2100,
+   ~4422-4426, and `DumpAnnotation` (~900).
+8. **Pin the mixed dump ordering**: extend
+   `notes_external_buffer_dump_verbatim_path` (~14841) to assert the
+   RELATIVE order of the absolute-path record vs the project record
+   (byte-wise: `/`-prefixed sorts before `crates/...`) in both modes.
+9. **Wire `tools/drive_external_notes.py` into `tools/drive_all.py`** so
+   its 14 legs stop dropping out of the regression set (it uses its own
+   repo + own per-repo flock, so it can join the sequential suite). Verify
+   drive_all stays green with it included and report the new total.
+10. **Fix the stale `M-f` comment** in `tools/drive_external_notes.py`
+    (describes the line-2 call, operates on the line-5 probe).
