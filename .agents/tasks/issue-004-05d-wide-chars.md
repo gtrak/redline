@@ -22,12 +22,16 @@ column**. Reproduced live (pty/pyte):
   width — verified: pyte shows `fn 中() { let x = 1; }` aligned properly).
   This is purely the point↔screen column conversion.
 
-Note on the earlier "space vanished" sighting: `fn über() { let 中 = 1; }`
-rendering as `fn über() { let 中 =1; }` — investigate whether a space is
-genuinely dropped somewhere in the span/segment pipeline or whether that
-was a pyte wide-char artifact. If a space IS dropped, that is a second bug
-in the same area and must be fixed too (the render must be byte-faithful
-for non-wide text).
+**Second, CONFIRMED bug (same root cause).** `fn über() { let 中 = 1; }`
+renders as `fn über() { let 中 =1; }` — the space between `=` and `1` is
+genuinely dropped in pyte's `display` output (not a buffer artifact).
+Root cause established from the raw escape stream: the app DOES emit the
+space (`...let 中 = 1; }` appears in the byte stream). `draw_line` places
+each syntax segment at an absolute x and advances `x += segment.chars()
+.count()`; a segment ending in a wide char advances x by 1 while the
+terminal advanced 2, so the NEXT segment is drawn one cell early and
+clobbers a cell. Fix = the same display-width x-advance as item 1 (the
+render must be byte-faithful for all text).
 
 ## Read first
 
