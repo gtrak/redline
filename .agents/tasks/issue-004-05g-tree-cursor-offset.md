@@ -43,10 +43,22 @@ placement.
    coordinates, while the point column is pane-relative; the two panes are
    laid out by the flex row.
 
+## Also in scope (carried 05e review P2, same layering fix as 05d's)
+
+`src/app/store.rs` now reaches into `crate::ui::tree::{TREE_VISIBLE_ROWS}`
+(`tree_click_row`) — the ONLY `crate::ui` reference in `src/app`, and the
+same app→ui inversion the 05d review flagged and 05e fixed for the width
+helpers. Complete the pattern: move `TREE_WIDTH` and `TREE_VISIBLE_ROWS`
+into a non-UI module (e.g. `src/model/tree_layout.rs`, next to
+`src/model/text_width.rs`) and have `src/ui/tree.rs` import them (it may
+re-export for existing UI callers). `src/model` must not import `ui`/`app`.
+Keep it a pure move: same values (34, 8), same tests.
+
 ## Constraints
 
-- Scope fence: `src/ui/root.rs` (cursor placement), tests,
-  `tools/check_cursor_stream.py`. No click-mapping changes (05e is
+- Scope fence: `src/ui/root.rs` (cursor placement), `src/ui/tree.rs` +
+  `src/model/tree_layout.rs` (the const move), `src/app/store.rs` (import
+  path only), tests, `tools/check_cursor_stream.py`. No click-mapping changes (05e is
   correct); no point-motion changes; the 34-col width unchanged.
 - All suites green: `cargo test`, `tools/sweep.py`, `tools/sweep_flows.py`,
   `tools/drive_all.py`, `tools/drive_windowing.py`,
