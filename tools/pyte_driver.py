@@ -18,6 +18,23 @@ BIN = os.environ.get("REDLINE_BIN", "/home/gary/dev/red/target/debug/redline")
 COLS = int(os.environ.get("COLS", "80"))
 ROWS = int(os.environ.get("ROWS", "24"))
 
+# ── Read-quiet tuning (harness latency) ─────────────────────────────────
+# `_read` returns once the PTY byte stream has been SILENT for `quiet`
+# seconds. The app paints a complete frame in ~15 ms (measured: first byte
+# 0 ms, last byte 15 ms), so the old hardcoded 0.2 s was ~13x the real
+# work — the single largest tax on every PTY suite (559 .key() + 212
+# .wait() call sites; ~250 s of pure slack across the gate set).
+#
+# Default stays 0.2 (byte-for-byte the old behavior) so nothing silently
+# changes semantics; set REDLINE_PTY_QUIET=0.04..0.08 for the fast loop.
+# The select granularity is decoupled from `quiet` (below) so shrinking
+# `quiet` actually takes effect instead of being floored at 100 ms.
+PTY_QUIET = float(os.environ.get("REDLINE_PTY_QUIET", "0.2"))
+# Max select() block. Must be <= the quiet window or the quiet check can
+# only fire after a full granularity tick (the old 0.1 s cap is exactly
+# why a smaller `quiet` alone would NOT have helped).
+_POLL_GRAN = 0.01
+
 # ── Shared-fixture mutual exclusion ──────────────────────────────────────
 # Every PTY suite drives the SAME fixture repo (/tmp/redline_pyte_repo) and
 # several of them mutate it (flow legs create/save/delete files, magit
@@ -162,7 +179,7 @@ class App:
     def wait_ready(self, timeout=30.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            self._read(0.4, quiet=0.2)
+            self._read(0.4, quiet=PTY_QUIET)
             text = self.screen_text()
             # `ready` is the idle mode-line token; `indexing` means still busy.
             if "ready" in text and "indexing" not in text:
@@ -172,11 +189,15 @@ class App:
     def _read(self, timeout, quiet=0.0):
         deadline = time.time() + timeout
         last = time.time()
+        # Tighter poll than the quiet window so the idle check can fire on
+        # time (a coarse select() blocks the whole window before the check
+        # even runs). 10 ms is well under the app's 15 ms frame time.
+        gran = _POLL_GRAN if quiet > 0 else 0.1
         while True:
             remain = deadline - time.time()
             if remain <= 0:
                 break
-            r, _, _ = select.select([self.master], [], [], min(remain, 0.1))
+            r, _, _ = select.select([self.master], [], [], min(remain, gran))
             if r:
                 try:
                     data = os.read(self.master, 65536)
@@ -189,23 +210,40 @@ class App:
             if quiet > 0 and (time.time() - last) >= quiet:
                 break
 
-    def key(self, s, settle=1.0):
+    def key(self, s, settle=1.0, quiet=None):
+        """Send a key sequence and read until the stream is quiet.
+
+        A multi-token sequence (`"C-x C-f"`) is written as ONE burst and
+        read once — it is already batched. `quiet` overrides the
+        REDLINE_PTY_QUIET default for this call only.
+        """
         os.write(self.master, encode_key(s))
-        self._read(settle, quiet=0.2)
+        self._read(settle, quiet=PTY_QUIET if quiet is None else quiet)
 
-    def feed(self, data, settle=1.0):
+    def type_text(self, text, settle=1.0, quiet=None):
+        """Type a literal string as ONE burst + ONE read.
+
+        Replaces the `for ch in text: app.key(ch)` pattern, which pays a
+        full read-quiet window PER CHARACTER (measured 6.0x slower for a
+        6-char query). The app processes the whole burst in a single
+        render, so one read is both faster and equivalent.
+        """
+        os.write(self.master, text.encode())
+        self._read(settle, quiet=PTY_QUIET if quiet is None else quiet)
+
+    def feed(self, data, settle=1.0, quiet=None):
         os.write(self.master, data)
-        self._read(settle, quiet=0.2)
+        self._read(settle, quiet=PTY_QUIET if quiet is None else quiet)
 
-    def wait(self, t=1.0):
-        self._read(t, quiet=0.2)
+    def wait(self, t=1.0, quiet=None):
+        self._read(t, quiet=PTY_QUIET if quiet is None else quiet)
 
     def wait_done(self, timeout=15.0):
         """Wait until a streamed search has finished: the title stops showing
         'searching' and a match count is present."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            self._read(0.4, quiet=0.2)
+            self._read(0.4, quiet=PTY_QUIET)
             text = self.screen_text()
             if "searching" not in text and "matches in" in text:
                 return True
