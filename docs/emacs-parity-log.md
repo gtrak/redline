@@ -137,6 +137,21 @@ the next battery regardless (verification, not decision).
 | 9 | C-v/M-v 2-line overlap | **VERIFIED — already implemented** | `scroll_page_down`/`scroll_page_up` use `step = viewport - 2` (since plan-002 issue 03, "PART A fix item 5"). Unit tests: `scroll_page_down_keeps_two_line_overlap` (viewport=10, 100 lines: step=8, not 10). Battery legs (121-line fixture, viewport=27): C-v from `L6,4%` to `L31,25%` (step=25=viewport−2); M-v returns to `L6,4%` (step=25=viewport−2). 2-row overlap confirmed. |
 | 11 | Status-line position | **ADOPT (implemented)** | New `file_view_position_display()` on the store; format: `Top` at line 1, `Bot` when the window shows the buffer end (`scroll_top + viewport >= total`), otherwise `L{n},{pct}%` (1-based line, integer percent through the buffer, round-half-up). Appended to the status line after the searching indicator. Updates on every scroll/cursor movement (the status line re-renders every tick). Unit tests: `position_display_top`, `position_display_bot`, `position_display_middle`, `position_display_single_line_buffer`, `position_display_empty_buffer`. Battery legs (121-line fixture): after M-< shows `Top`, after C-n×5 shows `L6,4%`, after M-> shows `Bot`. |
 
+
+## Battery 4 — differential probe #2 (2026-09-18, equal viewports 24x80)
+
+Method: `tools/probe_emacs_diff2.py` runs the same controlled keystrokes on
+vanilla `emacs -Q -nw` (pty forced to 24x80 so viewports match) and on
+redline, and diffs cursor (row,col). 15/22 rows matched exactly; the
+divergences are below. (The first battery of this method, battery 3,
+found and fixed the 05c word-motion bug — see that section.)
+
+| # | Row | Disposition | Evidence |
+|---|---|---|---|
+| 32 | Page-scroll point model | **DELIBERATE DIVERGENCE — user veto welcome** | emacs `C-v`/`M-v` scroll the window and leave the point at its **buffer** line, clamping it to the window edge only when it would go off-screen (observed: point near the top, C-v → cursor row 1 = the new top line; point near the bottom, C-v → cursor row 1 as well). redline instead **pins the point's screen row** and recomputes its buffer line from the new window top (observed: C-v ×2 → cursor row 11 fixed, point line 10 → 35 → 60). Consequence: scrolling in redline advances the "current line" (status `L{n}`, which-function, region/anchor origin) through the buffer; in emacs the point stays put unless forced. The 05b/05c specs (written by the orchestrator) called the redline model "emacs behavior" — that claim was WRONG and is corrected here and in the spec text. The redline model is coherent for a cursor-centric TUI (the cursor never leaves the screen) and is kept pending a user call. |
+| 33 | `C-d` / `C-u` | **DOCUMENTED ADOPTION (unchanged)** | emacs: `C-d` = `delete-char` (no-op on a read-only buffer), `C-u` = universal prefix. redline: half-page scroll down/up (README keymap). Already a recorded adoption from plan 002/004-02; the probe re-confirms the keys do different things, by design. |
+| 34 | `M->` last-line landing | **DEFER (needs a line-level check)** | With equal viewports the cursor ROW differs after `M->` (emacs 19 vs redline 21) but both are col 0 and the windows hold different content, so row alone cannot tell whether the *point line* differs (emacs lands on the empty line after a trailing newline; redline may land on the last content line). Needs a probe printing the status-line line number on both sides; not chased this session. |
+
 ## Plan 004 issue 05c follow-up — 2026-09-18 (C-l contract + word motion rule)
 
 | # | Row | Disposition | Evidence |
