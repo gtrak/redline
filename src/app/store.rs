@@ -7673,9 +7673,13 @@ impl AppStore {
             });
         root.and_then(|root| Self::crate_rel(path, &root))
             .unwrap_or_else(|| {
+                // Never absolute: `SymbolContext.from_file` is root-relative.
+                // file_name() is Some for every real buffer path; the
+                // empty-string fallback (rather than display()) keeps the
+                // contract even for the pathological `/` or `..` shapes.
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string())
+                    .unwrap_or_default()
             })
     }
 
