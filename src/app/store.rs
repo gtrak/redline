@@ -874,6 +874,12 @@ pub struct AppStore {
     /// Number of lines visible in the file view (set by the UI on
     /// resize); used for page-scroll and slice math.
     viewport_lines: usize,
+    /// `C-l` recenter cycle index (plan 004 issue 05c; emacs
+    /// `recenter-top-bottom` / `recenter-last-op`): counts consecutive
+    /// recenters since the last non-recenter command, `mod 3` selects the
+    /// next position in the `(middle top bottom)` order. Reset to `0` on
+    /// any other command (a fresh C-l therefore goes to MIDDLE).
+    recenter_cycle: usize,
     /// Project-change bus: the file watcher publishes here; the UI
     /// (FileView auto-reload) and git status (07's seam) subscribe.
     pub watch_bus: ChangeBus,
@@ -1128,6 +1134,7 @@ impl AppStore {
             goto_line_active: false,
             goto_line_input: String::new(),
             viewport_lines: 24, // default; the UI updates on resize
+            recenter_cycle: 0,
             watch_bus: ChangeBus::new(),
             watcher: None,
             auto_reload: true,
@@ -2899,21 +2906,21 @@ impl AppStore {
 
     /// `C-l` (plan 004 issue 05c): emacs `recenter-top-bottom`. The point
     /// does NOT move; the window repositions so the point's screen row
-    /// cycles top → middle → bottom → top within the viewport: the next
-    /// target row is `0`, `viewport/2`, or `viewport-1` chosen by the zone
-    /// the point's current screen row is in, and `scroll_top =
-    /// point_line - desired_row` clamped to `[0, max_scroll]`. (The retired
-    /// cursor-is-window-top model cycled the WINDOW through buffer thirds
-    /// while the point stayed put, so the window scrolled off the point —
-    /// the observed misbehavior this replaces.)
+    /// cycles through the positions. `recenter-positions` defaults to
+    /// `(middle top bottom)`, and `recenter-top-bottom` advances the
+    /// position only when the immediately-preceding command was also
+    /// recenter (tracked by `recenter_cycle`, reset on any other command
+    /// in `dispatch` — emacs `recenter-last-op`). So a fresh C-l goes to
+    /// MIDDLE; consecutive C-l cycles middle → top → bottom → middle.
     ///
-    /// Degenerate ranges: `third` keeps a `.max(1)` (the plan-004-02
-    /// protection, reworked to screen-row space) so tiny viewports still
-    /// have a distinct top/bottom zone and C-l self-heals — it never leaves
-    /// the window off the point. When the buffer barely scrolls, the
-    /// clamps pin the point near its edge and the cycle collapses to the
+    /// The chosen screen row is `viewport/2` (middle), `0` (top), or
+    /// `viewport-1` (bottom); `scroll_top = point_line - desired_row`
+    /// clamped to `[0, max_scroll]`. When the buffer barely scrolls the
+    /// clamps pin the point where it is and the cycle collapses to the
     /// reachable positions (emacs recenter on a barely-scrolling buffer
-    /// behaves the same way).
+    /// behaves the same way). No zone-derived guess: the position is
+    /// purely the cycle index, so tiny viewports still cycle without
+    /// dead-ends (middle/top/bottom naturally repeat when rows collide).
     pub fn recenter(&mut self) {
         let p = self.file_point();
         let total = self.current_line_count();
@@ -2926,33 +2933,15 @@ impl AppStore {
             // The whole buffer fits in the viewport; nothing to recenter.
             return;
         }
-        let screen_row = p.line.saturating_sub(self.scroll_top());
-        // Zone boundaries in screen-row space (the cycle lives inside the
-        // viewport, not the buffer range). `third.max(1)` keeps tiny
-        // viewports cycling without dead ends (see the doc above).
-        let third = (vp / 3).max(1);
         let mid = vp / 2;
         let bottom = vp - 1;
-        // For `mid == bottom` (2-row viewport) the cycle collapses to
-        // top ↔ middle; handle it directly so row 0 is never a dead end.
-        if mid == bottom {
-            let desired_row = if screen_row == 0 { mid } else { 0 };
-            let new_top = (p.line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize;
-            self.set_scroll_top(new_top);
-            return;
-        }
-        // Zone for `screen_row`: top zone [0, third) → middle; middle zone
-        // [third, bottom - third) → bottom; bottom zone [bottom - third, ∞)
-        // → top. (A point whose row sits past the viewport — the window off
-        // the point — is in the bottom zone and C-l brings it back to the
-        // window top.)
-        let desired_row = if screen_row < third {
-            mid
-        } else if screen_row < bottom.saturating_sub(third) {
-            bottom
-        } else {
-            0
+        // Cycle order `(middle top bottom)` selected by the cycle index.
+        let desired_row = match self.recenter_cycle % 3 {
+            0 => mid,
+            1 => 0,
+            _ => bottom,
         };
+        self.recenter_cycle += 1;
         let new_top = (p.line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize;
         self.set_scroll_top(new_top);
     }
@@ -3248,14 +3237,15 @@ impl AppStore {
         self.set_point(p.line, line_len, line_len);
     }
 
-    /// M-f (plan 004 issue 05c; emacs `forward-word`): if the char at point
-    /// is a word char, advance to the end of that word run; otherwise skip
-    /// the non-word run (punctuation/whitespace) up to the first char of
-    /// the next word. Newlines are non-word, so the non-word skip continues
-    /// across line boundaries (emacs: the skip stops on the next word's
-    /// first char, which may sit on a later line; at the end of the buffer
-    /// it is a no-op). A word motion sets `goal_col` to the landing column
-    /// (emacs), and the window follows the point.
+    /// M-f (plan 004 issue 05c; emacs `forward-word`): move to the END of
+    /// the next word. If the char at point is a word char, advance to the
+    /// end of that word run. Otherwise skip the non-word run
+    /// (punctuation/whitespace) up to the next word, THEN walk word chars
+    /// to that word's end — `forward-word` lands at the word's END, not its
+    /// first char. Newlines are non-word, so the skip crosses line
+    /// boundaries and keeps skipping (and then walks) on the next line; at
+    /// the end of the buffer it is a no-op. A word motion sets `goal_col`
+    /// to the landing column (emacs), and the window follows the point.
     pub fn point_word_forward(&mut self) {
         let p = self.file_point();
         let total = self.current_line_count();
@@ -3264,33 +3254,28 @@ impl AppStore {
         }
         let mut line = p.line;
         let mut col = p.col;
-        let chars = self.line_chars(line);
-        if col < chars.len() && Self::is_word_char(chars[col]) {
-            // In a word: advance to its end (a word run cannot span a line
-            // — the newline is non-word).
-            while col < chars.len() && Self::is_word_char(chars[col]) {
-                col += 1;
-            }
-            self.set_point(line, col, col);
-            return;
-        }
-        // Not in a word: skip the non-word run (punctuation/whitespace)
-        // up to the next word's first char. Newlines are non-word, so the
-        // skip crosses to the next line and keeps skipping there.
         let mut moved = false;
         loop {
             let chars = self.line_chars(line);
             let len = chars.len();
+            // Skip the non-word run (punctuation/whitespace) up to the
+            // next word's first char.
             while col < len && !Self::is_word_char(chars[col]) {
                 col += 1;
                 moved = true;
             }
             if col < len {
-                // Landed on the next word's first char.
+                // Landed on the next word's first char: advance to the
+                // word's END (emacs forward-word lands at the end, not the
+                // first char). A word run cannot span a line.
+                while col < len && Self::is_word_char(chars[col]) {
+                    col += 1;
+                    moved = true;
+                }
                 break;
             }
-            // The run reaches EOL: cross to the next line (the newline is
-            // part of the non-word run) or stop at the buffer end.
+            // The non-word run reaches EOL: cross to the next line (the
+            // newline is part of the run) or stop at the buffer end.
             if line + 1 < total {
                 line += 1;
                 col = 0;
@@ -3304,14 +3289,13 @@ impl AppStore {
         }
     }
 
-    /// M-b (plan 004 issue 05c; emacs `backward-word`): if the char before
-    /// point is a word char, retreat to the first char of that word run;
-    /// otherwise skip the non-word run (punctuation/whitespace) backward.
-    /// Newlines are non-word, so the non-word skip crosses to the previous
-    /// line and continues through its trailing punctuation/whitespace, until
-    /// it lands just past the previous word's last char (or the start of the
-    /// buffer: no-op). A word motion sets `goal_col` to the landing column
-    /// (emacs), and the window follows the point.
+    /// M-b (plan 004 issue 05c; emacs `backward-word`): move to the START
+    /// of the previous word. If the char before point is a word char, that
+    /// word's start; otherwise skip the non-word run backward (crossing
+    /// lines — the newline is non-word), then keep retreating while word
+    /// chars to the word's first char. `backward-word` lands at the word's
+    /// START, not its end. A word motion sets `goal_col` to the landing
+    /// column (emacs), and the window follows the point.
     pub fn point_word_backward(&mut self) {
         let p = self.file_point();
         let total = self.current_line_count();
@@ -3340,6 +3324,12 @@ impl AppStore {
                     col -= 1;
                 }
                 if col > 0 {
+                    // Landed just past a word's last char: retreat to the
+                    // word's FIRST char (emacs backward-word lands at the
+                    // start, not the end).
+                    while col > 0 && Self::is_word_char(chars[col - 1]) {
+                        col -= 1;
+                    }
                     self.set_point(line, col, col);
                     return;
                 }
@@ -6658,6 +6648,13 @@ impl AppStore {
             .get(name)
             .cloned()
             .ok_or_else(|| RegistryError::UnknownCommand(name.to_string()))?;
+        // emacs `recenter-top-bottom`: the position only advances when the
+        // immediately-preceding command was also recenter; any other
+        // command resets the cycle (emacs `recenter-last-op`), so a fresh
+        // C-l starts at the first position (middle).
+        if name != "recenter" {
+            self.recenter_cycle = 0;
+        }
         command.run(self, arg);
         Ok(())
     }
@@ -7774,27 +7771,23 @@ mod tests {
 
     #[test]
     fn word_forward_walks_words_and_punctuation() {
+        // emacs `forward-word` lands at the END of each word (not its first
+        // char). Line 0: "hello world_foo!!" (len 17), line 1: "x",
+        // line 2: "ab cd".
         let (mut s, _dir) = store_with_words();
         s.set_point(0, 0, 0);
         s.point_word_forward();
         assert_eq!((s.point_line(), s.point_col()), (0, 5), "end of `hello`");
         s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 6), "skip the space, land on `world_foo`");
+        assert_eq!((s.point_line(), s.point_col()), (0, 15), "skip the space, walk to the end of `world_foo`");
         s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 15), "end of `world_foo` (underscore is word)");
+        // "!!" + newline are one non-word run: crosses to line 1, then
+        // walks `x` to its end (col 1).
+        assert_eq!((s.point_line(), s.point_col()), (1, 1), "skip the punctuation run across the newline, end of `x`");
         s.point_word_forward();
-        // "!!" + newline are one non-word run: crosses to line 1, col 0.
-        assert_eq!((s.point_line(), s.point_col()), (1, 0), "skip punctuation run across the newline");
+        assert_eq!((s.point_line(), s.point_col()), (2, 2), "wrap across lines, end of `ab`");
         s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (1, 1), "end of `x`");
-        s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 0), "wrap across lines to `ab`");
-        s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 2), "end of `ab`");
-        s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 3), "land on `cd`");
-        s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 5), "end of `cd` (buffer end)");
+        assert_eq!((s.point_line(), s.point_col()), (2, 5), "skip the space, end of `cd` (buffer end)");
         // At the buffer end M-f is a no-op.
         s.point_word_forward();
         assert_eq!((s.point_line(), s.point_col()), (2, 5), "no-op at buffer end");
@@ -7802,29 +7795,23 @@ mod tests {
 
     #[test]
     fn word_backward_walks_words_and_punctuation() {
+        // emacs `backward-word` lands at the START of each word (not its
+        // end). Line 0: "hello world_foo!!", line 1: "x", line 2: "ab cd".
         let (mut s, _dir) = store_with_words();
         // From the end of `cd` (line 2, col 5):
         s.set_point(2, 5, 5);
         s.point_word_backward();
         assert_eq!((s.point_line(), s.point_col()), (2, 3), "start of `cd`");
         s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 2), "skip the space, end of `ab`");
+        assert_eq!((s.point_line(), s.point_col()), (2, 0), "skip the space, start of `ab`");
         s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (2, 0), "start of `ab`");
+        // Cross the newline into line 1, back to the start of `x`.
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "cross the newline, start of `x`");
         s.point_word_backward();
-        // Newline + " " are one non-word run back to the end of `x` (line 1, col 1).
-        assert_eq!((s.point_line(), s.point_col()), (1, 1), "cross the newline through the space");
+        // Cross to line 0, skip "!!" back to the start of `world_foo` (col 6).
+        assert_eq!((s.point_line(), s.point_col()), (0, 6), "cross the newline, skip `!!`, start of `world_foo`");
         s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (1, 0), "start of `x`");
-        s.point_word_backward();
-        // Cross to line 0, skip "!!" back to the end of `world_foo` (col 15).
-        assert_eq!((s.point_line(), s.point_col()), (0, 15), "cross the newline, skip `!!`");
-        s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 6), "start of `world_foo`");
-        s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 5), "skip the space, end of `hello`");
-        s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 0), "start of `hello` (buffer start)");
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "skip the space, start of `hello` (buffer start)");
         // At the buffer start M-b is a no-op.
         s.point_word_backward();
         assert_eq!((s.point_line(), s.point_col()), (0, 0), "no-op at buffer start");
@@ -7845,14 +7832,13 @@ mod tests {
         s.point_word_forward();
         assert_eq!((s.point_line(), s.point_col()), (0, 4), "end of `word`");
         s.point_word_forward();
-        assert_eq!((s.point_line(), s.point_col()), (3, 0), "M-f skips blank lines to `next`");
-        // M-b from the start of `next`: the char before point is the newline
-        // (non-word); the run back through the blank lines lands just past
-        // `word`'s last char (line 0, col 4).
+        assert_eq!((s.point_line(), s.point_col()), (3, 4), "M-f skips blank lines to the end of `next`");
+        // M-b from the end of `next`: the char before point is a word char,
+        // so it lands on `next`'s start (line 3, col 0).
         s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 4), "M-b back across the blank lines");
+        assert_eq!((s.point_line(), s.point_col()), (3, 0), "M-b back to the start of `next`");
         s.point_word_backward();
-        assert_eq!((s.point_line(), s.point_col()), (0, 0), "M-b back to the start of `word`");
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "M-b back across the blank lines to the start of `word`");
     }
 
     #[test]
@@ -7862,8 +7848,8 @@ mod tests {
         // the short line clamps col to 1, and C-p back restores goal 15
         // (clamped to line 0's length — 17 — so 15).
         s.set_point(0, 0, 0);
-        for _ in 0..3 {
-            s.point_word_forward(); // → (0,15)
+        for _ in 0..2 {
+            s.point_word_forward(); // → (0,15) end of `world_foo`
         }
         s.point_down();
         assert_eq!((s.point_line(), s.point_col()), (1, 1), "C-n clamps to the short line");
@@ -7937,59 +7923,85 @@ mod tests {
 
     // ── plan 004 issue 05c: recenter-top-bottom contract ─────────────
     // store_with_lines(100) writes 100 "lineN\n" lines → ropey 101 lines;
-    // viewport=10 → max_scroll=91. Zones for the point's screen row:
-    // top [0,3) → middle (row 5); middle [3,6) → bottom (row 9);
-    // bottom [6,∞) → top (row 0). The point's line never moves.
+    // viewport=10 → max_scroll=91, mid=5, top row=0, bottom row=9.
+    // `recenter_cycle` selects the position in the emacs `(middle top
+    // bottom)` order: index 0 → middle, 1 → top, 2 → bottom, then repeats.
+    // It is reset to 0 on any non-recenter command (in `dispatch`), so a
+    // fresh C-l goes to MIDDLE. The point's line never moves.
 
     #[test]
-    fn recenter_from_bottom_zone_to_top() {
-        // Point line 50 (the window follows: top 41 → screen row 9, the
-        // bottom zone) → C-l moves the window so the point sits on row 0.
+    fn recenter_fresh_goes_to_middle() {
+        // A C-l that does not follow another C-l lands the point on the
+        // middle row (cycle index 0 → viewport/2).
         let (mut s, _dir) = store_with_lines(100);
         s.set_point(50, 0, 0);
+        s.recenter();
+        assert_eq!(s.scroll_top(), 45, "fresh C-l → middle (row 5)");
+        assert_eq!(s.point_line(), 50, "the point does not move");
+    }
+
+    #[test]
+    fn recenter_consecutive_cycles_middle_top_bottom() {
+        // Consecutive C-l advance middle → top → bottom, purely by cycle
+        // index (no zone-derived guess).
+        let (mut s, _dir) = store_with_lines(100);
+        s.set_point(50, 0, 0);
+        s.recenter(); // middle (row 5) → top 45
+        assert_eq!(s.scroll_top(), 45);
+        s.recenter(); // top (row 0) → top 50
+        assert_eq!(s.scroll_top(), 50);
+        s.recenter(); // bottom (row 9) → top 41
         assert_eq!(s.scroll_top(), 41);
-        s.recenter();
-        assert_eq!(s.scroll_top(), 50, "bottom zone → top");
-        assert_eq!(s.point_line(), 50, "the point does not move");
+        assert_eq!(s.point_line(), 50, "the point never moved");
     }
 
     #[test]
-    fn recenter_from_top_zone_to_middle() {
-        // Point line 50 at screen row 0 (top zone) → C-l moves it to row 5.
+    fn recenter_resets_to_middle_after_other_command() {
+        // Any intervening non-recenter command resets the cycle (in
+        // `dispatch`), so the next C-l goes to MIDDLE even though the
+        // previous C-l had already advanced the cycle.
         let (mut s, _dir) = store_with_lines(100);
         s.set_point(50, 0, 0);
-        s.set_scroll_top(50); // screen row 0
-        s.recenter();
-        assert_eq!(s.scroll_top(), 45, "top zone → middle (row 5)");
-        assert_eq!(s.point_line(), 50, "the point does not move");
+        s.recenter(); // middle → top 45
+        s.recenter(); // top → top 50
+        assert_eq!(s.scroll_top(), 50);
+        s.recenter_cycle = 0; // simulate an intervening command
+        s.recenter(); // fresh again → middle → top 45
+        assert_eq!(s.scroll_top(), 45);
     }
 
     #[test]
-    fn recenter_from_middle_zone_to_bottom() {
-        // Point line 50 at screen row 5 (middle zone) → C-l moves it to
-        // row 9 (the last screen row).
+    fn recenter_resets_cycle_through_dispatch() {
+        // The reset happens in `dispatch`: a non-recenter command between
+        // two C-l's forces the next C-l back to MIDDLE.
         let (mut s, _dir) = store_with_lines(100);
         s.set_point(50, 0, 0);
-        s.set_scroll_top(45); // screen row 5
-        s.recenter();
-        assert_eq!(s.scroll_top(), 41, "middle zone → bottom (row 9)");
-        assert_eq!(s.point_line(), 50, "the point does not move");
+        s.dispatch("recenter", None).unwrap(); // fresh → middle
+        assert_eq!(s.scroll_top(), 45);
+        s.dispatch("recenter", None).unwrap(); // top
+        assert_eq!(s.scroll_top(), 50);
+        // A non-recenter command resets the cycle to 0.
+        s.dispatch("re-walk", None).unwrap();
+        s.set_point(50, 0, 0); // restore the point for a clean read
+        s.dispatch("recenter", None).unwrap(); // fresh again → middle
+        assert_eq!(s.scroll_top(), 45);
     }
 
     #[test]
     fn recenter_full_cycle_returns_to_start() {
         let (mut s, _dir) = store_with_lines(100);
         s.set_point(50, 0, 0);
-        s.set_scroll_top(50); // screen row 0
-        s.recenter(); // top → middle (row 5)
+        s.recenter(); // middle (row 5)
         assert_eq!(s.scroll_top(), 45);
-        s.recenter(); // middle → bottom (row 9)
+        s.recenter(); // top (row 0)
+        assert_eq!(s.scroll_top(), 50);
+        s.recenter(); // bottom (row 9)
         assert_eq!(s.scroll_top(), 41);
-        s.recenter(); // bottom → top (row 0)
-        assert_eq!(s.scroll_top(), 50, "full cycle returns to row 0");
-        assert_eq!(s.point_line(), 50, "the point never moved");
-        s.recenter(); // and the cycle repeats
+        s.recenter(); // middle again (row 5) — the cycle repeats
         assert_eq!(s.scroll_top(), 45);
+        s.recenter(); // top again (row 0)
+        assert_eq!(s.scroll_top(), 50);
+        assert_eq!(s.point_line(), 50, "the point never moved");
     }
 
     #[test]
@@ -8021,17 +8033,20 @@ mod tests {
 
     #[test]
     fn recenter_tiny_viewports_still_cycle() {
-        // A 3-row viewport (third=1, mid=1, bottom=2) must cycle without a
-        // dead end: row 0 → middle (row 1); row 1 is in the bottom zone
-        // (bottom-third = 1) → top (row 0).
+        // A 3-row viewport (mid=1, top=0, bottom=2) must cycle without a
+        // dead end by index: middle (row 1) → top (row 0) → bottom (row 2)
+        // → middle. Rows that collide after clamping simply repeat.
         let (mut s, _dir) = store_with_lines(100);
         s.set_viewport_lines(3);
         s.set_point(50, 0, 0);
-        s.set_scroll_top(50); // screen row 0
-        s.recenter();
-        assert_eq!(s.scroll_top(), 49, "row 0 → middle (row 1)");
-        s.recenter();
-        assert_eq!(s.scroll_top(), 50, "row 1 → top (row 0)");
+        s.recenter(); // middle (row 1) → top 49
+        assert_eq!(s.scroll_top(), 49);
+        s.recenter(); // top (row 0) → top 50
+        assert_eq!(s.scroll_top(), 50);
+        s.recenter(); // bottom (row 2) → top 48
+        assert_eq!(s.scroll_top(), 48);
+        s.recenter(); // middle (row 1) → top 49
+        assert_eq!(s.scroll_top(), 49);
         assert_eq!(s.point_line(), 50);
     }
 

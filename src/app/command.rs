@@ -315,7 +315,7 @@ impl CommandRegistry {
         ));
         reg.register(Command::new(
             "recenter",
-            "Recenter (C-l; emacs recenter-top-bottom): the point stays put and its screen row cycles top → middle → bottom",
+            "Recenter (C-l; emacs recenter-top-bottom): the point stays put and its screen row cycles middle → top → bottom (a fresh C-l goes to middle; the cycle resets on any other command)",
             "motion",
             |store, _arg| store.recenter(),
         ));

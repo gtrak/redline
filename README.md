@@ -66,9 +66,9 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `k` | scroll-line-up | Scroll up one line |
 | `C-n` / `↓` | point-down | Point down one line (goal column preserved) |
 | `C-p` / `↑` | point-up | Point up one line |
-| `M-f` | word-forward | Point forward one word (wraps across lines) |
-| `M-b` | word-backward | Point backward one word |
-| `C-l` | recenter | Recenter: the point's screen row cycles top → middle → bottom |
+| `M-f` | word-forward | Point forward to the END of the next word (wraps across lines) |
+| `M-b` | word-backward | Point backward to the START of the previous word |
+| `C-l` | recenter | Recenter (emacs `recenter-top-bottom`): the point stays put; a fresh C-l puts it on the MIDDLE row, and consecutive C-l's cycle middle → top → bottom (the cycle resets on any other command) |
 | `g` | reload-buffer | Force-reload the current file |
 | `G` / `M->` | point-buffer-end | Point to the buffer end; the window follows |
 | `M-<` | point-buffer-start | Point to the buffer start; the window follows |

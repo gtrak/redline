@@ -293,11 +293,11 @@ def mouse_recenter_word_checks():
         (r, c) == (r0, c0) and s.row_text(1).strip().startswith("AAAA"),
         f"cup=({r},{c}) top row={s.row_text(1)[:8]!r}")
 
-    # ── C-l x3: point line fixed, screen row 1 -> mid -> last ─────────────
+    # ── C-l x3: point line fixed, middle -> top -> bottom ─────────────────
     # Viewport = 24 - 3 = 21 (0-based screen rows: mid = 10, last = 20).
-    # Point to line 25 (C-n x25 from the top); the window follows to top 5
-    # → screen row 20 (bottom zone). C-l #1 → row 0 (CUP row 2); #2 → row 10
-    # (CUP 12); #3 → row 20 (CUP 22); #4 → row 0 again.
+    # Point to line 25 (C-n x25 from the top). A fresh C-l goes to MIDDLE
+    # (CUP row 12); the next C-l's go to TOP (CUP 2) then BOTTOM (CUP 22);
+    # #4 returns to MIDDLE (CUP 12). The point line never moves.
     for _ in range(25):
         s.key("C-n", 0.15)
     s._read(0.5, quiet=0.15)
@@ -305,11 +305,11 @@ def mouse_recenter_word_checks():
     r2, _ = do("C-l")
     r3, _ = do("C-l")
     point_fixed = "L26," in s.text()
-    rec("C-l x3: screen row 1 -> mid -> last (point line fixed)",
-        (r1, r2, r3) == (2, 12, 22) and point_fixed,
-        f"rows={r1},{r2},{r3} want 2,12,22 L26={point_fixed}")
+    rec("C-l x3: middle -> top -> bottom (point line fixed)",
+        (r1, r2, r3) == (12, 2, 22) and point_fixed,
+        f"rows={r1},{r2},{r3} want 12,2,22 L26={point_fixed}")
     r4, _ = do("C-l")
-    rec("C-l #4: cycle returns to row 1", r4 == 2, f"row={r4} want 2")
+    rec("C-l #4: cycle returns to middle", r4 == 12, f"row={r4} want 12")
 
     # ── M-f / M-b: cursor column on word boundaries (wordleg.rs) ──────────
     s.key("C-x C-f", 1.0)
@@ -321,14 +321,10 @@ def mouse_recenter_word_checks():
         f"cup=({r0},{c0}) want (2,1)")
     fw = [
         ("M-f", (2, 6), "end of `hello`"),
-        ("M-f", (2, 7), "skip space, land on `world_foo`"),
-        ("M-f", (2, 16), "end of `world_foo` (underscore is word)"),
-        ("M-f", (3, 1), "skip `!!` across the newline to `x`"),
-        ("M-f", (3, 2), "end of `x`"),
-        ("M-f", (4, 1), "wrap across lines to `ab`"),
-        ("M-f", (4, 3), "end of `ab`"),
-        ("M-f", (4, 4), "land on `cd`"),
-        ("M-f", (4, 6), "end of `cd` (buffer end)"),
+        ("M-f", (2, 16), "skip the space, walk to the end of `world_foo`"),
+        ("M-f", (3, 2), "skip `!!`+newline, end of `x`"),
+        ("M-f", (4, 3), "wrap across lines, end of `ab`"),
+        ("M-f", (4, 6), "skip the space, end of `cd` (buffer end)"),
     ]
     fw_ok, fw_detail = True, []
     for key, want, why in fw:
@@ -339,9 +335,9 @@ def mouse_recenter_word_checks():
     r, c = do("M-f")
     fw_ok = fw_ok and (r, c) == (4, 6)
     fw_detail.append(f"M-f(noop @ end):{(r,c)}== (4,6)")
-    rec("M-f x9: forward-word lands on exact columns", fw_ok, "; ".join(fw_detail))
+    rec("M-f x5: forward-word lands on exact columns (word ends)", fw_ok, "; ".join(fw_detail))
     bw = [
-        (4, 4), (4, 3), (4, 1), (3, 2), (3, 1), (2, 16), (2, 7), (2, 6), (2, 1),
+        (4, 4), (4, 1), (3, 1), (2, 7), (2, 1),
     ]
     bw_ok, bw_detail = True, []
     for i, want in enumerate(bw):
@@ -349,7 +345,7 @@ def mouse_recenter_word_checks():
         ok = (r, c) == want
         bw_ok = bw_ok and ok
         bw_detail.append(f"M-b{i+1}:{(r,c)}{'=' if ok else '!='}{want}")
-    rec("M-b x9: backward-word lands on exact columns", bw_ok, "; ".join(bw_detail))
+    rec("M-b x5: backward-word lands on exact columns (word starts)", bw_ok, "; ".join(bw_detail))
     r, c = do("M-b M-b M-b")
     rec("M-b at buffer start: no-op", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
 
