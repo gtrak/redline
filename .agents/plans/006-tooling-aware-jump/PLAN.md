@@ -15,6 +15,13 @@ Status: 01+02 complete; 03 folded into 02 (see task record)
   resolve (bump generation in the hit path), P3 second-colon boundary in
   symbol_at_point, P3 vacuous m_dot_includes_uppercase_identifiers test, P3
   line==0 guard in open_resolved_source.
+- **Issue 03 REVIVED with new scope** (user request 2026-09-18: "I want to
+  follow other types once inside a library buffer"): navigate WITHIN external
+  sources — a background tree-sitter index of the landed crate's source_root
+  (carried by `ResolvedSource.source_root` since 006-01), M-. and imenu keyed
+  against it for external buffers instead of refusing "buffer not in project",
+  resolver fall-through for symbols not in the crate. See
+  `.agents/tasks/issue-006-03-impl.md`.
 Phases: 1 · Issues: 01–02
 Depends on: plan 005 (edit modes) — sequencing only; no code dependency
 
