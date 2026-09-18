@@ -47,6 +47,36 @@ functionality. We don't need *scratch*."
 6. Its own parity-log row: divergence from the emacs splash is deliberate
    (KEEP) — append to `docs/emacs-parity-log.md`.
 
+## Orchestrator pre-check (2026-09-18, against the committed tree)
+
+- **Derive machinery already exists — reuse, never hand-write**: `store.rs`
+  has `menu_entries_for_path(&KeySeq)`, `menu_entries()`, `menu_rows()`,
+  `menu_height()`, `menu_bindings()` (~4034-4195) turning the live
+  keymap × command registry into grouped rows (prefixes first, then leaf
+  commands by registry category, headers per group). Home = the all-groups
+  view of exactly this; add an "all top-level groups" query rather than a
+  new formatter.
+- **`open_scratch` call sites to change** (auto-create paths):
+  `command.rs:154` (the explicit `open-scratch` command — may stay, but
+  should now open HOME instead of a buffer), `store.rs:2602`
+  (`kill_buffer` when the last buffer dies → must show HOME, not create
+  scratch), `store.rs:5411` (stale-reference fallback in the buffer-list
+  open path → HOME). Also the boot path. Tests call
+  `store.open_scratch()` directly (`store.rs:7503`) — expect those to be
+  reworked to the home state.
+- **`*scratch*` appears in existing assertions**: it is a buffer key in
+  `BufferTable` and in buffer-list/picker expectations (the parity log's
+  `C-x b` leg saw "3 of 3" including `*scratch*`). Those move to the home
+  state (no scratch entry, so the counts change).
+- **`q` on home must be unbound**: find where the bare-`q` → quit/close
+  binding lives (the root/buffer view keymap) so home does not inherit it;
+  `C-x C-c` must still quit immediately (no buffers ⇒ nothing to save, per
+  004-04).
+- `?` already opens the descendable transient menu and works (verified
+  live: `?` then `C-x` descends into the C-x submenu; a bare prefix shows
+  `[C-x]` pending in the status line and `C-g` cancels) — home's `?` should
+  do the same.
+
 ## Constraints
 
 - Scope fence: `src/app/store.rs` (drop scratch create; empty-state/home
