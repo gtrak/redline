@@ -236,6 +236,11 @@ class App:
         self._read(settle, quiet=PTY_QUIET if quiet is None else quiet)
 
     def wait(self, t=1.0, quiet=None):
+        # Callers pass `t` as "give the app this long to settle". The read
+        # still returns early on a quiet window, so a smaller window makes
+        # settle steps overlap the app's (15 ms) render instead of padding
+        # out to t. Fast mode is validated by a full-battery equivalence
+        # run, not assumed (see tools/gate.sh).
         self._read(t, quiet=PTY_QUIET if quiet is None else quiet)
 
     def wait_done(self, timeout=15.0):
