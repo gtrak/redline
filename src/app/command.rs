@@ -373,6 +373,12 @@ impl CommandRegistry {
             "buffers",
             |store, _arg| store.buffer_list_prev(),
         ));
+        reg.register(Command::new(
+            "buffer-list-kill-selected",
+            "Kill the selected buffer in the buffer list (d)",
+            "buffers",
+            |store, _arg| store.buffer_list_kill_selected(),
+        ));
         // ── issue 07: magit status & staging ───────────────────────────
         reg.register(Command::new(
             "magit-status",
@@ -769,7 +775,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 100, "expected 100 seed commands: {names:?}");
+        assert_eq!(names.len(), 101, "expected 101 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -811,6 +817,7 @@ mod tests {
             "open-buffer-list-selected",
             "buffer-list-next",
             "buffer-list-prev",
+            "buffer-list-kill-selected",
             "magit-status",
             "magit-stage",
             "magit-unstage",

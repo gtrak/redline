@@ -1238,6 +1238,98 @@ def flow_notes_scroll():
         app.kill()
 
 
+# ── plan-004-issue-05h buffer-list key-consistency legs ─────────────────────────────
+
+def _buffer_row_count(app):
+    """Count of buffer-list rows: each row ends with '(N lines)' (the
+    current buffer's marker column is '*', every other row's is a space)."""
+    n = 0
+    for r in range(app.rows):
+        if re.search(r"\(\d+ lines\)\s*$", app.row_text(r)):
+            n += 1
+    return n
+
+
+def flow_buffer_list_np():
+    """NEW (plan-004-issue-05h) buffer-list key consistency: in the `C-x C-b`
+    list, `n`/`p` move the selection (no `unbound key` echo; the highlighted
+    row changes), `d` kills the selected buffer (the buffer count drops by
+    one and the list STAYS OPEN, with the selection clamped to a valid row),
+    and `q` still closes. Drives its own App."""
+    app = App(REPO, rows=ROWS, cols=COLS)
+    try:
+        # Two real buffers + *scratch* = 3 rows (MRU: lib current, main, scratch).
+        app.key("C-x C-f")
+        app.wait(0.8)
+        for ch in "main":
+            app.key(ch, settle=0.2)
+        app.key("RET")
+        app.wait(0.8)
+        app.key("C-x C-f")
+        app.wait(0.8)
+        for ch in "lib":
+            app.key(ch, settle=0.2)
+        app.key("RET")
+        app.wait(0.8)
+
+        app.key("C-x C-b")
+        app.wait(0.8)
+        list_open = "*list-buffers*" in text(app)
+        # Key-help footer lists n/p/d so the new keys are discoverable.
+        footer = next((app.row_text(r) for r in range(app.rows)
+                       if "d kill" in app.row_text(r)), "")
+        footer_ok = "n/p" in footer and "d kill" in footer
+        count_before = _buffer_row_count(app)
+
+        # n: the highlighted row changes and nothing echoes `unbound key`.
+        blue_before = app.blue_rows()
+        app.key("n")
+        app.wait(0.5)
+        blue_after_n = app.blue_rows()
+        n_moved = blue_before != blue_after_n and len(blue_after_n) == 1
+        n_no_echo = "unbound key" not in text(app)
+
+        # p: back to the original row, still no echo.
+        app.key("p")
+        app.wait(0.5)
+        blue_after_p = app.blue_rows()
+        p_back = blue_after_p == blue_before
+        p_no_echo = "unbound key" not in text(app)
+
+        # d on the selected (non-current) buffer: count drops by one, the
+        # list stays open, and the selection clamps to a valid row.
+        app.key("n")
+        app.wait(0.5)
+        app.key("d")
+        app.wait(0.8)
+        list_still_open = "*list-buffers*" in text(app)
+        count_after = _buffer_row_count(app)
+        d_dropped = count_after == count_before - 1
+        blue_after_d = app.blue_rows()
+        d_clamped = (len(blue_after_d) == 1
+                     and 1 <= blue_after_d[0] <= 1 + count_after)
+        no_kill_echo = "unbound key" not in text(app)
+
+        # q still closes the list.
+        app.key("q")
+        app.wait(0.6)
+        q_closed = "*list-buffers*" not in text(app)
+
+        ok = (list_open and footer_ok and count_before == 3
+              and n_moved and n_no_echo and p_back and p_no_echo
+              and list_still_open and d_dropped and d_clamped and no_kill_echo
+              and q_closed)
+        record("U-05h-bl", "C-x C-b,n,p,n,d,q", ok,
+               f"list-open={list_open} footer-n/p/d={footer_ok} rows={count_before} "
+               f"n-moved-highlight={n_moved} (blue {blue_before}->{blue_after_n}) "
+               f"n-no-unbound-echo={n_no_echo} p-returns={p_back} "
+               f"d-dropped-count={d_dropped} ({count_before}->{count_after}) "
+               f"list-stays-open={list_still_open} selection-clamped={d_clamped} "
+               f"(blue={blue_after_d}) q-closes={q_closed}")
+    finally:
+        app.kill()
+
+
 def flow_banner_hint():
     """NEW (plan-003-03) banner-hint check, driven per kind.
 
@@ -1919,6 +2011,10 @@ def main():
     flow_blame_windowing()
     flow_notes_scroll()
     flow_banner_hint()
+
+    # plan-004-issue-05h buffer-list key-consistency leg (own App; it kills a
+    # buffer, so it must not share state with the flows above or below).
+    flow_buffer_list_np()
 
     # plan-004-issue-03 mark/kill/yank sweep legs (on the fixture repo).
     app = App(REPO, rows=ROWS, cols=COLS)

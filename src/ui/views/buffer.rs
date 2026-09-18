@@ -93,7 +93,7 @@ pub fn BufferListView(props: &BufferListViewProps, mut _hooks: Hooks) -> impl In
                     })
                 })
                 Text(
-                    content: "RET open · C-n/C-p or arrows move · q close",
+                    content: "RET open · n/p (or C-n/C-p/arrows) move · d kill · q close",
                     color: face_color(t.preview),
                 )
             }

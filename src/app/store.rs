@@ -178,6 +178,15 @@ impl ViewId {
                 km.bind(&[Key::ctrl_char('n')], "buffer-list-next").unwrap();
                 km.bind(&[Key::up()], "buffer-list-prev").unwrap();
                 km.bind(&[Key::ctrl_char('p')], "buffer-list-prev").unwrap();
+                // Issue 05h: `n`/`p` match the magit/log convention (same
+                // commands as the arrow / C-n / C-p binds).
+                km.bind(&[Key::char('n')], "buffer-list-next").unwrap();
+                km.bind(&[Key::char('p')], "buffer-list-prev").unwrap();
+                // Issue 05h: `d` is the dired-convention kill verb (parity
+                // log row 31). Kills the selected buffer via the same
+                // `kill_buffer` path the `C-x k` picker runs; the list
+                // stays open.
+                km.bind(&[Key::char('d')], "buffer-list-kill-selected").unwrap();
                 // PART A fix (item 4): page keys step the selection too.
                 km.bind(&[Key::new(KeyCode::PageDown)], "buffer-list-next").unwrap();
                 km.bind(&[Key::new(KeyCode::PageUp)], "buffer-list-prev").unwrap();
@@ -2659,6 +2668,24 @@ impl AppStore {
         if n > 0 {
             self.buffer_list_selected = (self.buffer_list_selected + n - 1) % n;
         }
+    }
+
+    /// Buffer list: `d` kills the SELECTED buffer (issue 05h; the
+    /// dired-convention kill verb backlogged in parity log row 31). Reuses
+    /// the existing `kill_buffer` path the `C-x k` picker runs — no second
+    /// kill verb. The list stays open; the selection clamps to a valid row.
+    pub fn buffer_list_kill_selected(&mut self) {
+        let key = match self.buffers.list().get(self.buffer_list_selected) {
+            Some((key, _)) => key.to_string(),
+            None => return,
+        };
+        self.kill_buffer(&key);
+        let n = self.buffers.len();
+        self.buffer_list_selected = if n > 0 {
+            self.buffer_list_selected.min(n - 1)
+        } else {
+            0
+        };
     }
 
     // ── project file-tree sidebar (issue 09) ───────────────────────────
@@ -7775,6 +7802,60 @@ mod tests {
         assert_eq!(store.view_name_display(), "src/main.rs");
     }
 
+    /// Issue 05h: `n`/`p` move the selection exactly as `C-n`/`C-p` (no
+    /// "unbound key" echo), and `d` kills the selected buffer via the
+    /// existing `kill_buffer` path — the list stays open and the selection
+    /// clamps to a valid row.
+    #[test]
+    fn buffer_list_n_p_d_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_path("src/main.rs");
+        store.open_path("src/lib.rs");
+        store.open_path("src/main.rs"); // main.rs current; MRU: main, lib, scratch
+
+        store.dispatch("list-buffers", None).unwrap();
+        assert_eq!(store.top_view(), ViewId::BufferList);
+        let rows = store.buffer_rows();
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["src/main.rs", "src/lib.rs", "*scratch*"], "{names:?}");
+        assert!(rows[0].current);
+
+        // n/p move identically to C-n/C-p, with no unbound-key echo.
+        store.key_event(key("C-n"));
+        assert_eq!(store.buffer_list_selected(), 1);
+        store.key_event(key("C-p"));
+        assert_eq!(store.buffer_list_selected(), 0);
+        store.key_event(key("n"));
+        assert_eq!(store.buffer_list_selected(), 1);
+        assert!(!store.message.contains("unbound key"), "`n` must not echo: {:?}", store.message);
+        store.key_event(key("p"));
+        assert_eq!(store.buffer_list_selected(), 0);
+
+        // d kills the selected (non-current) buffer: the list stays open
+        // and the selection clamps to the row that shifted into place.
+        store.key_event(key("n")); // row 1: src/lib.rs
+        store.key_event(key("d"));
+        assert_eq!(store.top_view(), ViewId::BufferList, "d must not close the list");
+        assert!(!store.quit);
+        let rows = store.buffer_rows();
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["src/main.rs", "*scratch*"], "{names:?}");
+        assert!(store.message.contains("killed"), "{:?}", store.message);
+        assert_eq!(store.buffer_list_selected(), 1, "selection clamps to a valid row");
+
+        // d on the last row clamps the selection to row 0.
+        store.key_event(key("d"));
+        assert_eq!(store.buffer_rows().len(), 1);
+        assert_eq!(store.buffer_list_selected(), 0);
+        assert_eq!(store.top_view(), ViewId::BufferList);
+
+        // q still closes the list.
+        store.key_event(key("q"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+    }
+
     #[test]
     fn switch_project_lands_in_new_projects_file_picker() {
         let base = tempfile::tempdir().unwrap();
@@ -7928,7 +8009,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 100);
+        assert_eq!(store.picker_count().0, 101);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -7946,11 +8027,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 99);
+        assert_eq!(store.picker_selected(), 100);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 98);
+        assert_eq!(store.picker_selected(), 99);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op close, *scratch* is not editable, so just a message).
@@ -7985,7 +8066,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 100);
+        assert_eq!(store.picker_count().0, 101);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
