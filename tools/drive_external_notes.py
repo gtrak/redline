@@ -12,6 +12,11 @@ was keyed off project-relative paths (dead there):
      `cargo metadata` (the registry source is cached, so it is fast and
      offline) → lands READ-ONLY in
      ~/.cargo/registry/src/<hash>/ropey-1.6.1/src/rope.rs.
+  E1b ownership guard (006-02b item 1): C-x C-q AND C-x C-s are REFUSED on
+     the external buffer ("external buffer is read-only (not
+     project-owned)") — the deliberate edit-mode override must never turn
+     a registry source (a cache shared by every project on the machine)
+     editable or writable.
   E2 annotate: `A` on the landing line → type the note → RET: the margin
      marker AND the inline note row render on the external buffer (the
      record is keyed by the ABSOLUTE path, stored in the project's
@@ -242,7 +247,7 @@ def main():
         s.key("M-g g", 0.8)
         s.key("5", 0.4)
         s.key("RET", 0.8)   # line 5: top-level `ropey::Rope::new();` probe call
-        s.key("M-f", 0.8)   # let, r, then the END of the `ropey` run
+        s.key("M-f", 0.8)   # point to the END of the `ropey` run on the line-5 probe
         s.key("M-.", 1.5)
         ok, msg = s.poll("jumped to", timeout=40.0)
         m = re.search(r"jumped to (\S+):(\d+)", msg)
@@ -258,6 +263,20 @@ def main():
         ok = "Rope" in s.screen_text()
         rec("E1: the window landed on rope.rs (Rope in view)", ok,
             f"top={s.row_text(1)!r}")
+
+        # ── E1b: the ownership guard (006-02b item 1) ─────────────────
+        # The registry source is a cache shared by every project on the
+        # machine: the C-x C-q edit-mode override and C-x C-s must both be
+        # refused on it.
+        print("\n=== E1b: C-x C-q / C-x C-s refused on the external buffer ===")
+        s.key("C-x C-q", 1.0)
+        ok, msg = s.poll("external buffer is read-only", timeout=10.0)
+        rec("E1b: C-x C-q is refused on the external buffer",
+            ok, f"minibuffer={msg!r}")
+        s.key("C-x C-s", 1.0)
+        ok, msg = s.poll("external buffer is read-only", timeout=10.0)
+        rec("E1b: C-x C-s is refused on the external buffer",
+            ok, f"minibuffer={msg!r}")
 
         # ── E2: annotate on the external buffer ─────────────────────────
         print("\n=== E2: A on the external buffer renders marker + note row ===")

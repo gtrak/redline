@@ -7,6 +7,8 @@ content row carries the blue selected-row signature (bg `48;5;12` -> pyte
 `5c5cff`, white fg, NO reverse) and it is the row the store's cursor points
 at. The active-buffer status line (bottom row) is excluded from the count.
 """
+import os
+import subprocess
 import sys
 sys.path.insert(0, "/home/gary/dev/red/tools")
 from pyte_driver import App
@@ -126,6 +128,24 @@ def drive_windowing():
             f"cursor in window {sum(in_win)}/28, help visible {sum(help_ok)}/28, window scrolled {scrolled}x")
 
 
+def drive_external_notes():
+    """The plan 008 external-buffer annotation legs (006-02b item 9): a real
+    M-. resolve into the cargo registry, driven in a DEDICATED repo
+    (/tmp/redline_ext_repo) under its own per-repo PTY flock, so it joins
+    this sequential suite without contending with the shared
+    /tmp/redline_pyte_repo fixture. Run in a child process so its sys.exit
+    and PTY cleanup stay contained; the outer `timeout` bounds it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "drive_external_notes.py")
+    try:
+        r = subprocess.run([sys.executable, path], timeout=600)
+    except subprocess.TimeoutExpired:
+        verdict("external notes (own repo)", False, "timed out after 600s")
+        return
+    verdict("external notes (own repo)", r.returncode == 0,
+            f"exit={r.returncode}")
+
+
 if __name__ == "__main__":
     drive_magit()
     drive_log()
@@ -133,6 +153,7 @@ if __name__ == "__main__":
     drive_tree()
     drive_buffer_list()
     drive_windowing()
+    drive_external_notes()
     print("\n=== SUMMARY ===")
     for name, ok, detail in VERDICTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}")

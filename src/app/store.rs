@@ -663,11 +663,14 @@ impl FileViewRow {
 
 /// One annotation anchored to a file line (plan 005 issue 02): the record
 /// stored in `.redline-notes.md`'s structured section and rendered inline
-/// in the file view. `path` is project-relative. `anchor` is the exact
-/// text of the anchored line at creation: automatic re-anchoring (±25
-/// lines) keeps `line` pointing at it as the file drifts, and `orphaned`
-/// flags the case where the anchor text is gone (the annotation stays at
-/// its last known line — NEVER moved to a guessed line).
+/// in the file view. `path` is the record key: the project-relative path
+/// for project files, or the absolute path string for external (library)
+/// buffers (plan 008 issue 01 — see `buffer_annotation_path`, the one
+/// key-derivation point). `anchor` is the exact text of the anchored line
+/// at creation: automatic re-anchoring (±25 lines) keeps `line` pointing
+/// at it as the file drifts, and `orphaned` flags the case where the
+/// anchor text is gone (the annotation stays at its last known line —
+/// NEVER moved to a guessed line).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Annotation {
     pub path: String,
@@ -1364,15 +1367,23 @@ pub struct AppStore {
     /// The resolve-result bus: a background M-. fall-through job publishes
     /// here; the UI's drain task applies each event (mirrors `index_bus`).
     pub resolve_bus: ResolveBus,
-    /// Generation counter for resolve jobs: bumped on every new fall-through
-    /// request (a stale in-flight result is then discarded) and on project
-    /// switch, mirroring `index_generation`.
+    /// Generation counter for resolve jobs: bumped on every M-. request
+    /// (a workspace hit supersedes any in-flight job, 006-02b item 2), on
+    /// every new fall-through request, and on project switch — a stale
+    /// in-flight result is then discarded.
     resolve_generation: usize,
     /// Status-line activity while a resolve job is in flight:
     /// `(text, generation)`; the display hides it when the generation no
     /// longer matches (superseded request or project switch), so it can
     /// never hang on a stale job.
     resolving: Option<(String, usize)>,
+    /// The buffer keys opened via the external-landing path
+    /// (`open_external_path`: registry / tooling sources, plan 006 issue
+    /// 02) — the buffers the ownership guard (006-02b item 1) refuses to
+    /// make editable or write. Path-keyed, stable across project switches
+    /// (a path under a NEW project root is project-owned again, checked
+    /// first in `buffer_is_project_owned`).
+    external_buffers: std::collections::HashSet<String>,
     /// The search-event bus (issue 06): the store keeps the sender side
     /// for its lifetime; each search job clones a sender for its worker
     /// thread. The receiver is kept in the store and handed out exactly
@@ -1643,6 +1654,7 @@ impl AppStore {
             resolve_bus: ResolveBus::new(),
             resolve_generation: 0,
             resolving: None,
+            external_buffers: std::collections::HashSet::new(),
             search_bus,
             search_rx,
             index_rx: None,
@@ -1995,6 +2007,16 @@ impl AppStore {
                     return false;
                 }
             };
+            // 006-02b item 1: ownership guard — an external (registry /
+            // tooling) source is a cache shared by every project on the
+            // machine; refuse the write even if the buffer somehow reached
+            // edit mode.
+            if !self.buffer_is_project_owned(key) {
+                self.minibuffer_message(
+                    "save-buffer: external buffer is read-only (not project-owned)",
+                );
+                return false;
+            }
             if !buf.editable {
                 self.minibuffer_message("save-buffer: buffer is read-only");
                 return false;
@@ -2533,7 +2555,7 @@ impl AppStore {
             self.minibuffer_message("toggle-read-only: no current buffer");
             return;
         };
-        let (editable, locally_modified) = {
+        let (editable, locally_modified, owned) = {
             let buf = match self.buffers.get(&key) {
                 Some(b) => b,
                 None => {
@@ -2546,8 +2568,17 @@ impl AppStore {
                 self.minibuffer_message("toggle-read-only: scratch has no file");
                 return;
             }
-            (buf.editable, buf.locally_modified)
+            (buf.editable, buf.locally_modified, self.buffer_is_project_owned(&key))
         };
+        if !owned {
+            // 006-02b item 1: the C-x C-q override must NEVER turn an
+            // external (registry / tooling) source editable — it is a cache
+            // shared by every project on the machine.
+            self.minibuffer_message(
+                "toggle-read-only: external buffer is read-only (not project-owned)",
+            );
+            return;
+        }
         if editable {
             if locally_modified {
                 // Unsaved edits must not be lost silently: confirm first
@@ -3054,6 +3085,10 @@ impl AppStore {
     fn open_external_path(&mut self, abs: &Path) -> Option<String> {
         let (rope, mtime) = load_file(abs).ok()?;
         let key = self.buffers.insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
+        // 006-02b item 1: remember that this key is an external (registry /
+        // tooling) source — the ownership guard refuses edit mode + save
+        // for exactly these buffers.
+        self.external_buffers.insert(key.clone());
         self.buffers.set_current(&key);
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
@@ -3086,8 +3121,14 @@ impl AppStore {
             return;
         }
         // Land on the resolved line (1-based; when the provider could not
-        // pin one, the top of the file) and record the jump.
-        let line = source.line.map(|l| (l - 1) as usize).unwrap_or(0);
+        // pin one, the top of the file) and record the jump. A provider
+        // emitting 0 is treated as "no line" (006-02b item 6) so the
+        // `(l - 1) as usize` below can never underflow.
+        let line = source
+            .line
+            .filter(|l| *l > 0)
+            .map(|l| (l - 1) as usize)
+            .unwrap_or(0);
         self.set_point_line(line);
         self.ensure_highlight();
         self.record_jump(&origin, "M-.");
@@ -4417,6 +4458,30 @@ impl AppStore {
             .iter()
             .filter(|e| matches!(e, NotesEntry::Record(a) if a.path == rel))
             .count()
+    }
+
+    /// Whether the buffer at `key` is PROJECT-OWNED (006-02b item 1, the
+    /// edit-mode/save ownership guard): `true` for path-less (scratch)
+    /// buffers, for paths under the current project root (project files +
+    /// the notes file — this also covers a PREVIOUS project's buffers after
+    /// a switch: they are the user's own files, not a shared cache), and
+    /// for any other buffer that was not opened via the external-landing
+    /// path. `false` for external (tooling / registry) sources — a cache
+    /// shared by every project on the machine, never editable, never
+    /// written.
+    fn buffer_is_project_owned(&self, key: &str) -> bool {
+        let Some(buf) = self.buffers.get(key) else {
+            return false;
+        };
+        let Some(path) = buf.path.as_ref() else {
+            return true; // scratch (no on-disk path): as today
+        };
+        if let Some(root) = self.project.as_ref().map(|p| &p.root)
+            && path.starts_with(root)
+        {
+            return true;
+        }
+        !self.external_buffers.contains(key)
     }
 
     /// The buffer at `key`'s annotation key (plan 008 issue 01, the ONE
@@ -7042,6 +7107,13 @@ impl AppStore {
         };
         let rel = rel.to_string_lossy().into_owned();
 
+        // 006-02b item 2: supersede any in-flight tooling resolve — a
+        // successful workspace hit must not be clobbered by a stale event
+        // from a superseded request that lands later. The fall-through
+        // path re-bumps in `start_symbol_resolution`, which is fine (a
+        // generation only needs to differ; the event carries its own).
+        self.resolve_generation += 1;
+
         let line = self.point_line();
         let line_text = buf.line_text(line).unwrap_or_default();
         // (1) The symbol under the point: identifier run around the point's
@@ -7200,6 +7272,16 @@ impl AppStore {
     /// the result (jump) or reports the miss.
     pub fn apply_resolve_event(&mut self, event: &ResolveEvent) {
         if event.generation != self.resolve_generation {
+            // A stale event (a superseded request or a previous project):
+            // its result is discarded. The drain is latest-wins — this
+            // stale send may have OVERWRITTEN the current generation's
+            // event in the watch channel (006-02b item 3); if so the
+            // current job's event never reaches us and its `resolving`
+            // indicator would stick until the next action. Clearing it here
+            // is always safe: a still-in-flight current-generation event
+            // lands its jump when it arrives (its generation still matches)
+            // — at worst the indicator hides a few moments early.
+            self.resolving = None;
             return;
         }
         self.resolving = None;
@@ -7238,6 +7320,23 @@ impl AppStore {
             return None;
         }
         let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        // 006-02b item 4: a cursor parked on the SECOND colon of a `::`
+        // separator (the point's own char and its predecessor are both
+        // `:`) sits at the very end of the preceding path segment — treat
+        // the point as one char to the left (the segment's end) so the
+        // identifier / path token extract per the existing rules
+        // (`a::b` → `("a", "a::b")`). The FIRST colon is already covered:
+        // the char before the point is the segment's last identifier char.
+        let col = if col >= 2
+            && col < chars.len()
+            && chars[col] == ':'
+            && chars[col - 1] == ':'
+            && is_ident(chars[col - 2])
+        {
+            col - 1
+        } else {
+            col
+        };
         // The run the point belongs to: the char AT the point when it is an
         // identifier char, else the run ending immediately BEFORE it.
         let start = if col < chars.len() && is_ident(chars[col]) {
@@ -9212,6 +9311,109 @@ mod tests {
         assert!(s2.message.contains("not a buffer view"), "msg: {}", s2.message);
         assert!(!s2.buffers.get(&bufk).unwrap().editable,
             "the toggle must not fire outside the buffer view");
+    }
+
+    /// 006-02b item 1 fixture: a project store with an external (outside-
+    /// root) file open read-only via the tooling-landing path.
+    fn store_with_external_buffer() -> (tempfile::TempDir, tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        let ext = tempfile::tempdir().unwrap();
+        let abs = ext.path().join("registry_src.rs");
+        std::fs::write(&abs, "pub fn spawn<F>(f: F) {}\n").unwrap();
+        s.open_external_path(&abs).unwrap();
+        (dir, ext, s)
+    }
+
+    #[test]
+    fn toggle_read_only_refuses_external_buffer() {
+        // 006-02b item 1: the C-x C-q override must NEVER turn an external
+        // (registry / tooling) buffer editable — it is a cache shared by
+        // every project on the machine.
+        let (_dir, _ext, mut s) = store_with_external_buffer();
+        let key = s.buffers.current().unwrap().to_string();
+        assert!(!s.buffers.get(&key).unwrap().editable,
+            "external buffers start read-only");
+        s.toggle_read_only();
+        assert!(!s.buffers.get(&key).unwrap().editable,
+            "C-x C-q must NOT turn an external buffer editable");
+        assert!(s.message.contains("external buffer is read-only"), "msg: {}", s.message);
+        // Plan-005 semantics intact: a PROJECT file in the same session
+        // still toggles into edit mode.
+        std::fs::create_dir_all(_dir.path().join("src")).unwrap();
+        std::fs::write(_dir.path().join("src/p.rs"), "fn p() {}\n").unwrap();
+        s.open_path("src/p.rs");
+        s.toggle_read_only();
+        let pkey = s.buffers.current().unwrap().to_string();
+        assert!(s.buffers.get(&pkey).unwrap().editable,
+            "a project file toggles into edit mode as before (msg: {})", s.message);
+    }
+
+    #[test]
+    fn buffer_is_project_owned_classifies_external_scratch_and_project() {
+        // 006-02b item 1: the ownership notion itself — external paths
+        // refuse, scratch and project files (incl. the notes file) pass.
+        let (dir, _ext, mut s) = store_with_external_buffer();
+        let ext_key = s.buffers.current().unwrap().to_string();
+        assert!(!s.buffer_is_project_owned(&ext_key), "registry source: not owned");
+        assert!(s.buffer_is_project_owned(SCRATCH_NAME), "scratch (no path): owned as today");
+        // The notes file lives under the root: owned (the 005 decision —
+        // notes keep their edit-mode semantics).
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        s.open_notes();
+        let notes_key = s.notes_key().unwrap();
+        assert!(s.buffer_is_project_owned(&notes_key), "notes file (under root): owned");
+    }
+
+    #[test]
+    fn save_buffer_key_refuses_external_even_when_editable() {
+        // 006-02b item 1: even if an external buffer somehow reached edit
+        // mode (a future bug), the save must be refused — the write would
+        // corrupt a cache shared by every project on the machine.
+        let (_dir, ext, mut s) = store_with_external_buffer();
+        let key = s.buffers.current().unwrap().to_string();
+        s.buffers.get_mut(&key).unwrap().editable = true; // the hypothetical future bug
+        assert!(!s.save_buffer_key(&key), "the save must be refused");
+        assert!(s.message.contains("external buffer is read-only"), "msg: {}", s.message);
+        let abs = ext.path().join("registry_src.rs");
+        assert_eq!(std::fs::read_to_string(&abs).unwrap(), "pub fn spawn<F>(f: F) {}\n",
+            "the external file is untouched");
+        // Plan-005 path still works: a project file passes the gate and
+        // writes to disk.
+        std::fs::create_dir_all(_dir.path().join("src")).unwrap();
+        std::fs::write(_dir.path().join("src/p.rs"), "old\n").unwrap();
+        s.open_path("src/p.rs");
+        s.toggle_read_only(); // into edit mode (project file: allowed)
+        let pkey = s.buffers.current().unwrap().to_string();
+        assert!(s.save_buffer_key(&pkey), "a project file saves (msg: {})", s.message);
+    }
+
+    #[test]
+    fn save_buffer_key_still_writes_previous_project_buffer_after_switch() {
+        // 006-02b item 1: the guard refuses only EXTERNAL (registry / tooling)
+        // buffers. A previous project's buffer (no longer under the new root
+        // after a switch) is the user's own file — C-x C-s still writes it.
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        for d in [&dir1, &dir2] {
+            std::fs::write(d.path().join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::create_dir_all(d.path().join("src")).unwrap();
+        }
+        std::fs::write(dir1.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+        let mut s = store(dir1.path());
+        s.open_path("src/a.rs");
+        s.toggle_read_only(); // into edit mode (under root1: owned)
+        let key1 = s.buffers.current().unwrap().to_string();
+        assert!(s.buffers.get(&key1).unwrap().editable);
+        // Switch to a second project: dir1's buffer is no longer under the
+        // current root, but it is not an external landing either.
+        s.switch_project_root(dir2.path().to_str().unwrap());
+        let root2 = s.project.as_ref().unwrap().root.clone();
+        assert!(!s.buffers.get(&key1).unwrap().path.as_ref().unwrap().starts_with(&root2),
+            "precondition: the buffer is outside the new root");
+        assert!(s.buffer_is_project_owned(&key1), "previous-project file is still owned");
+        assert!(s.save_buffer_key(&key1), "previous-project file still saves (msg: {})", s.message);
     }
 
     #[test]
@@ -11399,7 +11601,9 @@ mod tests {
         assert!(!s.picker_open(), "unique cross-file: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "target is at line 0 in lib.rs");
-        assert_eq!(s.resolve_generation, 0, "a workspace hit never fires the resolver");
+        // 006-02b item 2: the hit bumped the generation (superseding any
+        // in-flight resolve) but started no job — exactly one bump.
+        assert_eq!(s.resolve_generation, 1, "a workspace hit supersedes in-flight resolves");
     }
 
     #[test]
@@ -11513,7 +11717,9 @@ mod tests {
         // `main` is defined only in main.rs: unique → jump to main's definition (line 0).
         assert!(!s.picker_open());
         assert_eq!(s.point_line(), 0, "jumped to main's definition");
-        assert_eq!(s.resolve_generation, 0, "enclosing-symbol hit never fires the resolver");
+        // 006-02b item 2: the enclosing hit bumps the generation (one
+        // supersede bump, no job).
+        assert_eq!(s.resolve_generation, 1, "the enclosing hit supersedes in-flight resolves");
     }
 
     // ── plan 006 issue 02: tooling-resolver fall-through ─────────────────────────
@@ -11561,6 +11767,12 @@ mod tests {
         assert_eq!(satp("let x = 1;", 4), Some(("x".into(), "x".into())));
         // Deep path: `a::b::c` under the middle segment.
         assert_eq!(satp("use a::b::c;", 7), Some(("b".into(), "a::b::c".into())));
+        // 006-02b item 4: the cursor on the SECOND colon of a `::`
+        // separator counts as the end of the preceding segment (the first
+        // colon already did, via the "run before the point" rule).
+        assert_eq!(satp("a::b", 1), Some(("a".into(), "a::b".into())));
+        assert_eq!(satp("a::b", 2), Some(("a".into(), "a::b".into())));
+        assert_eq!(satp("use a::b::c;", 6), Some(("a".into(), "a::b::c".into())));
     }
 
     #[test]
@@ -11575,7 +11787,9 @@ mod tests {
         s.open_path("src/main.rs");
         s.set_point(0, 2, 2); // cursor inside `tokio`
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 1, "fall-through fired exactly once");
+        // 006-02b item 2: the xref-entry supersede bump + the
+        // start_symbol_resolution bump — two bumps for a fall-through.
+        assert_eq!(s.resolve_generation, 2, "fall-through fired exactly once");
         assert!(
             s.resolving_display().is_empty(),
             "no runtime: the indicator must not hang"
@@ -11596,12 +11810,12 @@ mod tests {
         // Direct hit under the point → no fall-through.
         s.set_point(0, 12, 12);
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 0, "direct hit: no resolver");
-        // Enclosing hit → no fall-through either.
+        assert_eq!(s.resolve_generation, 1, "direct hit: one supersede bump, no job");
+        // Enclosing hit → no fall-through either (a second supersede bump).
         s.open_path("src/lib.rs");
         s.set_point(0, 0, 0);
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 0, "enclosing hit: no resolver");
+        assert_eq!(s.resolve_generation, 2, "enclosing hit: one supersede bump, no job");
     }
 
     #[tokio::test]
@@ -11622,11 +11836,11 @@ mod tests {
         let origin_key = s.buffers.current().map(String::from).unwrap();
         let recents_before = s.project_store.recents.list(&root).to_vec();
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 1);
+        assert_eq!(s.resolve_generation, 2, "xref supersede bump + start bump");
         assert!(s.resolving_display().contains("`tokio::spawn`"), "status activity while pending");
         // Land a fabricated (provider-shaped) hit for the in-flight job.
         let event = ResolveEvent {
-            generation: 1,
+            generation: 2,
             symbol: "tokio::spawn".into(),
             source: Some(ResolvedSource {
                 file: ext.path().to_path_buf(),
@@ -11666,7 +11880,7 @@ mod tests {
         let before = s.buffers.current().map(String::from).unwrap();
         s.xref_find_definitions();
         let event = ResolveEvent {
-            generation: 1,
+            generation: 2,
             symbol: "tokio::spawn".into(),
             source: None,
             error: Some("no tooling provider could resolve symbol `tokio::spawn` (tried 1 provider(s): rust): no crate `tokio`".into()),
@@ -11696,13 +11910,13 @@ mod tests {
         s.open_path("src/main.rs");
         s.set_point(0, 2, 2);
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 1, "fall-through started");
+        assert_eq!(s.resolve_generation, 2, "fall-through started (xref bump + start bump)");
         let event = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
             .await
             .expect("resolve event published within 30s");
         assert!(event.is_ok());
         let event = rx.borrow_and_update().clone();
-        assert_eq!(event.generation, 1);
+        assert_eq!(event.generation, 2);
         assert!(event.source.is_none(), "miss: no source, got error: {:?}", event.error);
         s.apply_resolve_event(&event);
         assert!(
@@ -11719,36 +11933,107 @@ mod tests {
     #[test]
     fn xref_resolver_stale_generation_event_discarded() {
         // An event from a superseded request (or a previous project) must be
-        // discarded: no state change, and the current activity text stays.
+        // discarded: no jump, no message — and (006-02b item 3) it CLEARS
+        // the resolving indicator, because the latest-wins drain means this
+        // stale send may have overwritten the current job's event in the
+        // channel; a stuck indicator would otherwise persist until the next
+        // action.
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "tokio::spawn(f);\n"),
         ]);
         s.open_path("src/main.rs");
         s.set_point(0, 2, 2);
         s.xref_find_definitions();
-        assert_eq!(s.resolve_generation, 1);
+        assert_eq!(s.resolve_generation, 2, "xref bump + start bump");
         // Simulate a superseded request bumping the generation (as a second
-        // M-. would), then deliver the OLD job's event.
+        // M-. that started its own job would), then deliver the OLD job's
+        // event.
         s.resolve_generation += 1;
-        s.resolving = Some(("resolving `other`…".into(), 2));
+        s.resolving = Some(("resolving `other`…".into(), 3));
         let before = s.message.clone();
         let stale = ResolveEvent {
-            generation: 1,
+            generation: 2,
             symbol: "tokio::spawn".into(),
             source: None,
             error: Some("boom".into()),
         };
         s.apply_resolve_event(&stale);
-        assert_eq!(s.message, before, "stale event changed no state");
-        assert_eq!(
-            s.resolving_display(),
-            "resolving `other`…",
-            "the CURRENT job's activity is untouched by a stale event"
+        assert_eq!(s.message, before, "stale event changed no reported state");
+        assert!(
+            s.resolving_display().is_empty(),
+            "a stale event clears the resolving indicator (latest-wins: the current job's event may have been overwritten)"
         );
-        // And the stale job's own activity text (gen 1) is hidden by the
+        // And the stale job's own activity text (gen 2) is hidden by the
         // display gate once the generation no longer matches.
-        s.resolving = Some(("resolving `tokio::spawn`…".into(), 1));
+        s.resolving = Some(("resolving `tokio::spawn`…".into(), 2));
         assert!(s.resolving_display().is_empty(), "stale-generation activity hidden by the display gate");
+    }
+
+    #[tokio::test]
+    async fn xref_workspace_hit_supersedes_in_flight_resolve() {
+        // 006-02b item 2: with a resolve in flight, a successful M-. 
+        // workspace hit bumps the generation, so the in-flight job's stale
+        // event (even a registry-source HIT) discards itself and never
+        // opens the external source or records a jump.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\ntarget();\n"),
+            ("src/lib.rs", "pub fn target() {}\n"),
+        ]);
+        let ext = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ext.path(), "pub fn spawn<F>(f: F) {}\n").unwrap();
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2); // cursor inside `tokio` → workspace miss
+        s.xref_find_definitions();
+        let in_flight = s.resolve_generation;
+        assert!(!s.resolving_display().is_empty(), "resolver in flight");
+        // The user's NEXT M-. is a workspace hit (line 1: `target();`).
+        s.set_point_line(1);
+        s.xref_find_definitions();
+        assert_eq!(s.resolve_generation, in_flight + 1, "the hit superseded the in-flight resolve");
+        assert_eq!(s.view_name_display(), "src/lib.rs", "the hit landed");
+        let before = s.view_name_display();
+        // Now the stale job's event (a registry-source hit) arrives.
+        let stale = ResolveEvent {
+            generation: in_flight,
+            symbol: "tokio::spawn".into(),
+            source: Some(ResolvedSource {
+                file: ext.path().to_path_buf(),
+                source_root: ext.path().parent().unwrap().to_path_buf(),
+                external: true,
+                line: Some(1),
+            }),
+            error: None,
+        };
+        s.apply_resolve_event(&stale);
+        assert_eq!(s.view_name_display(), before, "the stale hit did not open the registry source");
+    }
+
+    #[tokio::test]
+    async fn xref_resolver_line_zero_lands_at_top() {
+        // 006-02b item 6: a provider emitting line 0 is treated as "no
+        // line" — the landing is the top of the file (no underflow).
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "tokio::spawn(f);\n"),
+        ]);
+        let ext = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ext.path(), "extern crate dep;\npub fn spawn<F>(f: F) {}\n").unwrap();
+        s.open_path("src/main.rs");
+        s.set_point(0, 2, 2);
+        s.xref_find_definitions();
+        let event = ResolveEvent {
+            generation: s.resolve_generation,
+            symbol: "tokio::spawn".into(),
+            source: Some(ResolvedSource {
+                file: ext.path().to_path_buf(),
+                source_root: ext.path().parent().unwrap().to_path_buf(),
+                external: true,
+                line: Some(0),
+            }),
+            error: None,
+        };
+        s.apply_resolve_event(&event);
+        assert_eq!(s.point_line(), 0, "line 0 lands at the top of the file");
+        assert!(s.message.contains("jumped to"), "msg: {}", s.message);
     }
 
     // ── issue 05: which-function test (finding: enclosing-symbol) ──────
@@ -13035,18 +13320,20 @@ mod tests {
 
     #[test]
     fn m_dot_includes_uppercase_identifiers() {
-        // This test verifies that the identifier filter in xref_find_definitions
-        // includes uppercase-initial names (types/constants).
-        // We test the filter logic directly: the filter must NOT skip
-        // identifiers starting with uppercase.
-        let line_text = "let x = Foo::BAR;";
-        let identifiers: Vec<&str> = line_text
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|w| !w.is_empty() && w.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_'))
-            .collect();
-        assert!(identifiers.contains(&"Foo"), "uppercase 'Foo' must be in identifiers");
-        assert!(identifiers.contains(&"BAR"), "uppercase 'BAR' must be in identifiers");
-        assert!(identifiers.contains(&"x"), "lowercase 'x' must be in identifiers");
+        // The original bug this guarded: M-. skipping uppercase-initial
+        // names (types/constants). Selection now goes through
+        // symbol_at_point, which has no case filter: the cursor on `Foo`
+        // or `BAR` yields the identifier (the `::`-path token is kept for
+        // the resolver).
+        let line = "let x = Foo::BAR;";
+        // `Foo` starts at col 8 (cursor inside the identifier).
+        assert_eq!(satp(line, 8), Some(("Foo".into(), "Foo::BAR".into())));
+        // The second `:` of the `::` separator (col 12) counts as the end
+        // of the preceding segment (006-02b item 4).
+        assert_eq!(satp(line, 12), Some(("Foo".into(), "Foo::BAR".into())));
+        // `BAR` starts at col 13; just after it (col 16) still counts.
+        assert_eq!(satp(line, 13), Some(("BAR".into(), "Foo::BAR".into())));
+        assert_eq!(satp(line, 16), Some(("BAR".into(), "Foo::BAR".into())));
     }
 
     #[test]
@@ -14863,6 +15150,15 @@ mod tests {
         let plain = format_notes_dump(&items, "", true);
         assert!(plain.contains(&format!("{abs_str}:3: d\n")), "plain: {plain}");
         assert!(plain.contains("src/proj.rs:1: p\n"), "plain: {plain}");
+        // 008-01 P3 (folded into 006-02b item 8): pin the mixed ordering —
+        // the absolute (`/`-prefixed) record sorts BEFORE the
+        // project-relative record byte-wise (`/` < `s`), in BOTH modes.
+        let (ext_pos, proj_pos) = (block.find(abs_str.as_str()), block.find("src/proj.rs"));
+        assert!(ext_pos.is_some_and(|e| proj_pos.is_some_and(|p| e < p)),
+            "block: the absolute record precedes the relative record:\n{block}");
+        let (ext_pos, proj_pos) = (plain.find(abs_str.as_str()), plain.find("src/proj.rs"));
+        assert!(ext_pos.is_some_and(|e| proj_pos.is_some_and(|p| e < p)),
+            "plain: the absolute record precedes the relative record:\n{plain}");
     }
 
     /// Adding an external record must not touch the existing project-relative
