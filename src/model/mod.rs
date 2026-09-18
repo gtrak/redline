@@ -7,3 +7,4 @@ pub mod files;
 pub mod project;
 pub mod sections;
 pub mod text_width;
+pub mod tree_layout;

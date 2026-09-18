@@ -21,6 +21,11 @@ reconstruction:
     offset by the tree width (a click at 1-based terminal col 34 + k lands
     char index k-1; clicks inside the tree's columns select a tree row and
     do not move the code point).
+  * plan 004 issue 05g: with the tree sidebar visible, the HARDWARE cursor
+    (CUP) column is also offset by the tree width (after N× C-f from the
+    line start, the 1-based CUP column equals TREE_WIDTH + N + 1, and
+    equals the code pane's actual start column read from the frame + N +
+    1); tree-hidden stays 1:1.
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -589,31 +594,119 @@ def tree_click_checks():
     s.key("C-a", 0.6)
 
     # 1-based terminal col 34 + 6 = 40 on content row 0 (terminal row 1,
-    # 0-based): pane col 39-34=5 → char index 5 → CUP col 6 (1-based).
+    # 0-based): pane col 39-34=5 → char index 5 → CUP col 34 + 5 + 1 (05g:
+    # the CUP is in absolute screen coordinates, offset by the tree width).
     r, c = click(34 + 6 - 1, 1)
-    rec("tree on: click 1-based col 40 → char 5 (CUP (2,6))", (r, c) == (2, 6),
-        f"cup=({r},{c}) want (2,6)")
-    # 1-based col 35 (k=1): the first code-pane cell → char 0 → CUP (2,1).
+    rec("tree on: click 1-based col 40 → char 5 (CUP (2,40))", (r, c) == (2, 40),
+        f"cup=({r},{c}) want (2,40)")
+    # 1-based col 35 (k=1): the first code-pane cell → char 0 → CUP (2,35).
     r, c = click(34, 1)
-    rec("tree on: click 1-based col 35 → char 0 (CUP (2,1))", (r, c) == (2, 1),
-        f"cup=({r},{c}) want (2,1)")
+    rec("tree on: click 1-based col 35 → char 0 (CUP (2,35))", (r, c) == (2, 35),
+        f"cup=({r},{c}) want (2,35)")
     # Past the code pane's EOL (20 A's): 1-based col 34+25=59 → pane col 24
-    # → clamped to EOL char 20 → CUP col 21.
+    # → clamped to EOL char 20 → CUP col 34 + 20 + 1 = 55.
     r, c = click(34 + 25 - 1, 1)
-    rec("tree on: click past code pane EOL clamps to EOL", (r, c) == (2, 21),
-        f"cup=({r},{c}) want (2,21)")
+    rec("tree on: click past code pane EOL clamps to EOL",
+        (r, c) == (2, 55), f"cup=({r},{c}) want (2,55)")
     # A click inside the tree's columns (1-based col 10, a visible tree
     # row) selects a tree row but does NOT move the code point: the CUP
-    # stays where the previous click left it (point (0,20) → CUP (2,21)).
+    # stays where the previous click left it (point (0,20) → CUP (2,55)).
     r, c = click(9, 2)
     rec("tree on: click in tree cols does not move the code point",
-        (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+        (r, c) == (2, 55), f"cup=({r},{c}) want (2,55)")
     # Tree-hidden leg (regression): toggle the tree off; the mapping is 1:1
     # again (1-based col 6 → char 5 → CUP (2,6)).
     s.key("C-c p t", 0.9)
     r, c = click(5, 1)
     rec("tree off: click 1-based col 6 → CUP (2,6) (1:1)", (r, c) == (2, 6),
         f"cup=({r},{c}) want (2,6)")
+
+    s.kill()
+    return checks
+
+
+def tree_cursor_offset_checks():
+    """plan 004 issue 05g: with the tree sidebar visible the hardware
+    cursor (CUP) column is offset by the tree width — after N× C-f the
+    CUP column equals TREE_WIDTH + N (1-based TREE_WIDTH + N + 1), and
+    equals the code pane's actual start column (read from the frame, so
+    the test cannot drift if the layout changes) + N. Tree-hidden stays
+    1:1 (CUP col = N + 1)."""
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    # leg.rs: 60 lines; even line = 20 'A's, odd line = 2 'b's. NO trailing
+    # newline (ropey would count a trailing \n as an extra empty line).
+    llines = ["A" * 20 if i % 2 == 0 else "b" * 2 for i in range(60)]
+    with open(_os.path.join(src_dir, "leg.rs"), "w") as f:
+        f.write("\n".join(llines))
+
+    s = Session(None)
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    def do(key, settle=0.6):
+        """Press `key` and return the surviving CUP (row, col)."""
+        return last_cup_after_sync(s.key(key, settle))
+
+    def pane_start_col():
+        """0-based terminal column where the code pane's line 0 text starts
+        (the first run of 20 A's on content row 0 / terminal row 1)."""
+        line = s.row_text(1)
+        i = line.find("AAAAAA")
+        if i < 0:
+            return None
+        # The A-run is 20 chars: the pane starts where it starts.
+        return i
+
+    # Open leg.rs (line 0 = 20 A's) and show the tree sidebar.
+    s.key("C-x C-f", 1.0)
+    for ch in "leg.rs":
+        s.key(ch, 0.25)
+    s.key("RET", 1.0)
+    s.key("C-c p t", 0.9)
+    if "*tree*" not in s.text():
+        rec("tree visible (C-c p t)", False, "*tree* missing")
+        s.kill()
+        return checks
+    rec("tree visible (C-c p t)", True, "")
+    start = pane_start_col()
+    rec("frame: code pane start column read from the frame",
+        start is not None and start >= 1,
+        f"pane start col (0-based)={start}")
+    s.key("C-a", 0.6)
+
+    # Tree-visible leg: after cumulative N× C-f (point at char N of line
+    # 0), the CUP column must be TREE_WIDTH + N (0-based) = TREE_WIDTH + N +
+    # 1 (1-based), i.e. pane start + N + 1 — NOT inside the sidebar.
+    cup_ok, cup_detail, total = True, [], 0
+    for step in (1, 3, 7):
+        total += step
+        r, c = do("C-f " * step)  # `step` × C-f from the previous point
+        cup1 = (start is not None) and (c == start + total + 1)
+        cup_ok = cup_ok and cup1 and r == 2
+        cup_detail.append(f"N={total}:cup=({r},{c}) want col {start + total + 1 if start is not None else '?'}")
+    rec("tree on: cumulative C-f ×N → CUP col = pane start + N (1-based)",
+        cup_ok, "; ".join(cup_detail))
+    # The exact repro from the issue: 3× C-f from (0,0) on an 80-col
+    # terminal with the tree at col 34 → 0-based CUP col 34 + 3 = 37
+    # (1-based 38 — this reader is 1-based), not 0-based 3 (inside the
+    # sidebar).
+    s.key("M-<", 0.8)
+    r, c = do("C-f C-f C-f")
+    rec("tree on: 3× C-f → CUP (row 2, 0-based col 37) (repro: was 0-based col 3)",
+        (r, c) == (2, 38), f"cup=({r},{c}) want (2,38)")
+
+    # Tree-hidden leg (regression): toggle the tree off; CUP col is 1:1
+    # with the pane (3× C-f → col 4, 1-based).
+    s.key("C-c p t", 0.9)
+    s.key("M-<", 0.8)
+    r, c = do("C-f C-f C-f")
+    rec("tree off: 3× C-f → CUP (row 2, col 4) (1:1)",
+        (r, c) == (2, 4), f"cup=({r},{c}) want (2,4)")
 
     s.kill()
     return checks
@@ -645,6 +738,11 @@ def main():
     # tree-hidden regression leg).
     print("=== TREE-SIDEBAR CLICK OFFSET (tree visible) ===")
     all_checks += tree_click_checks()
+    print()
+    # plan 004 issue 05g: hardware-cursor (CUP) column offset with the tree
+    # sidebar visible (+ the tree-hidden regression leg).
+    print("=== TREE-SIDEBAR HARDWARE-CURSOR OFFSET (tree visible) ===")
+    all_checks += tree_cursor_offset_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")

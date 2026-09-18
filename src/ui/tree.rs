@@ -7,18 +7,9 @@
 use iocraft::prelude::*;
 
 use crate::app::store::TreeRow;
+use crate::model::tree_layout::{TREE_WIDTH, TREE_VISIBLE_ROWS};
 use crate::theme;
 use crate::ui::{bar_bg, face_bg, face_color, face_weight};
-
-/// The sidebar's fixed width in terminal columns. Shared between the
-/// layout (`View(width: …)`) and the root's click-column offset (plan 004
-/// issue 05e) so the two cannot drift.
-pub const TREE_WIDTH: u16 = 34;
-
-/// The number of file rows the sidebar window shows (the cursor is kept
-/// within 5 rows of the window top). Shared between the renderer and the
-/// store's click-to-row mapping (plan 004 issue 05e).
-pub const TREE_VISIBLE_ROWS: usize = 8;
 
 #[derive(Default, Props)]
 pub struct TreeSidebarProps {

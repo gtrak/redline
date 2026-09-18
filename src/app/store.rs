@@ -2757,7 +2757,7 @@ impl AppStore {
         let Some(rel) = terminal_row.checked_sub(1) else {
             return; // terminal row 0 is the tree title
         };
-        if rel >= crate::ui::tree::TREE_VISIBLE_ROWS {
+        if rel >= crate::model::tree_layout::TREE_VISIBLE_ROWS {
             return; // the help row (or below it)
         }
         let start = self.tree.selected.saturating_sub(5);

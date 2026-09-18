@@ -21,7 +21,8 @@ use crate::ui::picker::Picker;
 use crate::ui::results_view::ResultsView;
 use crate::ui::rows_view::MagitRowsView;
 use crate::ui::transient_menu::TransientMenuView;
-use crate::ui::tree::{TreeSidebar, TREE_WIDTH};
+use crate::model::tree_layout::TREE_WIDTH;
+use crate::ui::tree::TreeSidebar;
 use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
 
@@ -84,11 +85,15 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
 ///
 /// Layout (0-based terminal rows): the main view's title is row 0 and its first
 /// content row is row 1, so content row `i` (0-based within the window) is at
-/// terminal row `1 + i`. The tree sidebar (when visible) shares these rows in a
-/// separate column and is not the current view, so it is not positioned here.
+/// terminal row `1 + i`. With the tree sidebar visible the view's column is
+/// PANE-relative while the terminal cursor is in ABSOLUTE screen coordinates
+/// (the two panes are laid out by the flex row: the tree occupies terminal
+/// columns `[0, TREE_WIDTH)`), so the column is offset by `TREE_WIDTH`
+/// (clamped to the terminal width) and the row left unchanged (plan 004
+/// issue 05g). Tree hidden: the offset is 0 (pane col 0 == absolute col 0).
 fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
     let cell = |i: usize| (0u16, 1 + i as u16);
-    match snap.view {
+    let pos = match snap.view {
         ViewId::BufferList => Some(cell(
             snap.buffer_list_selected.min(snap.buffer_rows.len().saturating_sub(1)),
         )),
@@ -158,7 +163,22 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 Some((col as u16, 1 + banner + content_row as u16))
             }
         }
-    }
+    };
+    // Plan 004 issue 05g: the terminal cursor is in ABSOLUTE screen
+    // coordinates, but the view column computed above is PANE-relative —
+    // the two panes are laid out by the flex row, and the tree sidebar (when
+    // visible) occupies terminal columns `[0, TREE_WIDTH)`. Offset the column
+    // by the tree width (row unchanged) so the hardware cursor does not land
+    // inside the sidebar, and clamp to the terminal width so a huge column
+    // cannot address outside the screen. Tree hidden: offset 0, unchanged.
+    pos.map(|(col, row)| {
+        let col = if snap.tree_visible {
+            col.saturating_add(TREE_WIDTH).min(snap.terminal_width.saturating_sub(1))
+        } else {
+            col
+        };
+        (col, row)
+    })
 }
 
 /// Plan 004 issue 05e: with the tree sidebar visible the code pane's column 0
@@ -231,6 +251,9 @@ struct Snapshot {
     tree_visible: bool,
     tree_rows: Vec<crate::app::store::TreeRow>,
     tree_selected: usize,
+    // Terminal width (0 in the static render path; the hardware cursor is
+    // live-only, so the tree offset clamps to a real width in practice).
+    terminal_width: u16,
     // Symbol navigation (issue 05): which-function and indexing indicator.
     which_function: String,
     indexing: String,
@@ -495,6 +518,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             tree_visible: s.tree_visible(),
             tree_rows: s.tree_rows(),
             tree_selected: s.tree_selected(),
+            terminal_width: tw_raw,
             which_function: s.which_function(),
             indexing: s.indexing_display(),
             search_title: s.search_title(),
@@ -1070,6 +1094,7 @@ mod tests {
             tree_visible: false,
             tree_rows: Vec::new(),
             tree_selected: 0,
+            terminal_width: 80,
             which_function: String::new(),
             indexing: String::new(),
             search_title: String::new(),
@@ -1114,6 +1139,45 @@ mod tests {
         let mut snap = buffer_snapshot(&["bb", "bb"], 4, 2);
         snap.file_view_total_lines = 5;
         assert_eq!(cursor_cell(&snap), Some((2, 5)), "char index 2, clamped row 4 → row 5 (0-based)");
+    }
+
+    // ── plan 004 issue 05g: cursor_cell tree-sidebar column offset ────
+
+    /// plan 004 issue 05g: the terminal cursor is in ABSOLUTE screen
+    /// coordinates while the view column is PANE-relative — with the tree
+    /// visible the column is offset by `TREE_WIDTH` (row unchanged); tree
+    /// hidden the column is unchanged (pane col 0 == absolute col 0).
+    #[test]
+    fn cursor_cell_tree_visible_offsets_column_by_tree_width() {
+        let mut snap = buffer_snapshot(&["abcd"], 0, 3);
+        snap.tree_visible = true;
+        assert_eq!(
+            cursor_cell(&snap),
+            Some((TREE_WIDTH + 3, 1)),
+            "pane col 3 → terminal col 34 + 3 (0-based)"
+        );
+        // Tree hidden: the column is exactly the pane column.
+        let snap = buffer_snapshot(&["abcd"], 0, 3);
+        assert_eq!(cursor_cell(&snap), Some((3, 1)), "tree hidden: unchanged");
+    }
+
+    /// plan 004 issue 05g: with the tree visible a huge pane column is
+    /// clamped to the last terminal column so it cannot address outside
+    /// the screen (80-col terminal: max 0-based col 79).
+    #[test]
+    fn cursor_cell_tree_visible_clamps_to_terminal_width() {
+        let long = "A".repeat(200);
+        let mut snap = buffer_snapshot(&[&long], 0, 100);
+        snap.tree_visible = true;
+        assert_eq!(
+            cursor_cell(&snap),
+            Some((79, 1)),
+            "pane col 100 + tree 34 → clamped to terminal col 79"
+        );
+        // Tree hidden: no clamp (a beyond-pane column may land off-screen,
+        // the pre-05g behavior).
+        let snap = buffer_snapshot(&[&long], 0, 100);
+        assert_eq!(cursor_cell(&snap), Some((100, 1)), "tree hidden: unchanged");
     }
 
     // ── plan 004 issue 05e: tree-sidebar click offset ──────────────────
