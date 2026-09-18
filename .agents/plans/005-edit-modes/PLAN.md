@@ -26,22 +26,32 @@ stdout annotation dump that fits shell workflows.
    `C-x C-s` saves to disk. Our own save must not false-flag the watcher
    (extend the event-suppression machinery to saved paths). Mode shown in
    the status line.
-2. **Annotate mode (per buffer)**: `A` on a file line opens/edits a
-   line-anchored annotation — stored as `path:line: text` in
-   `.redline-notes.md` (the notes buffer stays the annotation surface;
-   opening an annotation focuses that entry). Annotations anchor to the
-   line under the cursor when created.
-3. **Quit dump**: after the TUI tears down, all annotations print to
-   stdout as `path:line: text` (grep -n style — redirect or copy-paste).
-   Empty when none (clean for pipes). Dump reflects the final state
-   (after plan-004-04 save prompts).
+2. **Inline annotations (per buffer)**: `A` anchors an annotation to the
+   line at point and shows it **inline in the file view** — a margin
+   marker on the anchored line plus a dim virtual note line under it.
+   Storage is a real, editable notes file (`.redline-notes.md`) with a
+   structured annotation section; anchors are **automatic**: the captured
+   line text is a drift anchor, re-anchored on open/save (±25-line
+   search), flagged orphaned (never silently moved) when the content is
+   gone.
+3. **Quit dump (agent-consumable)**: after the TUI tears down, annotations
+   print to stdout as a per-annotation block with the path, line, the
+   anchored **code line**, and the `NOTE:` text — self-contained so it can
+   be handed to an agent. `--notes=plain` restores `path:line: text`.
+   Empty when none (clean for pipes). Dump reflects final state (after
+   save prompts).
 
 ## Key decisions
 
 - `C-x C-q` for the edit toggle (emacs read-only-toggle vocabulary, no new
   key class); `C-x C-s` for save (universal emacs muscle memory).
-- Annotations are line-anchored records, not free text: the dump needs
-  line numbers, so the anchor is captured at creation (path + line).
+- Annotations are anchored records, not free text: (path, line, col,
+  anchored-line text). The line text makes anchors self-maintaining;
+  the dump carries the code line so an agent has context without the
+  repo open.
+- **Inline visibility is the point** (user directive 2026-09-18): reading
+  a file shows its annotations in place; the notes buffer is the
+  persistence/edit surface, not the only place you ever see them.
 - Dump goes to stdout AFTER the alternate screen exits — TUI output stays
   on the terminal, dump is pipable.
 - Read-only by default remains the app's identity: edit mode is explicit,
@@ -55,8 +65,10 @@ stdout annotation dump that fits shell workflows.
 - A file buffer toggled to edit mode accepts edits and `C-x C-s` writes
   them to disk (git sees the change); toggling back to read-only restores
   auto-reload behavior.
-- `A` on a line creates an annotation; quit prints `src/main.rs:42: text`
-  on stdout; `redline 2>/dev/null | grep main.rs` works.
+- `A` on a line shows an inline cue (marker + note line) in the FILE
+  view; quit prints the agent block; `redline --notes=plain 2>/dev/null
+  | grep store.rs` works; edit the file elsewhere → annotation re-anchors
+  by content.
 - Full drive suite green; no regressions to the watcher conflict
   discipline or the quit save-prompt.
 
