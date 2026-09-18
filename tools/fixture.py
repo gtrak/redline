@@ -11,6 +11,7 @@ Run directly to reset:  python3 tools/fixture.py
 Or import:               from fixture import reset; reset()
 """
 import os
+import shutil
 import subprocess
 
 REPO = "/tmp/redline_pyte_repo"
@@ -31,12 +32,20 @@ def reset():
     # Drop untracked leg/scratch files the PTY suites create, so the tree is
     # exactly the baseline (see docs/ux-testing-plan.md backlog #8/#12).
     for stray in ("src/leg.rs", "src/wordleg.rs", "src/cursorleg.rs",
-                  "src/whichfn.rs", "src/wideleg.rs", "wideleg.rs"):
+                  "src/whichfn.rs", "src/wideleg.rs", "wideleg.rs",
+                  # drive_xref's external-landing leg (L5) adds a path-dep
+                  # Cargo.toml/Cargo.lock to the SHARED fixture; if that run is
+                  # killed by the mandated `timeout` (SIGTERM/SIGKILL skips its
+                  # finally), the leftovers change every later suite's
+                  # tree/status/file-listing renders (backlog-#12 class).
+                  "Cargo.toml", "Cargo.lock"):
         p = os.path.join(REPO, stray)
         try:
             os.remove(p)
         except FileNotFoundError:
             pass
+    # ...and the target/ dir that Cargo.toml's presence can pull in.
+    shutil.rmtree(os.path.join(REPO, "target"), ignore_errors=True)
     # Ensure the working-tree changes exist (idempotent: only writes markers if
     # the files lost them).
     lib = os.path.join(REPO, "src", "lib.rs")

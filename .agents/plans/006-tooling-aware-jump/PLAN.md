@@ -1,6 +1,6 @@
 # 006 — Redline: tooling-aware jump-to-definition
 
-Status: 01+02 complete; 03 folded into 02 (see task record)
+Status: 01+02+02b complete; 03 revived with new scope (see task record)
 
 ## Outcome record
 
@@ -15,6 +15,18 @@ Status: 01+02 complete; 03 folded into 02 (see task record)
   resolve (bump generation in the hit path), P3 second-colon boundary in
   symbol_at_point, P3 vacuous m_dot_includes_uppercase_identifiers test, P3
   line==0 guard in open_resolved_source.
+- **02b PASS** (`e66c654`, reviewer verdict 2026-09-18: PASS; 509 tests / 0
+  failed / 2 ignored; all PTY suites green — sweep 14/14, sweep_flows 65/65,
+  drive_all 7/7, windowing 28/28, panes 4/4, cursor-stream 80/80,
+  notes-dump 17/17, drive_xref 10/10, drive_external_notes 16/16). Shipped
+  the ownership guard (`external_buffers` + `buffer_is_project_owned`:
+  C-x C-q AND C-x C-s refused on registry/tooling sources, with
+  project/scratch/previous-project/notes semantics intact), the M-. supersede
+  bump, the drain-race indicator clear, and the six P3s plus 008-01's P3s.
+  Review flagged two narrow residuals (documented, non-blocking): an
+  external path under a `$HOME`-rooted project re-classifies as owned; a
+  stale set marker if the same absolute path is later opened as a project
+  file (fail-safe only).
 - **Issue 03 REVIVED with new scope** (user request 2026-09-18: "I want to
   follow other types once inside a library buffer"): navigate WITHIN external
   sources — a background tree-sitter index of the landed crate's source_root
