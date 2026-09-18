@@ -64,6 +64,20 @@ into an agent, so enough information there that it'll know what to do."
    cannot be opened, degrade gracefully and SAY so (report + skip the dump
    rather than corrupt it). Add a test that redirects stdout to a file and
    asserts ZERO escape bytes there while frames still appear on the pty.
+
+   **HOW (orchestrator pre-check, so you don't pick the fragile path):**
+   iocraft 0.9.1 has no stable custom-output API; the `unstable-output-streams`
+   feature exists but the skill flags it as "has crossterm caveats". PREFER
+   the fd-level approach, which needs no iocraft feature:
+   when stdout is not a tty, open `/dev/tty` and `dup2` it onto fd 1 BEFORE
+   starting the render loop (then iocraft/crossterm write to the tty while
+   the ORIGINAL stdout fd — saved with `dup` — is used for the dump). Use
+   `std::os::fd`/`libc`-free `std::os::unix::io::AsRawFd`; do not add a
+   dependency for this (`libc` is reachable via crossterm's re-export if
+   needed; check before claiming). Save the pre-dup stdout so the dump is
+   not lost. If `dup2` fails, fall back to printing the dump to the tty and
+   reporting why.
+   Document the choice and its verification in the report.
 4. Final state only: whatever the annotation set is after any 004-04 save
    prompts (the await returns after the user finishes them).
 
