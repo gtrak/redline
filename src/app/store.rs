@@ -92,6 +92,81 @@ impl ResolveBus {
     }
 }
 
+/// The result the background crate-indexing job publishes to the app via
+/// the [`CrateIndexBus`] (plan 006 issue 03): the FINISHED symbol index
+/// for an EXTERNAL source tree (a registry crate root or a path-dependency
+/// crate root), keyed by its `source_root`. Mirrors the
+/// [`ResolveEvent`]/[`ResolveBus`] pattern: a `watch` channel,
+/// latest-value-wins. The build (the project indexer's
+/// rayon-parallel tree-sitter machinery — `nav::index::build_index` is
+/// root-agnostic) runs on `spawn_blocking` and never blocks the landing;
+/// this event is the single publish per build (the `indexing crate …`
+/// indicator is store-side state, cleared when the event lands).
+#[derive(Clone, Debug, Default)]
+pub struct CrateIndexEvent {
+    /// The source-tree root the index covers (the LRU cache key).
+    pub source_root: PathBuf,
+    /// The finished index (crate-relative file paths).
+    pub index: SymbolIndex,
+}
+
+/// The crate-index-result bus (plan 006 issue 03): a `watch` channel over
+/// [`CrateIndexEvent`]. The store owns the sender; the UI's drain task in
+/// `Root` subscribes and applies each event to the store (mirrors
+/// `ResolveBus`).
+#[derive(Clone)]
+pub struct CrateIndexBus {
+    tx: watch::Sender<CrateIndexEvent>,
+}
+
+impl std::fmt::Debug for CrateIndexBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrateIndexBus").finish()
+    }
+}
+
+impl CrateIndexBus {
+    pub fn new() -> Self {
+        let (tx, _rx) = watch::channel(CrateIndexEvent::default());
+        Self { tx }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<CrateIndexEvent> {
+        self.tx.subscribe()
+    }
+
+    pub fn send(&self, event: CrateIndexEvent) {
+        let _ = self.tx.send(event);
+    }
+}
+
+/// The LRU cap for the external crate-index cache (plan 006 issue 03): a
+/// handful of crates is plenty; the oldest is evicted when a new one
+/// lands.
+const EXT_INDEX_CAP: usize = 3;
+/// An external source tree larger than this (`.rs` files) is too big to
+/// index: the build is refused with a clear message (no known registry
+/// crate approaches it).
+const EXT_INDEX_FILE_CAP: usize = 2000;
+
+/// The M-. selection outcome inside an EXTERNAL (registry / tooling)
+/// buffer (plan 006 issue 03) — the project path's four outcomes,
+/// crate-relative.
+enum ExternalXrefOutcome {
+    /// Unique definition: crate-relative file + 0-based line.
+    Jump { file: String, line: usize },
+    /// Ambiguous: candidates (crate-relative, same-file-first) + the
+    /// picker's lookup label.
+    Picker { lookup: String, defs: Vec<crate::nav::index::Location> },
+    /// Crate miss with the point on a symbol: the resolver fall-through,
+    /// carrying the point's (path-shaped) token.
+    Resolver(String),
+    /// An enclosing symbol with no indexed definition.
+    NoDefinition(String),
+    /// Nothing under or near the point.
+    NoSymbol,
+}
+
 /// A view on the stack. The top of the stack is what the main view
 /// renders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1384,6 +1459,28 @@ pub struct AppStore {
     /// (a path under a NEW project root is project-owned again, checked
     /// first in `buffer_is_project_owned`).
     external_buffers: std::collections::HashSet<String>,
+    // ── external crate index cache (plan 006 issue 03) ────────────
+    /// LRU cache of EXTERNAL (registry / tooling) source-tree indexes,
+    /// one entry per `source_root`: newest last, capped at
+    /// `EXT_INDEX_CAP` (the oldest is evicted when a new crate lands).
+    /// Built in the background (`start_crate_indexing`, off the input
+    /// path) and consulted by M-. / imenu inside an external buffer.
+    /// Machine-wide (absolute roots), so it survives project switches —
+    /// these indexes are never "the project" (008-01 semantics hold).
+    external_indexes: Vec<(PathBuf, Arc<std::sync::Mutex<SymbolIndex>>)>,
+    /// The crate-index-result bus: a background crate-index job publishes
+    /// its finished index here; the UI's drain task applies each event
+    /// (mirrors `resolve_bus`).
+    pub crate_index_bus: CrateIndexBus,
+    /// Status-line activity while a crate-index job is in flight: one
+    /// `(source_root, label)` per build; cleared when its final event
+    /// lands (`apply_crate_index_event`).
+    crate_indexing: Vec<(PathBuf, String)>,
+    /// The `source_root` the Xref picker's candidates are keyed against
+    /// (`None` = the project index): set when M-. inside an EXTERNAL
+    /// buffer opens the ambiguous picker, so query re-computation,
+    /// preview, and the selection all stay crate-relative.
+    xref_crate_root: Option<PathBuf>,
     /// The search-event bus (issue 06): the store keeps the sender side
     /// for its lifetime; each search job clones a sender for its worker
     /// thread. The receiver is kept in the store and handed out exactly
@@ -1655,6 +1752,10 @@ impl AppStore {
             resolve_generation: 0,
             resolving: None,
             external_buffers: std::collections::HashSet::new(),
+            external_indexes: Vec::new(),
+            crate_index_bus: CrateIndexBus::new(),
+            crate_indexing: Vec::new(),
+            xref_crate_root: None,
             search_bus,
             search_rx,
             index_rx: None,
@@ -3129,6 +3230,13 @@ impl AppStore {
             .filter(|l| *l > 0)
             .map(|l| (l - 1) as usize)
             .unwrap_or(0);
+        // 006-03: an external (registry / tooling) landing registers its
+        // crate's source tree for background indexing (off the input
+        // path; the LRU cap governs) so M-. / imenu work INSIDE it. The
+        // landing itself is never blocked on the index.
+        if source.external {
+            self.start_crate_indexing(&source.source_root);
+        }
         self.set_point_line(line);
         self.ensure_highlight();
         self.record_jump(&origin, "M-.");
@@ -3313,12 +3421,20 @@ impl AppStore {
     }
 
     /// Candidates for the Xref picker (definition locations for the
-    /// current lookup name).
-    fn xref_candidates(&self) -> Vec<PickerCandidate> {
-        let name = &self.xref_lookup_name;
-        self.index
-            .definitions_of(name)
-            .into_iter()
+    /// current lookup name — the project index, or the crate index the
+    /// picker was opened with, 006-03).
+    fn xref_candidates(&mut self) -> Vec<PickerCandidate> {
+        let name = self.xref_lookup_name.clone();
+        let root = self.xref_crate_root.clone();
+        let defs: Vec<crate::nav::index::Location> = match root.as_ref() {
+            Some(root) => self
+                .crate_index_arc(root)
+                .map(|arc| arc.lock().unwrap().definitions_of(&name))
+                .unwrap_or_default(),
+            None => self.index.definitions_of(&name),
+        };
+        defs
+            .iter()
             .map(|d| PickerCandidate {
                 name: format!("{}:{}", d.file, d.symbol.line + 1),
                 display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
@@ -3328,26 +3444,11 @@ impl AppStore {
             .collect()
     }
 
-    /// Candidates for the Imenu picker (current file's outline).
-    fn imenu_candidates(&self) -> Vec<PickerCandidate> {
-        let Some(key) = self.buffers.current().map(String::from) else {
-            return Vec::new();
-        };
-        let Some(buf) = self.buffers.get(&key) else {
-            return Vec::new();
-        };
-        let Some(path) = buf.path.as_ref() else {
-            return Vec::new();
-        };
-        let Some(project) = self.project.as_ref() else {
-            return Vec::new();
-        };
-        let Ok(rel) = path.strip_prefix(&project.root) else {
-            return Vec::new();
-        };
-        let rel = rel.to_string_lossy();
-        self.index
-            .outline(&rel)
+    /// Candidates for the Imenu picker (current file's outline — the
+    /// project index for project files, the owning crate's index for
+    /// external buffers, 006-03).
+    fn imenu_candidates(&mut self) -> Vec<PickerCandidate> {
+        self.current_buffer_outline()
             .iter()
             .map(|s| PickerCandidate {
                 name: format!("{}:{}", s.name, s.line + 1),
@@ -3504,7 +3605,7 @@ impl AppStore {
     }
 
     /// (filtered count, total candidate count).
-    pub fn picker_count(&self) -> (usize, usize) {
+    pub fn picker_count(&mut self) -> (usize, usize) {
         let total = match self.picker_kind() {
             None | Some(PickerKind::Palette) => self.registry.list().count(),
             Some(PickerKind::FindFile) => self
@@ -3523,23 +3624,19 @@ impl AppStore {
                 .unwrap_or(0),
             Some(PickerKind::Buffers | PickerKind::KillBuffer) => self.buffers.len(),
             Some(PickerKind::Projects) => self.project_store.registry.len(),
-            Some(PickerKind::Xref) => self
-                .index
-                .definitions_of(&self.xref_lookup_name)
-                .len(),
-            Some(PickerKind::Imenu) => self
-                .buffers
-                .current()
-                .and_then(|key| self.buffers.get(key))
-                .and_then(|b| b.path.as_ref())
-                .and_then(|path| {
-                    self.project.as_ref().and_then(|p| {
-                        path.strip_prefix(&p.root).ok().map(|r| {
-                            self.index.outline(&r.to_string_lossy()).len()
-                        })
-                    })
-                })
-                .unwrap_or(0),
+            // 006-03: the Xref picker's total follows its root — the
+            // project index, or the crate index it was opened with.
+            Some(PickerKind::Xref) => {
+                let name = self.xref_lookup_name.clone();
+                match self.xref_crate_root.clone().as_ref() {
+                    Some(root) => self
+                        .crate_index_arc(root)
+                        .map(|arc| arc.lock().unwrap().definitions_of(&name).len())
+                        .unwrap_or(0),
+                    None => self.index.definitions_of(&name).len(),
+                }
+            }
+            Some(PickerKind::Imenu) => self.current_buffer_outline().len(),
             Some(PickerKind::Symbols) => self.index.total(),
             Some(PickerKind::Branch) => self
                 .with_git(|g| g.branches())
@@ -3646,13 +3743,23 @@ impl AppStore {
             .join("\n")
     }
 
+    /// The absolute path of a picker file candidate: crate-relative when
+    /// the Xref picker lists an external crate (006-03 — the
+    /// `source_root` recorded when the picker opened), project-relative
+    /// otherwise.
+    fn picker_file_abs(&self, rel: &str) -> Option<PathBuf> {
+        if let Some(root) = self.xref_crate_root.as_ref() {
+            return Some(root.join(rel));
+        }
+        self.project.as_ref().map(|p| p.root.join(rel))
+    }
+
     /// Preview of a file centred on a 0-based line: a window of
     /// `PREVIEW_LINES` total lines around `line` (the definition context).
     fn file_preview_at_line(&self, rel: &str, line: usize) -> String {
-        let Some(project) = self.project.as_ref() else {
+        let Some(abs) = self.picker_file_abs(rel) else {
             return String::new();
         };
-        let abs = project.root.join(rel);
         let key = abs.to_string_lossy().into_owned();
         let text = if let Some(buf) = self.buffers.get(&key) {
             buf.text()
@@ -3737,13 +3844,28 @@ impl AppStore {
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();
-                    self.open_path(file);
-                    let key = self.buffers.current().map(String::from).unwrap_or_default();
-                    self.set_point_line(line - 1);
-                    self.ensure_highlight();
-                    let _ = key;
-                    self.record_jump(&origin, "M-.");
-                    self.minibuffer_message(&format!("jumped to {file}:{line}"));
+                    if let Some(root) = self.xref_crate_root.clone() {
+                        // 006-03: the candidate is CRATE-relative — open
+                        // READ-ONLY via the external path (the landing
+                        // stays inside the same source_root, so the crate
+                        // cache stays valid and 008-01 semantics hold).
+                        if self.open_external_path(&root.join(file)).is_some() {
+                            self.set_point_line(line - 1);
+                            self.ensure_highlight();
+                            self.record_jump(&origin, "M-.");
+                            self.minibuffer_message(&format!("jumped to {file}:{line}"));
+                        } else {
+                            self.minibuffer_message(&format!("cannot open {file}"));
+                        }
+                    } else {
+                        self.open_path(file);
+                        let key = self.buffers.current().map(String::from).unwrap_or_default();
+                        self.set_point_line(line - 1);
+                        self.ensure_highlight();
+                        let _ = key;
+                        self.record_jump(&origin, "M-.");
+                        self.minibuffer_message(&format!("jumped to {file}:{line}"));
+                    }
                 }
             }
             PickerKind::Imenu => {
@@ -5958,7 +6080,13 @@ impl AppStore {
             return;
         };
         let Ok(rel) = path.strip_prefix(&project.root) else {
-            self.minibuffer_message("buffer not in project");
+            // 006-03: registry / tooling sources are not git checkouts —
+            // blame stays refused, but the message says WHY.
+            if self.external_buffers.contains(&key) {
+                self.minibuffer_message("no git history for external sources");
+            } else {
+                self.minibuffer_message("buffer not in project");
+            }
             return;
         };
         let rel = rel.to_string_lossy().into_owned();
@@ -7093,16 +7221,31 @@ impl AppStore {
             self.minibuffer_message("no buffer");
             return;
         };
-        let Some(path) = buf.path.as_ref() else {
-            self.minibuffer_message("no file (scratch buffer)");
-            return;
+        // An OWNED path: the `buf` borrow must not span the `&mut self`
+        // calls below (the external-buffer navigation, 006-03).
+        let path = match &buf.path {
+            Some(p) => p.clone(),
+            None => {
+                self.minibuffer_message("no file (scratch buffer)");
+                return;
+            }
         };
         let Some(project) = self.project.as_ref() else {
             self.minibuffer_message("no project");
             return;
         };
         let Ok(rel) = path.strip_prefix(&project.root) else {
-            self.minibuffer_message("buffer not in project");
+            // 006-03: an EXTERNAL (registry / tooling) buffer navigates
+            // within its OWN crate's index (keyed against the crate's
+            // source_root); a crate miss keeps the resolver fall-through
+            // (the origin project's metadata — unchanged semantics).
+            // A non-external buffer outside the root keeps the pre-006-03
+            // refusal.
+            if self.external_buffers.contains(&key) {
+                self.xref_in_external_buffer(&key, &path);
+            } else {
+                self.minibuffer_message("buffer not in project");
+            }
             return;
         };
         let rel = rel.to_string_lossy().into_owned();
@@ -7123,7 +7266,9 @@ impl AppStore {
 
         let defs: Option<Vec<crate::nav::index::Location>> = at
             .as_ref()
-            .and_then(|(ident, path_token)| self.xref_definition_candidates(ident, path_token, &rel));
+            .and_then(|(ident, path_token)| {
+                Self::xref_definition_candidates(&self.index, ident, path_token, &rel)
+            });
         let defs = defs.unwrap_or_default();
 
         let lookup_name: String;
@@ -7176,6 +7321,7 @@ impl AppStore {
             // Ambiguous: open the Xref picker (same-file candidates first).
             // The jump entry is recorded when the user selects a candidate
             // (run_selected for Xref).
+            self.xref_crate_root = None;
             self.xref_lookup_name = lookup_name;
             let candidates: Vec<PickerCandidate> = defs
                 .iter()
@@ -7191,13 +7337,14 @@ impl AppStore {
     }
 
     /// (M-., selection rule 2) The definition candidates for the symbol at the
-    /// point: the workspace index tried with BOTH the last segment and the
+    /// point in `index`: the index tried with BOTH the last segment and the
     /// full `::`-path (the index is name-keyed), deduplicated, ordered
-    /// SAME-FILE-FIRST then (file, line, name) — a same-file match (struct +
-    /// impl in one file is the normal case) wins the direct jump, and when
-    /// several remain the picker lists them in that order.
+    /// SAME-FILE-FIRST (`rel`) then (file, line, name) — a same-file match
+    /// (struct + impl in one file is the normal case) wins the direct jump,
+    /// and when several remain the picker lists them in that order. Shared
+    /// by the project index and the external crate indexes (006-03).
     fn xref_definition_candidates(
-        &self,
+        index: &SymbolIndex,
         ident: &str,
         path_token: &str,
         rel: &str,
@@ -7205,9 +7352,9 @@ impl AppStore {
         if ident.is_empty() {
             return None;
         }
-        let mut all: Vec<crate::nav::index::Location> = self.index.definitions_of(ident);
+        let mut all: Vec<crate::nav::index::Location> = index.definitions_of(ident);
         if path_token != ident {
-            all.extend(self.index.definitions_of(path_token));
+            all.extend(index.definitions_of(path_token));
         }
         all.sort_by(|a, b| {
             // Same-file candidates first (false < true), then deterministic
@@ -7305,6 +7452,290 @@ impl AppStore {
             Some((text, g)) if *g == self.resolve_generation => text.clone(),
             _ => String::new(),
         }
+    }
+
+    // ── external crate index cache (plan 006 issue 03) ───────────────
+
+    /// Start the background index build for an EXTERNAL source tree
+    /// (plan 006 issue 03): walk `**/*.rs` under `root` and run the
+    /// project indexer's machinery (`nav::index::build_index` is
+    /// root-agnostic) on `spawn_blocking`; the finished index publishes
+    /// on the `CrateIndexBus`. NEVER blocks the landing. Single-flight
+    /// per source_root (already cached or already in flight: no-op).
+    /// Refused with a clear message above `EXT_INDEX_FILE_CAP` files (no
+    /// known registry crate approaches it); silent no-op without a tokio
+    /// runtime (plain unit tests).
+    pub fn start_crate_indexing(&mut self, root: &Path) {
+        if !root.is_dir() {
+            return;
+        }
+        if self.external_indexes.iter().any(|(r, _)| r == root) {
+            return; // already indexed
+        }
+        if self.crate_indexing.iter().any(|(r, _)| r == root) {
+            return; // a build is already in flight for this root
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let files = Self::crate_rs_files(root);
+        if files.is_empty() {
+            return;
+        }
+        if files.len() > EXT_INDEX_FILE_CAP {
+            self.minibuffer_message(&format!(
+                "crate too large to index ({} .rs files; cap {})",
+                files.len(),
+                EXT_INDEX_FILE_CAP
+            ));
+            return;
+        }
+        let label = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        self.crate_indexing.push((root.to_path_buf(), label.clone()));
+        let bus = self.crate_index_bus.clone();
+        let root_clone = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let index = build_index(&root_clone, &files, None);
+            bus.send(CrateIndexEvent {
+                source_root: root_clone,
+                index,
+            });
+        });
+    }
+
+    /// The `**/*.rs` walk of an external source tree (crate-relative,
+    /// forward-slash paths — the same key shape the project index uses).
+    fn crate_rs_files(root: &Path) -> Vec<String> {
+        ignore::Walk::new(root)
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_some_and(|t| t.is_file())
+                    && e.path()
+                        .extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+            })
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+            .collect()
+    }
+
+    /// Install a crate-index event into the store (called by the UI's
+    /// CrateIndexBus drain). LRU: the root's entry becomes the newest;
+    /// the oldest are evicted past `EXT_INDEX_CAP`; the root's in-flight
+    /// indicator clears (it can never stick past its own final event).
+    pub fn apply_crate_index_event(&mut self, event: &CrateIndexEvent) {
+        let index = Arc::new(std::sync::Mutex::new(event.index.clone()));
+        // A duplicate entry for the same root (a stale re-build; never
+        // expected — single-flight) would leak: replace, not append.
+        self.external_indexes.retain(|(r, _)| r != &event.source_root);
+        self.external_indexes
+            .push((event.source_root.clone(), index));
+        while self.external_indexes.len() > EXT_INDEX_CAP {
+            self.external_indexes.remove(0); // evict the oldest
+        }
+        self.crate_indexing
+            .retain(|(r, _)| r != &event.source_root);
+    }
+
+    /// The `indexing crate …` indicator for the activity display (empty
+    /// when idle): mirrors the project indexing indicator on the status
+    /// line.
+    pub fn crate_indexing_display(&self) -> String {
+        self.crate_indexing
+            .first()
+            .map(|(_, label)| format!("indexing crate {label}…"))
+            .unwrap_or_default()
+    }
+
+    /// The cached index handle for an exact `source_root` (the LRU
+    /// recency bump — the entry moves to the newest slot): the caller
+    /// locks it within its own scope.
+    fn crate_index_arc(
+        &mut self,
+        root: &Path,
+    ) -> Option<Arc<std::sync::Mutex<SymbolIndex>>> {
+        let pos = self.external_indexes.iter().position(|(r, _)| r == root);
+        let entry = self.external_indexes.remove(pos?);
+        self.external_indexes.push(entry.clone());
+        Some(entry.1)
+    }
+
+    /// The cached index handle of the crate owning `path` (the
+    /// `source_root` it is nested under — there is exactly one: the
+    /// cache holds sibling registry crate roots, never a nested pair),
+    /// with the LRU recency bump.
+    fn crate_index_arc_for_path(
+        &mut self,
+        path: &Path,
+    ) -> Option<(PathBuf, Arc<std::sync::Mutex<SymbolIndex>>)> {
+        let root = self
+            .external_indexes
+            .iter()
+            .find(|(r, _)| path.starts_with(r))?
+            .0
+            .clone();
+        let arc = self.crate_index_arc(&root)?;
+        Some((root, arc))
+    }
+
+    /// M-. inside an EXTERNAL (registry / tooling) buffer (plan 006
+    /// issue 03): the SAME selection rule as the project path (symbol at
+    /// point + `::`-path token, same-file-first candidate ordering,
+    /// dedup, enclosing-symbol fallback) run against the OWNING crate's
+    /// index (keyed against its source_root); a crate miss keeps the
+    /// resolver fall-through (unchanged semantics — `SymbolContext` still
+    /// carries the ORIGIN project's workspace_root, so following a type
+    /// into ANOTHER dependency resolves through the origin project's
+    /// metadata; the landing in that crate registers its index per
+    /// `open_resolved_source`, and the LRU cap governs).
+    fn xref_in_external_buffer(&mut self, key: &str, path: &Path) {
+        // Supersede any in-flight tooling resolve (006-02b item 2: a hit
+        // must not be clobbered by a stale event of a superseded
+        // request); the fall-through path re-bumps in
+        // `start_symbol_resolution`.
+        self.resolve_generation += 1;
+        let line = self.point_line();
+        let line_text = self
+            .buffers
+            .get(key)
+            .map(|b| b.line_text(line).unwrap_or_default())
+            .unwrap_or_default();
+        let at = Self::symbol_at_point(&line_text, self.point_col());
+        let Some((root, outcome)) =
+            self.crate_xref_outcome(path, line, at.as_ref())
+        else {
+            // No crate index for this root yet (build in flight, refused,
+            // or no runtime): the miss behaves as the project's — the
+            // resolver fall-through (or "no symbol under point").
+            match &at {
+                Some((_, path_token)) => self
+                    .start_symbol_resolution(path_token, &path.display().to_string()),
+                None => self.minibuffer_message("no symbol under point"),
+            }
+            return;
+        };
+        match outcome {
+            ExternalXrefOutcome::Jump { file, line } => {
+                let origin = self.current_jump_entry();
+                let abs = root.join(&file);
+                if self.open_external_path(&abs).is_some() {
+                    self.set_point_line(line);
+                    self.ensure_highlight();
+                    self.record_jump(&origin, "M-.");
+                    self.minibuffer_message(&format!(
+                        "jumped to {file}:{}",
+                        line + 1
+                    ));
+                } else {
+                    self.minibuffer_message(&format!("cannot open {file}"));
+                }
+            }
+            ExternalXrefOutcome::Picker { lookup, defs } => {
+                self.xref_crate_root = Some(root);
+                self.xref_lookup_name = lookup;
+                let candidates: Vec<PickerCandidate> = defs
+                    .iter()
+                    .map(|d| PickerCandidate {
+                        name: format!("{}:{}", d.file, d.symbol.line + 1),
+                        display: format!(
+                            "{}:{}  [{}] {}",
+                            d.file,
+                            d.symbol.line + 1,
+                            d.symbol.kind.tag(),
+                            d.symbol.name
+                        ),
+                        docs: String::new(),
+                        category: "xref".to_string(),
+                    })
+                    .collect();
+                self.open_picker(PickerKind::Xref, "Definition: ", candidates);
+            }
+            ExternalXrefOutcome::Resolver(token) => {
+                self.start_symbol_resolution(&token, &path.display().to_string())
+            }
+            ExternalXrefOutcome::NoDefinition(name) => {
+                self.minibuffer_message(&format!("no definition for `{name}`"))
+            }
+            ExternalXrefOutcome::NoSymbol => {
+                self.minibuffer_message("no symbol under point")
+            }
+        }
+    }
+
+    /// The M-. selection outcome for an EXTERNAL buffer, run against its
+    /// owning crate's index (crate-relative paths, the project path's
+    /// same-file-first ordering). `None` when the root has no cached
+    /// index yet.
+    fn crate_xref_outcome(
+        &mut self,
+        path: &Path,
+        line: usize,
+        at: Option<&(String, String)>,
+    ) -> Option<(PathBuf, ExternalXrefOutcome)> {
+        let (root, arc) = self.crate_index_arc_for_path(path)?;
+        let idx = arc.lock().unwrap();
+        let rel = path
+            .strip_prefix(&root)
+            .ok()?
+            .to_string_lossy()
+            .into_owned();
+        // (2) Symbol-at-point definitions (the same selection rule as the
+        // project path).
+        let defs = at
+            .and_then(|(ident, token)| {
+                Self::xref_definition_candidates(&idx, ident, token, &rel)
+            })
+            .unwrap_or_default();
+        let outcome = if !defs.is_empty() {
+            let lookup = defs[0].symbol.name.clone();
+            if defs.len() == 1 {
+                ExternalXrefOutcome::Jump {
+                    file: defs[0].file.clone(),
+                    line: defs[0].symbol.line,
+                }
+            } else {
+                ExternalXrefOutcome::Picker { lookup, defs }
+            }
+        } else {
+            // (3) Enclosing-symbol fallback (unchanged: by line, not by the
+            // point's column).
+            let outline = idx.outline(&rel).to_vec();
+            match crate::nav::index::enclosing_symbol(&outline, line) {
+                Some(sym) => {
+                    let lookup = sym.name.clone();
+                    let defs = idx.definitions_of(&lookup);
+                    if defs.is_empty() {
+                        // (4) The point's own (path-shaped) token is what
+                        // the resolver gets — not the enclosing name.
+                        match at {
+                            Some((_, token)) => {
+                                ExternalXrefOutcome::Resolver(token.clone())
+                            }
+                            None => ExternalXrefOutcome::NoDefinition(lookup),
+                        }
+                    } else if defs.len() == 1 {
+                        ExternalXrefOutcome::Jump {
+                            file: defs[0].file.clone(),
+                            line: defs[0].symbol.line,
+                        }
+                    } else {
+                        ExternalXrefOutcome::Picker { lookup, defs }
+                    }
+                }
+                None => match at {
+                    Some((_, token)) => ExternalXrefOutcome::Resolver(token.clone()),
+                    None => ExternalXrefOutcome::NoSymbol,
+                },
+            }
+        };
+        Some((root, outcome))
     }
 
     /// The identifier run at the point's column (char offset) on `text`, plus
@@ -7409,16 +7840,59 @@ impl AppStore {
             self.minibuffer_message("no project");
             return;
         };
-        let Ok(rel) = path.strip_prefix(&project.root) else {
-            self.minibuffer_message("buffer not in project");
-            return;
-        };
-        let rel = rel.to_string_lossy().into_owned();
-        let outline = self.index.outline(&rel).to_vec();
+        // 006-03: an EXTERNAL (registry / tooling) buffer gets its outline
+        // from the owning crate's index (below) instead of refusing; a
+        // non-external buffer outside the root keeps the refusal.
+        match path.strip_prefix(&project.root) {
+            Ok(_) => {}
+            Err(_) if self.external_buffers.contains(&key) => {}
+            Err(_) => {
+                self.minibuffer_message("buffer not in project");
+                return;
+            }
+        }
+        let outline = self.current_buffer_outline();
         if outline.is_empty() {
             self.minibuffer_message("no symbols in current file");
             return;
         }
+        self.open_imenu_picker(outline);
+    }
+
+    /// The current buffer's symbol outline: the project index for project
+    /// files, the OWNING crate's index for external (registry / tooling)
+    /// buffers (006-03), empty for scratch / out-of-project non-external.
+    fn current_buffer_outline(&mut self) -> Vec<crate::nav::index::Symbol> {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return Vec::new();
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            return Vec::new();
+        };
+        let Some(project) = self.project.as_ref() else {
+            return Vec::new();
+        };
+        match path.strip_prefix(&project.root) {
+            Ok(rel) => self.index.outline(&rel.to_string_lossy()).to_vec(),
+            Err(_) if self.external_buffers.contains(&key) => self
+                .crate_index_arc_for_path(&path)
+                .map(|(root, arc)| {
+                    let idx = arc.lock().unwrap();
+                    let crel = path
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    idx.outline(&crel).to_vec()
+                })
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Open the imenu picker over `outline` (indentation by enclosing
+    /// extent — shared by the project and external-buffer paths).
+    fn open_imenu_picker(&mut self, outline: Vec<crate::nav::index::Symbol>) {
         let candidates: Vec<PickerCandidate> = outline
             .iter()
             .map(|s| {
@@ -7459,6 +7933,9 @@ impl AppStore {
             self.minibuffer_message("no symbols indexed yet");
             return;
         }
+        // The symbol picker lists the PROJECT index — any open Xref
+        // picker's crate root (006-03) must not leak into it.
+        self.xref_crate_root = None;
         let candidates: Vec<PickerCandidate> = self
             .index
             .all_locations()
@@ -12034,6 +12511,366 @@ mod tests {
         s.apply_resolve_event(&event);
         assert_eq!(s.point_line(), 0, "line 0 lands at the top of the file");
         assert!(s.message.contains("jumped to"), "msg: {}", s.message);
+    }
+
+    // ── plan 006 issue 03: navigate within external (crate) sources ────
+
+    /// 006-03 fixture: a project store (one project file) plus an
+    /// EXTERNAL crate source tree (outside the project root) with a
+    /// synchronously installed crate index. Returns (store, project
+    /// dir, crate root).
+    fn store_with_crate_index(files: &[(&str, &str)]) -> (AppStore, tempfile::TempDir, tempfile::TempDir) {
+        let (mut s, dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        for (rel, content) in files {
+            let path = root.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+        }
+        let crate_files = AppStore::crate_rs_files(root.path());
+        let index = build_index(root.path(), &crate_files, None);
+        s.apply_crate_index_event(&CrateIndexEvent {
+            source_root: root.path().to_path_buf(),
+            index,
+        });
+        (s, dir, root)
+    }
+
+    #[tokio::test]
+    async fn crate_index_background_build_publishes_and_indicates() {
+        // The synthetic tree lives OUTSIDE the project root: the index
+        // build is root-agnostic (the project indexer's machinery, run
+        // on spawn_blocking), and the finished index lands via the
+        // CrateIndexBus exactly like the ResolveBus events do.
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("src/lib.rs"),
+            "pub fn target() {}\npub mod sub { pub fn deep() {} }\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("src/other.rs"), "pub fn helper() {}\n").unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(root.path());
+        // The in-flight indicator mirrors the project indexing indicator.
+        assert!(
+            s.crate_indexing_display().starts_with("indexing crate "),
+            "{}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        assert_eq!(event.source_root, root.path());
+        s.apply_crate_index_event(&event);
+        // Installed (one LRU entry) and the indicator cleared with the
+        // final event.
+        assert_eq!(s.external_indexes.len(), 1);
+        assert_eq!(s.crate_indexing_display(), "");
+        // Crate-relative outlines are queryable.
+        let arc = s.crate_index_arc(root.path()).unwrap();
+        let idx = arc.lock().unwrap();
+        assert_eq!(idx.definition_count("target"), 1);
+        assert_eq!(idx.definition_count("helper"), 1);
+        assert_eq!(idx.definition_count("deep"), 1);
+        assert!(idx.has("src/lib.rs"), "crate-relative key");
+        // A second start for the same root is a no-op (already cached).
+        s.start_crate_indexing(root.path());
+        assert!(s.crate_indexing.is_empty(), "no duplicate build");
+    }
+
+    #[test]
+    fn external_mdot_cross_file_within_crate_jumps_read_only() {
+        // M-. on a type that another file of the SAME crate defines:
+        // the jump stays inside the crate (crate-relative display), opens
+        // read-only through the external path, and records a jump.
+        let (mut s, _dir, root) = store_with_crate_index(&[
+            ("src/lib.rs", "pub fn use_helper() {\n    helper();\n}\n"),
+            ("src/other.rs", "pub fn helper() {}\n"),
+        ]);
+        s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
+        let origin_key = s.buffers.current().unwrap().to_string();
+        // Line 1: "    helper();" — `helper` starts at col 4.
+        s.set_point(1, 4, 4);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique cross-file: no picker");
+        assert!(
+            s.message.contains("jumped to src/other.rs:1"),
+            "crate-relative display, got: {}",
+            s.message
+        );
+        let key = s.buffers.current().unwrap().to_string();
+        assert_eq!(key, root.path().join("src/other.rs").to_string_lossy());
+        assert_eq!(s.point_line(), 0, "landed on the definition line");
+        // The landing stays external: read-only, in the external set, never
+        // a project file (recents untouched — 008-01 semantics).
+        assert!(!s.buffers.get(&key).unwrap().editable);
+        assert!(s.external_buffers.contains(&key));
+        // M-, walks back to the origin (still inside the crate).
+        s.jump_back();
+        assert_eq!(
+            s.buffers.current().unwrap().to_string(),
+            origin_key,
+            "jump-back returns to the origin buffer"
+        );
+    }
+
+    #[test]
+    fn external_mdot_same_file_candidate_wins() {
+        // The normal struct + impl-in-one-file case: the same-file
+        // candidate wins the direct jump (the project path's
+        // same-file-first ordering, unchanged).
+        let (mut s, _dir, root) = store_with_crate_index(&[(
+            "src/lib.rs",
+            "pub struct Foo {}\nimpl Foo {\n    pub fn new() -> Self { Foo {} }\n}\npub fn use_it() {\n    let f = Foo::new();\n}\n",
+        )]);
+        s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
+        // Line 5: "    let f = Foo::new();" — `new` starts at col 17.
+        s.set_point(5, 17, 17);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file: no picker");
+        assert_eq!(s.point_line(), 2, "jumped to the same-file impl method");
+        assert!(
+            s.message.contains("jumped to src/lib.rs:3"),
+            "{}",
+            s.message
+        );
+    }
+
+    #[test]
+    fn external_mdot_ambiguous_opens_crate_picker_and_selection_jumps() {
+        // Two same-named definitions across the crate → the Xref picker
+        // with CRATE-RELATIVE display paths; the query re-computation and
+        // the RET selection both stay crate-rooted (the selection opens
+        // read-only inside the crate, never through the project root).
+        let (mut s, _dir, root) = store_with_crate_index(&[
+            ("src/lib.rs", "pub fn target() {}\npub fn call() {\n    target();\n}\n"),
+            ("src/other.rs", "pub fn target() {}\n"),
+        ]);
+        s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
+        // Line 2: "    target();" — `target` starts at col 4.
+        s.set_point(2, 4, 4);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "two candidates: picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered[0].0.name.starts_with("src/lib.rs:"),
+            "same-file candidate first: {}",
+            filtered[0].0.name
+        );
+        assert!(
+            filtered[1].0.name.starts_with("src/other.rs:"),
+            "crate-relative display: {}",
+            filtered[1].0.name
+        );
+        // Query re-computation consults the CRATE index (the project
+        // index has no `target` — a leaked project root would yield 0).
+        s.picker_query_char('s');
+        assert_eq!(
+            s.picker_filtered().len(),
+            2,
+            "refilter against the crate index"
+        );
+        // Select the second candidate (DOWN + RET): the jump lands
+        // inside the crate, read-only.
+        s.key_event(key("DOWN"));
+        assert_eq!(s.picker_selected(), 1);
+        s.key_event(key("RET"));
+        assert!(s.message.contains("jumped to src/other.rs:1"), "{}", s.message);
+        let key = s.buffers.current().unwrap().to_string();
+        assert_eq!(key, root.path().join("src/other.rs").to_string_lossy());
+        assert!(s.external_buffers.contains(&key));
+        assert!(!s.buffers.get(&key).unwrap().editable);
+    }
+
+    #[test]
+    fn external_mdot_miss_falls_through_to_resolver() {
+        // A symbol the crate index does not know: the miss keeps the
+        // project path's resolver fall-through (unchanged semantics —
+        // the origin project's metadata), superseding any in-flight
+        // resolve. Plain (no runtime) test: the spawn is skipped and the
+        // miss reported synchronously, like xref_workspace_miss_fires_….
+        let (mut s, _dir, root) = store_with_crate_index(&[(
+            "src/probe.rs",
+            "pub fn helper() {}\ntokio::spawn(f);\n",
+        )]);
+        s.open_external_path(&root.path().join("src/probe.rs")).unwrap();
+        // Line 1: top-level `tokio::spawn(f);` — no crate definition, no
+        // enclosing symbol → resolver fall-through with the path token.
+        s.set_point(1, 9, 9); // cursor inside `spawn`
+        s.xref_find_definitions();
+        assert_eq!(
+            s.resolve_generation, 2,
+            "external supersede bump + start bump"
+        );
+        assert!(
+            s.message.contains("no provider resolution for `tokio::spawn`"),
+            "graceful miss, got: {}",
+            s.message
+        );
+        assert!(
+            s.resolving_display().is_empty(),
+            "no runtime: the indicator must not hang"
+        );
+    }
+
+    #[test]
+    fn external_imenu_lists_crate_file_outline_and_refilters() {
+        // M-i inside an external buffer: the outline comes from the
+        // owning crate's index (not a refusal), and the query
+        // re-computation stays crate-rooted.
+        let (mut s, _dir, root) = store_with_crate_index(&[(
+            "src/lib.rs",
+            "pub struct Foo {}\nimpl Foo {\n    pub fn new() -> Self { Foo {} }\n}\npub fn use_it() {\n    let f = Foo::new();\n}\n",
+        )]);
+        s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
+        s.open_imenu();
+        assert!(s.picker_open(), "imenu opens on the external buffer");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Imenu));
+        let names: Vec<_> = s
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Foo:1", "new:3", "use_it:5"], "{names:?}");
+        assert_eq!(s.picker_count(), (3, 3), "the total follows the crate index");
+        // Refilter: `new` matches only the impl method (the crate index,
+        // not the project's, is consulted — the project index is empty
+        // here; a leaked project root would yield 0 candidates).
+        s.picker_query_char('n');
+        s.picker_query_char('e');
+        s.picker_query_char('w');
+        let filtered: Vec<_> = s
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.clone())
+            .collect();
+        assert_eq!(filtered, vec!["new:3"], "{filtered:?}");
+    }
+
+    #[test]
+    fn external_index_lru_cap_evicts_oldest_and_recency_bumps() {
+        // The cache caps at 3 roots; the oldest is evicted when a new
+        // crate lands; a lookup bumps recency.
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let roots: Vec<tempfile::TempDir> = (0..4)
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect();
+        for r in &roots {
+            s.apply_crate_index_event(&CrateIndexEvent {
+                source_root: r.path().to_path_buf(),
+                index: SymbolIndex::default(),
+            });
+        }
+        let ordered: Vec<&Path> =
+            s.external_indexes.iter().map(|(r, _)| r.as_path()).collect();
+        assert_eq!(s.external_indexes.len(), 3, "cap holds");
+        assert_eq!(
+            ordered,
+            vec![roots[1].path(), roots[2].path(), roots[3].path()],
+            "the oldest (roots[0]) is evicted; newest last"
+        );
+        // A lookup bumps recency: roots[1] moves to the newest slot…
+        s.crate_index_arc(roots[1].path()).unwrap();
+        // …so the next landing evicts roots[2] instead (the new oldest).
+        let r5 = tempfile::tempdir().unwrap();
+        s.apply_crate_index_event(&CrateIndexEvent {
+            source_root: r5.path().to_path_buf(),
+            index: SymbolIndex::default(),
+        });
+        let ordered: Vec<&Path> =
+            s.external_indexes.iter().map(|(r, _)| r.as_path()).collect();
+        assert_eq!(
+            ordered,
+            vec![roots[3].path(), roots[1].path(), r5.path()],
+            "recency bump changed the eviction victim (roots[2] evicted)"
+        );
+    }
+
+    #[test]
+    fn external_cache_does_not_leak_into_project_mdot() {
+        // Regression: a project file's M-. resolves against the PROJECT
+        // index even when a cached crate index defines the same name.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { target(); }\n"),
+            ("src/lib.rs", "pub fn target() {}\n"),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/crate.rs"), "pub fn target() {}\n").unwrap();
+        let crate_files = AppStore::crate_rs_files(root.path());
+        s.apply_crate_index_event(&CrateIndexEvent {
+            source_root: root.path().to_path_buf(),
+            index: build_index(root.path(), &crate_files, None),
+        });
+        s.open_path("src/main.rs");
+        // Line 0: "fn main() { target(); }" — `target` starts at col 12.
+        s.set_point(0, 12, 12);
+        s.xref_find_definitions();
+        assert!(!s.picker_open());
+        assert_eq!(
+            s.view_name_display(),
+            "src/lib.rs",
+            "the PROJECT definition wins (not the crate's)"
+        );
+    }
+
+    #[test]
+    fn blame_external_buffer_says_why() {
+        // Registry / tooling sources are not git checkouts: the refusal
+        // stays, but the message now explains it (006-03 item 4).
+        let (_dir, _ext, mut s) = store_with_external_buffer();
+        s.open_blame();
+        assert_eq!(s.message, "no git history for external sources");
+    }
+
+    #[test]
+    fn previous_project_buffer_mdot_still_refused() {
+        // The lifted refusal applies only to EXTERNAL buffers: a previous
+        // project's file (outside the new root but not an external
+        // landing) keeps the plain refusal.
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        for d in [&dir1, &dir2] {
+            std::fs::write(d.path().join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::create_dir_all(d.path().join("src")).unwrap();
+        }
+        std::fs::write(dir1.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+        let mut s = store(dir1.path());
+        s.open_path("src/a.rs");
+        s.switch_project_root(dir2.path().to_str().unwrap());
+        s.xref_find_definitions();
+        assert_eq!(s.message, "buffer not in project");
+    }
+
+    #[tokio::test]
+    async fn crate_index_refuses_oversized_tree() {
+        // Above the file cap the build is refused with a clear message
+        // (no known registry crate approaches 2000 .rs files).
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..(EXT_INDEX_FILE_CAP + 1) {
+            std::fs::write(
+                root.path().join(format!("f{i}.rs")),
+                "fn f() {}\n",
+            )
+            .unwrap();
+        }
+        s.start_crate_indexing(root.path());
+        assert!(
+            s.message.contains("crate too large to index")
+                && s.message.contains("2001"),
+            "{}",
+            s.message
+        );
+        assert!(s.crate_indexing.is_empty(), "no in-flight build armed");
+        assert!(s.external_indexes.is_empty(), "no cache entry");
     }
 
     // ── issue 05: which-function test (finding: enclosing-symbol) ──────

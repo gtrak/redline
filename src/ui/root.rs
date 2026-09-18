@@ -269,6 +269,8 @@ struct Snapshot {
     indexing: String,
     // Tooling-aware jump (plan 006 issue 02): resolving indicator.
     resolving: String,
+    // External crate indexing (plan 006 issue 03): crate-index indicator.
+    crate_indexing: String,
     // Search (issue 06): results view + status-line indicator.
     search_title: String,
     search_rows: Vec<ResultRow>,
@@ -463,6 +465,30 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
+    // Crate-index drain (plan 006 issue 03): the background crate-index
+    // builds (registry sources, off the input path) publish their finished
+    // indexes here — same `watch` latest-value-wins pattern as the resolve
+    // bus above. A crate-index build can only start AFTER a tooling
+    // landing, so the drain's subscription (Root start-up) is always live
+    // before the first publish (no zero-receiver race).
+    let crate_store = store.clone();
+    let crate_rx = crate_store.lock().unwrap().crate_index_bus.subscribe();
+    hooks.use_future(async move {
+        let mut rx = crate_rx;
+        while let Ok(()) = rx.changed().await {
+            // Coalesce: drain all immediately-available crate-index events
+            // before one repaint (two crates can land in quick succession).
+            loop {
+                let event = rx.borrow_and_update().clone();
+                crate_store.lock().unwrap().apply_crate_index_event(&event);
+                if !rx.has_changed().unwrap_or(false) {
+                    break;
+                }
+            }
+            tick.set(tick.get() + 1);
+        }
+    });
+
     // Search drain (issue 06): take the store's SearchBus receiver out of
     // the store (exactly once; `UnboundedReceiver` is not cloneable, so no
     // subscription is needed) and apply each event to the store. Because
@@ -562,6 +588,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             which_function: s.which_function(),
             indexing: s.indexing_display(),
             resolving: s.resolving_display(),
+            crate_indexing: s.crate_indexing_display(),
             search_title: s.search_title(),
             search_rows,
             search_top_row,
@@ -738,6 +765,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 which_function: snap.which_function,
                 indexing: snap.indexing,
                 resolving: snap.resolving,
+                crate_indexing: snap.crate_indexing,
                 searching: snap.searching,
                 position: snap.position,
                 annotations: snap.annotations,
@@ -786,6 +814,10 @@ struct StatusLineProps {
     /// Tooling-aware jump (plan 006 issue 02): active while an M-. miss is
     /// being resolved by the provider chain (`resolving …`).
     pub resolving: String,
+    /// External crate indexing (plan 006 issue 03): active while a
+    /// registry source's crate index builds in the background
+    /// (`indexing crate …`).
+    pub crate_indexing: String,
     pub searching: String,
     pub position: String,
     /// The current file's annotation count ("1 note" / "3 notes"; empty
@@ -829,6 +861,9 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
     }
     if !props.resolving.is_empty() {
         text.push_str(&format!("  *{}", props.resolving));
+    }
+    if !props.crate_indexing.is_empty() {
+        text.push_str(&format!("  *{}", props.crate_indexing));
     }
     if !props.searching.is_empty() {
         text.push_str(&format!("  *{}", props.searching));
@@ -1161,6 +1196,7 @@ mod tests {
             pending: String::new(),
             activity: String::new(),
             resolving: String::new(),
+            crate_indexing: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
@@ -1299,6 +1335,7 @@ mod tests {
             pending: String::new(),
             activity: String::new(),
             resolving: String::new(),
+            crate_indexing: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
@@ -1412,6 +1449,7 @@ mod tests {
             pending: String::new(),
             activity: String::new(),
             resolving: String::new(),
+            crate_indexing: String::new(),
             message: String::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,

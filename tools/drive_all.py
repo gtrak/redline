@@ -146,6 +146,22 @@ def drive_external_notes():
             f"exit={r.returncode}")
 
 
+def drive_external_crate():
+    """Plan 006 issue 03: M-. / imenu INSIDE a registry source (the crate
+    index, off the input path), driven in a DEDICATED repo
+    (/tmp/redline_ext_crate_repo) under its own per-repo PTY flock — same
+    containment as drive_external_notes."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "drive_external_crate.py")
+    try:
+        r = subprocess.run([sys.executable, path], timeout=600)
+    except subprocess.TimeoutExpired:
+        verdict("external crate nav (own repo)", False, "timed out after 600s")
+        return
+    verdict("external crate nav (own repo)", r.returncode == 0,
+            f"exit={r.returncode}")
+
+
 if __name__ == "__main__":
     drive_magit()
     drive_log()
@@ -154,6 +170,7 @@ if __name__ == "__main__":
     drive_buffer_list()
     drive_windowing()
     drive_external_notes()
+    drive_external_crate()
     print("\n=== SUMMARY ===")
     for name, ok, detail in VERDICTS:
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
