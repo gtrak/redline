@@ -59,23 +59,38 @@ User reports (2026-09-18), after 05b gave the file view a (line,col) point:
 - List-ish views: keep the existing wheel behavior (moves the selection) —
   that is correct for a cursor list. No change.
 
-### 3. `C-l` = emacs `recenter-top-bottom`
+### 3. `C-l` = emacs `recenter-top-bottom` (SPEC AMENDED 2026-09-18)
 - The point does NOT move. The WINDOW repositions so the point's screen
-  row cycles top → middle → bottom → top within the viewport:
-  desired_row ∈ {0, viewport/2, viewport−1}; `scroll_top = point_line −
-  desired_row`, clamped to [0, max_scroll]. Tiny viewports must still
-  cycle without dead-ends (keep the existing degenerate-range protection;
-  the current `(max_scroll/3).max(1)` regression test family must be
-  reworked to the new contract, not deleted).
+  row moves among {top=0, middle=viewport/2, bottom=viewport−1};
+  `scroll_top = point_line − desired_row`, clamped to [0, max_scroll].
+- **Cycle ORDER must match emacs**: emacs `recenter-positions` defaults to
+  `(middle top bottom)`, and `recenter-top-bottom` advances the position
+  only when the immediately-preceding command was also recenter (else it
+  starts at the first position = middle). So: a C-l that does NOT directly
+  follow another C-l goes to MIDDLE; consecutive C-l cycles
+  middle → top → bottom → middle. Implement with a small cycle-index
+  field reset on any other command (emacs `recenter-last-op`), NOT a
+  zone-derived guess. Verified live: point line 30, viewport 22 →
+  emacs cursor rows 14 → 1 → 27 → 14.
+- Tiny viewports must still cycle without dead-ends (keep the
+  degenerate-range protection; the old `(max_scroll/3).max(1)` test family
+  must be reworked to the new contract, not deleted).
 - Update the doc comment (the old one describes the retired
-  cursor-is-window-top model).
+  cursor-is-window-top model) and README/parity-log order text.
 
-### 4. Word motion `M-f` / `M-b`
-- Point moves by word in the file view: forward-word to the end of the
-  next word, backward-word to the start of the previous word, emacs-style
-  (wraps across line boundaries; word = run of alphanumeric/underscore,
-  non-word = punctuation/whitespace runs — document the exact rule and
-  note emacs syntax-table differences).
+### 4. Word motion `M-f` / `M-b` (SPEC AMENDED 2026-09-18)
+- `M-f` = emacs `forward-word`: move to the **END** of the next word.
+  Algorithm: skip non-word chars (crossing lines, newline is non-word),
+  THEN walk word chars forward to that word's end. Do NOT stop at the
+  word's first char.
+- `M-b` = emacs `backward-word`: move to the **START** of the previous
+  word. If point is inside a word → that word's start; else skip non-word
+  backward (crossing lines), then keep retreating while word chars to the
+  word's first char. Do NOT stop at the word's end.
+- Verified emacs columns for `fn alpha() { let x = 1; }` (len 25):
+  M-f: 0→2, 2→8, 3→8, 8→16, 9→16, 12→16, 25→(wrap)→2.
+  M-b: 0→0, 2→0, 3→0, 8→3, 9→3, 12→3, 25→21.
+  `tools/probe_emacs_diff.py` must report OK for every row after the fix.
 - Update `goal_col` consistently (a word motion sets the goal column to
   the landing column, as emacs does).
 - Bindings: `M-f` / `M-b` in the file-view keymap. Add the commands to
