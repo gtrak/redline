@@ -59,7 +59,10 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   in dba535c and proven non-vacuous.
 - **05h** (spec: .agents/tasks/issue-004-05h-buffer-list-keys.md):
   buffer-list `n`/`p`/`d` echo unbound (inconsistent with magit/log `n`/`p`
-  and the dired `d`-kill convention); found by tools/ux_sweep.py. IN FLIGHT.
+  and the dired `d`-kill convention); found by tools/ux_sweep.py. DONE
+  (679c007, review in flight; 450 tests). NOTE: the worker reported
+  drive_windowing 23/23 + panes 13/13, but the harnesses actually produce
+  28/28 and 4/4 — orchestrator re-ran and flagged the reporting mismatch.
 - **05g** (DONE, badaf9b, review PASS; 444 tests): hardware cursor
   absolute with the tree visible (measured before: CUP col 3 over the
   sidebar; after: 37, verified live), plus the TREE_* consts moved to
