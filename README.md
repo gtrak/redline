@@ -30,6 +30,28 @@ redline
 Redline auto-detects the project root (git repo or marker file). The status
 line shows the project name and current view.
 
+## Annotations and the quit dump
+
+In the file view, `A` records a note anchored to the line under the cursor;
+notes live in `.redline-notes.md` in the project root and re-anchor
+automatically as the file drifts (an anchor whose text is gone is flagged
+orphaned, never moved to a guessed line).
+
+On quit (`C-x C-c`), the annotations print to stdout as a self-contained
+brief — project root header, then per note: `path:line`, the anchored code
+line, and the note text (orphaned notes are marked explicitly). Pass the
+dump straight to an agent:
+
+```sh
+redline > notes.txt
+```
+
+When stdout is redirected, redline renders the TUI to `/dev/tty` so stdout
+carries only the dump (zero escape bytes); if `/dev/tty` is unavailable the
+dump is skipped and reported on stderr. For grep/pipe use, `--notes=plain`
+prints the bare `path:line: text` form. No annotations ⇒ zero bytes on
+stdout.
+
 ## Keymap cheat sheet
 
 Generated from the command registry. The `M-x` palette lists all commands.

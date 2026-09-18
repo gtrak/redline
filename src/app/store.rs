@@ -838,6 +838,96 @@ pub fn serialize_notes(doc: &NotesDoc) -> String {
     out
 }
 
+/// One annotation in the quit-dump shape (plan 005 issue 03): a
+/// self-contained brief an agent can act on. `line` is 1-based (the
+/// record's 0-based `Annotation::line` + 1 — the dump is for humans and
+/// agents, not ropey). `code` is the anchored line: the buffer's current
+/// content at `line` when the anchor holds, otherwise the stored `anchor`
+/// (the last known anchored text — an orphaned record's line must not be
+/// trusted).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DumpAnnotation {
+    /// Project-relative path (the record's `path`).
+    pub path: String,
+    /// 1-based anchored line.
+    pub line: usize,
+    /// The anchored code line (see above).
+    pub code: String,
+    /// The note text (the record's `text`; may span lines).
+    pub text: String,
+    pub orphaned: bool,
+}
+
+/// Format the quit-dump (plan 005 issue 03). Both modes order by path
+/// asc, then line asc (stable for diffing); an empty set yields ZERO
+/// bytes (pipes stay clean).
+///
+/// Block mode (default, `plain = false`) — the agent brief:
+/// `# redline annotations — <root>` + a blank line, then per record:
+/// `path:line`, the anchored line indented +4 as code, and `NOTE:` with
+/// the text (subsequent note lines aligned under the first). Orphaned
+/// records carry an explicit `  ORPHANED (anchor text not found)` line so
+/// the agent never trusts a stale line number silently.
+///
+/// Plain mode (`--notes=plain`, the grep/pipe shape): one `path:line:
+/// text` per record (subsequent note lines aligned under the first),
+/// no header and no code/orphan lines.
+pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    // The ordering is part of the output contract (diff stability), so it
+    // lives here, not in the accessor.
+    let mut items: Vec<&DumpAnnotation> = items.iter().collect();
+    items.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    let mut out = String::new();
+    if !plain {
+        out.push_str("# redline annotations \u{2014} ");
+        out.push_str(root);
+        out.push_str("\n\n");
+    }
+    for item in items {
+        if !plain {
+            out.push_str(&format!("{}:{}\n", item.path, item.line));
+            if item.orphaned {
+                out.push_str("  ORPHANED (anchor text not found)\n");
+            }
+            out.push_str("    ");
+            out.push_str(&item.code);
+            out.push('\n');
+            let lines: Vec<&str> = item.text.split('\n').collect();
+            let (first, rest) = match lines.split_first() {
+                Some((f, r)) => (*f, r),
+                None => ("", &[] as &[&str]),
+            };
+            out.push_str("  NOTE: ");
+            out.push_str(first);
+            for extra in rest {
+                out.push('\n');
+                out.push_str("        "); // aligned under the first note line's text
+                out.push_str(extra);
+            }
+            out.push('\n');
+        } else {
+            let prefix = format!("{}:{}: ", item.path, item.line);
+            let lines: Vec<&str> = item.text.split('\n').collect();
+            let (first, rest) = match lines.split_first() {
+                Some((f, r)) => (*f, r),
+                None => ("", &[] as &[&str]),
+            };
+            out.push_str(&prefix);
+            out.push_str(first);
+            for extra in rest {
+                out.push('\n');
+                out.push_str(&prefix); // aligned under the first note line's text
+                out.push_str(extra);
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Direction of an incremental search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsearchDirection {
@@ -2035,6 +2125,54 @@ impl AppStore {
         for key in keys {
             self.reanchor_for_key(&key);
         }
+    }
+
+    /// Collect the annotations for the quit-dump (plan 005 issue 03): one
+    /// `DumpAnnotation` per structured record in the notes document (raw
+    /// blocks are skipped — they carry no usable record). `line` is
+    /// rendered 1-based; `code` is the open buffer's current content at
+    /// the anchored line when the anchor holds, otherwise the stored
+    /// `anchor` (an orphaned record's line must not be trusted, so its
+    /// stored anchor text is the last known line).
+    pub fn annotations_for_dump(&mut self) -> Vec<DumpAnnotation> {
+        self.ensure_notes_doc();
+        let items: Vec<DumpAnnotation> = self
+            .notes_doc
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let a = e.as_record()?;
+                let code = if a.orphaned {
+                    a.anchor.clone()
+                } else {
+                    self.buffer_line_text_for_rel(&a.path, a.line)
+                        .unwrap_or_else(|| a.anchor.clone())
+                };
+                Some(DumpAnnotation {
+                    path: a.path.clone(),
+                    line: a.line + 1, // 0-based record line -> 1-based dump line
+                    code,
+                    text: a.text.clone(),
+                    orphaned: a.orphaned,
+                })
+            })
+            .collect();
+        items
+    }
+
+    /// The open buffer's content at 0-based `line` for the
+    /// project-relative path `rel`, when such a buffer is open.
+    fn buffer_line_text_for_rel(&self, rel: &str, line: usize) -> Option<String> {
+        for (key, _) in self.buffers.list() {
+            if self.buffer_rel_path(key).as_deref() == Some(rel) {
+                return self
+                    .buffers
+                    .get(key)
+                    .and_then(|b| b.line_text(line))
+                    .map(|t| t.into_owned());
+            }
+        }
+        None
     }
 
     /// Write the notes document back to disk (and into the open notes
@@ -13926,6 +14064,185 @@ mod tests {
         s.note_prompt_confirm();
         assert_eq!(ann_records(&s).len(), 0);
         assert_eq!(s.message, "note cancelled");
+    }
+
+    // ── plan 005 issue 03: quit-dump formatter + accessor ───────────────
+
+    fn dump_item(path: &str, line: usize, code: &str, text: &str, orphaned: bool) -> DumpAnnotation {
+        DumpAnnotation {
+            path: path.to_string(),
+            line,
+            code: code.to_string(),
+            text: text.to_string(),
+            orphaned,
+        }
+    }
+
+    /// The default block mode is the agent brief: header + blank line, then
+    /// path:line, the anchored line indented +4, and `NOTE:` with the text.
+    #[test]
+    fn notes_dump_block_format_exact_bytes() {
+        let items = vec![dump_item(
+            "src/app/store.rs",
+            1420,
+            "fn save_buffer(&mut self) {",
+            "this silently overwrites the mtime; check the conflict marker first",
+            false,
+        )];
+        let out = format_notes_dump(&items, "/home/dev/red", false);
+        let expected = "# redline annotations \u{2014} /home/dev/red\n\n".to_owned()
+            + "src/app/store.rs:1420\n"
+            + "    fn save_buffer(&mut self) {\n"
+            + "  NOTE: this silently overwrites the mtime; check the conflict marker first\n";
+        assert_eq!(out, expected, "exact block bytes");
+    }
+
+    /// An orphaned record carries the explicit marker line (the agent must
+    /// not trust a stale line number silently) and its code line is the
+    /// STORED anchor (last known anchored text).
+    #[test]
+    fn notes_dump_orphaned_marker() {
+        let items = vec![dump_item("src/old.rs", 7, "fn gone() {", "stale note", true)];
+        let out = format_notes_dump(&items, "/p", false);
+        let expected = "# redline annotations \u{2014} /p\n\n".to_owned()
+            + "src/old.rs:7\n"
+            + "  ORPHANED (anchor text not found)\n"
+            + "    fn gone() {\n"
+            + "  NOTE: stale note\n";
+        assert_eq!(out, expected, "exact orphaned bytes");
+    }
+
+    /// Multi-line notes: subsequent lines align under the first note line's
+    /// text (block: 8 spaces = 2 + `NOTE: `; plain: the `path:line: `
+    /// prefix repeats).
+    #[test]
+    fn notes_dump_multiline_note_alignment() {
+        let items = vec![dump_item("a.rs", 3, "code", "first\nsecond\nthird", false)];
+        let block = format_notes_dump(&items, "/p", false);
+        assert!(
+            block.contains("  NOTE: first\n        second\n        third\n"),
+            "block continuation alignment: {block:?}"
+        );
+        let plain = format_notes_dump(&items, "/p", true);
+        assert_eq!(
+            plain,
+            "a.rs:3: first\n".to_owned() + "a.rs:3: second\n" + "a.rs:3: third\n",
+            "plain continuation alignment"
+        );
+    }
+
+    /// Ordering is part of the contract: path asc, then line asc, in BOTH
+    /// modes (diff stability).
+    #[test]
+    fn notes_dump_ordering_path_then_line() {
+        let items = vec![
+            dump_item("b.rs", 5, "x", "n5", false),
+            dump_item("a.rs", 9, "y", "n9", false),
+            dump_item("a.rs", 2, "z", "n2", false),
+        ];
+        for plain in [false, true] {
+            let out = format_notes_dump(&items, "/p", plain);
+            let positions: Vec<usize> = out
+                .match_indices("a.rs:2")
+                .map(|(i, _)| i)
+                .chain(out.match_indices("a.rs:9").map(|(i, _)| i))
+                .chain(out.match_indices("b.rs:5").map(|(i, _)| i))
+                .collect();
+            assert!(
+                positions.windows(2).all(|w| w[0] < w[1]),
+                "order a:2 < a:9 < b:5 (plain={plain}): {out:?}"
+            );
+        }
+    }
+
+    /// `--notes=plain` parity: same records, the grep/pipe shape with NO
+    /// header and no code/orphan lines; the block keeps them.
+    #[test]
+    fn notes_dump_plain_flag_parity() {
+        let items = vec![
+            dump_item("src/main.rs", 4, "fn main() {", "fix the off-by-one", false),
+            dump_item("README.md", 1, "Redline", "top", true),
+        ];
+        let plain = format_notes_dump(&items, "/p", true);
+        assert_eq!(
+            plain,
+            "README.md:1: top\n".to_owned() + "src/main.rs:4: fix the off-by-one\n",
+            "plain: path:line: text, no header, ordered"
+        );
+        assert!(!plain.contains("ORPHANED") && !plain.contains("# redline"));
+        let block = format_notes_dump(&items, "/p", false);
+        assert!(block.starts_with("# redline annotations \u{2014} /p\n\n"));
+        assert!(block.contains("ORPHANED (anchor text not found)"));
+        assert!(block.contains("    fn main() {") && block.contains("  NOTE: top"));
+    }
+
+    /// No annotations ⇒ zero bytes in BOTH modes (pipes stay clean).
+    #[test]
+    fn notes_dump_empty_is_zero_bytes() {
+        assert_eq!(format_notes_dump(&[], "/p", false), "");
+        assert_eq!(format_notes_dump(&[], "/p", true), "");
+    }
+
+    /// The accessor resolves the dump shape from the store: 1-based lines,
+    /// `code` = the open buffer's current content when the anchor holds, the
+    /// STORED anchor for orphaned records (never the line's current text),
+    /// and the stored anchor when the buffer is not open.
+    #[test]
+    fn notes_dump_accessor_resolves_code_and_lines() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/dump1.rs", "alpha line\nbeta line\ngamma line\n");
+        for a in [
+            Annotation {
+                path: "src/dump1.rs".to_string(),
+                line: 0,
+                col: 0,
+                anchor: "alpha line".to_string(),
+                text: "note one".to_string(),
+                orphaned: false,
+            },
+            Annotation {
+                path: "src/dump1.rs".to_string(),
+                line: 1,
+                col: 0,
+                anchor: "GHOST ANCHOR".to_string(),
+                text: "ghost note".to_string(),
+                orphaned: true,
+            },
+        ] {
+            s.notes_doc.entries.push(NotesEntry::Record(a));
+        }
+        // Persist so the lazy-load path does not clobber the in-memory doc
+        // (the real A/prompt flow does this via sync on commit).
+        s.sync_notes_from_doc();
+        let items = s.annotations_for_dump();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].path, "src/dump1.rs");
+        assert_eq!(items[0].line, 1, "record line 0 → dump line 1 (1-based)");
+        assert_eq!(items[0].code, "alpha line", "open buffer's current line");
+        assert_eq!(items[0].text, "note one");
+        assert!(!items[0].orphaned);
+        assert_eq!(items[1].line, 2, "record line 1 → dump line 2 (1-based)");
+        assert_eq!(
+            items[1].code, "GHOST ANCHOR",
+            "orphaned: the stored anchor, NOT the line's current text"
+        );
+        assert!(items[1].orphaned);
+
+        // Closed buffer: `code` falls back to the stored anchor.
+        let mut s2 = store_with_project();
+        s2.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/closed.rs".to_string(),
+            line: 12,
+            col: 0,
+            anchor: "fn closed() {".to_string(),
+            text: "closed note".to_string(),
+            orphaned: false,
+        }));
+        s2.sync_notes_from_doc();
+        let items2 = s2.annotations_for_dump();
+        assert_eq!(items2.len(), 1);
+        assert_eq!(items2[0].line, 13, "1-based");
+        assert_eq!(items2[0].code, "fn closed() {", "closed buffer → stored anchor");
     }
 
     /// The rendered-row map round-trips buffer_line ↔ rendered_row through
