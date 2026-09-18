@@ -48,11 +48,16 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   display-width cursor/click columns + the dropped-space render bug (found
   by UX sweep); also folds the carried 004-04 review P2 (prompt redisplay
   after a failed save).
-- **05e** (IN FLIGHT; spec: .agents/tasks/issue-004-05e-tree-click-offset.md):
+- **05e** (DONE, 95f24b1, review in flight; 442 tests):
   clicks must subtract the fixed 34-column tree sidebar offset (found by
   UX sweep: with the tree visible, a click at terminal col 40 lands the
   point at col 22 — wrong char; clicks inside the tree also move the code
   point). QUEUED after 05d (same files: root.rs/tree.rs/store.rs).
+- **05f** (spec: .agents/tasks/issue-004-05f-menu-readability.md): menu
+  truncation mid-word + columns colliding (7 rows at 80 cols). QUEUED.
+- **05g** (spec: .agents/tasks/issue-004-05g-tree-cursor-offset.md): the
+  hardware cursor is pane-relative with the tree visible (measured: CUP
+  col 3 instead of 37, drawn over the sidebar). QUEUED after 05e.
 - **Battery 3/4 harnesses**: column-level emacs comparison + differential
   probes (tools/drive_*_battery3.py, tools/probe_emacs_diff{,2}.py). Probe
   #2 logged parity rows 32-34 (scroll-model divergence is NOT emacs — kept
