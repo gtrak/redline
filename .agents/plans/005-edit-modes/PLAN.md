@@ -79,11 +79,15 @@ stdout annotation dump that fits shell workflows.
   preempt the user's pending C-u/numeric-prefix decision, parity row 22).
   02 review was BLOCKING: note rows overflowed the canvas (point's line
   could go undrawn; cursor one row off). Both that P1 AND the marker
-  clobber were fixed in **02b (a3d71e1, review in flight; 478 tests)** and
+  clobber were fixed in **02b (0bd99ad, review PASS; 479 tests)** and
   verified live by the orchestrator: `▎fn tall_0() {}` renders the full
   text, and at the window bottom under an annotation `tall_20` is drawn
   with the cursor on it. Also: tools now flock the shared fixture
   (8f0375e) after concurrent suites produced phantom failures.
+- 02c (largest-span canvas fill, backlog #14) — reviewer-recommended
+  follow-up: choose the largest span s with s + notes_in_window(s) <=
+  viewport so a densely-annotated file fills the canvas instead of
+  showing 2 rows of 21. QUEUED as a small focused change.
 - 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
   so a redirect needs /dev/tty rendering).
 
