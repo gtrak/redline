@@ -1,6 +1,6 @@
 # 006 — Redline: tooling-aware jump-to-definition
 
-Status: 01+02+02b complete; 03 revived with new scope (see task record)
+Status: COMPLETE (01, 02, 02b, 03 all PASS) — archivable
 
 ## Outcome record
 
@@ -27,6 +27,25 @@ Status: 01+02+02b complete; 03 revived with new scope (see task record)
   external path under a `$HOME`-rooted project re-classifies as owned; a
   stale set marker if the same absolute path is later opened as a project
   file (fail-safe only).
+- **03 PASS** (`7bab785`, reviewer verdict 2026-09-18: PASS; 520 tests / 0
+  failed / 2 ignored; drive_all 8/8 incl. new drive_external_crate 12/12;
+  windowing 28/28; panes 4/4; cursor-stream 80/80; notes-dump 17/17;
+  drive_xref 10/10; drive_external_notes 16/16; ux_sweep 3 pre-existing).
+  Background crate index (CrateIndexBus, spawn_blocking, LRU cap 3 keyed by
+  `source_root`, `indexing crate …` indicator off the input path) wired into
+  external landings; M-./imenu inside a library buffer run the same selection
+  rule against the crate index (crate-relative display, read-only landings);
+  miss keeps the resolver fall-through on the ORIGIN project's metadata;
+  blame refusal now carries a reason. 11 new tests. Live: M-. on `Rope` →
+  registry rope.rs:82 → M-. on `RopeBuilder` → src/rope_builder.rs:42 (in-crate)
+  → M-, back.
+  Review P2 follow-ups queued as **006-03b** (non-blocking): cap-3 eviction can
+  strand a still-open buffer's crate (bump recency on landing/make-current);
+  resolver `from_file` passes an absolute path where the context documents
+  workspace-relative (no live bug — cargo provider ignores it); `rel`
+  derivation skips the `\`→`/` normalization the index keys use (Windows-only);
+  a zero-cost N/M counter was achievable without breaching the nav/index fence;
+  `current_buffer_outline`'s `strip_prefix().unwrap()` robustness.
 - **Issue 03 REVIVED with new scope** (user request 2026-09-18: "I want to
   follow other types once inside a library buffer"): navigate WITHIN external
   sources — a background tree-sitter index of the landed crate's source_root
