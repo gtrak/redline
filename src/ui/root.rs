@@ -78,7 +78,9 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
 /// `MoveTo(col, row)` order) for the current view. The row is the view's cursor
 /// row — the blue-bar (selected) row for list views, the point's screen row for
 /// the read-focused buffer view (clamped to the viewport, plan 004 issue 05c)
-/// — and the column is the point's column (or 0 for list views).
+/// — and the column is the point's DISPLAY column (char-index → display-
+/// column conversion, plan 004 issue 05d) for the read-focused buffer view, 0
+/// for list views).
 ///
 /// Layout (0-based terminal rows): the main view's title is row 0 and its first
 /// content row is row 1, so content row `i` (0-based within the window) is at
@@ -125,20 +127,35 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                     .min(max_content_row);
                 Some((0, 1 + banner + content_row as u16))
             } else {
-                // Read-focused file view: the cursor tracks the point
+                // read-focused file view: the cursor tracks the point
                 // (plan 004 issue 05b). Row = the point's buffer line
                 // relative to the window top (clamped to the visible window,
-                // issue 05c); col = the point's column. Cols beyond the pane
-                // width place the cursor off-screen (no horizontal scroll in
-                // 05b).
+                // issue 05c); col = the point's display column (05d).
+                // Cols beyond the pane width place the cursor off-screen (no
+                // horizontal scroll in 05b).
                 let line = snap
                     .file_view_point_line
                     .min(total.saturating_sub(1));
                 let content_row = line
                     .saturating_sub(snap.file_view_top_line)
                     .min(max_content_row);
-                let col = snap.file_view_point_col as u16;
-                Some((col, 1 + banner + content_row as u16))
+                // The terminal cursor is positioned in CELLS, not char
+                // indexes: the display column is the width of the point
+                // line's prefix [0, point_col) (plan 004 issue 05d). Fall
+                // back to the char index when the point line is outside
+                // the pre-computed visible slice (the cursor row is
+                // clamped off the point in that case too).
+                let col = snap
+                    .file_view_lines
+                    .get(line.saturating_sub(snap.file_view_top_line))
+                    .map(|l| {
+                        crate::ui::file_view::char_index_to_display_col(
+                            &l.text,
+                            snap.file_view_point_col,
+                        )
+                    })
+                    .unwrap_or(snap.file_view_point_col);
+                Some((col as u16, 1 + banner + content_row as u16))
             }
         }
     }
@@ -971,5 +988,109 @@ mod tests {
         // require a running terminal and cannot be automated in the unit
         // test suite (iocraft's mock_terminal_render_loop needs `futures`
         // which is not a direct dependency).
+    }
+
+    // ── plan 004 issue 05d: cursor_cell display-column conversion ───────
+
+    /// A `Snapshot` shaped for `cursor_cell`: a read-focused Buffer view
+    /// with the given lines at window top 0. All fields `cursor_cell` does
+    /// not read stay at inert defaults.
+    fn buffer_snapshot(lines: &[&str], point_line: usize, point_col: usize) -> Snapshot {
+        Snapshot {
+            view: ViewId::Buffer,
+            file_view_lines: lines
+                .iter()
+                .map(|t| FileViewLine {
+                    text: (*t).to_string(),
+                    spans: Vec::new(),
+                })
+                .collect(),
+            file_view_top_line: 0,
+            file_view_total_lines: lines.len(),
+            file_view_viewport_lines: 21,
+            file_view_point_line: point_line,
+            file_view_point_col: point_col,
+            quit: false,
+            project: String::new(),
+            view_name: String::new(),
+            pending: String::new(),
+            activity: String::new(),
+            message: String::new(),
+            buffer_rows: Vec::new(),
+            buffer_list_selected: 0,
+            picker: false,
+            prompt: String::new(),
+            query: String::new(),
+            selected: 0,
+            candidates: Vec::new(),
+            total: 0,
+            preview: String::new(),
+            magit_rows: Vec::new(),
+            magit_top_row: 0,
+            magit_total_rows: 0,
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_height: 0,
+            log_title: String::new(),
+            log_rows: Vec::new(),
+            blame_title: String::new(),
+            blame_rows: Vec::new(),
+            commit_diff_title: String::new(),
+            commit_diff_rows: Vec::new(),
+            commit_diff_top_row: 0,
+            commit_diff_total_rows: 0,
+            commit_editor_title: String::new(),
+            commit_editor_rows: Vec::new(),
+            dirty: None,
+            file_view_title: String::new(),
+            file_view_changed_on_disk: false,
+            file_view_current_buffer_editable: false,
+            tree_visible: false,
+            tree_rows: Vec::new(),
+            tree_selected: 0,
+            which_function: String::new(),
+            indexing: String::new(),
+            search_title: String::new(),
+            search_rows: Vec::new(),
+            search_top_row: 0,
+            search_total_rows: 0,
+            search_selected_row: None,
+            search_running: false,
+            search_error: None,
+            searching: String::new(),
+            position: String::new(),
+            region_lines: None,
+            region_size: None,
+        }
+    }
+
+    /// The cursor column is the point's DISPLAY column (terminal cells),
+    /// not its char index (plan 004 issue 05d): char 13 of
+    /// `CJK: abcd中 efgh` sits at display col 14 (中 is 2 cells).
+    #[test]
+    fn cursor_cell_uses_display_column_not_char_index() {
+        let snap = buffer_snapshot(&["CJK: abcd中 efgh", "bb"], 0, 13);
+        assert_eq!(
+            cursor_cell(&snap),
+            Some((14, 1)),
+            "char 13 → display col 14 (0-based); content row 0 → row 1 (0-based)"
+        );
+        let snap = buffer_snapshot(&["CJK: abcd中 efgh", "bb"], 0, 0);
+        assert_eq!(cursor_cell(&snap), Some((0, 1)));
+        // ASCII lines are unchanged: display col == char index.
+        let snap = buffer_snapshot(&["abcd", "bb"], 1, 1);
+        assert_eq!(cursor_cell(&snap), Some((1, 2)));
+        // Combining marks add no cell: char 2 of e+U+0301+x is at col 1.
+        let snap = buffer_snapshot(&["e\u{301}x"], 0, 2);
+        assert_eq!(cursor_cell(&snap), Some((1, 1)));
+    }
+
+    /// A point line outside the pre-computed visible slice falls back to
+    /// the char index (the cursor row is clamped off the point there too).
+    #[test]
+    fn cursor_cell_falls_back_to_char_index_off_slice() {
+        let mut snap = buffer_snapshot(&["bb", "bb"], 4, 2);
+        snap.file_view_total_lines = 5;
+        assert_eq!(cursor_cell(&snap), Some((2, 5)), "char index 2, clamped row 4 → row 5 (0-based)");
     }
 }

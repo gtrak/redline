@@ -2899,19 +2899,29 @@ impl AppStore {
     /// bounds, so a click past EOL lands at EOL and a click on an empty line
     /// lands at col 0. `row` is the click's row within the visible file area
     /// (the caller subtracts the file view's title-line offset); `col` is
-    /// the terminal column, which maps 1:1 to the line's char index (the
-    /// file view renders from column 0 — no gutter). The existing goal
-    /// column is preserved (a mouse set-point does not touch it, emacs
-    /// model); the window follows (05b behavior). No-op outside the file
-    /// view.
+    /// the clicked TERMINAL (display) column — wide (CJK) chars occupy 2
+    /// cells, so it is converted to a char index for the point (a click
+    /// inside a wide char maps to that char; plan 004 issue 05d). The
+    /// existing goal column is preserved (a mouse set-point does not touch
+    /// it, emacs model); the window follows (05b behavior). No-op outside
+    /// the file view.
     pub fn mouse_click_position(&mut self, row: usize, col: usize) {
         if self.top_view() != ViewId::Buffer {
             return;
         }
         let target_line = self.scroll_top() + row;
         let line_len = self.line_char_len(target_line);
+        // Display column -> char index (the file view renders from cell 0
+        // with no gutter; plan 004 issue 05d).
+        let char_col = self
+            .buffers
+            .current_buffer()
+            .and_then(|b| b.line_text(target_line))
+            .map(|t| crate::ui::file_view::display_col_to_char_index(&t, col))
+            .unwrap_or(0)
+            .min(line_len);
         let p = self.file_point();
-        self.set_point(target_line, col.min(line_len), p.goal_col);
+        self.set_point(target_line, char_col, p.goal_col);
     }
 
     /// Scroll to the top (line 0).
@@ -6778,6 +6788,22 @@ impl AppStore {
         ));
     }
 
+    /// Re-render the prompt AFTER a failed save left an error message in
+    /// the minibuffer: compose the prompt with the error so the decision
+    /// line stays visible alongside it (plan 004 issue 05d, carried 004-04
+    /// review P2). The prompt comes FIRST: the composed line wraps at the
+    /// pane width, leaving the error (e.g. `save failed: ...`) on its own
+    /// continuation row. A no-op when the prompt is not active.
+    fn quit_prompt_show_with_error(&mut self) {
+        let Some(name) = self.quit_prompt_buffer() else {
+            return;
+        };
+        self.minibuffer_message(&format!(
+            "Save this buffer: {name}? (y, n, !, C-g) — {}",
+            self.message
+        ));
+    }
+
     /// Answer one key of the quit save-prompt. `y` saves the offered buffer
     /// (a failed save reports the error and re-prompts the SAME buffer),
     /// `n` skips it, `!` saves this and ALL remaining snapshotted buffers
@@ -6799,10 +6825,14 @@ impl AppStore {
                 };
                 if self.save_buffer_key(&asked) {
                     self.quit_prompt_advance();
+                } else {
+                    // A failed save already reported the error in the
+                    // minibuffer; the snapshot head is untouched, so the
+                    // same buffer is re-offered on the next y/n/!/C-g —
+                    // redisplay the prompt alongside the error so the
+                    // decision line stays visible.
+                    self.quit_prompt_show_with_error();
                 }
-                // A failed save already reported the error in the
-                // minibuffer; the snapshot head is untouched, so the same
-                // buffer is re-offered on the next y/n/!/C-g.
             }
             'n' => {
                 self.quit_prompt_advance();
@@ -6816,10 +6846,12 @@ impl AppStore {
                 for (i, k) in rest.iter().enumerate() {
                     if !self.save_buffer_key(k) {
                         // Report the failure and re-prompt from the FAILED
-                        // buffer (the already-saved ones drop off).
+                        // buffer (the already-saved ones drop off), with the
+                        // prompt redisplayed alongside the error.
                         self.quit_prompt = Some(QuitPrompt {
                             pending: rest.split_off(i),
                         });
+                        self.quit_prompt_show_with_error();
                         return;
                     }
                 }
@@ -7324,7 +7356,12 @@ mod tests {
         s.key_event(key("C-x"));
         s.key_event(key("C-c"));
 
-        // `y` fails: the error is reported and the SAME buffer is re-offered.
+        // `y` fails: the error is reported, the SAME buffer is re-offered,
+        // and the prompt decision line is redisplayed alongside the error.
+        let prompt = format!(
+            "Save this buffer: {}? (y, n, !, C-g)",
+            notes_path.display()
+        );
         s.key_event(key("y"));
         assert!(!s.quit, "a failed save must not quit");
         assert!(s.quit_prompt_active(), "the prompt must stay up after a failed save");
@@ -7333,10 +7370,26 @@ mod tests {
             "the error must be reported: {:?}",
             s.message
         );
+        assert!(
+            s.message.contains(&prompt),
+            "the prompt decision line must be redisplayed alongside the error: {:?}",
+            s.message
+        );
         assert_eq!(
             s.quit_prompt_buffer(),
             Some(notes_path.display().to_string()),
             "the failed buffer must remain the offered one"
+        );
+        // The `!` failure branch redisplay the prompt the same way: `!`
+        // re-saves the (still read-only) head buffer, fails, and re-prompts
+        // from it with the decision line visible.
+        s.key_event(key("!"));
+        assert!(!s.quit, "a failed `!` save must not quit");
+        assert!(s.quit_prompt_active(), "the prompt must stay up after a failed `!`");
+        assert!(
+            s.message.contains("save failed") && s.message.contains(&prompt),
+            "error + prompt must both be visible after a failed `!`: {:?}",
+            s.message
         );
         // Re-prompted buffer still answered by the state machine: `n` quits.
         s.key_event(key("n"));
@@ -8094,6 +8147,32 @@ mod tests {
         // Line 1 is "bb" (len 2): a click far past EOL lands at EOL.
         s.mouse_click_position(1, 99);
         assert_eq!((s.point_line(), s.point_col()), (1, 2), "clamped to EOL");
+    }
+
+    #[test]
+    fn mouse_click_wide_chars_convert_display_col_to_char_index() {
+        // plan 004 issue 05d: the clicked column is a terminal (display)
+        // column; 中 (char 9) occupies display cols 9-10, so display col
+        // 14 is char 13 ('g'), not char 14.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/wide.rs"), "CJK: abcd中 efgh\nbb\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/wide.rs");
+        s.set_viewport_lines(10);
+        // A click inside the wide char (either of its cells) maps to it.
+        s.mouse_click_position(0, 9);
+        assert_eq!((s.point_line(), s.point_col()), (0, 9), "click inside 中 → char 9");
+        s.mouse_click_position(0, 10);
+        assert_eq!((s.point_line(), s.point_col()), (0, 9), "second cell of 中 → char 9");
+        // 'g' sits at display col 14 (one extra cell for 中).
+        s.mouse_click_position(0, 14);
+        assert_eq!((s.point_line(), s.point_col()), (0, 13), "display col 14 → char 13");
+        // A click past the line's total WIDTH (16) clamps to EOL (char 15).
+        s.mouse_click_position(0, 99);
+        assert_eq!((s.point_line(), s.point_col()), (0, 15), "past total width clamps to EOL");
     }
 
     #[test]
@@ -11927,4 +12006,5 @@ mod tests {
         assert!(after_pop.contains("end\n"), "original content must be preserved: {after_pop:?}");
     }
 }
+
 

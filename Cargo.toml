@@ -12,6 +12,10 @@ description = "Read-focused, emacs-flavored TUI code browser for the agent-codin
 # ── UI layer ────────────────────────────────────────────────────────────────
 iocraft = "0.9.1"          # declarative TUI (latest 0.9.1; re-exports crossterm events)
 crossterm = "0.29"         # pinned to match iocraft's `^0.29` requirement exactly
+# Display-width (wide/CJK + combining) math at the render/input boundary
+# (plan 004 issue 05d). Already in the tree as a transitive dep of iocraft
+# (v0.1.14); the standard crate for terminal cell widths.
+unicode-width = "0.1.14"
 
 # ── async runtime + observability ──────────────────────────────────────────
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }

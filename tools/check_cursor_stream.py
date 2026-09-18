@@ -13,6 +13,10 @@ reconstruction:
   * Under `COLORTERM=truecolor` the selected-row bar is emitted as
     `48;2;0;0;255` (truecolor); without it the 256-color `48;5;12` is retained.
   * pyte still reconstructs the bar (the blue-bar row exists, no reverse).
+  * plan 004 issue 05d: with wide (CJK) chars the CUP column is the DISPLAY
+    column, clicks convert display column back to char index (a click inside
+    a wide char maps to that char), and a space after a wide char is not
+    dropped by the render.
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -474,6 +478,68 @@ def file_view_checks():
     return checks
 
 
+def wide_char_checks():
+    """plan 004 issue 05d: wide (CJK) chars occupy 2 cells — the CUP column
+    is the DISPLAY column (char index -> prefix display width), clicks
+    convert the other way (display column -> char index; a click inside a
+    wide char maps to that char), and the render keeps a space after a wide
+    char (the draw_line x-advance must be width-aware).
+    """
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    with open(_os.path.join(src_dir, "wideleg.rs"), "w") as f:
+        f.write("CJK: abcd中 efgh\nfn über() { let 中 = 1; }\n")
+
+    s = Session(None)
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    def do(key, settle=0.6):
+        """Press `key` and return the surviving CUP (row, col)."""
+        return last_cup_after_sync(s.key(key, settle))
+
+    def click(col0, row0):
+        """Left-click at 0-based terminal (col, row) via SGR (1-based)."""
+        os.write(s.master, b"\x1b[<0;%d;%dM" % (col0 + 1, row0 + 1))
+        return last_cup_after_sync(s._read(0.6, quiet=0.15))
+
+    s.key("C-x C-f", 1.0)
+    for ch in "wideleg":
+        s.key(ch, 0.2)
+    s.key("RET", 1.2)
+    # Line 0: 中 is char 9 and occupies display cols 9-10, so 'g' (char 13)
+    # sits at display col 14 (0-based).
+    s.key("C-a", 0.5)
+    r, c = do("C-f " * 13)
+    rec("cursor on char 13: CUP col is DISPLAY col 14", (r, c) == (2, 15),
+        f"cup=({r},{c}) want (2,15)")
+    r, c = do("C-e")
+    rec("cursor at EOL: CUP col is display col 16", (r, c) == (2, 17),
+        f"cup=({r},{c}) want (2,17)")
+    # Click the SECOND cell of 中 (display col 10): maps to char 9, whose
+    # display col is 9 -> CUP (2, 10). Char-index arithmetic would land on
+    # the space (char 10) -> CUP col 11.
+    r, c = click(10, 1)
+    rec("click inside 中 (2nd cell) maps to that char", (r, c) == (2, 10),
+        f"cup=({r},{c}) want (2,10)")
+    # Click display col 14 (the 'g', char index 13) -> CUP (2, 15).
+    r, c = click(14, 1)
+    rec("click on display col 14 lands on char 13", (r, c) == (2, 15),
+        f"cup=({r},{c}) want (2,15)")
+    # The space after the wide char survives the render: content row 1
+    # (terminal row 2, 0-based) shows `let 中 = 1;` with its space.
+    line1 = s.row_text(2)
+    rec("space after a wide char survives the render",
+        "let 中 = 1;" in line1, f"row={line1[:32]!r}")
+
+    s.kill()
+    return checks
+
+
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -491,6 +557,10 @@ def main():
     # recenter-top-bottom, word motion legs.
     print("=== MOUSE CLICK COL / WHEEL PARITY / C-L RECENTER / WORD MOTION ===")
     all_checks += mouse_recenter_word_checks()
+    print()
+    # plan 004 issue 05d: wide (CJK) chars — display-column cursor + clicks.
+    print("=== WIDE (CJK) CHARS: DISPLAY-COLUMN CURSOR + CLICKS ===")
+    all_checks += wide_char_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")
