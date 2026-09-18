@@ -766,8 +766,17 @@ def transient_menu_checks():
     rec("menu@80: every row fits the width",
         all(len(r) <= COLS for r in rows),
         f"max row len={max(len(r) for r in rows)}")
-    rec("menu@80: long descriptions ellipsized",
-        any("…" in r for r in rows), "no '…' found")
+    # A DESCRIPTION that did not fit must carry the truncation ellipsis.
+    # NOTE: prefix rows render as "KEY …" (a literal ellipsis, present
+    # before this fix too), so "any '…' in rows" would pass on the OLD
+    # output — require the ellipsis to follow a "[KEY]" description
+    # marker, which only happens for a truncated description (05f
+    # review P2-1).
+    desc_truncated = [r for r in rows if "]" in r and "…" in r
+                      and r.index("…") > r.index("]")]
+    rec("menu@80: long descriptions ellipsized (a DESCRIPTION, not a prefix row)",
+        len(desc_truncated) >= 1,
+        f"description rows with '…': {len(desc_truncated)}")
     s.kill()
 
     # ~30 cols: single-column fallback (w < 40).
