@@ -22,6 +22,21 @@ def _git(*args):
 
 
 def reset():
+    # Restore ALL tracked files to HEAD first: an edit-mode PTY leg (or a
+    # manual probe) can save real edits into a fixture file, and a stale
+    # tracked file silently changes what every later flow renders. The
+    # markers below are re-applied afterwards (they are working-tree edits
+    # on top of HEAD, not commits).
+    _git("checkout", "--", ".")
+    # Drop untracked leg/scratch files the PTY suites create, so the tree is
+    # exactly the baseline (see docs/ux-testing-plan.md backlog #8/#12).
+    for stray in ("src/leg.rs", "src/wordleg.rs", "src/cursorleg.rs",
+                  "src/whichfn.rs", "src/wideleg.rs", "wideleg.rs"):
+        p = os.path.join(REPO, stray)
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
     # Ensure the working-tree changes exist (idempotent: only writes markers if
     # the files lost them).
     lib = os.path.join(REPO, "src", "lib.rs")
