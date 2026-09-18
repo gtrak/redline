@@ -35,6 +35,29 @@ transient-menu machinery as a full top-level map — instead of an empty
 | `src/ui/transient_menu.rs` | reuse/extend the derived-menu renderer for the all-groups layout. |
 | tests + tools/ | home renders derived groups (anti-drift test: registry change changes home); opening C-x C-f from home; C-x n from home; q-quit suite updated (q unbound on home). |
 
+## Orchestrator pre-check (2026-09-18, against committed tree)
+
+- **Derive machinery exists**: `menu_entries_for_path(&KeySeq)`,
+  `menu_entries()`, `menu_rows()`, `menu_height()`, `menu_bindings()` in
+  `store.rs` (~4034-4195) already turn the live keymap × command registry
+  into grouped rows. Home reuses exactly this — call it with an "all
+  top-level groups" query rather than a path; do not hand-write content.
+- **`open_scratch` call sites** (3 real ones): command registration
+  (`command.rs:154`), `kill_buffer` when the last buffer dies
+  (`store.rs:2602`), a stale-reference fallback in the buffer-list open
+  path (`store.rs:5411`), plus the boot path. Dropping `*scratch*` means
+  those fallbacks must render HOME instead (empty stack = home), not
+  create a buffer. Beware: tests call `store.open_scratch()` directly
+  (`store.rs:7503`) — the helper may stay (an explicit command) while the
+  *auto-create* paths change.
+- **`*scratch*` is also a buffer key** (`Buffers` docs ~363) and appears
+  in buffer-list expectations (e.g. `C-x b` picker "3 of 3" including
+  `*scratch*` in the parity log). Those assertions must move to the home
+  state (no scratch entry).
+- `q` is currently bound to `quit` only in the transient/list contexts;
+  on home it must be unbound (verify where the bare `q` → quit binding
+  lives so home does not inherit it).
+
 ## Verification
 
 - Gates green (test count changes: scratch-related tests updated); boot →
