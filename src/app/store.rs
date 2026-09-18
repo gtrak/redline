@@ -695,6 +695,18 @@ impl SearchPromptKind {
     }
 }
 
+/// Quit save-prompt state (plan 004 issue 04, emacs
+/// `save-buffers-kill-terminal` semantics). `pending` is the SNAPSHOT of
+/// locally-modified buffer keys taken at quit-interception time, ordered
+/// oldest-first (MRU order reversed) so the least-recently-touched buffer is
+/// asked first. The snapshot is never recomputed: a buffer saved during the
+/// prompt does not re-appear, and a buffer modified after interception is
+/// not asked about.
+#[derive(Debug)]
+struct QuitPrompt {
+    pending: Vec<String>,
+}
+
 /// The jump-stack sentinel for the results view: a `JumpEntry` whose
 /// `buffer_key` is this never-a-real-buffer value means "return to the
 /// search results view" (the view has no buffer of its own; the entry's
@@ -829,6 +841,10 @@ pub struct AppStore {
     /// status line), e.g. `[C-c p]`.
     pub pending: KeySeq,
     pub quit: bool,
+    /// Quit save-prompt (plan 004 issue 04): when `Some`, a locally-modified
+    /// buffer awaits a save/skip decision and every key is routed to
+    /// `quit_prompt_key` (y / n / ! / C-g).
+    quit_prompt: Option<QuitPrompt>,
     /// Async-activity indicator slots (status line, e.g. `*indexing`).
     pub activity: Vec<String>,
     /// Minibuffer message (the echo area).
@@ -1117,6 +1133,7 @@ impl AppStore {
             files: HashMap::new(),
             pending: Vec::new(),
             quit: false,
+            quit_prompt: None,
             activity: Vec::new(),
             message: String::new(),
             picker: None,
@@ -1462,32 +1479,39 @@ impl AppStore {
     }
 
     /// Save the current buffer to its on-disk path (issue 09, notes +
-    /// any editable buffer). Updates the buffer's mtime and clears
-    /// `locally_modified`. No-op when the buffer has no path or is
-    /// not editable.
+    /// any editable buffer). No-op when there is no current buffer.
     pub fn save_buffer(&mut self) {
         let Some(key) = self.buffers.current() else {
             self.minibuffer_message("save-buffer: no current buffer");
             return;
         };
         let key = key.to_string();
+        self.save_buffer_key(&key);
+    }
+
+    /// Save the buffer with `key` to its on-disk path (plan 004 issue 04:
+    /// the quit save-prompt must save buffers that are not the current one).
+    /// Updates the buffer's mtime and clears `locally_modified`. Returns
+    /// `true` when the write landed; on any refusal/failure the minibuffer
+    /// message reports the reason and `false` is returned.
+    pub fn save_buffer_key(&mut self, key: &str) -> bool {
         let (path, text) = {
-            let buf = match self.buffers.get(&key) {
+            let buf = match self.buffers.get(key) {
                 Some(b) => b,
                 None => {
                     self.minibuffer_message("save-buffer: no buffer");
-                    return;
+                    return false;
                 }
             };
             if !buf.editable {
                 self.minibuffer_message("save-buffer: buffer is read-only");
-                return;
+                return false;
             }
             let path = match &buf.path {
                 Some(p) => p.clone(),
                 None => {
                     self.minibuffer_message("save-buffer: no file (scratch)");
-                    return;
+                    return false;
                 }
             };
             (path, buf.rope.to_string())
@@ -1498,16 +1522,18 @@ impl AppStore {
                     .ok()
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                if let Some(buf) = self.buffers.get_mut(&key) {
+                if let Some(buf) = self.buffers.get_mut(key) {
                     buf.mtime = mtime;
                     buf.locally_modified = false;
                     buf.changed_on_disk = false;
                 }
-                self.invalidate_highlight_for_key(&key);
+                self.invalidate_highlight_for_key(key);
                 self.minibuffer_message(&format!("wrote {}", path.display()));
+                true
             }
             Err(e) => {
                 self.minibuffer_message(&format!("save failed: {e}"));
+                false
             }
         }
     }
@@ -6317,6 +6343,13 @@ impl AppStore {
         if self.quit {
             return;
         }
+        // Quit save-prompt (plan 004 issue 04): modal — it swallows every
+        // key (y / n / ! / C-g; anything else is a no-op, no "unbound key"
+        // echo mid-prompt) and routes to the state machine.
+        if self.quit_prompt_active() {
+            self.quit_prompt_key(key);
+            return;
+        }
         // Transient menu (issue 002): topmost overlay. When open it swallows
         // every key except C-g: a listed leaf closes the menu and runs its
         // command, a listed prefix descends, and non-listed keys are ignored.
@@ -6690,6 +6723,144 @@ impl AppStore {
     pub fn minibuffer_message(&mut self, msg: &str) {
         self.message = msg.to_string();
     }
+
+    // ── plan 004 issue 04: quit save-prompt (save-buffers-kill-terminal) ─
+
+    /// Quit interception (plan 004 issue 04): `C-x C-c` (and the palette
+    /// `quit`) no longer flips `quit` directly. With NO locally-modified
+    /// buffer the quit proceeds immediately (existing behavior); with ≥1
+    /// modified buffer the save-prompt state machine starts over the
+    /// modified set snapshotted at interception time (oldest-first).
+    pub fn begin_quit(&mut self) {
+        self.clear_pending();
+        let modified: Vec<String> = self
+            .buffers
+            .list()
+            .into_iter()
+            .rev() // MRU order reversed → oldest-first
+            .filter(|(_, b)| b.locally_modified)
+            .map(|(k, _)| k.to_string())
+            .collect();
+        if modified.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.quit_prompt = Some(QuitPrompt { pending: modified });
+        self.quit_prompt_show();
+    }
+
+    /// Whether the quit save-prompt is active (a modified buffer is being
+    /// offered to save/skip).
+    pub fn quit_prompt_active(&self) -> bool {
+        self.quit_prompt.is_some()
+    }
+
+    /// The display name of the buffer currently offered by the quit
+    /// save-prompt (its path, or the `*scratch*` sentinel when pathless).
+    pub fn quit_prompt_buffer(&self) -> Option<String> {
+        let key = self
+            .quit_prompt
+            .as_ref()
+            .and_then(|p| p.pending.first())?;
+        match self.buffers.get(key).and_then(|b| b.path.as_ref()) {
+            Some(p) => Some(p.display().to_string()),
+            None => Some(key.clone()),
+        }
+    }
+
+    /// Render the prompt for the head of the snapshot in the minibuffer row.
+    fn quit_prompt_show(&mut self) {
+        let Some(name) = self.quit_prompt_buffer() else {
+            return;
+        };
+        self.minibuffer_message(&format!(
+            "Save this buffer: {name}? (y, n, !, C-g)"
+        ));
+    }
+
+    /// Answer one key of the quit save-prompt. `y` saves the offered buffer
+    /// (a failed save reports the error and re-prompts the SAME buffer),
+    /// `n` skips it, `!` saves this and ALL remaining snapshotted buffers
+    /// then quits, `C-g` cancels the whole quit. Every other key is
+    /// swallowed (no "unbound key" echo mid-prompt).
+    pub fn quit_prompt_key(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') {
+            self.quit_prompt_cancel();
+            return;
+        }
+        let Some(c) = key.char_value() else { return };
+        match c {
+            'y' => {
+                let Some(p) = self.quit_prompt.as_mut() else {
+                    return;
+                };
+                let Some(asked) = p.pending.first().cloned() else {
+                    return;
+                };
+                if self.save_buffer_key(&asked) {
+                    self.quit_prompt_advance();
+                }
+                // A failed save already reported the error in the
+                // minibuffer; the snapshot head is untouched, so the same
+                // buffer is re-offered on the next y/n/!/C-g.
+            }
+            'n' => {
+                self.quit_prompt_advance();
+            }
+            '!' => {
+                let mut rest = self
+                    .quit_prompt
+                    .take()
+                    .map(|p| p.pending)
+                    .unwrap_or_default();
+                for (i, k) in rest.iter().enumerate() {
+                    if !self.save_buffer_key(k) {
+                        // Report the failure and re-prompt from the FAILED
+                        // buffer (the already-saved ones drop off).
+                        self.quit_prompt = Some(QuitPrompt {
+                            pending: rest.split_off(i),
+                        });
+                        return;
+                    }
+                }
+                // Every snapshotted buffer saved: clear the prompt and quit.
+                self.quit_prompt = None;
+                self.quit = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop the answered buffer from the snapshot; the last answer quits.
+    fn quit_prompt_advance(&mut self) {
+        let answered = self
+            .quit_prompt
+            .as_mut()
+            .and_then(|p| p.pending.drain(0..1).next());
+        if answered.is_none() {
+            return;
+        }
+        if self
+            .quit_prompt
+            .as_ref()
+            .is_some_and(|p| p.pending.is_empty())
+        {
+            self.quit_prompt = None;
+            self.quit = true;
+        } else {
+            self.quit_prompt_show();
+        }
+    }
+
+    /// C-g: cancel the whole quit. Buffers already answered `y` are kept
+    /// saved; the rest are untouched. 004-03 cancel discipline applies to
+    /// the rest of the state (pending / picker / mark), and the cancel is
+    /// echoed like the other prompt cancels.
+    fn quit_prompt_cancel(&mut self) {
+        self.quit_prompt = None;
+        self.cancel();
+        self.minibuffer_message("cancel");
+    }
 }
 
 /// Pure scroll-anchor math for a buffer reload (issue 04).
@@ -6961,6 +7132,266 @@ mod tests {
         s.key_event(key("C-x"));
         s.key_event(key("C-c"));
         assert!(s.quit, "C-x C-c must still quit");
+    }
+
+    /// A store with an open notes buffer (the one UI-reachable modified
+    /// buffer) for the quit save-prompt tests (plan 004 issue 04).
+    fn notes_store() -> (tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        (dir, s)
+    }
+
+    #[test]
+    fn quit_prompt_unmodified_fast_path() {
+        let (_dir, mut s) = notes_store();
+        // No typed edits: notes is open but UNMODIFIED → immediate quit,
+        // no prompt (the existing q-quit behavior is preserved).
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit, "unmodified buffers must quit immediately");
+        assert!(!s.quit_prompt_active());
+        assert!(
+            !s.message.contains("Save this buffer"),
+            "no prompt must be rendered: {:?}",
+            s.message
+        );
+    }
+
+    #[test]
+    fn quit_prompt_y_saves_and_quits() {
+        let (dir, mut s) = notes_store();
+        let notes_path = dir.path().join(".redline-notes.md");
+        s.key_event(key("H"));
+        s.key_event(key("i"));
+        assert!(s.buffers.current_buffer().unwrap().locally_modified);
+
+        // Interception: the prompt names the modified buffer's path.
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(!s.quit, "the prompt must hold the quit");
+        assert!(s.quit_prompt_active());
+        let expected = format!("Save this buffer: {}? (y, n, !, C-g)", notes_path.display());
+        assert_eq!(s.message, expected, "prompt text mismatch");
+        assert_eq!(s.quit_prompt_buffer().unwrap(), notes_path.display().to_string());
+
+        // `y`: saved to disk, then the last answer quits.
+        s.key_event(key("y"));
+        assert!(s.quit, "y on the last modified buffer must quit");
+        assert!(!s.quit_prompt_active());
+        let on_disk = std::fs::read_to_string(&notes_path).unwrap();
+        assert!(on_disk.contains("Hi"), "y must write the edit to disk");
+        assert!(
+            !s.buffers.current_buffer().unwrap().locally_modified,
+            "save must clear locally_modified"
+        );
+    }
+
+    #[test]
+    fn quit_prompt_n_skips_and_quits() {
+        let (dir, mut s) = notes_store();
+        let notes_path = dir.path().join(".redline-notes.md");
+        s.key_event(key("x"));
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+
+        // `n`: knowingly discard → quit, the file is left unwritten
+        // (open_notes created it with the seed line; the edit must not land).
+        s.key_event(key("n"));
+        assert!(s.quit, "n on the last modified buffer must quit");
+        let on_disk = std::fs::read_to_string(&notes_path).unwrap();
+        assert!(!on_disk.contains("x"), "n must NOT write the edit to disk");
+        assert!(
+            s.buffers.current_buffer().unwrap().locally_modified,
+            "the skipped buffer keeps its local text (still modified in memory)"
+        );
+    }
+
+    /// Two modified, SAVEABLE buffers: the notes buffer plus a second
+    /// editable-with-path buffer (the UI only exposes notes, so the second is
+    /// built through the buffer API to exercise the multi-buffer prompt).
+    fn two_modified_buffers(
+        dir: &std::path::Path,
+        s: &mut AppStore,
+    ) -> (String, std::path::PathBuf) {
+        let extra = dir.join("extra.md");
+        std::fs::write(&extra, "old\n").unwrap();
+        let mtime = std::fs::metadata(&extra)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let extra_key = s
+            .buffers
+            .insert_rope(Some(extra.clone()), Rope::from_str("old\n"), mtime, true);
+        s.mark_locally_modified(&extra_key);
+        // The notes buffer (opened LAST → most recent) also gets an edit.
+        s.key_event(key("z"));
+        (extra_key, extra)
+    }
+
+    #[test]
+    fn quit_prompt_bang_saves_all_remaining_then_quits() {
+        let (dir, mut s) = notes_store();
+        let (extra_key, extra) = two_modified_buffers(dir.path(), &mut s);
+        let notes_path = dir.path().join(".redline-notes.md");
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+
+        // `!`: save this and ALL remaining, then quit (no per-buffer answers).
+        s.key_event(key("!"));
+        assert!(s.quit, "! must quit after saving everything");
+        assert!(!s.quit_prompt_active());
+        assert!(extra.exists());
+        let extra_disk = std::fs::read_to_string(&extra).unwrap();
+        assert!(extra_disk.contains("old"), "! must save the extra buffer");
+        let notes_disk = std::fs::read_to_string(&notes_path).unwrap();
+        assert!(notes_disk.contains("z"), "! must save the notes buffer");
+        assert!(!s.buffers.get(&extra_key).unwrap().locally_modified);
+        assert!(!s.buffers.current_buffer().unwrap().locally_modified);
+    }
+
+    #[test]
+    fn quit_prompt_asks_oldest_first_one_at_a_time() {
+        let (_dir, mut s) = notes_store();
+        let (_extra_key, extra) = two_modified_buffers(_dir.path(), &mut s);
+        // notes was opened BEFORE extra.md → it is the OLDER of the two
+        // modified buffers and must be asked first (extra.md, inserted
+        // after, sits at the MRU front → last in the oldest-first walk).
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+        assert!(
+            s.quit_prompt_buffer().unwrap().ends_with(".redline-notes.md"),
+            "the oldest modified buffer must be asked first"
+        );
+
+        // `n` skips it; the extra.md prompt appears next (oldest-first walk).
+        s.key_event(key("n"));
+        assert!(!s.quit, "only one buffer answered so far");
+        assert!(s.quit_prompt_active());
+        assert_eq!(s.quit_prompt_buffer().unwrap(), extra.display().to_string());
+        s.key_event(key("n"));
+        assert!(s.quit, "the last answer must quit");
+        assert!(!s.quit_prompt_active());
+    }
+
+    #[test]
+    fn quit_prompt_c_g_cancels_the_whole_quit() {
+        let (_dir, mut s) = notes_store();
+        s.key_event(key("x"));
+        let text_before = s.buffers.current_buffer().unwrap().text();
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+        // C-g: cancel the quit entirely — prompt gone, app stays alive.
+        s.key_event(key("C-g"));
+        assert!(!s.quit, "C-g must cancel the quit");
+        assert!(!s.quit_prompt_active());
+        assert_eq!(s.message, "cancel");
+        assert_eq!(
+            s.buffers.current_buffer().unwrap().text(),
+            text_before,
+            "buffer content must be intact after C-g"
+        );
+        assert!(s.buffers.current_buffer().unwrap().locally_modified);
+
+        // Quitting again re-enters the prompt (the buffer is still modified);
+        // a bare answer finishes it.
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+        s.key_event(key("n"));
+        assert!(s.quit);
+    }
+
+    #[test]
+    fn quit_prompt_save_failure_reports_and_reprompts_same_buffer() {
+        let (dir, mut s) = notes_store();
+        let notes_path = dir.path().join(".redline-notes.md");
+        // Make the write fail: the notes file becomes read-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&notes_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        s.key_event(key("x"));
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+
+        // `y` fails: the error is reported and the SAME buffer is re-offered.
+        s.key_event(key("y"));
+        assert!(!s.quit, "a failed save must not quit");
+        assert!(s.quit_prompt_active(), "the prompt must stay up after a failed save");
+        assert!(
+            s.message.contains("save failed"),
+            "the error must be reported: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.quit_prompt_buffer(),
+            Some(notes_path.display().to_string()),
+            "the failed buffer must remain the offered one"
+        );
+        // Re-prompted buffer still answered by the state machine: `n` quits.
+        s.key_event(key("n"));
+        assert!(s.quit);
+    }
+
+    #[test]
+    fn quit_prompt_snapshot_is_frozen_at_interception() {
+        let (_dir, mut s) = notes_store();
+        let extra = _dir.path().join("after.md");
+        std::fs::write(&extra, "a\n").unwrap();
+        let mtime = std::fs::metadata(&extra)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let extra_key = s
+            .buffers
+            .insert_rope(Some(extra.clone()), Rope::from_str("a\n"), mtime, true);
+
+        // Modify notes only; a SECOND buffer becomes modified AFTER the
+        // interception (it must never enter the prompt).
+        s.key_event(key("m"));
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+        s.mark_locally_modified(&extra_key);
+
+        // A buffer saved mid-prompt must not re-appear either: save notes
+        // through the API, then answer `n` — exactly ONE prompt total.
+        let notes_key = s.buffers.current().unwrap().to_string();
+        assert!(s.save_buffer_key(&notes_key));
+        assert!(!s.buffers.get(&notes_key).unwrap().locally_modified);
+        s.key_event(key("n"));
+        assert!(s.quit, "one snapshot entry → the next answer quits");
+        assert!(!s.quit_prompt_active());
+        // The post-interception buffer was never asked about.
+        assert!(s.buffers.get(&extra_key).unwrap().locally_modified);
+    }
+
+    #[test]
+    fn quit_prompt_unknown_keys_are_swallowed() {
+        let (_dir, mut s) = notes_store();
+        s.key_event(key("x"));
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        let prompt = s.message.clone();
+        // Stray keys during the prompt: no "unbound key" echo, no state
+        // change (typing must not leak into the buffer either).
+        s.key_event(key("z"));
+        s.key_event(key("C-SPC"));
+        s.key_event(key("RET"));
+        assert!(s.quit_prompt_active(), "stray keys must not exit the prompt");
+        assert!(!s.quit);
+        assert_eq!(s.message, prompt, "the prompt must stay on screen");
+        assert!(s.buffers.current_buffer().unwrap().text().ends_with("x"));
     }
 
     #[test]

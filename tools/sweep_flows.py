@@ -1496,6 +1496,310 @@ def flow_cross_buffer_kill(app):
            f"notes-open={notes_open} cross-buffer-yank-landed={yank_landed}")
 
 
+# ── plan-004-issue-04 quit save-prompt sweep legs ────────────────────────────
+#
+# `C-x C-c` (and any quit path) with locally-modified buffers must not
+# silently discard edits: a per-buffer prompt (`y, n, !, C-g`, emacs
+# save-buffers-kill-terminal semantics) is driven here on the notes buffer
+# (the only UI-reachable modified buffer). Each leg runs its OWN App: the
+# y/n/! legs end the process, so sequential dedicated Apps are required.
+
+PROMPT_HEAD = "Save this buffer:"
+PROMPT_KEYS = "(y, n, !, C-g)"
+
+
+def reap(app):
+    """Reap the PTY child if it has exited. Returns the exit status (int,
+    negative when killed by a signal), or None while the process is alive."""
+    try:
+        pid, status = os.waitpid(app.pid, os.WNOHANG)
+    except ChildProcessError:
+        return 0  # already reaped
+    if pid == 0:
+        return None  # still running
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return -os.WTERMSIG(status)
+    return status
+
+
+def wait_exit(app, timeout=12.0):
+    """Pump the PTY until the process has exited (or the timeout lapses).
+    Returns the exit status, or None if the app is still alive."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = reap(app)
+        if status is not None:
+            return status
+        app._read(0.3, quiet=0.2)
+    return reap(app)
+
+
+def _read_notes(path):
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return f.read()
+
+
+def flow_quit_prompt_unmodified():
+    """Unmodified quit stays immediate: notes opened but never typed into
+    → `C-x C-c` quits with NO prompt rendered."""
+    notes = os.path.join(REPO, ".redline-notes.md")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        notes_open = ".redline-notes.md" in row0(app)
+        app.key("C-x C-c", settle=1.0)
+        no_prompt = PROMPT_HEAD not in text(app)
+        status = wait_exit(app, 8.0)
+        ok = notes_open and no_prompt and status == 0
+        record("quit-prompt-none", "C-x n;C-x C-c", ok,
+               f"notes-open={notes_open} prompt-rendered={not no_prompt} "
+               f"immediate-exit-0={status == 0} (status={status})")
+    finally:
+        try:
+            app.kill()
+        except NameError:
+            pass
+        try:
+            os.remove(notes)
+        except FileNotFoundError:
+            pass
+
+
+def flow_quit_prompt_y():
+    """Modified notes + `C-x C-c` → prompt names the path; `y` writes the
+    file (contents asserted on disk) and the process ends with exit 0."""
+    notes = os.path.join(REPO, ".redline-notes.md")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        notes_open = ".redline-notes.md" in row0(app)
+        app.key("Q", settle=0.4)
+        app.key("Y", settle=0.4)
+        app.key("C-x C-c", settle=1.0)
+        t = text(app)
+        prompted = (PROMPT_HEAD in t and ".redline-notes.md" in t
+                    and PROMPT_KEYS in t)
+        alive = reap(app) is None
+        app.key("y", settle=2.0)
+        status = wait_exit(app)
+        on_disk = _read_notes(notes) or ""
+        ok = (notes_open and prompted and alive and status == 0
+              and "QY" in on_disk)
+        record("quit-prompt-y", "C-x n,QY;C-x C-c;y", ok,
+               f"notes-open={notes_open} prompt-rendered-with-path={prompted} "
+               f"alive-during-prompt={alive} exit-0-after-y={status == 0} "
+               f"file-contains-edit={('QY' in on_disk)} (status={status})")
+    finally:
+        try:
+            app.kill()
+        except NameError:
+            pass
+        try:
+            os.remove(notes)
+        except FileNotFoundError:
+            pass
+
+
+def flow_quit_prompt_n():
+    """`n` on a modified buffer: exits without writing (the file content is
+    byte-identical to the seed) — the edit is knowingly discarded."""
+    notes = os.path.join(REPO, ".redline-notes.md")
+    with open(notes, "w") as f:
+        f.write("# Notes\nseed\n")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        app.key("X", settle=0.4)
+        app.key("C-x C-c", settle=1.0)
+        prompted = PROMPT_HEAD in text(app)
+        app.key("n", settle=2.0)
+        status = wait_exit(app)
+        on_disk = _read_notes(notes)
+        unchanged = on_disk == "# Notes\nseed\n"
+        ok = prompted and status == 0 and unchanged
+        record("quit-prompt-n", "C-x n,X;C-x C-c;n", ok,
+               f"prompt-rendered={prompted} exit-0-after-n={status == 0} "
+               f"file-unchanged={unchanged} (status={status})")
+    finally:
+        try:
+            app.kill()
+        except NameError:
+            pass
+        try:
+            os.remove(notes)
+        except FileNotFoundError:
+            pass
+
+
+def flow_quit_prompt_cg():
+    """`C-g` cancels the whole quit: prompt gone, buffer content intact, the
+    process is STILL RUNNING; a re-quit re-enters the prompt and proceeds."""
+    notes = os.path.join(REPO, ".redline-notes.md")
+    with open(notes, "w") as f:
+        f.write("# Notes\nseed\n")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        app.key("Q", settle=0.4)
+        app.key("Z", settle=0.4)
+        app.key("C-x C-c", settle=1.0)
+        prompted = PROMPT_HEAD in text(app)
+        app.key("C-g", settle=0.8)
+        t = text(app)
+        cancelled = ("cancel" in t and PROMPT_HEAD not in t
+                     and "QZ" in t)  # buffer content still on screen
+        alive = reap(app) is None
+        # Re-quit: the buffer is still modified → the prompt returns;
+        # answering `n` finishes the quit.
+        app.key("C-x C-c", settle=1.0)
+        reprompted = PROMPT_HEAD in text(app)
+        app.key("n", settle=2.0)
+        status = wait_exit(app)
+        on_disk = _read_notes(notes) or ""
+        ok = (prompted and cancelled and alive and reprompted
+              and status == 0 and "QZ" not in on_disk)
+        record("quit-prompt-cg", "C-x n,QZ;C-x C-c;C-g;C-x C-c;n", ok,
+               f"prompted={prompted} cancel-echo+content-intact={cancelled} "
+               f"still-running-after-cg={alive} reprompted-on-requit={reprompted} "
+               f"exit-0={status == 0} edit-not-written={('QZ' not in on_disk)}")
+    finally:
+        try:
+            app.kill()
+        except NameError:
+            pass
+        try:
+            os.remove(notes)
+        except FileNotFoundError:
+            pass
+
+
+def flow_quit_prompt_save_fail():
+    """Save failure (read-only notes file): `y` reports the error in the
+    minibuffer and RE-PROMPTS THE SAME buffer; the quit does not proceed,
+    and `C-g` cancels out."""
+    notes = os.path.join(REPO, ".redline-notes.md")
+    with open(notes, "w") as f:
+        f.write("# Notes\nseed\n")
+    os.chmod(notes, 0o444)  # non-root: the app's write must fail with EACCES
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        app.key("F", settle=0.4)
+        app.key("C-x C-c", settle=1.0)
+        prompted = PROMPT_HEAD in text(app)
+        app.key("y", settle=1.0)
+        echo = app.row_text(app.rows - 2)
+        failed = "save failed" in echo
+        # Re-prompt of the SAME buffer: a second `y` is still routed to the
+        # prompt (and fails again), rather than being treated as typing.
+        app.key("y", settle=1.0)
+        reprompt_same = "save failed" in app.row_text(app.rows - 2)
+        alive = reap(app) is None
+        app.key("C-g", settle=0.8)
+        cancelled = "cancel" in text(app)
+        still_running = reap(app) is None
+        on_disk = _read_notes(notes)
+        unchanged = on_disk == "# Notes\nseed\n"
+        ok = (prompted and failed and reprompt_same and alive
+              and cancelled and still_running and unchanged)
+        record("quit-prompt-save-fail", "C-x n,F;C-x C-c;y;y;C-g", ok,
+               f"prompted={prompted} save-fail-reported={failed} "
+               f"same-buffer-reprompted={reprompt_same} quit-blocked={alive} "
+               f"cg-cancels={cancelled} still-running={still_running} "
+               f"file-unchanged={unchanged}")
+    finally:
+        os.chmod(notes, 0o644)
+        try:
+            app.kill()
+        except NameError:
+            pass
+        try:
+            os.remove(notes)
+        except FileNotFoundError:
+            pass
+
+
+def flow_quit_prompt_bang():
+    """Two modified buffers (notes of REPO + notes of a second registered
+    project reached via `C-c p p`): `!` saves BOTH (both files written,
+    contents asserted) and then quits."""
+    import json
+    _ensure_repo2()
+    os.makedirs(os.path.join(G5_CACHE, "redline"), exist_ok=True)
+    reg = {"projects": [
+        {"root": REPO, "name": "redline_pyte_repo"},
+        {"root": REPO2, "name": "redline_pyte_repo2"},
+    ]}
+    with open(os.path.join(G5_CACHE, "redline", "projects.json"), "w") as f:
+        json.dump(reg, f)
+    prev = os.environ.get("XDG_CACHE_HOME")
+    os.environ["XDG_CACHE_HOME"] = G5_CACHE
+    notes1 = os.path.join(REPO, ".redline-notes.md")
+    notes2 = os.path.join(REPO2, ".redline-notes.md")
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        app.key("C-x n")
+        app.wait(0.8)
+        app.key("Q", settle=0.4)
+        app.key("A", settle=0.4)  # REPO notes modified
+        # Switch to the second project (picker filtered to repo2).
+        app.key("C-c p p", settle=1.0)
+        picker = "Switch project:" in text(app)
+        app.key("2", settle=0.6)
+        app.key("RET", settle=2.0)
+        switched = wait_for(
+            app, lambda: "redline_pyte_repo2" in app.row_text(app.rows - 1), 8.0
+        )
+        # The switch lands on the Find-file picker of the new project
+        # (projectile's default switch action); close it with C-g (the
+        # picker guard) before opening the notes.
+        landed_picker = "Find file:" in text(app)
+        app.key("C-g", settle=0.8)
+        picker_closed = "Find file:" not in text(app)
+        # Open + modify REPO2's notes → two modified buffers.
+        app.key("C-x n")
+        app.wait(0.8)
+        app.key("Q", settle=0.4)
+        app.key("B", settle=0.4)
+        app.key("C-x C-c", settle=1.0)
+        prompted = PROMPT_HEAD in text(app)
+        app.key("!", settle=3.0)
+        status = wait_exit(app)
+        d1 = _read_notes(notes1) or ""
+        d2 = _read_notes(notes2) or ""
+        ok = (picker and switched and landed_picker and picker_closed and prompted
+              and status == 0 and "QA" in d1 and "QB" in d2)
+        record("quit-prompt-bang", "C-x n,QA;C-c p p,2,RET;C-g;C-x n,QB;C-x C-c;!", ok,
+               f"switch-picker={picker} switched={switched} "
+               f"lands-in-find-file={landed_picker} picker-closed-by-cg={picker_closed} "
+               f"prompted={prompted} "
+               f"both-files-written={('QA' in d1) and ('QB' in d2)} "
+               f"exit-0={status == 0} (status={status})")
+    finally:
+        if prev is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = prev
+        try:
+            app.kill()
+        except NameError:
+            pass
+        for p in (notes1, notes2):
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+
+
 def main():
     _reset_fixture()
     app = App(REPO, rows=ROWS, cols=COLS)
@@ -1625,6 +1929,15 @@ def main():
     app = App(REPO, rows=ROWS, cols=COLS)
     flow_cross_buffer_kill(app)
     app.kill()
+
+    # ── plan-004-issue-04 quit save-prompt legs (each drives its own App;
+    # the y/n/! legs end the process). ─────────────────────────────────
+    flow_quit_prompt_unmodified()
+    flow_quit_prompt_y()
+    flow_quit_prompt_n()
+    flow_quit_prompt_cg()
+    flow_quit_prompt_save_fail()
+    flow_quit_prompt_bang()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

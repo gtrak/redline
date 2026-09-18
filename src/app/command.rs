@@ -113,8 +113,10 @@ impl CommandRegistry {
             "Quit redline",
             "navigation",
             |store, _arg| {
-                store.clear_pending();
-                store.quit = true;
+                // Plan 004 issue 04: the interceptor prompts per modified
+                // buffer first (y / n / ! / C-g); with no modified buffer it
+                // flips `store.quit` immediately (existing behavior).
+                store.begin_quit();
             },
         ));
         reg.register(Command::new(
