@@ -897,7 +897,8 @@ pub fn serialize_notes(doc: &NotesDoc) -> String {
 /// trusted).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DumpAnnotation {
-    /// Project-relative path (the record's `path`).
+    /// The record's `path` verbatim: project-relative for project files,
+    /// absolute for external (library) buffers (plan 008 issue 01).
     pub path: String,
     /// 1-based anchored line.
     pub line: usize,
@@ -2094,18 +2095,20 @@ impl AppStore {
         }
     }
 
-    /// The current buffer's project-relative path (annotation records are
-    /// keyed by it), `None` for pathless buffers (scratch) or no project.
-    fn current_buffer_rel(&self) -> Option<String> {
+    /// The current buffer's annotation key (plan 008 issue 01): the
+    /// project-relative path when the buffer's path strips under the
+    /// project root, else the absolute path string (external buffers).
+    /// `None` only for pathless buffers (scratch).
+    fn current_annotation_path(&self) -> Option<String> {
         let key = self.buffers.current()?.to_string();
-        self.buffer_rel_path(&key)
+        self.buffer_annotation_path(&key)
     }
 
     /// The index of the FIRST structured-section record anchored at the
     /// current buffer's line `line`, or `None` when the line carries no
     /// annotation.
     fn record_index_for_line(&self, line: usize) -> Option<usize> {
-        let rel = self.current_buffer_rel()?;
+        let rel = self.current_annotation_path()?;
         self.notes_doc
             .entries
             .iter()
@@ -2121,7 +2124,7 @@ impl AppStore {
     /// Stable and idempotent: a record whose line holds the anchor is
     /// untouched (its `orphaned` flag clears — the anchor came back).
     fn reanchor_for_key(&mut self, key: &str) {
-        let Some(rel) = self.buffer_rel_path(key) else {
+        let Some(rel) = self.buffer_annotation_path(key) else {
             return;
         };
         let Some(buf) = self.buffers.get(key) else {
@@ -2226,11 +2229,12 @@ impl AppStore {
         items
     }
 
-    /// The open buffer's content at 0-based `line` for the
-    /// project-relative path `rel`, when such a buffer is open.
+    /// The open buffer's content at 0-based `line` for the annotation key
+    /// `rel` (project-relative, or absolute for external buffers), when
+    /// such a buffer is open.
     fn buffer_line_text_for_rel(&self, rel: &str, line: usize) -> Option<String> {
         for (key, _) in self.buffers.list() {
-            if self.buffer_rel_path(key).as_deref() == Some(rel) {
+            if self.buffer_annotation_path(key).as_deref() == Some(rel) {
                 return self
                     .buffers
                     .get(key)
@@ -2305,7 +2309,7 @@ impl AppStore {
         let line = self.point_line();
         let prefill = self.notes_doc.entries.iter().find_map(|e| {
             e.as_record()
-                .filter(|a| a.line == line && a.path == self.current_buffer_rel().as_deref().unwrap_or(""))
+                .filter(|a| a.line == line && a.path == self.current_annotation_path().as_deref().unwrap_or(""))
                 .map(|a| a.text.clone())
         });
         self.note_prompt_line = line;
@@ -2367,7 +2371,7 @@ impl AppStore {
         let Some(key) = self.buffers.current().map(String::from) else {
             return;
         };
-        let Some(rel) = self.buffer_rel_path(&key) else {
+        let Some(rel) = self.buffer_annotation_path(&key) else {
             self.minibuffer_message("annotate: no file to annotate (scratch)");
             return;
         };
@@ -2489,7 +2493,7 @@ impl AppStore {
     /// The annotation count for the current buffer's file (0 for
     /// pathless buffers or when no record matches its path).
     fn current_buffer_annotation_count(&self) -> usize {
-        let Some(rel) = self.current_buffer_rel() else {
+        let Some(rel) = self.current_annotation_path() else {
             return 0;
         };
         self.notes_doc
@@ -4279,13 +4283,14 @@ impl AppStore {
         // Get the highlight result from the cache (if any).
         let highlight: Option<&HighlightResult> = self.buffer_highlight_result();
 
-        // This buffer's annotation records (matched by project-relative
-        // path), in record order. The marker flag is independent of
+        // This buffer's annotation records (matched by annotation key:
+        // project-relative path, or the absolute path for external
+        // buffers), in record order. The marker flag is independent of
         // note-row visibility.
         let Some(key) = self.buffers.current().map(String::from) else {
             return Vec::new();
         };
-        let rel = self.buffer_rel_path(&key);
+        let rel = self.buffer_annotation_path(&key);
         let records: Vec<&Annotation> = self
             .notes_doc
             .entries
@@ -4403,7 +4408,7 @@ impl AppStore {
         }
         self.ensure_notes_doc();
         let key = self.buffers.current().map(String::from);
-        let Some(rel) = key.as_deref().and_then(|k| self.buffer_rel_path(k)) else {
+        let Some(rel) = key.as_deref().and_then(|k| self.buffer_annotation_path(k)) else {
             return total;
         };
         total + self
@@ -4414,15 +4419,24 @@ impl AppStore {
             .count()
     }
 
-    /// The current buffer's project-relative path (for annotation lookup);
-    /// `None` for buffers without a path (scratch) or with no project.
-    fn buffer_rel_path(&self, key: &str) -> Option<String> {
+    /// The buffer at `key`'s annotation key (plan 008 issue 01, the ONE
+    /// key-derivation point for annotation records): the project-relative
+    /// path (lossy) when the buffer's path strips under the project root
+    /// — byte-identical to the pre-008 key for existing project buffers
+    /// (no migration, no notes-file change) — else the absolute path
+    /// string (external buffers opened read-only via `open_external_path`,
+    /// e.g. `M-.` into a registry source). Notes still live in the
+    /// project's `.redline-notes.md`; the record's `path` simply carries
+    /// the absolute string. `None` only for pathless buffers (scratch).
+    fn buffer_annotation_path(&self, key: &str) -> Option<String> {
         let buf = self.buffers.get(key)?;
         let abs = buf.path.as_ref()?;
-        let root = self.project.as_ref()?.root.clone();
-        abs.strip_prefix(root)
-            .ok()
-            .map(|rel| rel.to_string_lossy().into_owned())
+        if let Some(root) = self.project.as_ref().map(|p| &p.root)
+            && let Ok(rel) = abs.strip_prefix(root)
+        {
+            return Some(rel.to_string_lossy().into_owned());
+        }
+        Some(abs.to_string_lossy().into_owned())
     }
 
     /// (top_line, total_lines, viewport_lines) for the file view.
@@ -14689,6 +14703,215 @@ mod tests {
         s.note_prompt_confirm();
         assert_eq!(ann_records(&s).len(), 0);
         assert_eq!(s.message, "note cancelled");
+    }
+
+    // ── plan 008 issue 01: annotation keying on external buffers ─────────
+
+    /// An out-of-project file, opened read-only the way `M-.` lands it.
+    /// Returns the store + the file's absolute path string.
+    fn store_with_external_file() -> (AppStore, String) {
+        let mut s = store_with_project();
+        let ext = tempfile::tempdir().unwrap();
+        let abs = ext.path().join("lib_source.rs");
+        std::fs::write(&abs, "ext line one\next line two\next line three\n").unwrap();
+        let abs_str = abs.to_string_lossy().into_owned();
+        let key = s
+            .open_external_path(&abs)
+            .expect("external file opens read-only");
+        assert!(s.buffers.get(&key).unwrap().path.is_some());
+        (s, abs_str)
+    }
+
+    /// The key-derivation point: project files key by project-relative path
+    /// (byte-identical to pre-008); an external buffer keys by its ABSOLUTE
+    /// path string; scratch (pathless) still yields `None`.
+    #[test]
+    fn notes_annotation_path_under_root_and_absolute() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annext.rs", "a\nb\n");
+        let proj_key = s.buffers.current().unwrap().to_string();
+        assert_eq!(
+            s.buffer_annotation_path(&proj_key).as_deref(),
+            Some("src/annext.rs"),
+            "under-root key unchanged (byte-identical)"
+        );
+
+        let ext = tempfile::tempdir().unwrap();
+        let abs = ext.path().join("lib.rs");
+        std::fs::write(&abs, "x\n").unwrap();
+        let abs_str = abs.to_string_lossy().into_owned();
+        let ext_key = s.open_external_path(&abs).unwrap();
+        assert_eq!(
+            s.buffer_annotation_path(&ext_key).as_deref(),
+            Some(abs_str.as_str()),
+            "out-of-root key = the absolute path"
+        );
+        // The current-buffer variant follows the current buffer.
+        assert_eq!(
+            s.current_annotation_path().as_deref(),
+            Some(abs_str.as_str()),
+            "current_annotation_path tracks the current buffer"
+        );
+        // Scratch: pathless buffers still have no key.
+        let scratch_key = s.buffers
+            .insert_rope(None, Rope::from_str("s"), std::time::SystemTime::now(), true);
+        assert!(s.buffer_annotation_path(&scratch_key).is_none());
+    }
+
+    /// `A` → type → RET commits on an external buffer (record keyed by the
+    /// absolute path, written to the project's notes file), `d` deletes it;
+    /// the prefill sees the external record back.
+    #[test]
+    fn notes_external_buffer_annotate_delete_round_trip() {
+        let (mut s, abs_str) = store_with_external_file();
+        s.set_point_line(1);
+        s.annotate();
+        assert!(s.note_prompt_active());
+        assert_eq!(s.note_prompt_input(), "", "fresh prompt, no prefill");
+        s.note_prompt_char('l');
+        s.note_prompt_char('i');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert_eq!(a.path, abs_str, "record keyed by the absolute path");
+        assert_eq!(a.line, 1);
+        assert_eq!(a.anchor, "ext line two");
+        assert_eq!(a.text, "li");
+        // On disk, in the project's notes file (placement unchanged).
+        let disk = std::fs::read_to_string(
+            s.project.as_ref().unwrap().root.join(".redline-notes.md"),
+        )
+        .unwrap();
+        assert!(disk.contains(&format!("path: {abs_str}")), "{disk}");
+        // The status count sees the external record.
+        assert_eq!(s.annotation_count_display(), "1 note");
+        // Pre-fill for edit on the external record.
+        s.set_point_line(1);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "li", "external record pre-fills");
+        s.note_prompt_cancel();
+        // `d` removes it.
+        s.set_point_line(1);
+        s.annotate_delete();
+        assert!(s.message.contains("deleted annotation: li"), "{}", s.message);
+        assert!(ann_records(&s).is_empty());
+    }
+
+    /// `file_view_rows` marker + note row render on an external buffer,
+    /// keyed by the absolute path (pre-008 these were dead there).
+    #[test]
+    fn notes_external_buffer_marker_and_note_row() {
+        let (mut s, _) = store_with_external_file();
+        s.set_point_line(0);
+        s.annotate();
+        s.note_prompt_char('m');
+        s.note_prompt_confirm();
+        s.show_note_rows = true;
+        let rows = s.file_view_rows();
+        let code_rows: Vec<_> = rows.iter().filter(|r| !r.is_note).collect();
+        let marker: Vec<_> = code_rows
+            .iter()
+            .filter(|r| r.annotated && r.line == 0)
+            .collect();
+        assert_eq!(marker.len(), 1, "margin marker on the annotated line");
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note).collect();
+        assert_eq!(note_rows.len(), 1, "the inline note row renders");
+        assert!(note_rows[0].text.contains("m"), "{}", note_rows[0].text);
+        // A record carrying the external file's IN-PROJECT relative name
+        // must NOT match the external buffer (the external key is the
+        // absolute path, so the keys differ).
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/lib_source.rs".to_string(),
+            line: 0,
+            col: 0,
+            anchor: "ext line one".to_string(),
+            text: "rel-path impostor".to_string(),
+            orphaned: false,
+        }));
+        let rows = s.file_view_rows();
+        assert_eq!(
+            rows.iter().filter(|r| r.is_note).count(),
+            1,
+            "a rel-path record for the external file's in-project relative name never matches"
+        );
+    }
+
+    /// The quit-dump carries the external record's path VERBATIM (absolute)
+    /// with the open buffer's live code line; project records keep their
+    /// relative path in the same dump.
+    #[test]
+    fn notes_external_buffer_dump_verbatim_path() {
+        let (mut s, abs_str) = store_with_external_file();
+        s.set_point_line(2);
+        s.annotate();
+        s.note_prompt_char('d');
+        s.note_prompt_confirm();
+        // A project record in the same doc keeps its relative path.
+        open_ann_file(&mut s, "src/proj.rs", "p0\np1\n");
+        s.set_point_line(0);
+        s.annotate();
+        s.note_prompt_char('p');
+        s.note_prompt_confirm();
+        let items = s.annotations_for_dump();
+        let ext = items.iter().find(|i| i.path == abs_str).expect("external item");
+        assert_eq!(ext.line, 3, "0-based line 2 → 1-based 3");
+        assert_eq!(ext.code, "ext line three", "live code from the open external buffer");
+        let proj = items.iter().find(|i| i.path == "src/proj.rs").expect("project item");
+        assert_eq!(proj.code, "p0");
+        // The formatted dump prints both paths verbatim.
+        let block = format_notes_dump(&items, s.project.as_ref().unwrap().root.to_str().unwrap(), false);
+        assert!(block.contains(&format!("{abs_str}:3\n")), "block: {}", block);
+        let plain = format_notes_dump(&items, "", true);
+        assert!(plain.contains(&format!("{abs_str}:3: d\n")), "plain: {plain}");
+        assert!(plain.contains("src/proj.rs:1: p\n"), "plain: {plain}");
+    }
+
+    /// Adding an external record must not touch the existing project-relative
+    /// record's bytes in the notes file (no migration, no re-keying).
+    #[test]
+    fn notes_external_annotation_leaves_rel_records_untouched() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/keep.rs", "k0\nk1\n");
+        s.set_point_line(1);
+        s.annotate();
+        s.note_prompt_char('k');
+        s.note_prompt_confirm();
+        let before = std::fs::read_to_string(
+            s.project.as_ref().unwrap().root.join(".redline-notes.md"),
+        )
+        .unwrap();
+        assert!(before.contains("path: src/keep.rs"), "{before}");
+        // The record block for the rel record: its `path:` line through the
+        // line before the next record's `path:`.
+        let block = |text: &str, path: &str| -> String {
+            let marker = format!("path: {path}\n");
+            let start = text.find(&marker).expect("record line");
+            // Through the record's final `orphaned:` line (schema-ordered).
+            let tail = &text[start + marker.len()..];
+            let end = tail.find("orphaned:").unwrap() + "orphaned:".len();
+            text[start..start + marker.len() + end].to_string()
+        };
+
+        let (mut s, abs_str) = {
+            let ext = tempfile::tempdir().unwrap();
+            let abs = ext.path().join("lib.rs");
+            std::fs::write(&abs, "e0\ne1\n").unwrap();
+            s.open_external_path(&abs).unwrap();
+            (s, abs.to_string_lossy().into_owned())
+        };
+        s.set_point_line(1);
+        s.annotate();
+        s.note_prompt_char('e');
+        s.note_prompt_confirm();
+        let after = std::fs::read_to_string(
+            s.project.as_ref().unwrap().root.join(".redline-notes.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            block(&before, "src/keep.rs"),
+            block(&after, "src/keep.rs"),
+            "the rel record's bytes are untouched: {after}"
+        );
+        assert!(after.contains(&format!("path: {abs_str}")), "external record written: {after}");
     }
 
     // ── plan 005 issue 03: quit-dump formatter + accessor ───────────────
