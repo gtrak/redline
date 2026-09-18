@@ -210,8 +210,8 @@ All from node: Moving-Point.html unless noted.
 | `C-p` / UP | `previous-line` | Up one screen line, preserving position |
 | `C-a` / Home | `move-beginning-of-line` | Beginning of the **logical** line |
 | `C-e` / End | `move-end-of-line` | End of the logical line |
-| `M-f` | `forward-word` | Forward one word |
-| `M-b` | `backward-word` | Backward one word |
+| `M-f` | `forward-word` | Forward to the **END** of the next word (skip non-word, then walk the word to its end; wraps lines) |
+| `M-b` | `backward-word` | Backward to the **START** of the previous word (from inside a word → that word's start; else skip non-word back, then retreat to the word's first char; wraps lines) |
 | `M-<` | `beginning-of-buffer` | Top of buffer; with numeric arg n → n/10 of the way from top |
 | `M->` | `end-of-buffer` | End of buffer |
 | `M-r` | `move-to-window-line-top-bottom` | Cycles point to top/center/bottom screen line |
@@ -247,6 +247,15 @@ All from node: Moving-Point.html unless noted.
   to line n there — cross-buffer line jump (node: Select-Buffer.html).
 - `C-l` recenter: the manual has a "Recentering" node (16.2) but it was NOT
   fetched — C-l behavior is **NOT VERIFIED** in this session.
+- `C-l` `recenter-top-bottom` **VERIFIED LIVE** (vanilla emacs 30.2, `-Q
+  -nw`, 2026-09-18; supersedes the NOT-VERIFIED marker above for the
+  defaults): positions cycle in the order of the variable
+  `recenter-positions`, whose default is `(middle top bottom)`. `C-l`
+  moves point's SCREEN row to the next position **only when the
+  immediately-preceding command was also `recenter`**; otherwise it starts
+  at the FIRST position (middle). The point's buffer position never
+  changes. Observed: point at buffer line 30, viewport 22 → cursor rows
+  14 → 1 → 27 → 14; a `C-n` between C-l's resets the next C-l to row 14.
 
 # Incremental search
 
@@ -486,6 +495,24 @@ Nodes: Xref, Looking-Up-Identifiers, Xref-Commands.
   candidate also pushes) beyond the above; internal details
   (`xref-push-marker-stack`) are **NOT VERIFIED** in this session.
 
+## Word-motion landing columns (VERIFIED LIVE 2026-09-18)
+
+For the line `fn alpha() { let x = 1; }` (25 chars), vanilla emacs 30.2
+`-Q -nw`:
+
+| from col | `M-f` lands | `M-b` lands |
+|---|---|---|
+| 0 | 2 (end of `fn`) | 0 (buffer/line start) |
+| 2 (space) | 8 (end of `alpha`) | 0 (start of `fn`) |
+| 3 (inside `alpha`) | 8 (its end) | 0 (start of `fn`) |
+| 8 (space) | 16 (end of `let`) | 3 (start of `alpha`) |
+| 9 / 12 (inside `let`) | 16 | 3 |
+| 25 (EOL) | wraps → 2 (end of next line's `fn`) | 21 (start of `1`) |
+
+Rule: `forward-word` = skip non-word, then to the word's **end**;
+`backward-word` = inside-word → word start, else skip non-word backward,
+then to the word's **start**. They are NOT `skip-chars` run boundaries.
+
 ## *xref* buffer keys (node: Xref-Commands)
 
 | Key | Command | Behavior |
@@ -682,7 +709,10 @@ Consolidated table: key → command → verified behavior → redline issue.
 - Match count in the isearch prompt (issue 03): the manual only documents
   the search string in the echo area; a match count display is a redline
   addition (**NOT VERIFIED** as Emacs behavior).
-- `C-l` recenter: **NOT VERIFIED** (Recentering node not fetched).
+- `C-l` recenter: **VERIFIED LIVE** for the defaults — `recenter-positions`
+  `(middle top bottom)`, fresh C-l → middle, consecutive C-l advances,
+  reset on any other command; point position unchanged (see the Motion
+  keys note above).`
 
 # Sources
 
