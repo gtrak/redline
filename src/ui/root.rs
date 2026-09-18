@@ -21,7 +21,7 @@ use crate::ui::picker::Picker;
 use crate::ui::results_view::ResultsView;
 use crate::ui::rows_view::MagitRowsView;
 use crate::ui::transient_menu::TransientMenuView;
-use crate::ui::tree::TreeSidebar;
+use crate::ui::tree::{TreeSidebar, TREE_WIDTH};
 use crate::ui::views::buffer::BufferListView;
 use crate::ui::{face_bg, face_color, face_weight};
 
@@ -149,7 +149,7 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                     .file_view_lines
                     .get(line.saturating_sub(snap.file_view_top_line))
                     .map(|l| {
-                        crate::ui::file_view::char_index_to_display_col(
+                        crate::model::text_width::char_index_to_display_col(
                             &l.text,
                             snap.file_view_point_col,
                         )
@@ -159,6 +159,19 @@ fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
             }
         }
     }
+}
+
+/// Plan 004 issue 05e: with the tree sidebar visible the code pane's column 0
+/// is terminal column `TREE_WIDTH` (the tree occupies terminal columns
+/// `[0, TREE_WIDTH)`). Splits a 0-based terminal click column into
+/// `(in_tree, pane_col)`: a click inside the tree's columns must NOT move the
+/// code point (the tree row under it is selected instead — the store maps the
+/// terminal row); every other click passes the column shifted by the tree
+/// width to the file-view click mapping. Tree hidden: the shift is 0 and no
+/// click lands in the tree.
+fn click_pane(tree_visible: bool, col: usize) -> (bool, usize) {
+    let offset = if tree_visible { TREE_WIDTH as usize } else { 0 };
+    (tree_visible && col < offset, col.saturating_sub(offset))
 }
 
 /// One render's worth of store state, extracted as owned values so the
@@ -292,11 +305,12 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             tick.set(tick.get() + 1);
         }
         // Mouse support (issue 09, step 4: best-effort). Wheel scroll in
-        // all list views; click-to-position in the file view (Buffer).
-        // Limitations: no drag-select, no click in pickers/menus, no
-        // click-to-select in list views (v1); with the tree sidebar
-        // visible, a file-view click's column is shifted by the tree's
-        // width (best-effort: the col is clamped to EOL at worst).
+        // all list views; click-to-position in the file view (Buffer);
+        // click-to-select in the tree sidebar (plan 004 issue 05e: with the
+        // tree visible, clicks in the tree's columns select a tree row and
+        // clicks in the code pane are shifted by TREE_WIDTH). Limitations:
+        // no drag-select, no click in pickers/menus, no click-to-select in
+        // list views (v1).
         if let TerminalEvent::FullscreenMouse(mouse) = &event {
             use iocraft::MouseEventKind;
             match mouse.kind {
@@ -312,15 +326,23 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // Click-to-position: the file view's content area starts
                     // at terminal row 0 (the title is part of the view's
                     // first line). The row is 0-based from the top.
-                    // Subtract 1 for the title line offset. The column is the
-                    // terminal column, which maps 1:1 to the line's char
-                    // index (the file view renders from column 0 — no gutter,
-                    // plan 004 issue 05c).
+                    // Subtract 1 for the title line offset. The column is a
+                    // terminal (display) column, which maps 1:1 to the line's
+                    // display column with the tree hidden (the file view
+                    // renders from column 0 — no gutter, plan 004 issue 05c)
+                    // and is shifted by the tree width when it is visible
+                    // (plan 004 issue 05e): a click inside the tree's
+                    // columns selects the tree row under it and never moves
+                    // the code point.
                     let row = (mouse.row as usize).saturating_sub(1);
-                    event_store
-                        .lock()
-                        .unwrap()
-                        .mouse_click_position(row, mouse.column as usize);
+                    let mut store = event_store.lock().unwrap();
+                    let (in_tree, pane_col) =
+                        click_pane(store.tree_visible(), mouse.column as usize);
+                    if in_tree {
+                        store.tree_click_row(mouse.row as usize);
+                    } else {
+                        store.mouse_click_position(row, pane_col);
+                    }
                     tick.set(tick.get() + 1);
                 }
                 _ => {}
@@ -1092,5 +1114,29 @@ mod tests {
         let mut snap = buffer_snapshot(&["bb", "bb"], 4, 2);
         snap.file_view_total_lines = 5;
         assert_eq!(cursor_cell(&snap), Some((2, 5)), "char index 2, clamped row 4 → row 5 (0-based)");
+    }
+
+    // ── plan 004 issue 05e: tree-sidebar click offset ──────────────────
+
+    /// Tree hidden: the terminal column maps 1:1 to the code pane's column
+    /// and no click lands in the tree.
+    #[test]
+    fn click_pane_tree_hidden_is_identity() {
+        for col in [0usize, 1, 33, 34, 40, 79] {
+            assert_eq!(click_pane(false, col), (false, col), "col {col}");
+        }
+    }
+
+    /// Tree visible: columns `[0, TREE_WIDTH)` are the tree (no code-pane
+    /// click); columns `>= TREE_WIDTH` pass through shifted by the tree
+    /// width (34 → pane col 0, 40 → pane col 6).
+    #[test]
+    fn click_pane_tree_visible_offsets_by_tree_width() {
+        for col in 0..TREE_WIDTH as usize {
+            assert_eq!(click_pane(true, col), (true, 0), "col {col} is the tree");
+        }
+        assert_eq!(click_pane(true, 34), (false, 0), "pane col 0");
+        assert_eq!(click_pane(true, 40), (false, 6), "pane col 6");
+        assert_eq!(click_pane(true, 79), (false, 45), "pane col 45");
     }
 }

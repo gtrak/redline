@@ -17,6 +17,10 @@ reconstruction:
     column, clicks convert display column back to char index (a click inside
     a wide char maps to that char), and a space after a wide char is not
     dropped by the render.
+  * plan 004 issue 05e: with the tree sidebar visible, click columns are
+    offset by the tree width (a click at 1-based terminal col 34 + k lands
+    char index k-1; clicks inside the tree's columns select a tree row and
+    do not move the code point).
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -540,6 +544,81 @@ def wide_char_checks():
     return checks
 
 
+def tree_click_checks():
+    """plan 004 issue 05e: with the tree sidebar visible (TREE_WIDTH = 34
+    terminal columns), click columns are offset by the tree width: a click
+    at 1-based terminal col 34 + k on a code row lands char index k-1 (CUP
+    col k in ASCII), a click past the code pane's EOL clamps to EOL, and a
+    click inside the tree's columns does NOT move the code point (it
+    selects a tree row instead). The tree-hidden leg stays 1:1.
+    """
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    # leg.rs: 60 lines; even line = 20 'A's, odd line = 2 'b's. NO trailing
+    # newline (ropey would count a trailing \n as an extra empty line).
+    llines = ["A" * 20 if i % 2 == 0 else "b" * 2 for i in range(60)]
+    with open(_os.path.join(src_dir, "leg.rs"), "w") as f:
+        f.write("\n".join(llines))
+
+    s = Session(None)
+    checks = []
+
+    def rec(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
+
+    def click(col0, row0):
+        """Left-click at 0-based terminal (col, row) via SGR (1-based)."""
+        os.write(s.master, b"\x1b[<0;%d;%dM" % (col0 + 1, row0 + 1))
+        return last_cup_after_sync(s._read(0.6, quiet=0.15))
+
+    # Open leg.rs (line 0 = 20 A's) and show the tree sidebar.
+    s.key("C-x C-f", 1.0)
+    for ch in "leg.rs":
+        s.key(ch, 0.25)
+    s.key("RET", 1.0)
+    s.key("C-c p t", 0.9)
+    if "*tree*" not in s.text():
+        rec("tree visible (C-c p t)", False, "*tree* missing")
+        s.kill()
+        return checks
+    rec("tree visible (C-c p t)", True, "")
+
+    # Point at (0,0) before the click legs.
+    s.key("C-a", 0.6)
+
+    # 1-based terminal col 34 + 6 = 40 on content row 0 (terminal row 1,
+    # 0-based): pane col 39-34=5 → char index 5 → CUP col 6 (1-based).
+    r, c = click(34 + 6 - 1, 1)
+    rec("tree on: click 1-based col 40 → char 5 (CUP (2,6))", (r, c) == (2, 6),
+        f"cup=({r},{c}) want (2,6)")
+    # 1-based col 35 (k=1): the first code-pane cell → char 0 → CUP (2,1).
+    r, c = click(34, 1)
+    rec("tree on: click 1-based col 35 → char 0 (CUP (2,1))", (r, c) == (2, 1),
+        f"cup=({r},{c}) want (2,1)")
+    # Past the code pane's EOL (20 A's): 1-based col 34+25=59 → pane col 24
+    # → clamped to EOL char 20 → CUP col 21.
+    r, c = click(34 + 25 - 1, 1)
+    rec("tree on: click past code pane EOL clamps to EOL", (r, c) == (2, 21),
+        f"cup=({r},{c}) want (2,21)")
+    # A click inside the tree's columns (1-based col 10, a visible tree
+    # row) selects a tree row but does NOT move the code point: the CUP
+    # stays where the previous click left it (point (0,20) → CUP (2,21)).
+    r, c = click(9, 2)
+    rec("tree on: click in tree cols does not move the code point",
+        (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+    # Tree-hidden leg (regression): toggle the tree off; the mapping is 1:1
+    # again (1-based col 6 → char 5 → CUP (2,6)).
+    s.key("C-c p t", 0.9)
+    r, c = click(5, 1)
+    rec("tree off: click 1-based col 6 → CUP (2,6) (1:1)", (r, c) == (2, 6),
+        f"cup=({r},{c}) want (2,6)")
+
+    s.kill()
+    return checks
+
+
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -561,6 +640,11 @@ def main():
     # plan 004 issue 05d: wide (CJK) chars — display-column cursor + clicks.
     print("=== WIDE (CJK) CHARS: DISPLAY-COLUMN CURSOR + CLICKS ===")
     all_checks += wide_char_checks()
+    print()
+    # plan 004 issue 05e: tree-sidebar click offset (tree-visible leg + the
+    # tree-hidden regression leg).
+    print("=== TREE-SIDEBAR CLICK OFFSET (tree visible) ===")
+    all_checks += tree_click_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")

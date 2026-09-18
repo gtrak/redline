@@ -10,6 +10,16 @@ use crate::app::store::TreeRow;
 use crate::theme;
 use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 
+/// The sidebar's fixed width in terminal columns. Shared between the
+/// layout (`View(width: …)`) and the root's click-column offset (plan 004
+/// issue 05e) so the two cannot drift.
+pub const TREE_WIDTH: u16 = 34;
+
+/// The number of file rows the sidebar window shows (the cursor is kept
+/// within 5 rows of the window top). Shared between the renderer and the
+/// store's click-to-row mapping (plan 004 issue 05e).
+pub const TREE_VISIBLE_ROWS: usize = 8;
+
 #[derive(Default, Props)]
 pub struct TreeSidebarProps {
     pub rows: Vec<TreeRow>,
@@ -113,10 +123,10 @@ pub fn TreeSidebar(props: &TreeSidebarProps, mut _hooks: Hooks) -> impl Into<Any
         .iter()
         .enumerate()
         .skip(start)
-        .take(8)
+        .take(TREE_VISIBLE_ROWS)
         .collect();
     element! {
-        View(width: 34, flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: face_bg(t.view), flex_direction: FlexDirection::Column) {
+        View(width: TREE_WIDTH, flex_shrink: 0.0, overflow: Overflow::Hidden, background_color: face_bg(t.view), flex_direction: FlexDirection::Column) {
             Text(
                 content: "*tree*",
                 color: face_color(t.view_title),

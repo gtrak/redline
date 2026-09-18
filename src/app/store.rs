@@ -2741,6 +2741,32 @@ impl AppStore {
         self.tree.selected = self.tree.selected.saturating_sub(1);
     }
 
+    /// Click-to-select in the tree sidebar (plan 004 issue 05e): the
+    /// sidebar layout is a title row (terminal row 0), up to
+    /// `TREE_VISIBLE_ROWS` file rows (starting at the visible window top,
+    /// `selected.saturating_sub(5)`), then a help row. Map a 0-based
+    /// terminal row onto the tree row under it; the title row, the help
+    /// row, rows past the window, a hidden tree, or a non-buffer top view
+    /// are no-ops. A tree click moves ONLY the tree cursor — it never
+    /// touches the code point (the code point is set by code-pane clicks,
+    /// and `RET` opens the selected file).
+    pub fn tree_click_row(&mut self, terminal_row: usize) {
+        if !self.tree.visible || self.top_view() != ViewId::Buffer {
+            return;
+        }
+        let Some(rel) = terminal_row.checked_sub(1) else {
+            return; // terminal row 0 is the tree title
+        };
+        if rel >= crate::ui::tree::TREE_VISIBLE_ROWS {
+            return; // the help row (or below it)
+        }
+        let start = self.tree.selected.saturating_sub(5);
+        let idx = start.saturating_add(rel);
+        if idx < self.tree.rows.len() {
+            self.tree.selected = idx;
+        }
+    }
+
     /// `RET` (with the tree focused): open the selected file, returning to
     /// the buffer view. No-op on an empty tree.
     pub fn tree_open_selected(&mut self) {
@@ -2899,12 +2925,14 @@ impl AppStore {
     /// bounds, so a click past EOL lands at EOL and a click on an empty line
     /// lands at col 0. `row` is the click's row within the visible file area
     /// (the caller subtracts the file view's title-line offset); `col` is
-    /// the clicked TERMINAL (display) column — wide (CJK) chars occupy 2
-    /// cells, so it is converted to a char index for the point (a click
-    /// inside a wide char maps to that char; plan 004 issue 05d). The
-    /// existing goal column is preserved (a mouse set-point does not touch
-    /// it, emacs model); the window follows (05b behavior). No-op outside
-    /// the file view.
+    /// the clicked DISPLAY column RELATIVE TO THE FILE VIEW'S LEFT EDGE —
+    /// with the tree sidebar visible the root event arm subtracts the tree
+    /// width before calling (plan 004 issue 05e), so callers never mix the
+    /// two. Wide (CJK) chars occupy 2 cells, so the display column is
+    /// converted to a char index for the point (a click inside a wide char
+    /// maps to that char; plan 004 issue 05d). The existing goal column is
+    /// preserved (a mouse set-point does not touch it, emacs model); the
+    /// window follows (05b behavior). No-op outside the file view.
     pub fn mouse_click_position(&mut self, row: usize, col: usize) {
         if self.top_view() != ViewId::Buffer {
             return;
@@ -2917,7 +2945,7 @@ impl AppStore {
             .buffers
             .current_buffer()
             .and_then(|b| b.line_text(target_line))
-            .map(|t| crate::ui::file_view::display_col_to_char_index(&t, col))
+            .map(|t| crate::model::text_width::display_col_to_char_index(&t, col))
             .unwrap_or(0)
             .min(line_len);
         let p = self.file_point();
@@ -8218,6 +8246,70 @@ mod tests {
         s.push_view(ViewId::BufferList);
         s.mouse_click_position(3, 4);
         assert_eq!((s.point_line(), s.point_col()), (0, 0), "click outside the file view is a no-op");
+    }
+
+    // ── plan 004 issue 05e: tree-sidebar click-to-select ────────────────
+
+    #[test]
+    fn tree_click_row_selects_visible_row_and_leaves_point_alone() {
+        // With the tree visible, a click in the tree's columns selects the
+        // tree row under it and NEVER moves the code point.
+        let (mut s, _dir) = store_with_lines(100);
+        s.ensure_files();
+        s.toggle_tree();
+        assert!(s.tree_visible());
+        let n = s.tree_rows().len();
+        assert!(n >= 2, "need >=2 tree rows: {n}");
+
+        // The code point starts away from (0,0) so any movement is visible.
+        s.set_point(3, 2, 0);
+
+        // Terminal row 0 is the tree title: a no-op (selection + point).
+        s.tree_click_row(0);
+        assert_eq!(s.tree_selected(), 0);
+        assert_eq!((s.point_line(), s.point_col()), (3, 2), "title-row click must not move the code point");
+
+        // Terminal row 2 → visible row 1 (window top is `selected-5`, 0
+        // here): the selection moves, the point does not.
+        s.tree_click_row(2);
+        assert_eq!(s.tree_selected(), 1, "terminal row 2 → tree row 1");
+        assert_eq!((s.point_line(), s.point_col()), (3, 2), "tree-row click must not move the code point");
+
+        // The help row (row TREE_VISIBLE_ROWS+1 = 9) is a no-op.
+        s.tree_click_row(9);
+        assert_eq!(s.tree_selected(), 1);
+        // A far row (past the window) is a no-op.
+        s.tree_click_row(99);
+        assert_eq!(s.tree_selected(), 1);
+
+        // With the tree hidden every tree click is a no-op.
+        s.toggle_tree();
+        assert!(!s.tree_visible());
+        s.tree_click_row(2);
+        assert_eq!(s.tree_selected(), 1, "hidden tree: click is a no-op");
+    }
+
+    #[test]
+    fn tree_click_row_selects_within_a_scrolled_window() {
+        // Window top is `selected - 5`: after moving the selection to row 7
+        // (of 8 rows) the visible window starts at row 2, so terminal row
+        // 1 (the first visible row) selects tree row 2.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        for i in 0..8 {
+            std::fs::write(root.join(format!("f{i}.rs")), "x\n").unwrap();
+        }
+        let mut s = store(root);
+        s.ensure_files();
+        s.toggle_tree();
+        let n = s.tree_rows().len();
+        assert!(n >= 8, "need >=8 tree rows: {n}");
+        s.tree.selected = 7;
+        s.tree_click_row(1);
+        assert_eq!(s.tree_selected(), 2, "terminal row 1 → window row 0 → tree row 2");
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "selection only; point untouched");
     }
 
     #[test]
