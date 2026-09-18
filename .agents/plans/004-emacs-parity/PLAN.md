@@ -32,6 +32,25 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
    buffers (y/n/!/C-g) instead of silently discarding.
    Row 15 (undo) stays logged-not-implemented ("no undo yet").
 
+### Added mid-plan (user reports + UX sweeps, 2026-09-18)
+
+- **05b** (committed 220208c): file-view (line,col) point + emacs motion keys
+  (C-n/C-p/C-f/C-b/arrows/C-a/C-e/M-</M->, goal column, scroll screen-row
+  pinning, cursor_cell at the point). Answers the user's "cursor stuck at
+  top-left / move it with the navigation keys".
+- **05c** (committed 197967e + fix bd5c9a7): mouse click sets the full
+  (line,col) point; wheel = window scroll; C-l = emacs `recenter-top-bottom`
+  (middle→top→bottom, reset on other commands); M-f/M-b emacs word motion.
+  Word motion and C-l order were found WRONG by the differential probe
+  (tools/probe_emacs_diff.py) and fixed; review VERDICT PASS.
+- **05d** (spec: .agents/tasks/issue-004-05d-wide-chars.md): display-width
+  cursor/click columns + the dropped-space render bug (found by UX sweep).
+  QUEUED after 004-04 (both touch store.rs/root.rs).
+- **Battery 3/4 harnesses**: column-level emacs comparison + differential
+  probes (tools/drive_*_battery3.py, tools/probe_emacs_diff{,2}.py). Probe
+  #2 logged parity rows 32-34 (scroll-model divergence is NOT emacs — kept
+  pending the user's call; C-d/C-u adoption; M-> resolved as a match).
+
 ## Key decisions
 
 - Vanilla emacs defaults are the reference; the user's config is never the
