@@ -1,4 +1,33 @@
-# Task: plan 005 issue 02b — annotation marker must not overwrite the first character
+# Task: plan 005 issue 02b — annotation rendering: marker gutter + note rows must not overflow the canvas
+
+NOTE: this spec now carries TWO fixes in the same rendering/coordinate area
+(both in src/ui/file_view.rs + the coordinate consumers), so the file is
+touched once:
+
+(A) **BLOCKING (005-02 review P1, orchestrator-reproduced)**: note rows
+    make the rendered slice exceed the canvas. `file_view_rows()` slices
+    buffer lines `[scroll_top, scroll_top + viewport_lines)` and then
+    APPENDS one row per annotated line in that slice, with no scroll
+    adjustment and no cap; `cursor_cell` clamps `content_row` to
+    `viewport_lines - 1 - banner`. Repro (verified live, 60-line file,
+    annotation on line 0, viewport 21): 20x C-n puts the point at
+    `tall_20`, the visible canvas ends at `tall_19`, and the hardware
+    cursor sits on `tall_19` — the point's OWN LINE IS NOT DRAWN and the
+    cursor is one row off. `C-c a` (hide note rows) instantly corrects it
+    to `tall_20`, proving the note row is stealing a canvas row without
+    the window compensating. Fix: make the file-view window aware of
+    rendered rows — either cap the emitted code-row span so
+    `rendered rows <= viewport_lines`, or advance `start`/`scroll_top` by
+    the note-row count so the point's rendered row stays
+    `<= viewport_lines - 1 - banner` — and clamp `content_row` against the
+    RENDERED slice, not the buffer-line viewport. Choose one, state why,
+    and add the reviewer's suggested leg: open a >viewport file, `A` on
+    line 0, C-n to the window bottom, assert the position's line is drawn
+    AND the cursor row is that same row.
+
+(B) **Known defect (orchestrator-reproduced)**: the `▎` marker is drawn at
+    cell 0 OVER the code text, clobbering each annotated line's first
+    character (`fn target_one() {}` -> `▎n target_one() {}`).
 
 You are the implementation worker. Repo root is your cwd. Self-contained.
 
