@@ -77,10 +77,13 @@ stdout annotation dump that fits shell workflows.
   rendered-row map (file_view_rows with row_for_line/line_for_row).
   DELETE is `d` in the buffer view (orchestrator ruling: `C-u A` would
   preempt the user's pending C-u/numeric-prefix decision, parity row 22).
-  **KNOWN DEFECT → 02b**: the `▎` marker is overlaid at cell 0 and
-  CLOBBERS the first character of every annotated line (verified live:
-  `fn target_one() {}` → `▎n target_one() {}`); 02b adds a real gutter,
-  consistent across render/cursor/click.
+  02 review was BLOCKING: note rows overflowed the canvas (point's line
+  could go undrawn; cursor one row off). Both that P1 AND the marker
+  clobber were fixed in **02b (a3d71e1, review in flight; 478 tests)** and
+  verified live by the orchestrator: `▎fn tall_0() {}` renders the full
+  text, and at the window bottom under an annotation `tall_20` is drawn
+  with the cursor on it. Also: tools now flock the shared fixture
+  (8f0375e) after concurrent suites produced phantom failures.
 - 03 agent-consumable dump — QUEUED (spec corrected: the TUI owns stdout,
   so a redirect needs /dev/tty rendering).
 
