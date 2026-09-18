@@ -54,7 +54,7 @@ Tree::root_node(&self) -> Node
 Tree::edit(&mut self, &InputEdit)
 Tree::walk(&self) -> TreeCursor
 Node::kind(&self) -> &'static str
-Node::start_byte / end_byte / start_position / end_position / byte_range
+Node::start_byte / end_byte / start_position / end_position / byte_range   // start_position/end_position -> Point { row, column: usize } in the 0.24.7 Rust binding — row is the 0-based line, no cast needed (verified against the 0.24.7 source)
 Node::child_count / child(i) / named_child(i) / child_by_field_name(impl AsRef<[u8]>)
 Node::is_named / is_missing / has_error / is_error / parent()
 Node::utf8_text(&self, &[u8]) -> Result<&str, Utf8Error>

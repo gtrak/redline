@@ -45,6 +45,7 @@ SHARED_SUITES=(
   check_cursor_stream.py
   ux_sweep.py
   probe_notes_dump.py
+  drive_syntax_notes.py
   drive_xref.py
   drive_external_notes.py
   drive_external_crate.py

@@ -34,8 +34,12 @@ line shows the project name and current view.
 
 In the file view, `A` records a note anchored to the line under the cursor;
 notes live in `.redline-notes.md` in the project root and re-anchor
-automatically as the file drifts (an anchor whose text is gone is flagged
-orphaned, never moved to a guessed line).
+automatically as the file drifts. Rust files get a syntax anchor on top of
+the line text: when the point is on a symbol, the record stores the
+symbol's node kind + name, and re-anchoring first follows that node
+ANYWHERE in the file (surviving big insertions and reformats); zero or
+multiple matches fall back to the line text (±25-line search). An anchor
+whose text is gone is flagged orphaned, never moved to a guessed line.
 
 On quit (`C-x C-c`), the annotations print to stdout as a self-contained
 brief — project root header, then per note: `path:line`, the anchored code

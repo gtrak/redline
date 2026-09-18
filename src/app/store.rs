@@ -746,6 +746,27 @@ impl FileViewRow {
 /// at it as the file drifts, and `orphaned` flags the case where the
 /// anchor text is gone (the annotation stays at its last known line —
 /// NEVER moved to a guessed line).
+/// The OPTIONAL syntax anchor of an annotation (plan 007 issue 02): the
+/// (kind, text) of the identifier-ish node under the point at creation
+/// (007-01's `node_at` at the point's byte offset — e.g. `identifier` /
+/// `target_one` for a function name). Re-anchoring first searches the
+/// WHOLE file for a unique node with this kind + name (surviving a
+/// 100-line insertion and a reformat alike); zero or multiple matches
+/// fall through to the text rules. `None` for legacy records (no
+/// `syntax_*` keys), non-Rust files, and points where `node_at` has no
+/// identifier-ish answer (keywords, whitespace, operators) — those
+/// records ride the text rules alone, exactly as before.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxAnchor {
+    /// The tree-sitter node kind — always one of 007-01's identifier-ish
+    /// kinds (`identifier`, `field_identifier`, `type_identifier`,
+    /// `scoped_identifier`, `scoped_type_identifier`, `primitive_type`).
+    pub kind: String,
+    /// The node's source text (e.g. `target_one`; a `::` path comes back
+    /// whole, exactly as `node_at` returns it — `tokio::spawn`).
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Annotation {
     pub path: String,
@@ -754,6 +775,9 @@ pub struct Annotation {
     pub anchor: String,
     pub text: String,
     pub orphaned: bool,
+    /// The syntax anchor captured at creation (plan 007 issue 02); see
+    /// [`SyntaxAnchor`] for the capture rule and the re-anchor order.
+    pub syntax: Option<SyntaxAnchor>,
 }
 
 /// One entry of the notes file's structured annotation section: either a
@@ -878,6 +902,10 @@ fn parse_notes_section(lines: &[&str]) -> Vec<NotesEntry> {
 fn parse_record_block(block: &[&str]) -> Option<Annotation> {
     let mut rec = Annotation::default();
     let mut have = [false; 4]; // path, line, anchor, note
+    // The syntax anchor's keys (plan 007 issue 02) are OPTIONAL: both must
+    // be present for `syntax: Some`; either missing → `None` (legacy).
+    let mut syntax_kind: Option<String> = None;
+    let mut syntax_name: Option<String> = None;
     for line in &block[1..] {
         // Lines without a `:` (stray text, blank lines) are skipped, not
         // fatal: a record stays valid as long as the required fields are
@@ -916,12 +944,26 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
             "orphaned" => {
                 rec.orphaned = value.trim() == "true";
             }
+            "syntax_kind" => {
+                syntax_kind = Some(value.to_string());
+            }
+            "syntax_name" => {
+                syntax_name = Some(value.to_string());
+            }
             // Unknown keys inside a record block: the block stays valid
             // (forward compatibility), they are simply not re-emitted.
             _ => {}
         }
     }
     if have.iter().all(|h| *h) {
+        // The syntax anchor is OPTIONAL: absent keys (legacy records) and a
+        // half-written pair (a hand-edited `syntax_kind` without a
+        // `syntax_name`) both degrade to `None` — the record stays valid
+        // (tolerant parse), the anchor simply does not half-fire.
+        rec.syntax = match (syntax_kind, syntax_name) {
+            (Some(kind), Some(name)) => Some(SyntaxAnchor { kind, name }),
+            _ => None,
+        };
         Some(rec)
     } else {
         None
@@ -950,6 +992,14 @@ pub fn serialize_notes(doc: &NotesDoc) -> String {
                 out.push_str(&format!("anchor: {}\n", a.anchor));
                 out.push_str(&format!("note: {}\n", a.text));
                 out.push_str(&format!("orphaned: {}\n", a.orphaned));
+                // The syntax keys are emitted ONLY when present, appended
+                // after `orphaned` (additive): a record without a syntax
+                // anchor serializes byte-identically to the pre-007-02
+                // shape (no migration of legacy files).
+                if let Some(sa) = &a.syntax {
+                    out.push_str(&format!("syntax_kind: {}\n", sa.kind));
+                    out.push_str(&format!("syntax_name: {}\n", sa.name));
+                }
             }
             NotesEntry::Raw(s) => {
                 out.push_str(s);
@@ -2241,13 +2291,27 @@ impl AppStore {
     }
 
     /// Re-anchor the annotations of the buffer at `key` against the
-    /// buffer's current content (plan 005 issue 02): for each record
-    /// anchored there whose stored line no longer holds `anchor` exactly,
-    /// search ±25 lines — a UNIQUE match re-anchors (updates `line`,
-    /// clears `orphaned`); zero or multiple matches set `orphaned = true`
-    /// and leave `line` unchanged (NEVER move an anchor to a guessed line).
-    /// Stable and idempotent: a record whose line holds the anchor is
-    /// untouched (its `orphaned` flag clears — the anchor came back).
+    /// buffer's current content (plan 005 issue 02 + plan 007 issue 02):
+    /// for each record anchored there, the re-anchor order is
+    ///
+    /// 1. **syntax anchor** (records carrying a `SyntaxAnchor`): a node of
+    ///    the recorded `kind` + `name` found ANYWHERE in the file — exactly
+    ///    one match re-anchors to its line (any distance, orphan flag
+    ///    clears). Zero or multiple matches fall through (never guess,
+    ///    exactly like the text rules' ambiguity rule). The file is
+    ///    parsed at most once per pass, and only when at least one record
+    ///    for this file HAS a syntax anchor (the common legacy case pays
+    ///    no parse).
+    /// 2. **exact-line text**: the content at the stored line still matches
+    ///    `anchor` exactly (the record stays; an orphan flag clears).
+    /// 3. **±25-line text search**: a UNIQUE match re-anchors (updates
+    ///    `line`, clears `orphaned`).
+    /// 4. **orphan**: zero or multiple text matches set `orphaned = true`
+    ///    and leave `line` unchanged (NEVER move an anchor to a guessed
+    ///    line).
+    ///
+    /// Stable and idempotent: a record whose line holds the anchor (or
+    /// whose syntax node is unique) is untouched on a second pass.
     fn reanchor_for_key(&mut self, key: &str) {
         let Some(rel) = self.buffer_annotation_path(key) else {
             return;
@@ -2259,12 +2323,37 @@ impl AppStore {
         if total == 0 {
             return;
         }
+        // The syntax re-anchor index is built BEFORE the mutable pass (it
+        // reads `self`); `None` for the legacy / non-Rust / no-anchor cases
+        // and the text rules below run exactly as before.
+        let syntax_index = self.build_syntax_index_for_key(key, &rel);
         let mut changed = false;
         for entry in self.notes_doc.entries.iter_mut() {
             let Some(a) = entry.as_record_mut() else {
                 continue;
             };
             if a.path != rel {
+                continue;
+            }
+            // Order matters (007-02): syntax first — a unique (kind, name)
+            // node ANYWHERE in the file re-anchors to its line regardless
+            // of distance (this is what survives a 100-line insertion),
+            // even when the stored line still holds the anchor text (the
+            // note follows the symbol, not a coincidental text match).
+            // Zero or multiple matches fall through to the text rules.
+            if let Some(idx) = &syntax_index
+                && let Some(sa) = a.syntax.as_ref()
+                && let Some(lines) = idx.get(&(sa.kind.clone(), sa.name.clone()))
+                && lines.len() == 1
+            {
+                if a.line != lines[0] {
+                    a.line = lines[0];
+                    changed = true;
+                }
+                if a.orphaned {
+                    a.orphaned = false;
+                    changed = true;
+                }
                 continue;
             }
             let held = a.line < total
@@ -2305,6 +2394,89 @@ impl AppStore {
             self.sync_notes_from_doc();
         }
     }
+
+    /// The syntax re-anchor index for the buffer at `key` (plan 007
+    /// issue 02): `(kind, name) → the 0-based lines of every node of that
+    /// kind + text`, built from ONE parse of the buffer's current text.
+    /// `None` unless at least one record with annotation key `rel` carries
+    /// a `SyntaxAnchor` AND the buffer's language parses (Rust today — the
+    /// same single grammar pin 007-01 uses, via `queries::language_for`):
+    /// the common legacy file pays no parse at all on a re-anchor pass.
+    fn build_syntax_index_for_key(
+        &self,
+        key: &str,
+        rel: &str,
+    ) -> Option<HashMap<(String, String), Vec<usize>>> {
+        let any_syntax = self.notes_doc.entries.iter().any(|e| {
+            matches!(e, NotesEntry::Record(a) if a.path == rel && a.syntax.is_some())
+        });
+        if !any_syntax {
+            return None;
+        }
+        let (path_str, source) = {
+            let buf = self.buffers.get(key)?;
+            let path = buf.path.as_ref()?;
+            (path.to_string_lossy().into_owned(), buf.text())
+        };
+        let lang = self.grammar_registry.language_for(&path_str);
+        if lang != crate::syntax::registry::LanguageId::Rust {
+            return None;
+        }
+        // One fresh parse of the buffer's rope (the 007-02 contract: tree
+        // reuse / incremental reparse is 007-04's job, not this one's).
+        let language = crate::syntax::queries::language_for(lang)?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        let tree = parser.parse(source.as_bytes(), None)?;
+        let mut index: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        Self::collect_syntax_anchor_nodes(tree.root_node(), source.as_bytes(), &mut index);
+        Some(index)
+    }
+
+/// Walk the parse tree collecting every NAMED node of one of 007-01's
+/// identifier-ish kinds as `(kind, text) → lines` (plan 007 issue 02).
+/// Restricting to those kinds keeps the walk cheap and correct: a
+/// captured `SyntaxAnchor.kind` always belongs to the closed set, so no
+/// other node kind can ever contribute a false match. `::` paths stay
+/// whole (a `scoped_identifier` is one node — exactly as `node_at`
+/// returns it). Multiple nodes may share a line (`x = x`); each is
+/// counted, so uniqueness is over NODES, never lines.
+fn collect_syntax_anchor_nodes(
+    node: tree_sitter::Node,
+    source: &[u8],
+    index: &mut HashMap<(String, String), Vec<usize>>,
+) {
+    if node.is_named()
+        && Self::is_syntax_anchor_kind(node.kind())
+        && let Ok(text) = node.utf8_text(source)
+    {
+        index
+            .entry((node.kind().to_string(), text.to_string()))
+            .or_default()
+            .push(node.start_position().row);
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            Self::collect_syntax_anchor_nodes(child, source, index);
+        }
+    }
+}
+
+/// The identifier-ish node kinds `node_at` (007-01) can return — the
+/// closed set a captured `SyntaxAnchor.kind` belongs to. Kept in
+/// lockstep with `src/syntax/node.rs`'s `is_rust_identifier_kind`
+/// (007-01 is frozen — mirrored here, not shared).
+fn is_syntax_anchor_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "scoped_identifier"
+            | "scoped_type_identifier"
+            | "primitive_type"
+    )
+}
 
     /// Re-anchor every open file buffer's annotations (the "on load"
     /// pass: runs after the notes document is (re)loaded from disk).
@@ -2511,15 +2683,25 @@ impl AppStore {
         let line = line.min(total - 1);
         let anchor = buf.line_text(line).map(|t| t.into_owned()).unwrap_or_default();
         let col = self.point_col();
+        // 007-02: capture the syntax anchor at the point (None for
+        // non-Rust / keyword offsets — the text rules alone keep working).
+        let syntax = self.capture_syntax_anchor(&key, line);
         let existing = self.notes_doc.entries.iter().position(|e| {
             matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line)
         });
         match existing {
             Some(i) => {
                 // Edit: only the note text changes (the record's stored
-                // position stays — the re-anchor pass maintains it).
+                // position stays — the re-anchor pass maintains it). A
+                // re-capture at commit refreshes the syntax anchor when the
+                // point lands on an identifier-ish node; a `None` capture
+                // (the cursor slid onto a keyword) keeps the record's
+                // existing anchor rather than discarding a good one.
                 if let Some(a) = self.notes_doc.entries[i].as_record_mut() {
                     a.text = text.clone();
+                    if let Some(sa) = syntax.clone() {
+                        a.syntax = Some(sa);
+                    }
                 }
             }
             None => {
@@ -2532,6 +2714,7 @@ impl AppStore {
                         anchor,
                         text: text.clone(),
                         orphaned: false,
+                        syntax,
                     }));
             }
         }
@@ -2547,6 +2730,64 @@ impl AppStore {
             }
             None => self.minibuffer_message("note not saved: could not write the notes file"),
         }
+    }
+
+    /// 007-02: capture the syntax anchor for a record committed at buffer
+    /// `key`'s line `line`, taken at the CURRENT POINT's byte offset via
+    /// 007-01's `node_at`.
+    ///
+    /// Capture rule (explicit):
+    /// - **Offset: the point, not the line's first non-whitespace byte.**
+    ///   The point is where the user's attention is (the same target `M-.`
+    ///   acts on), and in Rust a line's first non-whitespace byte is
+    ///   usually a KEYWORD (`fn`, `let`, `if`, `struct`) where `node_at`
+    ///   has no identifier-ish node — the line-head rule would silently
+    ///   strip the anchor from exactly the item-header lines most worth
+    ///   anchoring. What is stored is the (kind, text) pair, so the
+    ///   criterion is landing on a meaningful node, which the point does
+    ///   best.
+    /// - **Node: the identifier-ish node at the point verbatim** — `kind`
+    ///   is `node_at`'s kind and `name` its text. `node_at` returns only
+    ///   identifier-ish nodes (007-01's frozen surface: it has no
+    ///   item-kind or statement surface), so there is no "statement →
+    ///   enclosing item" fallback to take: a local/call identifier
+    ///   anchors on itself, and re-anchoring's uniqueness filter keeps it
+    ///   honest (a name shadowed or repeated anywhere in the file →
+    ///   ambiguous → text rules, never a guess).
+    /// - **`None`** for non-Rust buffers, EOL points, and offsets with no
+    ///   identifier-ish node — the record then rides the text rules alone
+    ///   (today's behavior).
+    fn capture_syntax_anchor(&self, key: &str, line: usize) -> Option<SyntaxAnchor> {
+        let col = self.point_col();
+        let (path_str, source, byte) = {
+            let buf = self.buffers.get(key)?;
+            let path = buf.path.as_ref()?;
+            let line_start = buf.try_line_to_byte(line)?;
+            let line_text = buf.line_text(line)?;
+            // The point's column is a CHAR offset; convert it to a byte
+            // offset within the line. `col == line length` (EOL) has no
+            // char under it: the byte lands past the last char and
+            // `node_at` finds nothing (the honest answer for EOL).
+            let byte_in_line = line_text
+                .char_indices()
+                .nth(col)
+                .map(|(b, _)| b)
+                .unwrap_or(line_text.len());
+            (
+                path.to_string_lossy().into_owned(),
+                buf.text(),
+                line_start + byte_in_line,
+            )
+        };
+        let lang = self.grammar_registry.language_for(&path_str);
+        if lang != crate::syntax::registry::LanguageId::Rust {
+            return None;
+        }
+        let info = crate::syntax::node::node_at(lang, &source, byte)?;
+        Some(SyntaxAnchor {
+            kind: info.kind,
+            name: info.text,
+        })
     }
 
     /// `d` in the buffer view (plan 005 issue 02): delete the annotation
@@ -15788,6 +16029,7 @@ mod tests {
             entries: vec![
                 NotesEntry::Raw("# a comment".to_string()),
                 NotesEntry::Record(Annotation {
+                    syntax: None,
                     path: "src/main.rs".to_string(),
                     line: 4,
                     col: 2,
@@ -15797,6 +16039,7 @@ mod tests {
                 }),
                 NotesEntry::Raw("[annotation]\npath: src/main.rs\nline: 9\n(no required fields)".to_string()),
                 NotesEntry::Record(Annotation {
+                    syntax: None,
                     path: "README.md".to_string(),
                     line: 0,
                     col: 0,
@@ -15883,6 +16126,7 @@ mod tests {
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/ann1.rs", &content);
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann1.rs".to_string(),
             line: 25,
             col: 0,
@@ -15903,6 +16147,7 @@ mod tests {
         let content = far.join("\n") + "\nEDGE\n"; // anchor at line 26 = 0 + 26? no: line 26
         open_ann_file(&mut s, "src/ann2.rs", &content);
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann2.rs".to_string(),
             line: 1,
             col: 0,
@@ -15921,6 +16166,7 @@ mod tests {
         let content = far.join("\n") + "\nFAR\n"; // anchor at line 27
         open_ann_file(&mut s, "src/ann3.rs", &content);
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann3.rs".to_string(),
             line: 1,
             col: 0,
@@ -15944,6 +16190,7 @@ mod tests {
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/ann4.rs", &content);
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann4.rs".to_string(),
             line: 5, // out of range: drift for sure
             col: 0,
@@ -16047,6 +16294,311 @@ mod tests {
         s.note_prompt_confirm();
         assert_eq!(ann_records(&s).len(), 0);
         assert_eq!(s.message, "note cancelled");
+    }
+
+    // ── plan 007 issue 02: syntax-anchored annotations ───────────────────
+
+    /// The HEADLINE test (plan 007 issue 02): annotate a Rust fn (the
+    /// point on the function name → `SyntaxAnchor { identifier,
+    /// target_one }`), then simulate a 100-line insertion AND a
+    /// rustfmt-style reformat (the anchored line's exact text is GONE
+    /// from the file). The syntax-anchored record follows the function
+    /// (re-anchored to its new line, orphan flag cleared); the SAME
+    /// record WITHOUT the syntax anchor orphans at its last known line —
+    /// proof the ±25-line text path alone cannot do this.
+    #[test]
+    fn notes_syntax_anchor_survives_insertion_and_reformat() {
+        let original = "fn target_one() {\n    let x = 1;\n    x\n}\n";
+        // The reformat rewrites the signature line; 100 filler lines push
+        // the function 100 lines down (far outside ±25).
+        let filler: Vec<String> = (0..100).map(|i| format!("// filler {i}")).collect();
+        let rewritten =
+            filler.join("\n") + "\nfn target_one()\n{\n    let x = 1;\n    x\n}\n";
+        // The discriminating precondition: the anchored line's text no
+        // longer exists ANYWHERE — the text path (exact-line and ±25)
+        // has nothing to match, inside or outside the window.
+        assert!(
+            !rewritten.contains("fn target_one() {"),
+            "the text path must have nothing to match"
+        );
+
+        // Part 1: the syntax-anchored record follows the function.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/syn1.rs", original);
+        s.set_point(0, 3, 3); // col 3: on the `target_one` name
+        s.annotate();
+        s.note_prompt_char('s');
+        s.note_prompt_char('y');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert_eq!(
+            a.syntax,
+            Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "target_one".to_string(),
+            }),
+            "the fn name captures a syntax anchor"
+        );
+        assert_eq!(a.anchor, "fn target_one() {");
+        // Simulate the 100-line insertion + the reformat.
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&rewritten);
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(
+            a.line, 100,
+            "the note follows the function across 100 lines + a reformat"
+        );
+        assert!(!a.orphaned, "unique syntax match → not orphaned");
+        // Stable: a second pass changes nothing (idempotent).
+        s.reanchor_for_key(&key);
+        assert_eq!(ann_records(&s)[0].line, 100);
+        assert!(!ann_records(&s)[0].orphaned);
+        drop(s);
+
+        // Part 2 (discriminating half): the SAME drive with a record that
+        // has NO syntax anchor (the legacy shape) — the ±25-line text
+        // path finds nothing (the anchor text is gone and the move is
+        // 100 lines out) → orphaned, line unchanged. Without the syntax
+        // anchor, Part 1's outcome is impossible.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/syn2.rs", original);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/syn2.rs".to_string(),
+            line: 0,
+            col: 3,
+            anchor: "fn target_one() {".to_string(),
+            text: "sy".to_string(),
+            orphaned: false,
+            syntax: None,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&rewritten);
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(
+            a.orphaned,
+            "text path alone: 0 matches → orphaned (never a guess)"
+        );
+        assert_eq!(a.line, 0, "the orphan stays at its last known line");
+    }
+
+    /// A legacy record (no syntax_* keys) parses with `syntax: None`,
+    /// still re-anchors by text alone, and serializes back WITHOUT the
+    /// syntax keys — byte-identical to the pre-007-02 shape (no
+    /// migration of legacy records that are never touched).
+    #[test]
+    fn notes_legacy_record_stays_byte_identical_and_text_anchors() {
+        let record = "[annotation]\n\
+                      path: src/old.rs\n\
+                      line: 1\n\
+                      col: 0\n\
+                      anchor: two\n\
+                      note: old note\n\
+                      orphaned: false\n";
+        let doc_text = format!("{NOTES_BEGIN}\n{record}{NOTES_END}\n");
+        let doc = parse_notes(&doc_text);
+        let rec = doc.entries[0].as_record().expect("the legacy record parses");
+        assert!(rec.syntax.is_none(), "legacy record → syntax: None");
+        assert_eq!(
+            serialize_notes(&doc),
+            doc_text,
+            "a never-moved legacy record round-trips byte-identically (no syntax keys appear)"
+        );
+        // Re-anchoring still works by text alone for it.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/old.rs", "one\ntwo\nthree\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/old.rs".to_string(),
+            line: 5, // out of range: drift for sure
+            col: 0,
+            anchor: "two".to_string(),
+            text: "old note".to_string(),
+            orphaned: false,
+            syntax: None,
+        }));
+        let key = s.buffers.current().unwrap().to_string();
+        s.reanchor_for_key(&key);
+        assert_eq!(ann_records(&s)[0].line, 1, "legacy record re-anchors by text");
+        let out = serialize_notes(&s.notes_doc);
+        assert!(
+            !out.contains("syntax_kind"),
+            "no syntax keys ever appear for legacy records: {out}"
+        );
+        // Unknown keys inside a record block: the record stays VALID
+        // (forward compatibility) and the unknown key is not re-emitted —
+        // the pre-007-02 rule, unchanged.
+        let unknown = format!(
+            "{NOTES_BEGIN}\n\
+             [annotation]\n\
+             path: src/old.rs\n\
+             line: 1\n\
+             col: 0\n\
+             anchor: two\n\
+             note: old note\n\
+             orphaned: false\n\
+             future_key: later\n\
+             {NOTES_END}\n"
+        );
+        let udoc = parse_notes(&unknown);
+        assert!(
+            udoc.entries[0].as_record().is_some(),
+            "a record with an unknown key stays a valid record"
+        );
+        assert!(
+            udoc.entries[0].as_record().unwrap().syntax.is_none()
+        );
+        let uout = serialize_notes(&udoc);
+        assert!(!uout.contains("future_key"), "unknown keys are not re-emitted (005-02 rule)");
+        assert!(uout.contains("line: 1"), "the record's own fields survive");
+    }
+
+    /// Ambiguous syntax match (multiple identifier nodes with the same
+    /// kind + name anywhere in the file) → no guess → the text rules run;
+    /// when they also fail, the record orphans at its last known line.
+    #[test]
+    fn notes_syntax_ambiguous_match_orphans() {
+        let original = "fn helper() {\n    let helper = 1;\n    helper\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/syn3.rs", original);
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "src/syn3.rs".to_string(),
+            line: 0,
+            col: 3,
+            anchor: "fn helper() {".to_string(),
+            text: "amb".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "helper".to_string(),
+            }),
+        }));
+        // The signature line is reformatted (the anchor text is gone);
+        // `helper` still appears as the fn name AND the local → 3
+        // identifier nodes named `helper` → ambiguous.
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str("fn helper() -> i32\n{\n    let helper = 1;\n    helper\n}\n");
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(a.orphaned, "2+ syntax matches → no guess → orphan");
+        assert_eq!(a.line, 0, "the orphan keeps its last known line");
+    }
+
+    /// A record WITH a syntax anchor round-trips exactly: serialize →
+    /// parse → an equal record (the keys are re-emitted in full).
+    #[test]
+    fn notes_syntax_anchor_round_trip() {
+        let rec = Annotation {
+            path: "src/x.rs".to_string(),
+            line: 7,
+            col: 3,
+            anchor: "fn x() {".to_string(),
+            text: "rt".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "x".to_string(),
+            }),
+        };
+        let doc = NotesDoc {
+            before: Vec::new(),
+            entries: vec![NotesEntry::Record(rec.clone())],
+            after: Vec::new(),
+        };
+        let out = serialize_notes(&doc);
+        assert!(out.contains("syntax_kind: identifier\n"), "{out}");
+        assert!(out.contains("syntax_name: x\n"), "{out}");
+        let back = parse_notes(&out);
+        assert_eq!(back.entries, vec![NotesEntry::Record(rec)]);
+    }
+
+    /// A half-written anchor (`syntax_kind` without `syntax_name`) degrades
+    /// to `syntax: None` — the record stays VALID (tolerant parse, never
+    /// half-fires); a record with a malformed required field stays a Raw
+    /// block, verbatim (never dropped), even when it carries syntax keys
+    /// (005-02).
+    #[test]
+    fn notes_syntax_keys_half_and_malformed() {
+        let doc_text = format!(
+            "{NOTES_BEGIN}\n\
+             [annotation]\n\
+             path: a.rs\n\
+             line: 0\n\
+             col: 0\n\
+             anchor: one\n\
+             note: half anchor\n\
+             orphaned: false\n\
+             syntax_kind: identifier\n\
+             [annotation]\n\
+             path: b.rs\n\
+             line: 0\n\
+             col: 0\n\
+             note: missing its anchor\n\
+             syntax_kind: identifier\n\
+             syntax_name: ghost\n\
+             {NOTES_END}\n"
+        );
+        let doc = parse_notes(&doc_text);
+        assert_eq!(doc.entries.len(), 2);
+        // The half anchor: a VALID record, `syntax: None`.
+        let a = doc
+            .entries[0]
+            .as_record()
+            .expect("a record with a half syntax pair stays valid");
+        assert!(
+            a.syntax.is_none(),
+            "syntax_kind without syntax_name → None (never half-fires)"
+        );
+        assert_eq!(a.text, "half anchor");
+        // The record missing `anchor` stays a Raw block, verbatim (the
+        // syntax keys included — malformed records are never dropped).
+        match &doc.entries[1] {
+            NotesEntry::Raw(raw) => {
+                assert!(raw.contains("missing its anchor"), "{raw}");
+                assert!(raw.contains("syntax_name: ghost"), "{raw}");
+            }
+            other => panic!("malformed record must stay Raw: {other:?}"),
+        }
+    }
+
+    /// A non-Rust buffer captures no syntax anchor (007-01 returns None
+    /// for every non-Rust language — and no parse happens at all) and
+    /// rides the text rules as before; a Rust point on a KEYWORD (col 0
+    /// of the `fn` header) is the same: `None`, not a guess.
+    #[test]
+    fn notes_non_rust_and_keyword_points_have_no_syntax_anchor() {
+        // Non-Rust: the record has `syntax: None` (old behavior intact).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann_py.py", "def f():\n    return 1\n");
+        s.set_point(0, 4, 4); // on the `f` in `def f():`
+        s.annotate();
+        s.note_prompt_char('p');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert!(a.syntax.is_none(), "non-Rust → no syntax anchor");
+        assert_eq!(a.anchor, "def f():");
+        drop(s);
+
+        // Rust, point on the `fn` keyword (col 0): `node_at` has no
+        // identifier-ish node there → honest None.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann_kw.rs", "fn kw_target() {\n    let y = 2;\n}\n");
+        s.set_point(0, 0, 0); // col 0: the `f` of `fn`
+        s.annotate();
+        s.note_prompt_char('k');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert!(a.syntax.is_none(), "a keyword point captures no anchor");
+        assert_eq!(a.anchor, "fn kw_target() {");
     }
 
     // ── plan 008 issue 01: annotation keying on external buffers ─────────
@@ -16164,6 +16716,7 @@ mod tests {
         // must NOT match the external buffer (the external key is the
         // absolute path, so the keys differ).
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/lib_source.rs".to_string(),
             line: 0,
             col: 0,
@@ -16394,6 +16947,7 @@ mod tests {
         open_ann_file(&mut s, "src/dump1.rs", "alpha line\nbeta line\ngamma line\n");
         for a in [
             Annotation {
+                syntax: None,
                 path: "src/dump1.rs".to_string(),
                 line: 0,
                 col: 0,
@@ -16402,6 +16956,7 @@ mod tests {
                 orphaned: false,
             },
             Annotation {
+                syntax: None,
                 path: "src/dump1.rs".to_string(),
                 line: 1,
                 col: 0,
@@ -16432,6 +16987,7 @@ mod tests {
         // Closed buffer: `code` falls back to the stored anchor.
         let mut s2 = store_with_project();
         s2.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/closed.rs".to_string(),
             line: 12,
             col: 0,
@@ -16457,6 +17013,7 @@ mod tests {
         // Two annotations: line 1 and line 3 (both note rows visible).
         for (line, note) in [(1, "n1"), (3, "n3")] {
             s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
                 path: "src/ann7.rs".to_string(),
                 line,
                 col: 0,
@@ -16532,6 +17089,7 @@ mod tests {
         let content: String = (0..30).map(|i| format!("k{i}\n")).collect();
         open_ann_file(&mut s, "src/ann8.rs", &content);
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann8.rs".to_string(),
             line: 1,
             col: 0,
@@ -16583,6 +17141,7 @@ mod tests {
         open_ann_file(&mut s, "src/ann10.rs", &content);
         for line in 0..25 {
             s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
                 path: "src/ann10.rs".to_string(),
                 line,
                 col: 0,
@@ -16635,6 +17194,7 @@ mod tests {
         open_ann_file(&mut s2, "src/ann11.rs", &content);
         for line in 0..25 {
             s2.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
                 path: "src/ann11.rs".to_string(),
                 line,
                 col: 0,
@@ -16672,6 +17232,7 @@ mod tests {
         open_ann_file(&mut s3, "src/ann12.rs", &content);
         for i in 0..22 {
             s3.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
                 path: "src/ann12.rs".to_string(),
                 line: 5,
                 col: 0,
@@ -16696,6 +17257,7 @@ mod tests {
         let content: String = (0..30).map(|i| format!("k{i}")).collect::<Vec<_>>().join("\n");
         open_ann_file(&mut s4, "src/ann13.rs", &content);
         s4.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann13.rs".to_string(),
             line: 2,
             col: 0,
@@ -16746,6 +17308,7 @@ mod tests {
         open_ann_file(&mut s, "src/ann9.rs", "p0\np1\n");
         assert_eq!(s.annotation_count_display(), "");
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann9.rs".to_string(),
             line: 1,
             col: 0,
@@ -16754,6 +17317,7 @@ mod tests {
             orphaned: false,
         }));
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
             path: "src/ann9.rs".to_string(),
             line: 0,
             col: 0,
