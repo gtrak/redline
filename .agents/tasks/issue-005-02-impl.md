@@ -77,6 +77,18 @@ second off-by-one).
   translate buffer_line ↔ rendered_row both ways. Do not fudge offsets.
 
 ### 4. `A` flow
+
+ORCHESTRATOR DECISION (2026-09-18, resolving a worker escalation):
+**delete is `d` in the buffer view, NOT `C-u A`.** `C-u` is already a
+complete binding (scroll-half-page-up) and redline has no prefix-argument
+mechanism; adding one would preempt the user's pending decision (parity
+log row 22, "numeric prefix vs C-u = half-page" — PROPOSE, awaiting their
+call). So: `d` → `annotate-delete` (free in the buffer view; keep the
+command in M-x too). Requirements: on an unannotated line `d` is a NO-OP
+with a clear message (no self-insert, no "unbound key" echo); in editable
+buffers `d` must still self-insert as a printable (those take raw text);
+echo what was deleted (e.g. "deleted annotation: <first ~40 chars>").
+Add a leg proving delete works AND that `C-u` still scrolls.
 - `A` on a line prompts for note text in the **minibuffer**; RET commits
   (writes the record + shows the cue immediately). `A` on an annotated
   line pre-fills for edit. `C-u A` (or `d` on an annotated line) deletes.
