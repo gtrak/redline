@@ -53,11 +53,13 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   UX sweep: with the tree visible, a click at terminal col 40 lands the
   point at col 22 — wrong char; clicks inside the tree also move the code
   point). QUEUED after 05d (same files: root.rs/tree.rs/store.rs).
-- **05f** (spec: .agents/tasks/issue-004-05f-menu-readability.md): menu
-  truncation mid-word + columns colliding (7 rows at 80 cols). QUEUED.
+- **05f** (DONE, dbb1885, review PASS; 449 tests): menu readability
+  (ellipsis + gutter + single-column narrow fallback). The review's P2
+  (a weak ellipsis assertion that passed on old output) was strengthened
+  in dba535c and proven non-vacuous.
 - **05h** (spec: .agents/tasks/issue-004-05h-buffer-list-keys.md):
   buffer-list `n`/`p`/`d` echo unbound (inconsistent with magit/log `n`/`p`
-  and the dired `d`-kill convention); found by tools/ux_sweep.py. QUEUED.
+  and the dired `d`-kill convention); found by tools/ux_sweep.py. IN FLIGHT.
 - **05g** (DONE, badaf9b, review PASS; 444 tests): hardware cursor
   absolute with the tree visible (measured before: CUP col 3 over the
   sidebar; after: 37, verified live), plus the TREE_* consts moved to
