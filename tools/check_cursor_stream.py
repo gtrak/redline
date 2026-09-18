@@ -849,6 +849,10 @@ def annotation_gutter_checks():
         the gutter (full-string assertion, not prefix).
       * Cursor-column leg: the hardware cursor on an annotated line sits ON
         the character (gutter + display col), not one cell left.
+      * All-annotated canvas FILL (02c): a 25-line file with every line
+        annotated in the 21-row viewport emits ~20 of 21 rows (10 code +
+        10 note — the LARGEST fitting span), not a handful of non-blank
+        rows; the point's line is drawn.
     """
     import os as _os
     src_dir = _os.path.join(REPO, "src")
@@ -975,7 +979,66 @@ def annotation_gutter_checks():
         code_unchanged_hidden and code_unchanged_shown,
         f"hidden={code_unchanged_hidden} shown={code_unchanged_shown}")
 
+    # ── Leg 5: all-annotated canvas FILL (02c) ────────────────────
+    # plan 005 issue 02c: the 02b floor (span = 1) left a 25-line
+    # all-annotated file in a 21-row viewport showing only 3 non-blank
+    # rows. The LARGEST fitting span is 10 (10 + 10 notes <= 21, but
+    # 11 + 11 > 21) → 10 code + 10 note rows: the canvas FILLS, and the
+    # point's line (line 0) is drawn. Pre-seed .redline-notes.md on disk
+    # (annotations are records matched by project-relative path) before
+    # opening the file; the notes doc lazily re-reads on mtime change.
+    with open(_os.path.join(src_dir, "ann_dense.rs"), "w") as f:
+        f.write("\n".join(f"dense line {i}" for i in range(25)))
+    notes = _os.path.join(REPO, ".redline-notes.md")
+    with open(notes, "w") as f:
+        f.write("<!-- redline-annotations:begin -->\n")
+        for i in range(25):
+            f.write(f"[annotation]\npath: src/ann_dense.rs\nline: {i}\n"
+                    f"col: 0\nanchor: dense line {i}\nnote: n{i}\n"
+                    f"orphaned: false\n")
+        f.write("<!-- redline-annotations:end -->\n")
+    # Re-walk (C-c p i): the find-file list is a cached walk, so a file
+    # created after this session's first walk is invisible to C-x C-f
+    # until the walk is invalidated (the same trick sweep_flows uses for
+    # big.txt).
+    s.key("C-c p i", 1.0)
+    s.key("C-x C-f", 1.0)
+    for ch in "ann_dense":
+        s.key(ch, 0.25)
+    s.key("RET", 1.5)
+    s._read(0.5, quiet=0.15)
+    # Content rows are CUP 2..=22 (1-based) = screen rows 1..=21 (0-based).
+    canvas_rows = [s.row_text(r) for r in range(1, s.rows - 2)]
+    title = s.row_text(0).strip()
+    filled = [t for t in canvas_rows if t.strip()]
+    marker_rows = [t for t in canvas_rows if "\u258e" in t]
+    note_rows = [t for t in canvas_rows if "\u25b8" in t]
+    # FILL, not merely non-blank: >= 18 of 21 content rows, specifically
+    # the 10 code + 10 note shape.
+    rec("all-annotated fill: >= 18 of 21 content rows emitted",
+        len(filled) >= 18, f"title={title!r} filled={len(filled)} (want >=18)")
+    rec("all-annotated fill: 10 code + 10 note rows (largest span)",
+        len(marker_rows) == 10 and len(note_rows) == 10,
+        f"title={title!r} markers={len(marker_rows)} notes={len(note_rows)} "
+        f"filled={len(filled)}")
+    # The point's line (line 0, "dense line 0") is drawn with its marker
+    # and its note row underneath.
+    point_drawn = any("dense line 0" in t and "\u258e" in t for t in canvas_rows)
+    rec("all-annotated fill: point's line (line 0) drawn with marker",
+        point_drawn,
+        f"row0={[t for t in canvas_rows if 'dense line 0' in t][:1]}")
+
     s.kill()
+    # Test hygiene (shared /tmp fixture): this function's legs create
+    # scratch files + the notes file; remove them after kill so RE-RUNS
+    # of this suite start from the baseline magit pane (the
+    # transient-menu @30 leg's first page depends on how many rows the
+    # magit status occupies).
+    for stray in ("src/ann_gutter.rs", "src/ann_dense.rs", ".redline-notes.md"):
+        try:
+            os.remove(_os.path.join(REPO, stray))
+        except OSError:
+            pass
     return checks
 
 
