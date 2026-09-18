@@ -42,10 +42,13 @@ agent, so enough information there that it'll know what to do."
   goes after that await, before `Ok(())`. The store is behind
   `store_handle: Arc<Mutex<AppStore>>` created at `main.rs:120` — available
   post-loop; read the annotations from it there.
-- **stdout is clean in TUI mode**: nothing in `main.rs` prints to stdout
-  (logging goes to a file via `init_tracing`; iocraft renders to the tty),
-  so the dump will not interleave with the UI. Confirm no `println!` exists
-  on the render path before shipping.
+- **CORRECTED (2026-09-18, verified live): stdout is NOT clean — the TUI
+  owns it.** iocraft's fullscreen loop renders to stdout and the cursor
+  write is `crossterm::execute!(std::io::stdout(), …)` (`root.rs:568`).
+  Forking the app with stdout redirected to a file captured **10207 bytes
+  of escape codes** (alt-screen + CUP + SGR), so `redline > notes.txt`
+  would capture the frame stream. When stdout is not a tty, render to
+  `/dev/tty` and keep stdout for the dump only.
 - **Quit paths to respect**: `q`-quit and `C-x C-c` both funnel through the
   store's `quit` flag, but 004-04 will introduce a save-prompt state
   machine — in that case the outer `fullscreen()` await returns only after
