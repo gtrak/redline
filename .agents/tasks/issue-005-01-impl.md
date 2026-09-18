@@ -20,9 +20,15 @@ the existing conflict discipline.
 
 1. `.agents/plans/005-edit-modes/01-file-edit-mode.md` — contract + the
    pre-check section (blocking blocks already exist).
-2. `src/app/store.rs`:
-   - `Buffers::insert_rope(Some(path), rope, mtime, editable)` — the 4th
-     arg is the per-buffer editable flag (`open_notes` passes `true`).
+2. `src/model/buffer.rs` — the `Buffer` struct (`editable`,
+   `locally_modified`, `changed_on_disk` fields) and `BufferTable`
+   (`get`/`get_mut`/`list`/`insert_rope`). The toggle flips
+   `BufferTable::get_mut(key)?.editable` — no new setter needed.
+3. `src/app/store.rs`:
+   - `BufferTable::insert_rope(Some(path), rope, mtime, editable)` — the
+     4th arg is the per-buffer editable flag (`open_notes` passes `true`).
+   - `save_buffer()` now delegates to `save_buffer_key(key)` (004-04) —
+     which already saves a NON-current buffer correctly.
    - `save_buffer()` (~1458) — already saves ANY editable buffer with a
      path; updates mtime, clears `locally_modified`/`changed_on_disk`,
      re-highlights. Reuse as-is.

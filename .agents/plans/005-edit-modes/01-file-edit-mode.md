@@ -24,13 +24,20 @@ saved to disk with C-x C-s under the existing conflict discipline.
 
 | File | Change |
 |---|---|
-| `src/app/store.rs` (`Buffer.editable` already exists) | per-buffer edit-mode flag is ALREADY the `editable` field; the toggle flips it. There is no `src/model/buffer.rs` — the buffer type lives in `src/app/store.rs`. |
+| `src/model/buffer.rs` | `Buffer.editable` already exists (field + `Buffer::new(.., editable)`); the toggle flips it via the existing `BufferTable::get_mut(key)`. No new setter needed. (CORRECTION: this file DOES exist — my first pre-check claim that it did not was wrong.) |
 | `src/app/store.rs` | toggle command, save command + watcher suppression, conflict integration. |
 | `src/app/command.rs` / keymap | C-x C-q, C-x C-s bindings. |
 | `src/ui/root.rs` | status-line mode indicator. |
 | tests + tools/ flows | toggle, save, suppression, conflict, discard-guard. |
 
 ## Orchestrator pre-check (2026-09-18, against committed tree)
+
+CORRECTION (2026-09-18): an earlier version of this pre-check claimed
+`src/model/buffer.rs` does not exist. That was WRONG — the file is real
+(`Buffer` struct with `editable`, `locally_modified`, `changed_on_disk`,
+`mark`; `Buffer::new(path, rope, mtime, editable)`). The `Buffers`
+collection that owns the map lives in the app layer; check which one holds
+the mutable accessor the toggle needs.
 
 Confirmed building blocks already exist; this issue is mostly wiring + one
 new suppression path:
