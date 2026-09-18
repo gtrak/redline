@@ -29,7 +29,8 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
    remapping made the 256-color bar invisible on the user's theme).
 4. **Issue 04 — quit save-prompt with buffer selection** (user-approved
    row 13 with "buffer selection"): C-x C-c enumerates locally-modified
-   buffers (y/n/!/C-g) instead of silently discarding.
+   buffers (y/n/!/C-g) instead of silently discarding. **DONE** (0c5dfc6,
+   review PASS; 428 tests; 52/52 flows; carried P2 folded into 05d).
    Row 15 (undo) stays logged-not-implemented ("no undo yet").
 
 ### Added mid-plan (user reports + UX sweeps, 2026-09-18)
@@ -43,9 +44,10 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
   (middle→top→bottom, reset on other commands); M-f/M-b emacs word motion.
   Word motion and C-l order were found WRONG by the differential probe
   (tools/probe_emacs_diff.py) and fixed; review VERDICT PASS.
-- **05d** (spec: .agents/tasks/issue-004-05d-wide-chars.md): display-width
-  cursor/click columns + the dropped-space render bug (found by UX sweep).
-  QUEUED after 004-04 (both touch store.rs/root.rs).
+- **05d** (IN FLIGHT; spec: .agents/tasks/issue-004-05d-wide-chars.md):
+  display-width cursor/click columns + the dropped-space render bug (found
+  by UX sweep); also folds the carried 004-04 review P2 (prompt redisplay
+  after a failed save).
 - **Battery 3/4 harnesses**: column-level emacs comparison + differential
   probes (tools/drive_*_battery3.py, tools/probe_emacs_diff{,2}.py). Probe
   #2 logged parity rows 32-34 (scroll-model divergence is NOT emacs — kept
