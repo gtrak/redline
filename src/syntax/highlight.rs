@@ -897,56 +897,59 @@ mod tests {
             (state >> 33) as usize
         };
 
+        // 007-04 review P2-2: steps that took the incremental path (the
+        // pre-error prefix); the assert below pins a real minimum.
+        let mut incr_steps = 0usize;
+        // All VALID Rust lines (007-04 review P2-2: bare words / bare
+        // emoji lines are syntax errors — one of them poisons the baseline
+        // and the rest of the loop degrades to vacuous full-vs-full).
         let inserts = [
             "let v = 1;\n",
             "fn g() {}\n\n",
             "// éü\n",
-            "  indented line\n",
-            "🎉🎉\n",
+            "    a += 2;\n",
+            "// 🎉🎉\n",
         ];
+        // 007-04 review P2-2: mid-token edits break syntax within a few
+        // steps and the has_error guard then forces vacuous full-vs-full
+        // comparisons. So the edits here KEEP the content valid — whole
+        // lines inserted at line starts, whole brace-free lines deleted —
+        // so the incremental path is exercised by essentially every step.
         for step in 0..150 {
-            let n_chars = old_rope.len_chars();
-            let pos = rng() % (n_chars.saturating_add(1));
-            match rng() % 4 {
+            let n_lines = old_rope.len_lines();
+            let pos = old_rope.line_to_char(rng() % n_lines);
+            match rng() % 3 {
                 0 => {
-                    // ascii insert
+                    // ascii insert as its own line at a line start
                     let text = inserts[rng() % inserts.len()];
                     let edit = rope_edit_to_input_edit(&old_rope, pos, pos, text);
                     retained.apply_edit(&edit);
                     old_rope.insert(pos, text);
                 }
                 1 => {
-                    // multibyte insert
-                    let text = "café naïve\n";
+                    // multibyte insert as its own line (a COMMENT — bare
+                    // words would be a syntax error and poison the loop)
+                    let text = "// café naïve\n";
                     let edit = rope_edit_to_input_edit(&old_rope, pos, pos, text);
                     retained.apply_edit(&edit);
                     old_rope.insert(pos, text);
                 }
-                2 => {
-                    // bounded delete (1..6 chars) — may break syntax
-                    let k = 1 + (rng() % 6).min(n_chars.saturating_sub(pos));
-                    let end = (pos + k).min(n_chars);
-                    let edit = rope_edit_to_input_edit(&old_rope, pos, end, "");
-                    retained.apply_edit(&edit);
-                    old_rope.remove(pos..end);
-                }
                 _ => {
-                    // multi-line delete of a whole statement line (when
-                    // the region is a clean line) — usually stays valid
-                    if pos > 0 && old_rope.char(pos.wrapping_sub(1)) == '\n' {
-                        let mut end = pos + 1;
-                        while end < old_rope.len_chars()
-                            && old_rope.char(end) != '\n'
-                        {
-                            end += 1;
+                    // delete a whole line that carries no braces (a
+                    // statement/comment line) — stays valid
+                    let mut end_line = rng() % n_lines;
+                    for _ in 0..n_lines {
+                        let line = end_line % n_lines;
+                        let ls = old_rope.line_to_char(line);
+                        let le = old_rope.line_to_char((line + 1).min(n_lines));
+                        let text: String = old_rope.slice(ls..le).chars().collect();
+                        if !text.contains('{') && !text.contains('}') && !text.contains('(') {
+                            let edit = rope_edit_to_input_edit(&old_rope, ls, le, "");
+                            retained.apply_edit(&edit);
+                            old_rope.remove(ls..le);
+                            break;
                         }
-                        let edit = rope_edit_to_input_edit(&old_rope, pos, end, "");
-                        retained.apply_edit(&edit);
-                        old_rope.remove(pos..end);
-                    } else {
-                        let edit = rope_edit_to_input_edit(&old_rope, pos, pos, "let w = 2;\n");
-                        retained.apply_edit(&edit);
-                        old_rope.insert(pos, "let w = 2;\n");
+                        end_line += 1;
                     }
                 }
             }
@@ -955,7 +958,10 @@ mod tests {
             // baseline (mirrors `ensure_highlight_for_key`).
             let incr = match highlight_with_tree(&old_rope, LanguageId::Rust, &mut retained)
             {
-                Some(r) => r.unwrap(),
+                Some(r) => {
+                    incr_steps += 1;
+                    r.unwrap()
+                }
                 None => {
                     let (r, t) = highlight_reusable(&old_rope, LanguageId::Rust).unwrap();
                     retained.replace(t);
@@ -965,6 +971,16 @@ mod tests {
             let full = highlight_reusable(&old_rope, LanguageId::Rust).unwrap().0;
             assert_eq!(incr, full, "step {step}: incremental diverged from full");
         }
+        // 007-04 review P2-2: the stress loop must genuinely exercise the
+        // incremental path — once the content accumulates a syntax error
+        // the has_error guard forces full parses that compare equal
+        // vacuously. With ~120 valid fn bodies and mostly-clean edits the
+        // expected incremental count is O(100); require a solid minority
+        // (≥10) so a regression to all-vacuous steps fails loudly.
+        assert!(
+            incr_steps >= 20,
+            "only {incr_steps}/150 steps took the incremental path — the              stress loop is vacuously comparing full vs full"
+        );
 
         // Final content: the reusable pipeline must also match the
         // `Highlighter` full path (the byte-identical bar end-to-end).
@@ -1051,7 +1067,7 @@ mod tests {
     /// incremental parse is not SLOWER than the full parse.
     #[test]
     fn measure_full_vs_incremental() {
-        // ~1.5 MB of Rust: 40k small functions with comments.
+        // ~3.2 MB of Rust: 40k small functions with comments.
         let lines: Vec<String> = (0..40_000)
             .map(|i| format!("fn f{i}(a: i32, b: &str) -> i32 {{\n    // helper {i}\n    a.wrapping_add(1)\n}}\n"))
             .collect();

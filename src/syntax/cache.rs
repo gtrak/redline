@@ -94,6 +94,13 @@ impl RetainedTrees {
         self.map.contains_key(key)
     }
 
+    /// Remove a retained tree (007-04 review P2-1: content replacement
+    /// without an edit event must not leave a hintable stale tree).
+    pub fn remove(&mut self, key: &TreeKey) {
+        self.map.remove(key);
+        self.order.retain(|k| k != key);
+    }
+
     /// Apply an `InputEdit` to the retained tree; no-op when the buffer
     /// has no retained tree yet (plain text, big file, or not yet
     /// highlighted).
@@ -211,6 +218,13 @@ impl HighlightCache {
     /// one).
     pub fn retain_apply_edit(&mut self, key: &TreeKey, edit: &InputEdit) {
         self.trees.apply_edit(key, edit);
+    }
+
+    /// Drop a buffer's retained tree (007-04 review P2-1): a content
+    /// replacement WITHOUT an edit event must not leave a tree that could
+    /// be hinted against unrelated content when the mtime is unchanged.
+    pub fn retain_remove(&mut self, key: &TreeKey) {
+        self.trees.remove(key);
     }
 
     /// Store a freshly parsed tree as the buffer's retained baseline.

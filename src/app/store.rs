@@ -2611,12 +2611,26 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         mtime
     }
 
+    /// 007-04 review P2-1: drop a buffer's retained tree after a content
+    /// replacement that is NOT an edit event (`replace_buffer_text`,
+    /// read-only accept, disk reload). The `(key, mtime)` key alone
+    /// under-protects on coarse-granularity or mtime-preserving
+    /// filesystems; removing the tree forces a full parse on the next
+    /// highlight — the conservative, always-correct outcome.
+    fn drop_retained_tree(&mut self, key: &str) {
+        if let Some(buf) = self.buffers.get(key) {
+            self.highlight_cache
+                .retain_remove(&TreeKey::new(key, buf.mtime));
+        }
+    }
+
     /// Replace a buffer's text (the notes-buffer sync path).
     fn replace_buffer_text(&mut self, key: &str, text: &str) {
         let rope = Rope::from_str(text);
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.rope = rope;
         }
+        self.drop_retained_tree(key);
     }
 
     /// `A` (plan 005 issue 02): prompt for an annotation on the line at
@@ -3033,6 +3047,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             buf.changed_on_disk = false;
             buf.editable = false;
         }
+        self.drop_retained_tree(&key);
         self.toggle_ro_confirm = None;
         self.ensure_highlight_for_key(&key);
         self.minibuffer_message("read-only (C-x C-q to edit)");
@@ -7264,6 +7279,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             buf.mtime = mtime;
             buf.changed_on_disk = false;
         }
+        self.drop_retained_tree(&key);
         self.scroll.insert(key.clone(), new_top);
         self.ensure_highlight_for_key(&key);
         // plan 005 issue 02: auto-reload is a content change — the
@@ -7304,6 +7320,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             buf.changed_on_disk = false;
             buf.locally_modified = false; // force reload supersedes local edits
         }
+        self.drop_retained_tree(&key);
         self.scroll.insert(key.clone(), new_top);
         self.ensure_highlight_for_key(&key);
         // plan 005 issue 02: on reload, the annotation anchors for this
