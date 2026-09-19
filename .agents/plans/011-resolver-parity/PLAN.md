@@ -1,6 +1,6 @@
 # 011 — Redline: resolver parity across languages
 
-Status: 01 in flight (reviewed landing pending); 03 landed on branch `nlang` (in review); 02/04 queued behind 01; 05 last
+Status: 03 PASS+MERGED (ab75247); 01 in flight; 02/04 queued behind 01; 05 last
 Phases: 2 · Issues: 01–05
 Depends on: 007-03 (`SymbolContext` scope field) for 01; 007-01 (node-at-point)
 for 03–04
@@ -59,7 +59,7 @@ Verified state (2026-09-19):
 
 ## Outcome record (live)
 
-- **03** (branch `nlang`, commit `6c02690`, in review): per-language node-at-point
+- **03 PASS + MERGED** (`6c02690`, reviewer PASS, merged `ab75247`): per-language node-at-point
   in `src/syntax/node.rs` — JS/TS(+TSX), Python, Go identifier predicates +
   enclosing-scope walks behind 007-01's extension point, whole-path rule per
   grammar (`member_expression` / `nested_type_identifier`→`nested_identifier` /
