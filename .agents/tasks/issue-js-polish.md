@@ -39,3 +39,8 @@ Read `.agents/skills/*.md` as ground truth.
   (+ unit tests), `crates/redline-resolve/tests/corpus/js/README.md`,
   `docs/provider-matrix.md`. NOTHING else. A parallel lane owns
   `src/app/flow_tests.rs` and `src/app/store.rs` — do not touch either.
+
+## Post-merge follow-up (review P2s, queued)
+
+- malformed-package.json bail half: unit test (malformed intermediate + valid above → walk bails, not climbs past).
+- matrix "41 unit tests" wording: 3 are #[ignore] (loud-skip, not pass) — precision fix for a future matrix pass.
