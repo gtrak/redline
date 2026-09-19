@@ -18,10 +18,22 @@
 //! (no registry fetch, no network). When the cargo binary is absent the
 //! whole suite skips LOUDLY. No PTY is used anywhere.
 //!
+//! A deliberate provider/seam behavior change is a deliberate golden diff:
+//! these goldens are HAND-AUTHORED `*.golden` files — each file is BOTH the
+//! probe spec and the expected outcome, pinned byte-for-byte with hand-
+//! written header prose — so a re-bless does NOT re-render them (unlike the
+//! re-derivable js/go goldens). A bless run writes EVERY golden back
+//! UNCHANGED (the exact bytes a green run compares against), eprintlns a
+//! no-change line per file, then FAILS the run (011-08 follow-up P2-1: an
+//! accidental `GOLDEN_BLESS` can never end green; a deliberate hand-edit
+//! round-trips byte-identically):
+//! `GOLDEN_BLESS=1 cargo test -p redline-resolve --test golden_rust`.
+//!
 //! Deterministic probe walk: `*.golden` files under the corpus root in
 //! sorted (byte) order, one provider resolve per probe.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use redline_resolve::{CargoProvider, ResolvedSource, SymbolContext, ToolingProvider};
 
@@ -168,6 +180,61 @@ fn rel_to_corpus(corpus: &Path, p: &Path) -> Option<String> {
     None
 }
 
+// ── golden bless bookkeeping (011-08 follow-up P2-1, rust lane) ─────────────
+//
+// The rust goldens are hand-authored and authoritative: the bytes a green
+// run compares against ARE the checked-in file's own bytes. So bless does
+// not re-render; it rewrites every golden back UNCHANGED and records the
+// bless so the end-of-test gate fails the run. A no-op re-bless is always a
+// no-change; a deliberate hand-edit round-trips byte-identically.
+static BLESSED_RUN: AtomicBool = AtomicBool::new(false);
+static BLESSED_CHANGED: AtomicUsize = AtomicUsize::new(0);
+
+/// End-of-test gate: a bless run writes EVERY golden back first, then fails
+/// exactly once per test (never per file — a per-file panic would abort the
+/// loop and leave later goldens unwritten). An accidental GOLDEN_BLESS can
+/// therefore never end green.
+fn assert_bless_stopped(test_name: &str) {
+    if !BLESSED_RUN.load(Ordering::SeqCst) {
+        return;
+    }
+    let changed = BLESSED_CHANGED.load(Ordering::SeqCst);
+    panic!(
+        "GOLDEN_BLESS run of {test_name} rewrote {changed} golden(s) — \
+         run the suite again WITHOUT GOLDEN_BLESS to verify the new goldens pass"
+    );
+}
+
+/// Bless-mode write (no-ops unless `GOLDEN_BLESS` is set): a rust golden is
+/// hand-authored, so bless writes the CHECKED-IN golden back with the exact
+/// bytes a green run compares against (byte-preserving — writes to the
+/// checked-in corpus, not the tempdir copy, so `git diff` reflects it) and
+/// eprintlns a no-change line. `changed` is the js/go-compatible bookkeeping
+/// (always false here: there is no independent live-derived rendering that
+/// could differ from the checked-in file).
+fn bless_rust_golden(corpus_src: &Path, tmp_golden: &Path) {
+    if std::env::var_os("GOLDEN_BLESS").is_none() {
+        return;
+    }
+    let checkin = corpus_src.join(tmp_golden.file_name().unwrap());
+    let old = std::fs::read(&checkin)
+        .unwrap_or_else(|e| panic!("cannot read golden {}: {e}", checkin.display()));
+    let rendered = old.clone();
+    let changed = old != rendered;
+    std::fs::write(&checkin, &rendered)
+        .unwrap_or_else(|e| panic!("cannot bless {}: {e}", checkin.display()));
+    eprintln!(
+        "GOLDEN_BLESS: {} {} — review `git diff` before committing; \
+         this run FAILS so the bless cannot slip through green",
+        if changed { "REWROTE" } else { "no change to" },
+        checkin.display()
+    );
+    if changed {
+        BLESSED_CHANGED.fetch_add(1, Ordering::SeqCst);
+    }
+    BLESSED_RUN.store(true, Ordering::SeqCst);
+}
+
 /// Check an actual `ResolvedSource` against a resolved golden; returns the
 /// list of field mismatches (empty = exact match).
 fn check_resolved(src: &ResolvedSource, exp: &ExpectedResolved, corpus: &Path) -> Vec<String> {
@@ -218,7 +285,8 @@ fn rust_golden_corpus() {
     // golden path placeholders have a stable shape to normalize against.
     let tmp = tempfile::tempdir().expect("tempdir");
     let corpus = tmp.path().join("corpus");
-    copy_tree(&corpus_src_dir(), &corpus).expect("copy corpus");
+    let corpus_src = corpus_src_dir();
+    copy_tree(&corpus_src, &corpus).expect("copy corpus");
 
     // Isolated CARGO_HOME: the live cargo legs never touch the ambient
     // registry (path dependencies only — nothing can be fetched anyway).
@@ -242,6 +310,10 @@ fn rust_golden_corpus() {
     let mut failures: Vec<String> = Vec::new();
     for path in &goldens {
         let probe = parse_golden(path);
+        // Bless bookkeeping: a byte-preserving re-bless writes the checked-in
+        // golden back unchanged and records the bless (no-op unless
+        // GOLDEN_BLESS is set).
+        bless_rust_golden(&corpus_src, path);
         // An empty root (none of the goldens use one) would make
         // `Path::join("")` append a trailing slash and skew normalization.
         let probe_root = if probe.root.is_empty() {
@@ -300,6 +372,7 @@ fn rust_golden_corpus() {
         }
     }
 
+    assert_bless_stopped("rust_golden_corpus");
     assert!(
         failures.is_empty(),
         "{} golden mismatch(es) out of {} probes:\n\n{}",
