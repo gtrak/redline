@@ -7780,9 +7780,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let line = self.point_line();
         let line_text = buf.line_text(line).unwrap_or_default();
         // (1) The symbol under the point: identifier run around the point's
-        // column, plus the `::`-path token it belongs to (raw, for the
-        // resolver).
-        let at = Self::symbol_at_point(&line_text, self.point_col());
+        // column, plus the path token it belongs to (raw, for the
+        // resolver). 011-06: language-aware — in a non-Rust buffer the
+        // token is the whole dotted path when the point sits in the
+        // language's path container, else the bare extraction.
+        let lang = self.grammar_registry.language_for(&path.to_string_lossy());
+        let at = Self::symbol_at_point(lang, &line_text, self.point_col());
 
         let defs: Option<Vec<crate::nav::index::Location>> = at
             .as_ref()
@@ -9222,7 +9225,11 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .get(key)
             .map(|b| b.line_text(line).unwrap_or_default())
             .unwrap_or_default();
-        let at = Self::symbol_at_point(&line_text, self.point_col());
+        // 011-06: language-aware path token (the same seam as the project
+        // path — external buffers are non-Rust in practice, but the
+        // behavior is uniform by construction).
+        let lang = self.grammar_registry.language_for(&path.to_string_lossy());
+        let at = Self::symbol_at_point(lang, &line_text, self.point_col());
         let Some((root, outcome)) =
             self.crate_xref_outcome(path, line, at.as_ref())
         else {
@@ -9357,13 +9364,30 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     }
 
     /// The identifier run at the point's column (char offset) on `text`, plus
-    /// the `::`-path token it belongs to (plan 006 issue 02, selection rule
-    /// 1). Returns `(identifier, path_token)` — e.g. the cursor inside
-    /// `tokio::spawn` → `("spawn", "tokio::spawn")`; on `obj.name` →
-    /// `("name", "name")`. A cursor parked just AFTER the name (before
+    /// the path token it belongs to (plan 006 issue 02, selection rule 1).
+    /// Returns `(identifier, path_token)` — e.g. the cursor inside
+    /// `tokio::spawn` → `("spawn", "tokio::spawn")`; on a Rust `obj.name`
+    /// → `("name", "name")`. A cursor parked just AFTER the name (before
     /// `(`, `.`, or whitespace — the usual call-site spot) counts. `None`
     /// when the point is not on (or immediately after) an identifier run.
-    fn symbol_at_point(text: &str, col: usize) -> Option<(String, String)> {
+    ///
+    /// 011-06: the PATH TOKEN is language-aware. Rust's `::` shape is the
+    /// char-scan below, byte-for-byte unchanged (a Rust `.` field access
+    /// still stays bare — fields are not in the index). In a non-Rust
+    /// buffer, when the point sits inside the language's dotted path
+    /// container, the path token becomes the WHOLE dotted path
+    /// (`json.dumps`, `ns.member`, `pkg.Fn`) so the providers' already-
+    /// unit-tested dotted handling is reachable from M-.: ONE parse
+    /// (`syntax::node::node_at` — 011-03's whole-path machinery, 007-01's
+    /// one-parse discipline). When `node_at` returns `None` (no tree / a
+    /// shape it does not cover / the identifier is not a full
+    /// dot-delimited segment of the container, e.g. a computed member
+    /// `a[b]`) the exact current bare extraction stands — never guess.
+    fn symbol_at_point(
+        lang: LanguageId,
+        text: &str,
+        col: usize,
+    ) -> Option<(String, String)> {
         let chars: Vec<char> = text.chars().collect();
         if col > chars.len() {
             return None;
@@ -9437,7 +9461,47 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             }
         }
         let path_token: String = chars[pstart..pend].iter().collect();
+        // 011-06: non-Rust — upgrade the path token to the whole dotted
+        // path when the point sits inside the language's path container.
+        // `node_at` takes a byte offset: the identifier run's last char
+        // (always in-range — the run is non-empty here). Any miss keeps
+        // the bare extraction byte-for-byte (the `::` scan above is the
+        // Rust shape; `.` never extends it).
+        let path_token = if lang != LanguageId::Rust
+            && let Some(byte) = text.char_indices().nth(end - 1).map(|(b, _)| b)
+            && let Some(info) = crate::syntax::node::node_at(lang, text, byte)
+            && Self::dotted_path_container(lang, &info.kind)
+            && info.text.split('.').any(|seg| seg == identifier)
+        {
+            info.text
+        } else {
+            path_token
+        };
         Some((identifier, path_token))
+    }
+
+    /// 011-06: the per-language DOTTED path-container node kinds — exactly
+    /// the containers 011-03's `node_at` whole-path machinery returns, as
+    /// pinned per language in `src/syntax/node.rs`: JS/TS/TSX
+    /// `member_expression` (`a.b.c`) and the TS-only nested type
+    /// identifiers, Python's `attribute` (`a.b.c`), Go's
+    /// `selector_expression` / `qualified_type` (`pkg.Fn`). Rust is out of
+    /// scope here — its `::` shape is extracted byte-for-byte in
+    /// `symbol_at_point` itself.
+    fn dotted_path_container(lang: LanguageId, kind: &str) -> bool {
+        match lang {
+            LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+                matches!(
+                    kind,
+                    "member_expression" | "nested_type_identifier" | "nested_identifier"
+                )
+            }
+            LanguageId::Python => kind == "attribute",
+            LanguageId::Go => {
+                matches!(kind, "selector_expression" | "qualified_type")
+            }
+            _ => false,
+        }
     }
 
     /// `M-i`: imenu — open a picker over the current file's outline.
@@ -14176,54 +14240,262 @@ mod tests {
     // ── plan 006 issue 02: tooling-resolver fall-through ─────────────────────────
 
     /// The point-line token extractor: identifier run at the column + the
-    /// `::`-path token around it.
-    fn satp(text: &str, col: usize) -> Option<(String, String)> {
-        AppStore::symbol_at_point(text, col)
+    /// path token around it (011-06: language-aware path token).
+    fn satp(lang: LanguageId, text: &str, col: usize) -> Option<(String, String)> {
+        AppStore::symbol_at_point(lang, text, col)
     }
 
     #[test]
     fn symbol_at_point_identifier_and_path_token() {
+        // Rust `::`: byte-for-byte the pre-011-06 extraction (no parse).
         let line = "    let h = tokio::spawn(f);";
         // Cursor inside `tokio` (col 12) → ident `tokio`, path `tokio::spawn`.
-        assert_eq!(satp(line, 12), Some(("tokio".into(), "tokio::spawn".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 12),
+            Some(("tokio".into(), "tokio::spawn".into()))
+        );
         // Cursor inside `spawn` (col 19) → same path token.
-        assert_eq!(satp(line, 19), Some(("spawn".into(), "tokio::spawn".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 19),
+            Some(("spawn".into(), "tokio::spawn".into()))
+        );
         // Cursor parked right after `spawn` (before the `)` — the usual
         // call-site spot) still counts.
-        assert_eq!(satp(line, 24), Some(("spawn".into(), "tokio::spawn".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 24),
+            Some(("spawn".into(), "tokio::spawn".into()))
+        );
     }
 
     #[test]
     fn symbol_at_point_field_access_stays_bare() {
-        // A `.`-accessed field: the token is the bare field name (fields are
-        // NOT in the index yet — plan 007-01 will capture them).
+        // A Rust `.`-accessed field: the token stays the bare field name
+        // (fields are NOT in the index, and Rust `::`-only extraction is
+        // byte-for-byte preserved by 011-06 — the language-aware
+        // extension covers the OTHER languages' dotted path shapes).
         let line = "    let n = obj.name;";
-        assert_eq!(satp(line, 17), Some(("name".into(), "name".into())));
-        assert_eq!(satp(line, 20), Some(("name".into(), "name".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 17),
+            Some(("name".into(), "name".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Rust, line, 20),
+            Some(("name".into(), "name".into()))
+        );
+    }
+
+    /// 011-06 (discriminating): in a non-Rust buffer, the M-. path token
+    /// becomes the WHOLE dotted path when the point sits in the language's
+    /// path container — this is what makes the providers' already-
+    /// unit-tested dotted handling reachable from M-.. Pre-011-06 every
+    /// one of these returned the BARE identifier.
+    #[test]
+    fn symbol_at_point_dotted_path_extends_token_per_language() {
+        // Python: `json.dumps` at a use site — cursor on EITHER segment.
+        let line = "y = json.dumps(x)";
+        assert_eq!(
+            satp(LanguageId::Python, line, 5),
+            Some(("json".into(), "json.dumps".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Python, line, 11),
+            Some(("dumps".into(), "json.dumps".into()))
+        );
+        // Cursor parked right after `dumps` (before `(` — the usual
+        // call-site spot) still counts.
+        assert_eq!(
+            satp(LanguageId::Python, line, 14),
+            Some(("dumps".into(), "json.dumps".into()))
+        );
+        // Python deep chain: `os.path.join` under the MIDDLE segment.
+        let deep = "os.path.join(a, b)";
+        assert_eq!(
+            satp(LanguageId::Python, deep, 4),
+            Some(("path".into(), "os.path.join".into()))
+        );
+        // JS: `fakelib.apply(5)` — cursor on the member, and parked just
+        // after it (before `(`); TS gets the same answer (011-03 shares
+        // the JS machinery).
+        let js = "fakelib.apply(5);";
+        assert_eq!(
+            satp(LanguageId::JavaScript, js, 10),
+            Some(("apply".into(), "fakelib.apply".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::JavaScript, js, 13),
+            Some(("apply".into(), "fakelib.apply".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::TypeScript, js, 10),
+            Some(("apply".into(), "fakelib.apply".into()))
+        );
+        // Go: `fmt.Println(x)` (selector_expression) and a
+        // `qualified_type` in type position.
+        let go = "fmt.Println(x)";
+        assert_eq!(
+            satp(LanguageId::Go, go, 7),
+            Some(("Println".into(), "fmt.Println".into()))
+        );
+        let gotype = "var v fmt.Stringer";
+        assert_eq!(
+            satp(LanguageId::Go, gotype, 12),
+            Some(("Stringer".into(), "fmt.Stringer".into()))
+        );
+        // 006-02b-style separator rule for `.`: a cursor right after
+        // `json` (on the dot) counts as the end of the preceding segment.
+        assert_eq!(
+            satp(LanguageId::Python, "json.dumps", 4),
+            Some(("json".into(), "json.dumps".into()))
+        );
+    }
+
+    /// 011-06 (pin): the degradation stays byte-for-byte — bare
+    /// identifiers, an unimplemented language, and an identifier that is
+    /// NOT a full dot-delimited segment of its container (a computed
+    /// member `a[b]`, no dot at all) all keep the exact bare extraction.
+    #[test]
+    fn symbol_at_point_non_rust_bare_and_unsupported_shapes_stay_bare() {
+        // Bare identifiers (no path container around them): the bare
+        // extraction, in every language.
+        assert_eq!(
+            satp(LanguageId::Python, "x = 1", 0),
+            Some(("x".into(), "x".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::JavaScript, "const x = 1;", 6),
+            Some(("x".into(), "x".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Go, "const Z = 3", 6),
+            Some(("Z".into(), "Z".into()))
+        );
+        // Unimplemented language (Plain): no parse, byte-for-byte bare —
+        // the SAME line in Python extends, here it does not.
+        assert_eq!(
+            satp(LanguageId::Plain, "json.dumps", 6),
+            Some(("dumps".into(), "dumps".into()))
+        );
+        // A computed member `a[b]`: the node IS a member_expression, but
+        // `b` is not a dot-delimited SEGMENT of `a[b]` (no dot at all) —
+        // never feed the providers a non-path token; the bare extraction
+        // stands.
+        assert_eq!(
+            satp(LanguageId::JavaScript, "a[b]", 2),
+            Some(("b".into(), "b".into()))
+        );
+        // Punctuation / whitespace around the point: no symbol (the
+        // identifier-run rule is language-independent).
+        assert_eq!(satp(LanguageId::Python, "let a = 1;", 7), None);
+        assert_eq!(satp(LanguageId::Python, "{ ", 1), None);
+    }
+
+    /// 011-06 × 011-02 interplay (pin): a dotted token resolves on its OWN
+    /// path — the import walks are only for BARE symbols, so any
+    /// separator-containing symbol carries NO hint (the provider's own
+    /// dotted machinery does the work; no double-application).
+    #[test]
+    fn resolver_scope_dotted_symbols_carry_no_import_hint() {
+        let psrc = "import json\n\njson.dumps('x')\n";
+        let pbyte = psrc.find("dumps").expect("fixture");
+        assert!(
+            AppStore::python_scope_for(psrc, pbyte, "json.dumps").is_empty(),
+            "a dotted python symbol never gets an import-walk hint"
+        );
+        let gsrc = "import \"fmt\"\n\nfunc main() {\n\tfmt.Println(1)\n}\n";
+        let gbyte = gsrc.find("Println").expect("fixture");
+        assert!(
+            AppStore::go_scope_for(gsrc, gbyte, "fmt.Println").is_empty(),
+            "a dotted go symbol never gets a dot-import hint"
+        );
+    }
+
+    /// 011-06 (discriminating, app level): M-. on `json.dumps` in a python
+    /// buffer — the resolver context carries the WHOLE dotted path (the
+    /// no-runtime miss message echoes the exact token fed; pre-011-06 it
+    /// would have said the bare `dumps`).
+    #[test]
+    fn xref_python_dotted_token_reaches_resolver() {
+        let (mut s, _dir) = store_with_index(&[
+            ("main.py", "import json\n\njson.dumps(x)\n"),
+        ]);
+        s.open_path("main.py");
+        s.set_point(2, 7, 7); // cursor inside `dumps` on line 3
+        s.xref_find_definitions();
+        assert!(
+            s.message.contains("no provider resolution for `json.dumps`"),
+            "the resolver got the dotted path, got: {}", s.message
+        );
+        assert_eq!(s.resolve_generation, 2, "fall-through fired exactly once");
+    }
+
+    /// 011-06 (discriminating, app level): M-. on `fakelib.apply` in a js
+    /// buffer carries the dotted path to the resolver (pre-011-06 the
+    /// `::`-only extraction fed the bare `apply`).
+    #[test]
+    fn xref_js_dotted_token_reaches_resolver() {
+        let (mut s, _dir) = store_with_index(&[
+            ("main.js", "import * as fakelib from \"fakelib\";\n\nfakelib.apply(5);\n"),
+        ]);
+        s.open_path("main.js");
+        s.set_point(2, 10, 10); // cursor inside `apply` on line 3
+        s.xref_find_definitions();
+        assert!(
+            s.message.contains("no provider resolution for `fakelib.apply`"),
+            "the resolver got the dotted path, got: {}", s.message
+        );
+        assert_eq!(s.resolve_generation, 2, "fall-through fired exactly once");
     }
 
     #[test]
     fn symbol_at_point_boundaries_and_garbage() {
-        assert_eq!(satp("fn main() {}", 0), Some(("fn".into(), "fn".into())));
+        // Rust: the byte-for-byte boundary behavior (011-06 kept it).
+        assert_eq!(
+            satp(LanguageId::Rust, "fn main() {}", 0),
+            Some(("fn".into(), "fn".into()))
+        );
         // Punctuation (the `(` after a name): the run before the point.
-        assert_eq!(satp("call(1)", 4), Some(("call".into(), "call".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "call(1)", 4),
+            Some(("call".into(), "call".into()))
+        );
         // Whitespace with nothing identifier-ish around: no symbol.
-        assert_eq!(satp("let a = 1;", 7), None);
-        assert_eq!(satp("{ ", 1), None);
+        assert_eq!(satp(LanguageId::Rust, "let a = 1;", 7), None);
+        assert_eq!(satp(LanguageId::Rust, "{ ", 1), None);
         // A leading `::` does not extend past itself (empty path segment).
-        assert_eq!(satp("::inner", 3), Some(("inner".into(), "inner".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "::inner", 3),
+            Some(("inner".into(), "inner".into()))
+        );
         // Column at the very end of the line: the trailing run counts.
-        assert_eq!(satp("let x = 1;", 9), Some(("1".into(), "1".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "let x = 1;", 9),
+            Some(("1".into(), "1".into()))
+        );
         // Mid-line identifier.
-        assert_eq!(satp("let x = 1;", 4), Some(("x".into(), "x".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "let x = 1;", 4),
+            Some(("x".into(), "x".into()))
+        );
         // Deep path: `a::b::c` under the middle segment.
-        assert_eq!(satp("use a::b::c;", 7), Some(("b".into(), "a::b::c".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "use a::b::c;", 7),
+            Some(("b".into(), "a::b::c".into()))
+        );
         // 006-02b item 4: the cursor on the SECOND colon of a `::`
         // separator counts as the end of the preceding segment (the first
         // colon already did, via the "run before the point" rule).
-        assert_eq!(satp("a::b", 1), Some(("a".into(), "a::b".into())));
-        assert_eq!(satp("a::b", 2), Some(("a".into(), "a::b".into())));
-        assert_eq!(satp("use a::b::c;", 6), Some(("a".into(), "a::b::c".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, "a::b", 1),
+            Some(("a".into(), "a::b".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Rust, "a::b", 2),
+            Some(("a".into(), "a::b".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Rust, "use a::b::c;", 6),
+            Some(("a".into(), "a::b::c".into()))
+        );
     }
 
     #[test]
@@ -17004,13 +17276,25 @@ mod tests {
         // the resolver).
         let line = "let x = Foo::BAR;";
         // `Foo` starts at col 8 (cursor inside the identifier).
-        assert_eq!(satp(line, 8), Some(("Foo".into(), "Foo::BAR".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 8),
+            Some(("Foo".into(), "Foo::BAR".into()))
+        );
         // The second `:` of the `::` separator (col 12) counts as the end
         // of the preceding segment (006-02b item 4).
-        assert_eq!(satp(line, 12), Some(("Foo".into(), "Foo::BAR".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 12),
+            Some(("Foo".into(), "Foo::BAR".into()))
+        );
         // `BAR` starts at col 13; just after it (col 16) still counts.
-        assert_eq!(satp(line, 13), Some(("BAR".into(), "Foo::BAR".into())));
-        assert_eq!(satp(line, 16), Some(("BAR".into(), "Foo::BAR".into())));
+        assert_eq!(
+            satp(LanguageId::Rust, line, 13),
+            Some(("BAR".into(), "Foo::BAR".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Rust, line, 16),
+            Some(("BAR".into(), "Foo::BAR".into()))
+        );
     }
 
     #[test]

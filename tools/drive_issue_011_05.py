@@ -21,27 +21,33 @@ PYTHON (requires python3 — the provider shelling out to it is the live
         (store.rs open_blame external_buffers branch — one code path for
         every language, so this single live pin covers the cell).
   L-P2  PATH-SHAPED use with a plain `import json` (`json.dumps('x')`):
-        the app's char-based M-. extraction is `::`-only (Rust), so the
-        resolver gets the BARE `dumps` with NO scope hint — it degrades to
-        the exact no-hint bail. The provider's dotted handling (json.dumps)
-        is unit-covered only (crates/redline-resolve/src/providers/
-        python_provider.rs resolve_stdlib_module / resolve_dotted_chain_
-        fallback). DISCRIMINATING BONUS: the miss message reads
-        "tried 1 provider(s): python" — a live pin that the 011-01
-        language dispatch means a miss probes ONLY the matching provider
-        (never all four toolchains).
+        011-06 SUPERSEDED THE BAIL PIN. Pre-011-06 the `::`-only
+        extraction fed the BARE `dumps` with NO scope hint → the exact
+        no-hint bail (and "tried 1 provider(s): python" was the live
+        dispatch pin). Since 011-06 the M-. token IS the dotted path
+        `json.dumps`; the python provider's dotted handling resolves it
+        on its OWN path (dotted symbols get no import-walk hint — the
+        011-02/011-06 interplay, unit-pinned in store.rs) and the leg
+        now pins the EXACT stdlib landing (json/__init__.py:185, `def
+        dumps`). The dispatch guarantee stays unit-pinned in the
+        resolver crate (language_dispatch_*);
+        the live "tried 1 provider(s): python" miss pin remains in
+        drive_issue_011_02 L2 (prelude `print`).
 
 JAVASCRIPT (requires node + npm — both are present for the drive to run;
   the provider itself only needs node_modules, which setup_repo builds by
   hand, so no install runs):
   L-J1a PATH-SHAPED `ns.member` use (`fakelib.apply(…)` from
-        `import * as fakelib`): the app's M-. extraction is `::`-only
-        (Rust), so the resolver gets the BARE `apply` — and a namespace
-        import hints only the ENTRY name, never members (011-02's bounded
-        walk — never guessed). It degrades to the exact bail. The
-        provider's own dotted handling (fakelib.apply) is unit-covered
-        only (js_provider.rs). DISCRIMINATING BONUS: the miss reads
-        "tried 1 provider(s): javascript" — the live dispatch pin.
+        `import * as fakelib`): 011-06 SUPERSEDED THE BAIL PIN. Pre-
+        011-06 the extraction fed the BARE `apply` (a namespace import
+        hints only the ENTRY name, never members — the 011-02 walk never
+        guesses) → the exact bail ("tried 1 provider(s): javascript"
+        was the live dispatch pin). Since 011-06 the M-. token IS the
+        dotted path `fakelib.apply`; the js provider's dotted handling
+        locates the MEMBER, and the leg now pins the member's own
+        definition line (index.js:3 — discriminates from L-J1b's entry
+        landing at index.js:1). The dispatch guarantee stays unit-
+        pinned in the resolver crate (language_dispatch_*).
   L-J1b PATH-SHAPED namespace ENTRY (`fakelib(5);` — the bare namespace
         binding): the 011-02 P2-1 1-segment hint `["fakelib"]` lands on
         the package ENTRY file (index.js) — the live JS external landing.
@@ -286,7 +292,13 @@ def main():
             # next leg needs a clean buffer-view state.
             app.key("q", 0.8)
 
-            print("=== PYTHON L-P2: path-shaped `json.dumps` bails honestly ===")
+            print("=== PYTHON L-P2: path-shaped `json.dumps` LANDS (011-06) ===")
+            # Superseded pin: pre-011-06 this leg pinned the exact no-hint
+            # BAIL (the `::`-only extraction fed the bare `dumps`; "tried 1
+            # provider(s): python" was the live dispatch pin). Since
+            # 011-06 the path token IS `json.dumps`; the python provider's
+            # dotted handling resolves it on its OWN path (dotted symbols
+            # get no import-walk hint — 011-02/011-06 interplay).
             open_file(app, "py_path.py")
             app.key("M-g g", 0.8)
             app.key("3", 0.4)
@@ -294,20 +306,22 @@ def main():
             app.key("M-f", 0.6)    # end of the `json` run
             app.key("M-f", 0.6)    # end of the `dumps` run
             app.key("M-.", 0.5)
-            ok, msg = poll_minibuffer(
-                app, "no provider resolution", timeout=90.0)
-            rec("L-P2: plain-import path-shaped use is NOT guessed (the miss lands)",
-                ok, f"minibuffer={msg!r}")
-            rec("L-P2: the miss probes ONLY the matching provider (live dispatch pin)",
-                ok and "tried 1 provider(s): python" in msg, f"minibuffer={msg!r}")
+            ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+            rec("L-P2: plain-import path-shaped `json.dumps` LANDS in the stdlib (011-06)",
+                ok and "no provider resolution" not in msg,
+                f"minibuffer={msg!r}")
+            rec("L-P2: the landing is EXACTLY the stdlib `def dumps` (json/__init__.py:185)",
+                "json/__init__.py:185" in msg, f"minibuffer={msg!r}")
 
         if node_ok:
-            print("=== JS L-J1a: path-shaped `fakelib.apply` bails honestly ===")
-            # The app's char-based M-. extraction is `::`-only (Rust): in a
-            # js buffer the resolver gets the BARE `apply`. A namespace
-            # import hints only the entry name, never members — the 011-02
-            # walk never guesses a module path for a member (byte-for-byte
-            # degradation). The provider's own dotted handling is unit-only.
+            print("=== JS L-J1a: path-shaped `fakelib.apply` LANDS (011-06) ===")
+            # Superseded pin: pre-011-06 this leg pinned the exact BAIL
+            # (the extraction fed the bare `apply`; a namespace import
+            # hints only the entry name and the 011-02 walk never
+            # guesses a member's path; "tried 1 provider(s): javascript"
+            # was the live dispatch pin). Since 011-06 the path token IS
+            # `fakelib.apply`; the js provider's dotted handling locates
+            # the MEMBER — the member's own line, not L-J1b's entry line.
             open_file(app, "main.js")
             app.key("M-g g", 0.8)
             app.key("3", 0.4)
@@ -315,13 +329,12 @@ def main():
             app.key("M-f", 0.6)    # end of the `fakelib` run
             app.key("M-f", 0.6)    # end of the `apply` run
             app.key("M-.", 0.5)
-            ok, msg = poll_minibuffer(
-                app, "no provider resolution", timeout=90.0)
-            rec("L-J1a: a namespace member is NOT guessed (the miss lands)",
-                ok, f"minibuffer={msg!r}")
-            rec("L-J1a: the miss probes ONLY the matching provider (live dispatch pin)",
-                ok and "tried 1 provider(s): javascript" in msg,
+            ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+            rec("L-J1a: a namespace member LANDS in the package (011-06 dotted token)",
+                ok and "no provider resolution" not in msg,
                 f"minibuffer={msg!r}")
+            rec("L-J1a: the landing is the MEMBER's definition (index.js:3, not L-J1b's entry :1)",
+                "index.js:3" in msg, f"minibuffer={msg!r}")
 
             print("=== JS L-J1b: the namespace ENTRY lands in the package ===")
             open_file(app, "ns.js")

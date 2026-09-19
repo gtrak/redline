@@ -9,17 +9,16 @@ added this file; the "verified" column says which.
 
 ## Capability terms (so the cells cannot be misread)
 
-- **path-shaped** — M-. on a qualified use (`pkg.member`). Important
-  caveat, verified against `store.rs::symbol_at_point`: the app's M-.
-  symbol extraction extends only across `::` (Rust paths). In JS/Python/
-  Go buffers the resolver receives the BARE identifier, and the 011-02
-  per-language import walk rebuilds the qualified path from a scope
-  hint. So the path-shaped cell for a non-Rust language records what M-.
-  does at a qualified use site — including exactly how far the hint
-  mechanism reaches. The providers' own dotted-symbol handling
-  (`js_provider.rs` / `python_provider.rs` / `go_provider.rs` resolve
-  `pkg.member` directly) is unit-tested, but the app never feeds them a
-  dotted token today.
+- **path-shaped** — M-. on a qualified use (`pkg.member`). 011-06 made
+  the app's M-. extraction language-aware: in a non-Rust buffer the
+  path token is the WHOLE dotted path when the point sits inside the
+  language's path container (`json.dumps`, `ns.member`, `pkg.Fn` —
+  011-03's `node_at` whole-path machinery, one parse), so the providers'
+  dotted handling is reachable from M-.. Rust keeps `::` byte-for-byte
+  (a Rust `.` field access still stays bare — fields are not in the
+  index), and a parse failure / unsupported shape degrades to the
+  exact pre-011-06 bare extraction (never a guess). The cells record
+  what M-. does at a qualified use site, per language.
 - **bare via import** — M-. on a bare identifier that an import statement
   in the current buffer binds (the 011-02 scope hints).
 - **in-library follow-up** — after a landing, M-. on a symbol defined in
@@ -35,7 +34,7 @@ added this file; the "verified" column says which.
 
 | Capability | Rust | JS/TS | Python | Go |
 |---|---|---|---|---|
-| path-shaped | works (live) | **partial** — the namespace ENTRY lands; `ns.member` bails (both live) | **degrades to the bail** (live) | unit-covered only |
+| path-shaped | works (live) | **works (live)** (011-06) | **works (live)** (011-06) | unit-covered only |
 | bare via import | works (live) | works (live) | works (live) | unit-covered only |
 | in-library follow-up | works (live) | works (live) | works (live) | unit-covered only |
 | blame, project file | works (live, U-F7) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) |
@@ -56,16 +55,15 @@ added this file; the "verified" column says which.
 ### JS/TS (verified live: node 24 + npm present; the drive builds a
 hand-rolled `node_modules/fakelib` — no install runs)
 
-- path-shaped: **partial, both ends pinned live by 011-05 L-J1a/L-J1b**:
-  - the namespace ENTRY lands (`import * as fakelib` + bare `fakelib(5)`
-    → the 011-02 P2-1 1-segment hint `["fakelib"]` → package entry
-    file);
-  - `ns.member` (e.g. `fakelib.apply(5)`) **degrades to the bail**: the
-    app passes the bare `apply`, a namespace import hints only the entry
-    name, and the 011-02 walk never guesses a member's path (byte-for-
-    byte). The provider's own `pkg.member` handling is unit-covered
-    (`js_provider.rs`), unreachable from M-. while the app's extraction
-    is `::`-only.
+- path-shaped: **works live from 011-06 (drive_issue_011_06 L-J1)** —
+  `import * as fakelib` + `fakelib.apply(5)` + M-. on the use now lands
+  on the `function apply` in the package's entry file: the language-aware
+  extraction feeds the provider the dotted token `fakelib.apply`, and the
+  provider's dotted handling locates the member. Pre-011-06 this degraded
+  to the exact bail (the resolver got the bare `apply`; a namespace import
+  hints only the entry name; the 011-02 walk never guesses a member's
+  path — pinned live by 011-05 L-J1a). The namespace ENTRY landing is
+  unchanged (011-05 L-J1b, still live).
 - bare via import: works live (011-05 L-J2: `import { clamp }` →
   `util.js`). Named / default / alias / namespace / CJS-require shapes
   are unit-pinned in `store.rs` (`resolver_scope_js_*`).
@@ -79,14 +77,16 @@ hand-rolled `node_modules/fakelib` — no install runs)
 
 ### Python (verified live: python3 3.14.4 present)
 
-- path-shaped: **degrades to the bail, pinned live by 011-05 L-P2** —
-  plain `import json` + `json.dumps('x')`: the app passes the bare
-  `dumps` with no hint (a plain module import binds only the top-level
-  name; attribute chains are never guessed), and the python provider
-  keeps its exact no-hint bail (`bare symbol … needs scope info`). The
-  provider's dotted handling (`json.dumps`, `os.path.join` incl. the
-  frozen-`os.path` fallback) is unit-covered only
-  (`python_provider.rs`).
+- path-shaped: **works live from 011-06 (drive_issue_011_06 L-P1)** —
+  plain `import json` + `json.dumps('x')` + M-. on the use now lands in
+  the stdlib json source (`def dumps`): the language-aware extraction
+  feeds the provider the dotted token `json.dumps`, which resolves on its
+  OWN path (dotted symbols get no import-walk hint — 011-02/011-06
+  interplay, unit-pinned in `store.rs`). Pre-011-06 this degraded to the
+  exact no-hint bail (the resolver got the bare `dumps` with no hint —
+  pinned live by 011-05 L-P2). The `os.path` frozen-fallback chain shape
+  is unit-covered (`python_provider.rs`); the app-side deep-chain token
+  (`os.path.join` → the whole path) is unit-pinned in `store.rs`.
 - bare via import: works live (011-05 L-P1: `from json import dumps` →
   stdlib `def dumps`; first pinned by `drive_issue_011_02`).
   Module aliases (`import a.b as c`) and from-imports with aliases are
@@ -108,7 +108,10 @@ sandbox)
   (which shell out through overridable binaries / injected module
   caches, so they pass without a toolchain), the 011-02 Go import-walk
   unit pins (`resolver_scope_go_*`), and the 011-04 pure-tree-sitter Go
-  walk/extraction tests. **None is live-verified here.**
+  walk/extraction tests. Since 011-06 the app-side token extraction is
+  also unit-pinned (`symbol_at_point_dotted_path_extends_token_per_
+  language`: `fmt.Println` / `fmt.Stringer` come back whole). **None is
+  live-verified here.**
 - `tools/drive_issue_011_05.py` prints a LOUD banner and records a SKIP
   for the go leg when `go` is missing — by design: no fixture is built
   (a fixture with no toolchain to run against would be a fake), and the
@@ -124,20 +127,24 @@ sandbox)
   probes), `all_miss_error_names_eligible_providers` (the all-miss
   message names only eligible providers), plus the unset-language
   backward-compat pin.
-- Live: 011-05 L-P2 / L-J1a assert the miss message reads "tried **1**
-  provider(s): python" / "…: javascript" — registering four providers
-  did NOT turn every miss into a four-toolchain probe.
+- Live: the pre-011-06 "tried 1 provider(s)" miss pins (011-05 L-P2 /
+  L-J1a) were SUPERSEDED by 011-06 — those misses now land (the dotted
+  token reaches the matching provider, whose landing is the stronger
+  evidence: a wrong-provider probe would bail with that toolchain's own
+  error, e.g. "no Cargo.toml" in a python project). The live dispatch
+  pin on the MISS path now lives in `drive_issue_011_02` L2 (prelude
+  `print` → "tried 1 provider(s): python", byte-for-byte).
 
 ## Deliberate non-goals (this is a feature list, not a bug list)
 
 - **No LSP** (ruled out by the user; plan 011 decision).
 - **No macro expansion, generics inference, or arbitrary-expression
   typing** (plan 011 non-goals).
-- **App-level dotted tokens outside Rust**: `::`-only M-. extraction is
-  pre-011 app behavior; the 011-03 per-language `node_at` feeds the
-  scope-hint walks, it does not change the extraction. Closing the
-  path-shaped gaps above (JS `ns.member`, Python `json.dumps`) is a
-  follow-up decision, not a 011 defect.
+- **App-level dotted tokens outside Rust**: CLOSED by 011-06 — M-.
+  extraction is language-aware (the path token is the whole dotted path
+  in a non-Rust buffer's path container; byte-for-byte bare otherwise;
+  Rust `::` unchanged). The live cells are the python + js legs of
+  `drive_issue_011_06.py`; Go is unit-covered only (toolchain absent).
 - **Languages with no provider** (C/C++, JSON, YAML, TOML, shell,
   Markdown, …): the dispatch bails honestly — "no tooling provider
   handles language `X`" (011-01 mapping honesty) — instead of probing
@@ -152,4 +159,5 @@ per-repo flock)
 | `drive_issue_011_02.py` | bare `dumps` lands; prelude `print` bails byte-for-byte | python3 |
 | `drive_issue_011_04.py` | python stdlib tree IS indexed; in-crate M-. answers | python3 |
 | `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped degrade + dispatch pin · js: L-J1a ns.member bail + dispatch pin, L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
+| `drive_issue_011_06.py` | the two CHANGED path-shaped cells, live: L-P1 dotted `json.dumps` lands in the stdlib json source · L-J1 dotted `fakelib.apply` lands in the package entry file · loud per-runtime skip when absent (no go leg — unit-covered) | python3, node+npm |
 | `drive_external_crate.py` / `drive_external_use.py` | the Rust column (registry landing, in-crate jump, bare `use` landing) | cargo |
