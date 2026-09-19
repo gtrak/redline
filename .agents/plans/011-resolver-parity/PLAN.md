@@ -1,6 +1,6 @@
 # 011 — Redline: resolver parity across languages
 
-Status: planned (queued behind 007-03 — same files)
+Status: 01 in flight (reviewed landing pending); 03 landed on branch `nlang` (in review); 02/04 queued behind 01; 05 last
 Phases: 2 · Issues: 01–05
 Depends on: 007-03 (`SymbolContext` scope field) for 01; 007-01 (node-at-point)
 for 03–04
@@ -56,6 +56,23 @@ Verified state (2026-09-19):
    flock, the `drive_external_crate.py` pattern), plus an a11y-style
    "provider matrix" doc row: which language resolves path-shaped / bare /
    in-library today.
+
+## Outcome record (live)
+
+- **03** (branch `nlang`, commit `6c02690`, in review): per-language node-at-point
+  in `src/syntax/node.rs` — JS/TS(+TSX), Python, Go identifier predicates +
+  enclosing-scope walks behind 007-01's extension point, whole-path rule per
+  grammar (`member_expression` / `nested_type_identifier`→`nested_identifier` /
+  `attribute` / `selector_expression`→`qualified_type`), Rust byte-identical
+  (orchestrator-verified by fn extraction comparison). Grammar facts verified
+  against the pinned `NODE_TYPES` via a throwaway probe, NOT from memory; two
+  grammar-shape corrections vs the spec's own list (JS has no
+  `type_identifier`/`nested_type_identifier`). 24 new tests; 672 workspace
+  tests green; PTY suites deliberately skipped (no user-visible behavior, and
+  the fixtures are shared with two live lanes).
+- **01** in flight on main: dispatch verified live — `M-.` in a python buffer
+  attempts exactly ONE provider (python), the cargo provider is never probed;
+  new `tools/drive_issue_011_01.py` 3/3 on real python3.
 
 ## Key decisions
 
