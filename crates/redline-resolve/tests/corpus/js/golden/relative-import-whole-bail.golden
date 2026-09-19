@@ -1,6 +1,8 @@
 # golden for probe `relative-import-whole-bail`  (011-08 js lane)
 # anchor: src/legacy.cjs:15   symbol: `legacy`   scope: ["./legacy-util"]   mode: deterministic
-# note: relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal) — finding, not fixed in 011-08; candidate for a dedicated relative/absolute-specifier degradation.
-kind: bail
-message: |
-  package `.` is not in node_modules and offline mode refuses to install it
+# note: relative specifier (whole-module binding): the fixed behavior LANDS in the SIBLING file src/legacy-util.js (workspace-local, external = false, line null) — the leading `./` is a workspace-relative import, never a package (fix-jsrel; was the base-package-`.` offline refusal).
+kind: resolved
+external: false
+source_root: src
+file: legacy-util.js
+line: null

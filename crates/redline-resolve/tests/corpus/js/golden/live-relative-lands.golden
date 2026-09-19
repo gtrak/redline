@@ -1,0 +1,8 @@
+# golden for probe `live-relative-lands`  (011-08 js lane)
+# anchor: src/app.js:13   symbol: `legacy`   scope: ["./legacy-util"]   mode: live
+# note: the 6th live pin (js-lane review P2-3 follow-up): the ONLINE relative-hint shape — the corner that previously funneled into `npm install \".\"` when node_modules was absent. The fixed behavior: the relative specifier lands in the SIBLING file (src/legacy-util.js, external = false) before any node_modules probe or npm spawn — node_modules-presence-independent; its offline twin is relative-import-whole-bail (deterministic).
+kind: resolved
+external: false
+source_root: src
+file: legacy-util.js
+line: null

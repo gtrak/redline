@@ -126,7 +126,7 @@ symbol = "legacy"
 scope = ["./legacy-util"]
 ws = "corpus"
 mode = "deterministic"
-note = "relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal) — finding, not fixed in 011-08; candidate for a dedicated relative/absolute-specifier degradation."
+note = "relative specifier (whole-module binding): the fixed behavior LANDS in the SIBLING file src/legacy-util.js (workspace-local, external = false, line null) — the leading `./` is a workspace-relative import, never a package (fix-jsrel; was the base-package-`.` offline refusal)."
 
 [[probe]]
 id = "relative-member-bail"
@@ -136,7 +136,7 @@ symbol = "legacyJoin"
 scope = ["./legacy-util", "legacyJoin"]
 ws = "corpus"
 mode = "deterministic"
-note = "relative specifier with an item: the FIRST `.` splits at the leading dot — empty package, the whole specifier kept, item dropped — so it degrades exactly like the whole-binding shape (base package `.`)."
+note = "relative specifier with an item: lands in the SIBLING file and scans it for the MEMBER definition (`function legacyJoin`), external = false (fix-jsrel; the leading `.` used to leave the empty-package, base-`.` shape)."
 
 [[probe]]
 id = "absolute-import-bail"
@@ -146,7 +146,7 @@ symbol = "legacyJoin"
 scope = ["/abs/legacy-util", "legacyJoin"]
 ws = "corpus"
 mode = "deterministic"
-note = "absolute path specifier: no first segment -> empty base package, same offline refusal. Finding, not fixed in 011-08 — same candidate class."
+note = "absolute path specifier: not a package path, not workspace-relative — the dedicated absolute-specifier bail (fix-jsrel; was the empty-base-package offline refusal with empty backticks)."
 
 [[probe]]
 id = "side-effect-bail"
@@ -157,7 +157,7 @@ scope = []
 language = "javascript"
 ws = "corpus"
 mode = "deterministic"
-note = "side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned, finding not fixed in 011-08."
+note = "side-effect import (`import './styles.css'`): the file-ish name the app can produce is not a package spec — the dedicated file-ish bail (fix-jsrel; was the `styles`/`css` mis-split offline refusal)."
 
 [[probe]]
 id = "no-package-json-bail"
@@ -170,6 +170,11 @@ mode = "online-deterministic"
 note = "not an npm project (no package.json up the tree): names the walked-from root. Online provider, but this shape bails before any npm spawn (deterministic)."
 
 # ── live: real `npm install` (skipped loudly when npm/node absent) ──────────
+#
+# The live probes run in ONE shared corpus workspace, in manifest order
+# (the first install populates node_modules for the later probes).
+# live-relative-lands (fix-jsrel) lands in a workspace file and never
+# spawns npm, so it is node_modules-presence-independent.
 
 [[probe]]
 id = "live-leftpad-default"
@@ -222,4 +227,15 @@ symbol = "legacyJoin"
 scope = ["./legacy-util", "legacyJoin"]
 ws = "corpus"
 mode = "live"
-note = "the relative hint probed where node_modules IS populated: the leading `.` of the relative specifier collapses the item to None and the base package to `.`, so the node_modules directory ITSELF is probed as a package — entry-point bail pinned as-is (finding, not fixed in this issue)."
+note = "the relative hint probed where node_modules IS populated: the relative specifier lands in the sibling file BEFORE any node_modules probe — `node_modules/.` is never probed as a package (fix-jsrel; was the entry-point bail on `node_modules/.`)."
+
+[[probe]]
+id = "live-relative-lands"
+file = "src/app.js"
+line = 13
+symbol = "legacy"
+scope = ["./legacy-util"]
+language = "javascript"
+ws = "corpus"
+mode = "live"
+note = "the 6th live pin (js-lane review P2-3 follow-up): the ONLINE relative-hint shape — the corner that previously funneled into `npm install \".\"` when node_modules was absent. The fixed behavior: the relative specifier lands in the SIBLING file (src/legacy-util.js, external = false) before any node_modules probe or npm spawn — node_modules-presence-independent; its offline twin is relative-import-whole-bail (deterministic)."
