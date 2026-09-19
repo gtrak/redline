@@ -8937,8 +8937,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// issue 04): walk the OWNING language's source extensions under
     /// `root` — the language of the LANDED `landed_file` (the registry's
     /// extension map is the authority: Rust `rs`, JS/TS `js/jsx/ts/tsx/
-    /// mjs/cjs`, Python `py/pyi`, Go `go`; any other language: nothing,
-    /// the pre-011-04 end state) — and run the project indexer's
+    /// mjs/cjs`, Python `py/pyi`, Go `go`, C `c/h`, C++ `cc/cpp/cxx/hh/hpp/
+    /// hxx`, Markdown `md/markdown/mdx` (011-07); any other language:
+    /// nothing, the pre-011-04 end state) — and run the project indexer's
     /// machinery (`nav::index::build_index` is root-agnostic) on
     /// `spawn_blocking`; the finished index publishes on the
     /// `CrateIndexBus`. NEVER blocks the landing. Single-flight per
@@ -9003,9 +9004,15 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// each set here is the union of the extensions that map to the
     /// language's grammar family): Rust `rs`; JS/TS (JavaScript /
     /// TypeScript / Tsx) `js/jsx/ts/tsx/mjs/cjs`; Python `py/pyi`; Go
-    /// `go`. Every other language: nothing — the walk finds no files, so
-    /// no index builds (the same end state 006-03's `.rs`-only walk had
-    /// for every non-Rust landing).
+    /// `go`; C `c/h` (011-07 — headers ARE definition sources, the
+    /// registry maps `h` to C); C++ `cc/cpp/cxx/hh/hpp/hxx` (011-07, the
+    /// full registry map); Markdown `md/markdown/mdx` (011-07 — its
+    /// definition query captures headings only). Every other language:
+    /// nothing — the walk finds no files, so no index builds (the same
+    /// end state 006-03's `.rs`-only walk had for every non-Rust
+    /// landing). The JSON/TOML/YAML/Bash outline queries are not M-.
+    /// definition sources here (011-04 judgment, carried by 011-07):
+    /// data/config/shell files stay out of the walk.
     fn source_extensions_for(lang: LanguageId) -> &'static [&'static str] {
         match lang {
             LanguageId::Rust => &["rs"],
@@ -9013,6 +9020,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
             LanguageId::Python => &["py", "pyi"],
             LanguageId::Go => &["go"],
+            LanguageId::C => &["c", "h"],
+            LanguageId::Cpp => &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
+            LanguageId::Markdown => &["md", "markdown", "mdx"],
             _ => &[],
         }
     }
@@ -15336,10 +15346,11 @@ mod tests {
 
     // ── plan 011 issue 04: per-language source index ───────────────────
 
-    /// 011-04: the walk's extension sets stay in lockstep with
-    /// `registry.rs`'s extension map (the authority): every walked
-    /// extension must resolve (through the registry map) to a language
-    /// whose OWN set includes it — the sets are per grammar family.
+    /// 011-04 (extended by 011-07): the walk's extension sets stay in
+    /// lockstep with `registry.rs`'s extension map (the authority):
+    /// every walked extension must resolve (through the registry map) to
+    /// a language whose OWN set includes it — the sets are per grammar
+    /// family.
     #[test]
     fn source_extensions_round_trip_through_registry_map() {
         use crate::syntax::registry::resolve_language;
@@ -15350,6 +15361,9 @@ mod tests {
             LanguageId::Tsx,
             LanguageId::Python,
             LanguageId::Go,
+            LanguageId::C,
+            LanguageId::Cpp,
+            LanguageId::Markdown,
         ] {
             for ext in AppStore::source_extensions_for(lang) {
                 let resolved = resolve_language(&format!("a.{ext}"));
@@ -15366,9 +15380,16 @@ mod tests {
             !AppStore::source_extensions_for(LanguageId::Rust).contains(&"rsi"),
             "rsi stays out of the Rust index set"
         );
-        // Non-source languages index nothing (the pre-011-04 end state
-        // for every non-Rust landing).
-        for lang in [LanguageId::Plain, LanguageId::Json, LanguageId::Toml] {
+        // Languages whose grammar queries exist but whose files are not
+        // M-. definition sources (011-04 judgment, carried by 011-07):
+        // no walk set, no index.
+        for lang in [
+            LanguageId::Plain,
+            LanguageId::Json,
+            LanguageId::Toml,
+            LanguageId::Yaml,
+            LanguageId::Bash,
+        ] {
             assert!(AppStore::source_extensions_for(lang).is_empty());
         }
     }
@@ -15578,6 +15599,183 @@ mod tests {
         let index = build_index(p, &files, None);
         assert!(index.has("pkg/greet.go"));
         assert_eq!(index.definition_count("Greet"), 1, "go symbol extraction");
+    }
+
+    /// 011-07 discriminating: a C tree indexes through the full path
+    /// (language derivation from the landed `.c` file → the `c/h` walk →
+    /// build_index → CrateIndexBus). HEADERS ARE DEFINITION SOURCES:
+    /// the `.h` file's symbols are in the index alongside the `.c`'s.
+    /// Pre-011-07 the C set was empty, so the walk found 0 files and the
+    /// build never armed — the `/2)` indicator assert fails on any
+    /// regression to the empty set.
+    #[tokio::test]
+    async fn crate_index_builds_for_c_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::create_dir_all(p.join("include")).unwrap();
+        std::fs::write(
+            p.join("src/lib.c"),
+            "#include \"defs.h\"\nint alpha(int a) { return a; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("include/defs.h"),
+            "#ifndef DEFS_H\nstruct Gamma { int x; };\nint beta(int a) { return a; }\n#endif\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("README.md"), "docs\n").unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("src/lib.c"));
+        // 2 OWN source files (README.md excluded): the N/M counter is the
+        // file-set's size, not the tree's.
+        assert!(
+            s.crate_indexing_display().contains("/2)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        assert_eq!(event.source_root, p);
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("src/lib.c"), "crate-relative key (.c)");
+        assert!(
+            idx.has("include/defs.h"),
+            "header (.h) IS a C definition source"
+        );
+        assert_eq!(idx.definition_count("alpha"), 1, "c symbol extraction");
+        assert_eq!(idx.definition_count("beta"), 1, "header function extraction");
+        assert_eq!(idx.definition_count("Gamma"), 1, "header struct extraction");
+        assert!(!idx.has("README.md"), "non-source file not indexed");
+    }
+
+    /// 011-07 discriminating: a C++ tree indexes through the full path,
+    /// landing on a HEADER (`include/api.hpp`) — the header is both a
+    /// walk extension and a valid landed_file. All six registry C++
+    /// extensions are walked (the `.hh` file proves the non-`.hpp` map
+    /// keys).
+    #[tokio::test]
+    async fn crate_index_builds_for_cpp_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("include")).unwrap();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::create_dir_all(p.join("legacy")).unwrap();
+        std::fs::write(p.join("include/api.hpp"), "struct Widget { int x; };\n")
+            .unwrap();
+        std::fs::write(
+            p.join("src/widget.cc"),
+            "#include \"api.hpp\"\nWidget make_widget() { return {0}; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("legacy/old.hh"),
+            "int legacy_value() { return 0; }\n",
+        )
+        .unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("include/api.hpp"));
+        assert!(
+            s.crate_indexing_display().contains("/3)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(
+            idx.has("include/api.hpp"),
+            "crate-relative key (.hpp, the landed header)"
+        );
+        assert!(idx.has("src/widget.cc"), "crate-relative key (.cc)");
+        assert!(
+            idx.has("legacy/old.hh"),
+            ".hh map key walked, not just .hpp"
+        );
+        assert_eq!(idx.definition_count("Widget"), 1, "cpp struct extraction");
+        assert_eq!(
+            idx.definition_count("make_widget"),
+            1,
+            "cpp function extraction"
+        );
+        assert_eq!(idx.definition_count("legacy_value"), 1, "cpp header extraction");
+    }
+
+    /// 011-07 discriminating: a Markdown tree indexes through the full
+    /// path. VERIFIED HONEST SCOPE (extracted, not assumed): the
+    /// definition query's atx branch captures headings (`# Alpha` →
+    /// symbol `Alpha`); its SETEXT branch is DORMANT — `Beta\n====` yields
+    /// zero symbols (pinned in `setext_only_file_indexes_nothing` below
+    /// as the absent index entry), so the M-. targets in a markdown
+    /// dependency are ATX HEADINGS only: no setext, no paragraphs,
+    /// no links. All three registry map keys (`md`, `markdown`, `mdx`)
+    /// are walked.
+    #[tokio::test]
+    async fn crate_index_builds_for_markdown_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("docs")).unwrap();
+        std::fs::write(p.join("README.md"), "# Alpha\n\njust a paragraph\n").unwrap();
+        std::fs::write(p.join("docs/changelog.markdown"), "# Beta\n").unwrap();
+        std::fs::write(p.join("docs/guide.mdx"), "# Gamma\n").unwrap();
+        // Setext heading: the query's second branch is dormant (0
+        // symbols extracted) — this file is walked but indexes nothing,
+        // which is the honest end state, not a defect here (queries.rs
+        // is 011-04 territory).
+        std::fs::write(p.join("docs/setext.md"), "Delta\n====\n").unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("README.md"));
+        assert!(
+            s.crate_indexing_display().contains("/4)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("README.md"), "crate-relative key (.md)");
+        assert!(idx.has("docs/changelog.markdown"), ".markdown map key walked");
+        assert!(idx.has("docs/guide.mdx"), ".mdx map key walked");
+        assert_eq!(idx.definition_count("Alpha"), 1, "atx heading extraction");
+        assert_eq!(idx.definition_count("Beta"), 1, "atx heading extraction");
+        assert_eq!(idx.definition_count("Gamma"), 1, "mdx atx heading extraction");
+        assert!(
+            !idx.has("docs/setext.md"),
+            "setext branch is dormant: 0 symbols -> no index entry"
+        );
+    }
+
+    /// 011-07: the dormant setext branch, pinned directly against the
+    /// extractor (the e2e test above pins the same truth through the
+    /// full walk -> build_index path; this is the minimal unit twin).
+    #[test]
+    fn setext_only_markdown_file_contributes_no_symbols() {
+        assert!(
+            crate::syntax::queries::extract_symbols(
+                LanguageId::Markdown,
+                "Delta\n====\n"
+            )
+            .is_empty(),
+            "the query's setext branch captures nothing (atx only)"
+        );
     }
 
     /// 011-04: the walk is the OWNING language's, never a global "index
