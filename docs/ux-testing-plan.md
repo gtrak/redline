@@ -654,24 +654,24 @@ the providers in this loop.
 
 - `cargo test --workspace`: all green (main bin 717 + redline-resolve 110
   + integration suites, 0 failed).
-- Pooled 12-suite battery: ~106 s; every converted suite's thin tier
-  passes (drive_windowing 5.4 s, panes 3.6 s, xref 4.8 s, syntax-notes
-  4.0 s, external-notes 4.6 s, ux_sweep 20.7 s) vs the pre-loop-04 pooled
-  battery of ~96 s measured in the task spec — the thin tiers are faster
-  per-suite but the battery total is dominated by the kept heavy suites
-  (sweep.py, check_cursor_stream, sweep_flows, drive_all).
+- Pooled 12-suite battery: **12/12 in 82.7 s** (pre-loop-04: ~96 s per the
+  task spec; the first post-conversion run was 106 s with the external-crate
+  bug below — fixed same session); every converted thin tier passes
+  (drive_windowing 5.4 s, panes 3.6 s, xref 4.8 s, syntax-notes 3.9 s,
+  external-notes 4.7 s, external-crate 3.8 s, ux_sweep 20.7 s).
 
-### Open item (honest stop)
+### Resolved mid-loop (was the 2 BADs)
 
-`drive_external_crate.py` L1 (and the same leg inside `drive_all.py`):
-intermittent — the in-app provider job sticks on `resolving…` for the full
-poll while the identical resolve completes in ~0.9 s standalone
-(`redline-resolve` verified end-to-end, including the renamed-dep case).
-The notes-suite twin leg (same provider, near-identical repo) passes;
-pre-warming the index up front did not fix it. Root cause not pinned —
-suspect in-app event-drain/lane-contention timing, not the provider.
-Smallest next step: reproduce with `RUST_LOG=debug` + single-lane pool run
-and trace `apply_resolve_event` generations.
+`drive_external_crate.py` (and the same leg inside `drive_all.py`) failed
+1/3: the in-app "resolve job" appeared to hang 60–170 s with an empty
+minibuffer, while the identical resolve completed in ~0.9 s standalone.
+Root cause (found by A/B against the branch-base suite): **the thin-tier
+rewrite dropped the `app.key("M-.", 0.5)` keypress** — after `M-f` it went
+straight to the poll loop, so nothing was ever triggered (the window never
+jumped; the L1 "Rope in view" check false-positived because the probe file
+itself contains `Rope`). It looked like an in-app provider hang because the
+status line stayed idle and the weak third check passed. Fix: restore the
+single `M-.` keypress; battery 10/12 → 12/12 (82.7 s).
 
 ## Merge gate discipline (2026-09-20)
 

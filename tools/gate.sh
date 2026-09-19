@@ -18,11 +18,13 @@
 #                           full battery — run once after changing the driver
 #   tools/gate.sh pooled    fast + the PTY battery POOLED across private
 #                           per-lane fixture copies (tools/pool.py): the
-#                           12-suite battery in ~90-110 s (lanes=4, 0.06 quiet,
-#                           post-loop-04: 106 s measured with the converted
-#                           thin tiers; pre-loop-03: ~117 s) vs full's ~150 s
-#                           serial; same verdicts. Full stays the sequential,
-#                           always-works fallback.
+#                           12-suite battery in ~83-110 s (lanes=4, 0.06 quiet,
+#                           post-loop-04: 82.7 s measured at 12/12; the first
+#                           post-conversion run was 106 s with a dropped
+#                           M-. keypress in the thin drive_external_crate,
+#                           fixed same session; pre-loop-03: ~117 s) vs
+#                           full's ~150 s serial; same verdicts. Full stays
+#                           the sequential, always-works fallback.
 #
 # Stale-binary trap (loop-03): the pooled lanes run the binary pool.py
 # builds ONCE from the CURRENT checkout — if you `git checkout` another

@@ -126,6 +126,7 @@ def main():
         app.key("5", 0.4)
         app.key("RET", 0.8)   # line 5: top-level `ropey::Rope::new();` probe
         app.key("M-f", 0.8)   # point to the END of the `ropey` run
+        app.key("M-.", 0.5)    # the M-. that drives the whole leg
         # Poll the minibuffer for the landing (the `indexing crate`
         # indicator may share the status line meanwhile — that timing half
         # is the unit twin's now).
