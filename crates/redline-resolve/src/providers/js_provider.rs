@@ -29,7 +29,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// File extensions considered JavaScript/TypeScript sources.
 const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts"];
@@ -104,7 +104,13 @@ impl JsProvider {
         // import path) normalizes to `package.item` up front and then flows
         // through the SAME node_modules / locate machinery as a
         // path-shaped symbol. No hint keeps the bail, byte-for-byte.
-        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        // 011-02: a namespace-aliased member (`ns.member` from
+        // `import * as ns from "pkg"`, hinted as `["pkg", "member"]`) is
+        // rewritten to the package's real path and flows through the SAME
+        // machinery; identity hints and non-rewrites leave the symbol's
+        // own path untouched.
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope)
+            .or_else(|| scope_qualified_alias(".", &ctx.symbol, &ctx.scope));
         let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
         let (pkg_spec, item) = split_symbol(symbol);
         // A bare (dot-free) symbol has no package path; resolving it to a
@@ -859,6 +865,76 @@ mod tests {
             err.to_string().contains("needs scope info"),
             "err: {err}"
         );
+    }
+
+    // ── 011-02: namespace-aliased member (`ns.member` rewrite) ─────────
+
+    /// Discriminating: `ns.member` where `ns` comes from
+    /// `import * as ns from "pkg"` — the app's hint `["pkg", "member"]`
+    /// rewrites the alias and the member locates through the SAME
+    /// `node_modules` / `locate_item` machinery as the path-shaped twin.
+    #[test]
+    fn namespace_member_hint_rewrites_alias_to_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws","version":"1.0.0"}"#).unwrap();
+        let dep = ws.join("node_modules").join("acme");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(dep.join("package.json"), r#"{"name":"acme","main":"lib/main.js"}"#).unwrap();
+        fs::create_dir_all(dep.join("lib")).unwrap();
+        fs::write(
+            dep.join("lib/main.js"),
+            "export function doThing() { return 2; }\n",
+        )
+        .unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "ac.doThing".to_string(), // `import * as ac from "acme"`
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["acme".to_string(), "doThing".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().resolve(&ctx).unwrap();
+        assert!(src.external);
+        assert_eq!(src.file, dep.join("lib/main.js"));
+        assert_eq!(src.line, Some(1));
+    }
+
+    /// Regression pin: an identity hint (`import * as acme from "acme"` →
+    /// `["acme", "doThing"]` for `acme.doThing`) is the symbol's OWN path —
+    /// the rewrite must be a no-op (the provider still resolves the
+    /// symbol's path, not the hint). And a mismatched-item hint is ignored
+    /// (the symbol's path wins; `ac` is not a package → clean offline
+    /// refusal, never a guess).
+    #[test]
+    fn namespace_member_identity_and_mismatched_hints_are_no_ops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+        // Identity hint: the symbol's own path is used; `ac` is not in
+        // node_modules → the offline refusal proves the path walk ran.
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "ac.doThing".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["ac".to_string(), "doThing".to_string()],
+            language: None,
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
+        assert!(err.to_string().contains("offline"), "err: {err}");
+        assert!(err.to_string().contains("`ac`"), "err: {err}");
+
+        // Mismatched item (`other` ≠ `doThing`): not a rewrite of THIS
+        // symbol — the symbol's own path (`ac`) is used again.
+        let ctx = SymbolContext {
+            scope: vec!["acme".to_string(), "other".to_string()],
+            ..ctx.clone()
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
+        assert!(err.to_string().contains("`ac`"), "err: {err}");
     }
 
     // ── live E2E: real tiny npm package (network) ──────────────────────────

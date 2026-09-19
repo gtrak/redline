@@ -7763,19 +7763,26 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         (lang != crate::syntax::registry::LanguageId::Plain).then(|| lang.name().to_string())
     }
 
-    /// (007-03) The `SymbolContext.scope` hint for `symbol`, from the
-    /// CURRENT buffer's tree-sitter layer (007-01's `scope_path_at` + a
-    /// bounded `use_declaration` walk):
-    /// - a BARE symbol (no `::`) with a `use` declaration that brings the
-    ///   name into scope → the import's FULL original path, item included
-    ///   (an aliased `use a::B as C` yields `["a","B"]` for bare `C`);
+    /// (007-03 / 011-02) The `SymbolContext.scope` hint for `symbol`, from
+    /// the CURRENT buffer's tree-sitter layer (007-01's `scope_path_at` +
+    /// the per-language import walks):
+    /// - a BARE symbol with an import declaration that brings the name
+    ///   into scope → the import's FULL original path, item included
+    ///   (Rust `use a::B as C` → `["a","B"]` for bare `C`; JS/TS
+    ///   `import { B as C } from "a"` → `["a","B"]`; Python
+    ///   `from a import B as C` → `["a","B"]`; Go dot-import
+    ///   `import . "a/b"` → `["b","<bare item>"]`);
     /// - a BARE symbol with no such import → EMPTY (the providers keep
     ///   their exact no-hint behavior — std/prelude names are never
     ///   guessed, byte-for-byte degradation);
-    /// - a path-shaped symbol → the enclosing item chain.
+    /// - a path-shaped symbol → the enclosing item chain (Rust, 007-01)
+    ///   or a JS/TS namespace-aliased member rewrite (`ns.member` →
+    ///   `["pkg","member"]` when `ns` comes from `import * as ns from
+    ///   "pkg"`); Python/Go dotted symbols carry their own module /
+    ///   package path and get no hint.
     ///
-    /// Empty for a non-Rust buffer (007-01's layer is Rust-only), a missing
-    /// buffer/path, or a failed parse.
+    /// Empty for a missing buffer/path, a failed parse, or an unimplemented
+    /// language (including `Plain`).
     fn resolver_scope(&self, symbol: &str) -> Vec<String> {
         let Some(key) = self.buffers.current().map(String::from) else {
             return Vec::new();
@@ -7799,24 +7806,35 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         col: usize,
         symbol: &str,
     ) -> Vec<String> {
-        // 007-01's tree-sitter layer implements Rust only; every other
-        // language (and Plain) degrades to empty — the providers keep
-        // their no-hint behavior.
         let lang = crate::syntax::registry::resolve_language(&path.display().to_string());
-        if lang != crate::syntax::registry::LanguageId::Rust {
-            return Vec::new();
-        }
         let source = rope.to_string();
         let Some(byte) = point_byte_offset(rope, line, col) else {
             return Vec::new();
         };
-        if !symbol.contains("::") {
-            // Bare: the `use` declaration is THE hint; without one the
-            // scope stays empty (never guess a std/prelude name).
-            return Self::use_path_for_symbol(&source, byte, symbol).unwrap_or_default();
+        match lang {
+            // 007-03 (Rust): bare → the `use` declaration's path; path-
+            // shaped → the enclosing item chain (carried, not consumed).
+            crate::syntax::registry::LanguageId::Rust => {
+                if !symbol.contains("::") {
+                    return Self::use_path_for_symbol(&source, byte, symbol).unwrap_or_default();
+                }
+                crate::syntax::node::scope_path_at(lang, &source, byte)
+            }
+            // 011-02: the per-language import walks (bare symbols), plus
+            // the JS/TS namespace-member rewrite for path-shaped symbols.
+            crate::syntax::registry::LanguageId::JavaScript
+            | crate::syntax::registry::LanguageId::TypeScript
+            | crate::syntax::registry::LanguageId::Tsx => {
+                Self::js_ts_scope_for(lang, &source, byte, symbol)
+            }
+            crate::syntax::registry::LanguageId::Python => {
+                Self::python_scope_for(&source, byte, symbol)
+            }
+            crate::syntax::registry::LanguageId::Go => Self::go_scope_for(&source, byte, symbol),
+            // Every other language (and Plain): no hint — the providers
+            // keep their exact no-hint behavior.
+            _ => Vec::new(),
         }
-        // Path-shaped: carry the enclosing item chain (007-01).
-        crate::syntax::node::scope_path_at(lang, &source, byte)
     }
 
     /// (007-03) The FULL original path of the `use` declaration that brings
@@ -8050,6 +8068,621 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             return None;
         }
         Some(out)
+    }
+
+    // ── 011-02: per-language import walks (bare-symbol hints) ────────────
+
+    /// The text of a syntax node (`None` on non-UTF8).
+    fn node_text(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+        node.utf8_text(source).ok().map(String::from)
+    }
+
+    /// A non-empty ASCII identifier (`a0_Z`) — the segment shape an import
+    /// path may carry (mirrors the Rust `import_segments` rule; anything
+    /// else is an unsupported shape → no hint, never a guess).
+    fn is_ascii_identifier(s: &str) -> bool {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// (011-02) The JS/TS scope hint: a bare symbol → the package path its
+    /// import binds it to; a path-shaped `ns.member` → the namespace
+    /// rewrite; a plain dotted path (`lodash.map`) → EMPTY (it carries its
+    /// own package — the provider's path wins, never treated as bare).
+    fn js_ts_scope_for(
+        lang: crate::syntax::registry::LanguageId,
+        source: &str,
+        byte: usize,
+        symbol: &str,
+    ) -> Vec<String> {
+        // One parse per miss (the 007-03 discipline): a parse failure or an
+        // out-of-range offset degrades to the empty hint.
+        let Some(language) = crate::syntax::queries::language_for(lang) else {
+            return Vec::new();
+        };
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&language).is_err() {
+            return Vec::new();
+        }
+        let Some(tree) = parser.parse(source.as_bytes(), None) else {
+            return Vec::new();
+        };
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return Vec::new();
+        }
+        let bytes = source.as_bytes();
+        if !symbol.contains('.') {
+            return Self::js_ts_bare_import_path(root, bytes, symbol)
+                .unwrap_or_default();
+        }
+        // Path-shaped: exactly two dot segments (`ns.member`); deeper
+        // chains are an unsupported shape (no hint).
+        let Some((ns, member)) = symbol.split_once('.') else {
+            return Vec::new();
+        };
+        if member.contains('.') {
+            return Vec::new();
+        }
+        Self::js_ts_namespace_member_path(root, bytes, ns, member)
+            .unwrap_or_default()
+    }
+
+    /// The import path for a BARE JS/TS symbol, from the module's import
+    /// declarations. Bounded by design: only TOP-LEVEL declarations are
+    /// considered (ESM imports are module-scoped; CJS `require` bindings
+    /// are tracked at the top level only). First hit wins — a duplicate
+    /// binding of one name is a syntax error, so at most one declaration
+    /// can bind `symbol`:
+    /// - `import { X } from "pkg"` / `import type { X }` → `["pkg", "X"]`;
+    /// - `import { X as Y }` → `["pkg", "X"]` for bare `Y` (alias →
+    ///   original);
+    /// - `import X from "pkg"` → `["pkg", "X"]` (the default export);
+    /// - `import * as ns from "pkg"` → `["pkg"]` for bare `ns` (the
+    ///   package entry itself);
+    /// - `const { X } = require("pkg")` / `const { X as Y } = require` →
+    ///   the same rule (CJS destructuring);
+    /// - `const m = require("pkg")` → `["pkg"]` for bare `m` (the module
+    ///   object names the entry).
+    ///
+    /// Relative specifiers (`./…`, `../…`), absolute paths, and bare
+    /// side-effect imports (`import "pkg"`) bind nothing resolvable →
+    /// `None` (never guessed).
+    fn js_ts_bare_import_path(root: tree_sitter::Node, source: &[u8], symbol: &str) -> Option<Vec<String>> {
+        for i in 0..root.child_count() {
+            let child = root.child(i)?;
+            let hit = match child.kind() {
+                "import_statement" => {
+                    Self::js_ts_import_stmt_path(child, source, symbol)
+                }
+                "lexical_declaration" | "variable_declaration" => {
+                    Self::js_ts_require_path(child, source, symbol)
+                }
+                _ => None,
+            };
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    }
+
+    /// One `import_statement`: the local binding's original path
+    /// (`None` when no binding names `symbol`).
+    fn js_ts_import_stmt_path(stmt: tree_sitter::Node, source: &[u8], symbol: &str) -> Option<Vec<String>> {
+        let source_node = stmt.child_by_field_name("source")?;
+        let spec = Self::js_ts_specifier(source_node, source)?;
+        // `import_clause` is NOT a grammar field (verified against the
+        // pinned tree-sitter-javascript 0.23.1 sexp) — find it by kind.
+        // Its absence is the side-effect form (`import "pkg"`) — binds
+        // nothing, never a hint.
+        let clause = (0..stmt.child_count())
+            .filter_map(|k| stmt.child(k))
+            .find(|n| n.kind() == "import_clause")?;
+        for i in 0..clause.child_count() {
+            let c = clause.child(i)?;
+            match c.kind() {
+                // `import X from "pkg"` — the local binding for the
+                // package's default export.
+                "identifier" => {
+                    if let Some(name) = Self::node_text(c, source)
+                        && name == symbol
+                    {
+                        return Some(Self::js_ts_import_hint(&spec, &name));
+                    }
+                }
+                "named_imports" => {
+                    for j in 0..c.child_count() {
+                        let entry = c.child(j)?;
+                        if entry.kind() != "import_specifier" {
+                            continue;
+                        }
+                        let Some(name_node) = entry.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let name = Self::node_text(name_node, source)?;
+                        let alias = entry
+                            .child_by_field_name("alias")
+                            .and_then(|a| Self::node_text(a, source));
+                        if alias.as_deref().unwrap_or(&name) == symbol {
+                            return Some(Self::js_ts_import_hint(&spec, &name));
+                        }
+                    }
+                }
+                // `import * as ns from "pkg"` — the bare namespace names
+                // the package entry itself (its single named child is the
+                // alias; `*`/`as` are anonymous tokens).
+                "namespace_import" => {
+                    let alias = (0..c.child_count())
+                        .filter_map(|k| c.child(k))
+                        .find(|n| n.kind() == "identifier")
+                        .and_then(|n| Self::node_text(n, source))?;
+                    if alias == symbol {
+                        return Some(vec![spec]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// `const/let/var` declarations whose initializer is a plain
+    /// `require("pkg")` call (the CJS import shape).
+    fn js_ts_require_path(decl: tree_sitter::Node, source: &[u8], symbol: &str) -> Option<Vec<String>> {
+        for i in 0..decl.child_count() {
+            let d = decl.child(i)?;
+            if d.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name) = d.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(value) = d.child_by_field_name("value") else {
+                continue;
+            };
+            if value.kind() != "call_expression" {
+                continue;
+            }
+            // Only the bare identifier `require` (not a member/alias call).
+            let Some(callee) = value.child_by_field_name("function") else {
+                continue;
+            };
+            if callee.kind() != "identifier"
+                || Self::node_text(callee, source).as_deref() != Some("require")
+            {
+                continue;
+            }
+            let Some(args) = value.child_by_field_name("arguments") else {
+                continue;
+            };
+            // The arguments node: `(` at index 0, first arg at 1.
+            let Some(first) = args.child(1) else {
+                continue;
+            };
+            if first.kind() != "string" {
+                continue;
+            }
+            let Some(spec) = Self::js_ts_specifier(first, source) else {
+                continue;
+            };
+            match name.kind() {
+                // `const m = require("pkg")` — the whole module object:
+                // the binding names the package entry itself.
+                "identifier" => {
+                    if let Some(n) = Self::node_text(name, source)
+                        && n == symbol
+                    {
+                        return Some(vec![spec]);
+                    }
+                }
+                // `const { x, y: z } = require("pkg")` — destructured
+                // exports (shorthand and `original: local` pairs).
+                "object_pattern" => {
+                    for j in 0..name.child_count() {
+                        let p = name.child(j)?;
+                        let (local, original) = match p.kind() {
+                            "shorthand_property_identifier_pattern" => {
+                                let t = Self::node_text(p, source)?;
+                                (t.clone(), t)
+                            }
+                            "pair_pattern" => {
+                                let Some(key) = p.child_by_field_name("key") else {
+                                    continue;
+                                };
+                                let Some(val) = p.child_by_field_name("value") else {
+                                    continue;
+                                };
+                                if val.kind() != "identifier" {
+                                    continue; // nested patterns: unsupported shape.
+                                }
+                                (
+                                    Self::node_text(val, source)?,
+                                    Self::node_text(key, source)?,
+                                )
+                            }
+                            _ => continue,
+                        };
+                        if local == symbol {
+                            return Some(Self::js_ts_import_hint(&spec, &original));
+                        }
+                    }
+                }
+                _ => {} // array/nested patterns: unsupported shape → no hint.
+            }
+        }
+        None
+    }
+
+    /// The hint path for an imported item: `import { default as D }` /
+    /// `const { default: D } = require` name the ENTRY itself (no item
+    /// segment); any other original name carries it.
+    fn js_ts_import_hint(spec: &str, original: &str) -> Vec<String> {
+        if original == "default" {
+            vec![spec.to_string()]
+        } else {
+            vec![spec.to_string(), original.to_string()]
+        }
+    }
+
+    /// A JS/TS string-literal module specifier naming an EXTERNAL package:
+    /// quoted with `'`/`"` (a template literal or other shape is
+    /// unsupported), and not relative (`.`/`/`-prefixed — those resolve
+    /// within the project, never through node_modules). Scoped
+    /// (`@scope/name`) and subpath (`name/sub`) specs keep their `/`.
+    fn js_ts_specifier(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let text = Self::node_text(node, source)?;
+        let bytes = text.as_bytes();
+        if bytes.len() < 2 {
+            return None;
+        }
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if !(first == b'\'' && last == b'\'' || first == b'"' && last == b'"') {
+            return None;
+        }
+        let spec = std::str::from_utf8(&bytes[1..bytes.len() - 1]).ok()?;
+        if spec.is_empty() || spec.starts_with('.') || spec.starts_with('/') {
+            return None;
+        }
+        Some(spec.to_string())
+    }
+
+    /// The namespace-member rewrite: `ns.member` where `ns` comes from
+    /// `import * as ns from "pkg"` → `["pkg", "member"]` (the provider's
+    /// alias-rewrite rule turns it back into the package's real path;
+    /// identity cases — `import * as pkg from "pkg"` — are a no-op there
+    /// because the joined hint equals the symbol's own path).
+    fn js_ts_namespace_member_path(
+        root: tree_sitter::Node,
+        source: &[u8],
+        ns: &str,
+        member: &str,
+    ) -> Option<Vec<String>> {
+        for i in 0..root.child_count() {
+            let child = root.child(i)?;
+            if child.kind() != "import_statement" {
+                continue;
+            }
+            let Some(source_node) = child.child_by_field_name("source") else {
+                continue;
+            };
+            let Some(spec) = Self::js_ts_specifier(source_node, source) else {
+                continue;
+            };
+            let Some(clause) = (0..child.child_count())
+                .filter_map(|k| child.child(k))
+                .find(|n| n.kind() == "import_clause")
+            else {
+                // `import "pkg"` — side-effect only, binds nothing.
+                continue;
+            };
+            for j in 0..clause.child_count() {
+                let c = clause.child(j)?;
+                if c.kind() != "namespace_import" {
+                    continue;
+                }
+                let alias = (0..c.child_count())
+                    .filter_map(|k| c.child(k))
+                    .find(|n| n.kind() == "identifier")
+                    .and_then(|n| Self::node_text(n, source))?;
+                if alias == ns {
+                    return Some(vec![spec, member.to_string()]);
+                }
+            }
+        }
+        None
+    }
+
+    /// (011-02) The Python scope hint: a BARE symbol → the module path +
+    /// item its import binds it to. A dotted symbol (`os.path.join`) carries
+    /// its own module path → EMPTY (never treated as bare).
+    fn python_scope_for(source: &str, byte: usize, symbol: &str) -> Vec<String> {
+        if symbol.contains('.') {
+            return Vec::new();
+        }
+        Self::python_import_path_for_symbol(source, byte, symbol).unwrap_or_default()
+    }
+
+    /// The module path (segments, item included) of the import that binds a
+    /// BARE Python `symbol` at `byte`:
+    /// - `from a import X` → `["a", "X"]`; `from a.b import X` →
+    ///   `["a", "b", "X"]`; `from a import X as Y` → the original `X` for
+    ///   bare `Y`;
+    /// - `import a.b as c` → `["a", "b"]` for bare `c` (the module alias);
+    /// - a plain `import a.b` binds ONLY the top-level `a` → never a hint
+    ///   for bare `b` (not guessed);
+    /// - relative imports (`from . import X`), wildcards (`import *`), and
+    ///   `from a import b.c` (binds `b`, an attribute walk) → `None`
+    ///   (the sys.path root is unknown from the buffer path alone — never
+    ///   guessed).
+    ///
+    /// Bounded: the module level + the enclosing `function`/`class` blocks
+    /// only (innermost first — a local import shadows the module-level
+    /// one); imports nested deeper (under an `if`, etc.) are not counted.
+    /// Within a block the LAST matching statement at/before `byte` wins
+    /// (a re-import shadows the earlier one).
+    fn python_import_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
+        let language = crate::syntax::queries::language_for(
+            crate::syntax::registry::LanguageId::Python,
+        )?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        let tree = parser.parse(source.as_bytes(), None)?;
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return None;
+        }
+        // The innermost node containing `byte` (the same containment rule
+        // as the Rust walk).
+        let mut leaf = root;
+        loop {
+            let mut child = None;
+            for i in 0..leaf.child_count() {
+                if let Some(c) = leaf.child(i)
+                    && c.start_byte() <= byte
+                    && byte < c.end_byte()
+                {
+                    child = Some(c);
+                    break;
+                }
+            }
+            match child {
+                Some(c) => leaf = c,
+                None => break,
+            }
+        }
+        // Candidate blocks, innermost first (nearest scope shadows), the
+        // module level last.
+        let mut scopes: Vec<tree_sitter::Node> = Vec::new();
+        let mut anc = leaf.parent();
+        while let Some(a) = anc {
+            if a.kind() == "function_definition" || a.kind() == "class_definition" {
+                scopes.push(a);
+            }
+            anc = a.parent();
+        }
+        scopes.push(root);
+        let bytes = source.as_bytes();
+        for scope in scopes {
+            let block = if scope.kind() == "module" {
+                scope
+            } else {
+                scope.child_by_field_name("body")?
+            };
+            let mut hit: Option<Vec<String>> = None;
+            for i in 0..block.child_count() {
+                let child = block.child(i)?;
+                match child.kind() {
+                    "import_statement" | "import_from_statement" => {
+                        if !(child.start_byte() <= byte) {
+                            continue;
+                        }
+                        if let Some(path) =
+                            Self::python_import_stmt_path(child, bytes, symbol)
+                        {
+                            hit = Some(path); // last matching statement wins
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    }
+
+    /// One Python import statement: the original path the entry binds to
+    /// `symbol` (`None` when no entry names it — plain `import a.b`,
+    /// relative modules, wildcards, and attribute-walk entries are never
+    /// guessed).
+    fn python_import_stmt_path(
+        stmt: tree_sitter::Node,
+        source: &[u8],
+        symbol: &str,
+    ) -> Option<Vec<String>> {
+        match stmt.kind() {
+            "import_statement" => {
+                // Each entry is field `name`: a `dotted_name` (binds only
+                // its TOP-LEVEL segment — never a hint) or an
+                // `aliased_import` (binds the alias to the full module).
+                let mut hit: Option<Vec<String>> = None;
+                for i in 0..stmt.child_count() {
+                    let child = stmt.child(i)?;
+                    if child.kind() != "aliased_import" {
+                        continue;
+                    }
+                    let Some(alias_node) = child.child_by_field_name("alias") else {
+                        continue;
+                    };
+                    let alias = Self::node_text(alias_node, source)?;
+                    if alias != symbol {
+                        continue;
+                    }
+                    let Some(name) = child.child_by_field_name("name") else {
+                        continue;
+                    };
+                    hit = Some(Self::python_dotted_segments(name, source)?);
+                }
+                hit
+            }
+            "import_from_statement" => {
+                let module = stmt.child_by_field_name("module_name")?;
+                let base = if module.kind() == "relative_import" {
+                    return None; // `from . import X`: the enclosing package is
+                    // ambiguous without the sys.path root — not guessed.
+                } else {
+                    Self::python_dotted_segments(module, source)?
+                };
+                let mut hit: Option<Vec<String>> = None;
+                for i in 0..stmt.child_count() {
+                    let child = stmt.child(i)?;
+                    match child.kind() {
+                        "aliased_import" => {
+                            let Some(alias_node) = child.child_by_field_name("alias") else {
+                                continue;
+                            };
+                            let alias = Self::node_text(alias_node, source)?;
+                            if alias != symbol {
+                                continue;
+                            }
+                            let Some(name) = child.child_by_field_name("name") else {
+                                continue;
+                            };
+                            let item = Self::python_dotted_segments(name, source)?;
+                            if item.len() != 1 {
+                                continue; // `from a import b.c` binds `b`, not `b.c`.
+                            }
+                            let mut full = base.clone();
+                            full.extend(item);
+                            hit = Some(full);
+                        }
+                        "dotted_name" => {
+                            // `from a import b` — binds the (single) name.
+                            let item = Self::python_dotted_segments(child, source)?;
+                            if item.len() == 1 && item[0] == symbol {
+                                let mut full = base.clone();
+                                full.push(item[0].clone());
+                                hit = Some(full);
+                            }
+                        }
+                        _ => {} // `wildcard_import`: names no specific symbol.
+                    }
+                }
+                hit
+            }
+            _ => None,
+        }
+    }
+
+    /// The identifier segments of a Python `dotted_name` node (its `.`
+    /// tokens are anonymous — only `identifier` children count); `None`
+    /// when a segment is not a plain ASCII identifier.
+    fn python_dotted_segments(node: tree_sitter::Node, source: &[u8]) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        for i in 0..node.child_count() {
+            let c = node.child(i)?;
+            if c.kind() != "identifier" {
+                continue;
+            }
+            let t = Self::node_text(c, source)?;
+            if !Self::is_ascii_identifier(&t) {
+                return None;
+            }
+            out.push(t);
+        }
+        if out.is_empty() {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// (011-02) The Go scope hint: a BARE symbol → the dot-imported package
+    /// name + the symbol (Go binds bare item names only through DOT
+    /// imports — plain and aliased imports bind a package NAME, which is
+    /// always used qualified and needs no hint). A dotted symbol
+    /// (`y.Fn`) carries its own package name → EMPTY.
+    fn go_scope_for(source: &str, byte: usize, symbol: &str) -> Vec<String> {
+        if symbol.contains('.') {
+            return Vec::new();
+        }
+        Self::go_import_path_for_symbol(source, byte, symbol).unwrap_or_default()
+    }
+
+    /// The dot-import hint for a bare Go `symbol`: exactly ONE dot-imported
+    /// package in the file (file-scoped) → `["<local pkg name>",
+    /// "<symbol>"]` (the local name is the import path's last segment);
+    /// zero dot imports → `None`; SEVERAL → `None` (the origin of a bare
+    /// item is ambiguous — never guessed).
+    fn go_import_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
+        let language = crate::syntax::queries::language_for(
+            crate::syntax::registry::LanguageId::Go,
+        )?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        let tree = parser.parse(source.as_bytes(), None)?;
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return None;
+        }
+        let bytes = source.as_bytes();
+        let mut dot_pkgs: Vec<String> = Vec::new();
+        for i in 0..root.child_count() {
+            let child = root.child(i)?;
+            if child.kind() != "import_declaration" {
+                continue;
+            }
+            // Specs are direct children (single import) or children of the
+            // `import_spec_list` (grouped `import ( … )`).
+            let mut stack = vec![child];
+            while let Some(node) = stack.pop() {
+                for j in 0..node.child_count() {
+                    let c = node.child(j)?;
+                    match c.kind() {
+                        "import_spec" => {
+                            // Only `import . "pkg"` (the named `dot` node)
+                            // binds bare item names.
+                            let Some(name) = c.child_by_field_name("name") else {
+                                continue;
+                            };
+                            if name.kind() != "dot" {
+                                continue;
+                            }
+                            let Some(path_node) = c.child_by_field_name("path") else {
+                                continue;
+                            };
+                            let path = Self::go_string_content(path_node, bytes)?;
+                            let pkg = path.rsplit('/').next()?;
+                            if !Self::is_ascii_identifier(pkg) {
+                                continue;
+                            }
+                            dot_pkgs.push(pkg.to_string());
+                        }
+                        "import_spec_list" => stack.push(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let [pkg] = dot_pkgs.as_slice() else {
+            return None;
+        };
+        Some(vec![pkg.to_string(), symbol.to_string()])
+    }
+
+    /// The content of a Go `interpreted_string_literal` (import paths): the
+    /// quotes stripped, for `"…"` and backtick-quoted strings.
+    fn go_string_content(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let text = Self::node_text(node, source)?;
+        let bytes = text.as_bytes();
+        if bytes.len() < 2 {
+            return None;
+        }
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if !(first == b'"' && last == b'"' || first == b'`' && last == b'`') {
+            return None;
+        }
+        std::str::from_utf8(&bytes[1..bytes.len() - 1]).ok().map(String::from)
     }
 
     // ── external crate index cache (plan 006 issue 03) ───────────────
@@ -18197,7 +18830,383 @@ mod tests {
         assert!(!k.orphaned);
         assert_eq!(s.annotation_count_display(), "2 notes");
     }
+
+    // ── 011-02: per-language import walks (bare-symbol hints) ───────
+
+    /// (line, col) of a byte offset inside `src`.
+    fn point_of(src: &str, at: usize) -> (usize, usize) {
+        let line = src[..at].matches('\n').count();
+        let col = at - src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        (line, col)
+    }
+
+    /// Discriminating: a BARE imported symbol in a JS buffer now carries
+    /// the package path (007-03 did this for Rust only; pre-011-02 the
+    /// hint was empty for every non-Rust buffer).
+    #[test]
+    fn resolver_scope_js_named_import_carries_package_path() {
+        let src = "import { doThing } from \"acme\";\nfunction f() { doThing(); }\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.js", src)]);
+        s.open_path("src/index.js");
+        let at = src.rfind("doThing").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("doThing"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// JS alias → original: `import { doThing as dt }` carries the
+    /// ORIGINAL path for the bare alias.
+    #[test]
+    fn resolver_scope_js_alias_carries_original() {
+        let src = "import { doThing as dt } from \"acme\";\ndt();\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.js", src)]);
+        s.open_path("src/index.js");
+        let at = src.rfind("dt").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("dt"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// JS default import: the local binding carries the package + name
+    /// (the provider's definition scan then pins the real line, or bails
+    /// honestly when it can't — the hint is the user's import, not a
+    /// guess).
+    #[test]
+    fn resolver_scope_js_default_import_carries_package() {
+        let src = "import doThing from \"acme\";\ndoThing();\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.js", src)]);
+        s.open_path("src/index.js");
+        let at = src.rfind("doThing").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("doThing"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// JS namespace import: bare `ns` names the package entry (`["pkg"]`);
+    /// `ns.member` rewrites to the package's real path + member. An
+    /// identity alias (`import * as acme from "acme"`) still carries the
+    /// path — the provider's rewrite rule treats it as a no-op because the
+    /// hint IS the symbol's own path.
+    #[test]
+    fn resolver_scope_js_namespace_import() {
+        let src = "import * as ac from \"acme\";\nimport * as acme from \"acme\";\nac.doThing();\nacme.doThing();\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.js", src)]);
+        s.open_path("src/index.js");
+        // Bare namespace → the package entry.
+        let at = src.find("import * as ac ").unwrap() + "import * as ac".len();
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(s.resolver_scope("ac"), vec!["acme".to_string()]);
+        // `ns.member` → the package's real path + member.
+        let at = src.find("ac.doThing()").expect("fixture");
+        let (line, col) = point_of(src, at + 1); // inside `doThing`
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("ac.doThing"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+        // Identity alias: the hint equals the symbol's own path (the
+        // provider's rewrite is a no-op there — pinned at the provider).
+        let at = src.find("acme.doThing()").expect("fixture");
+        let (line, col) = point_of(src, at + 1);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("acme.doThing"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// No-import / relative / absolute specifiers are NEVER guessed:
+    /// the hint stays empty (the provider keeps its exact no-hint bail).
+    #[test]
+    fn resolver_scope_js_no_import_and_relative_are_not_guessed() {
+        let cases = [
+            ("no import", "function f() { doThing(); }\n"),
+            (
+                "relative",
+                "import { doThing } from \"./acme\";\ndoThing();\n",
+            ),
+            (
+                "relative parent",
+                "import { doThing } from \"../acme\";\ndoThing();\n",
+            ),
+            (
+                "absolute path",
+                "import { doThing } from \"/opt/acme\";\ndoThing();\n",
+            ),
+            (
+                "side-effect only",
+                "import \"acme\";\ndoThing();\n",
+            ),
+        ];
+        for (name, src) in cases {
+            let (mut s, _dir) = store_with_index(&[("src/index.js", src)]);
+            s.open_path("src/index.js");
+            let at = src.rfind("doThing").expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            assert!(
+                s.resolver_scope("doThing").is_empty(),
+                "{name}: no hint expected"
+            );
+        }
+    }
+
+    /// JS subpath specifiers keep their `/` (the provider drops the
+    /// subpath to the base package); CJS `require` destructuring follows
+    /// the same rules as ESM named imports.
+    #[test]
+    fn resolver_scope_js_subpath_and_cjs_require() {
+        let src = "import { doThing } from \"acme/sub\";\nconst { doThing2 } = require(\"acme2\");\nconst { doThing3: dt3 } = require(\"acme3\");\nconst acme4 = require(\"acme4\");\ndoThing();\ndoThing2();\ndt3();\nacme4();\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.cjs", src)]);
+        s.open_path("src/index.cjs");
+        let mut probe = |symbol: &str| {
+            let at = src.rfind(symbol).expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            s.resolver_scope(symbol)
+        };
+        assert_eq!(
+            probe("doThing"),
+            vec!["acme/sub".to_string(), "doThing".to_string()]
+        );
+        assert_eq!(
+            probe("doThing2"),
+            vec!["acme2".to_string(), "doThing2".to_string()]
+        );
+        assert_eq!(
+            probe("dt3"),
+            vec!["acme3".to_string(), "doThing3".to_string()]
+        );
+        // The whole-module binding names the entry itself (no item).
+        assert_eq!(probe("acme4"), vec!["acme4".to_string()]);
+    }
+
+    /// TS `import type { D }` carries the same hint as a value import
+    /// (type-only imports still name the item for the provider's scan).
+    #[test]
+    fn resolver_scope_ts_import_type_carries_package_path() {
+        let src = "import type { D } from \"acme\";\nlet d: D;\n";
+        let (mut s, _dir) = store_with_index(&[("src/index.ts", src)]);
+        s.open_path("src/index.ts");
+        let at = src.rfind("D").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("D"),
+            vec!["acme".to_string(), "D".to_string()]
+        );
+    }
+
+    /// Discriminating: a BARE imported symbol in a Python buffer carries
+    /// the module path + item (pre-011-02 the hint was empty).
+    #[test]
+    fn resolver_scope_python_from_import_carries_module_path() {
+        let src = "from acme import doThing\n\ndoThing()\n";
+        let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+        s.open_path("main.py");
+        let at = src.rfind("doThing").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("doThing"),
+            vec!["acme".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// Python `from a.b import X as Y`: the bare alias carries the FULL
+    /// original module path + original item.
+    #[test]
+    fn resolver_scope_python_from_submodule_alias_carries_original() {
+        let src = "from acme.sub import doThing as dt\n\ndt()\n";
+        let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+        s.open_path("main.py");
+        let at = src.rfind("dt").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("dt"),
+            vec!["acme".to_string(), "sub".to_string(), "doThing".to_string()]
+        );
+    }
+
+    /// Python module alias (`import a.b as c`) carries the module chain
+    /// for the bare alias; a plain `import a.b` binds ONLY the top-level
+    /// `a` — the bare `b` is never guessed.
+    #[test]
+    fn resolver_scope_python_module_alias_and_top_level_only() {
+        let src = "import acme.sub\nimport acme.sub2 as s\n\ns.fn()\n";
+        let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+        s.open_path("main.py");
+        // Bare `s` (the alias): the module chain.
+        let at = src.find("s.fn()").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("s"),
+            vec!["acme".to_string(), "sub2".to_string()]
+        );
+        // Plain `import acme.sub`: bare `sub` is NOT bound (only `acme`)
+        // → no hint (never guessed).
+        let at = src.find("acme.sub").expect("fixture");
+        let (line, col) = point_of(src, at + "acme.".len());
+        s.set_point(line, col, col);
+        assert!(s.resolver_scope("sub").is_empty());
+    }
+
+    /// Python local imports shadow module-level ones (innermost block
+    /// wins — the bounded walk mirrors the Rust mod-scope rule); within
+    /// one block the LAST re-import at/before the point wins.
+    #[test]
+    fn resolver_scope_python_local_import_shadows_module_level() {
+        let src = "from a import Thing\ndef f():\n    from b import Thing\n    return Thing\n\nThing()\n";
+        let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+        s.open_path("main.py");
+        // Inside the function: the local import wins.
+        let at = src.rfind("return Thing").expect("fixture");
+        let (line, col) = point_of(src, at + "return ".len());
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("Thing"),
+            vec!["b".to_string(), "Thing".to_string()]
+        );
+        // Module level: the module-level import.
+        let at = src.rfind("Thing()").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("Thing"),
+            vec!["a".to_string(), "Thing".to_string()]
+        );
+    }
+
+    /// Python same-block re-import: the last matching statement at/before
+    /// the point shadows the earlier one (imports are statements, unlike
+    /// Rust's module-scoped `use`).
+    #[test]
+    fn resolver_scope_python_later_reimport_shadows() {
+        let src = "from a import Thing\nx = Thing\nfrom b import Thing\ny = Thing\n";
+        let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+        s.open_path("main.py");
+        let before = src.find("x = Thing").expect("fixture");
+        let (line, col) = point_of(src, before + 4);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("Thing"),
+            vec!["a".to_string(), "Thing".to_string()]
+        );
+        let after = src.rfind("y = Thing").expect("fixture");
+        let (line, col) = point_of(src, after + 4);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("Thing"),
+            vec!["b".to_string(), "Thing".to_string()]
+        );
+    }
+
+    /// Python relative imports, wildcards, and dotted symbols are NEVER
+    /// guessed: the hint stays empty (the provider keeps its exact
+    /// no-hint bail / own-path behavior).
+    #[test]
+    fn resolver_scope_python_relative_and_wildcard_are_not_guessed() {
+        for (name, src, symbol) in [
+            ("relative", "from . import Thing\nThing()\n", "Thing"),
+            ("relative two", "from ..mod import Thing\nThing()\n", "Thing"),
+            ("wildcard", "from acme import *\ndoThing()\n", "doThing"),
+            ("dotted symbol", "import os\nos.path.join('a', 'b')\n", "os.path.join"),
+        ] {
+            let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+            s.open_path("main.py");
+            let at = src.rfind(symbol).expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            assert!(
+                s.resolver_scope(symbol).is_empty(),
+                "{name}: no hint expected"
+            );
+        }
+    }
+
+    /// Discriminating: a BARE symbol dot-imported in Go carries the
+    /// local package name (the import path's last segment) + the symbol.
+    #[test]
+    fn resolver_scope_go_dot_import_carries_package_name() {
+        let src = "package main\n\nimport . \"github.com/pkg/errors\"\n\nfunc main() {\n\t_ = New(\"x\")\n}\n";
+        let (mut s, _dir) = store_with_index(&[("main.go", src)]);
+        s.open_path("main.go");
+        let at = src.rfind("New").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("New"),
+            vec!["errors".to_string(), "New".to_string()]
+        );
+    }
+
+    /// Go grouped dot imports work the same (the `import ( … )` form).
+    #[test]
+    fn resolver_scope_go_grouped_dot_import() {
+        let src = "package main\n\nimport (\n\t. \"github.com/pkg/errors\"\n\t\"fmt\"\n)\n\nfunc main() {\n\t_ = New(\"x\")\n}\n";
+        let (mut s, _dir) = store_with_index(&[("main.go", src)]);
+        s.open_path("main.go");
+        let at = src.rfind("New").expect("fixture");
+        let (line, col) = point_of(src, at);
+        s.set_point(line, col, col);
+        assert_eq!(
+            s.resolver_scope("New"),
+            vec!["errors".to_string(), "New".to_string()]
+        );
+    }
+
+    /// Go plain/aliased imports bind a package NAME (always used
+    /// qualified) — never a bare-item hint; dotted symbols carry their
+    /// own package name → empty. Several dot imports make the origin of a
+    /// bare item ambiguous → never guessed.
+    #[test]
+    fn resolver_scope_go_non_dot_and_ambiguous_imports_are_not_guessed() {
+        for (name, src, symbol) in [
+            (
+                "plain import",
+                "package main\n\nimport \"github.com/x/y\"\n\nfunc main() {\n\t_ = y.Fn\n}\n",
+                "y",
+            ),
+            (
+                "aliased import",
+                "package main\n\nimport yy \"github.com/a/b\"\n\nfunc main() {\n\t_ = yy.Fn\n}\n",
+                "yy",
+            ),
+            (
+                "two dot imports",
+                "package main\n\nimport (\n\t. \"github.com/a/aa\"\n\t. \"github.com/b/bb\"\n)\n\nfunc main() {\n\t_ = Fn\n}\n",
+                "Fn",
+            ),
+            (
+                "dotted symbol",
+                "package main\n\nimport \"github.com/x/y\"\n\nfunc main() {\n\t_ = y.Fn\n}\n",
+                "y.Fn",
+            ),
+        ] {
+            let (mut s, _dir) = store_with_index(&[("main.go", src)]);
+            s.open_path("main.go");
+            let at = src.rfind(symbol).expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            assert!(
+                s.resolver_scope(symbol).is_empty(),
+                "{name}: no hint expected"
+            );
+        }
+    }
+
+
+
 }
-
-
-

@@ -126,14 +126,18 @@ pub struct SymbolContext {
     /// Path of the file the jump started from, workspace-relative.
     pub from_file: PathBuf,
     /// The app's tree-sitter hint for a BARE (separator-free) symbol: the
-    /// FULL path the bare name resolves to — the `use` declaration that
-    /// brings it into scope, item included
-    /// (`use serde::Deserialize;` → `["serde", "Deserialize"]`; an aliased
-    /// `use serde::Deserialize as D;` yields the SAME value for bare `D`).
-    /// For a path-shaped symbol the app may pass the enclosing item chain
-    /// instead (carried, not consumed by the providers today). Empty when
-    /// the app has no hint (no such import, non-Rust buffer, failed
-    /// parse) — a provider MUST then degrade to its exact no-hint
+    /// FULL path the bare name resolves to — the import declaration that
+    /// brings it into scope, item included (Rust `use serde::Deserialize;`
+    /// → `["serde", "Deserialize"]`; an aliased import — `use … as D`,
+    /// `import { … as D }`, `from … import … as D` — yields the SAME
+    /// original value for bare `D`; JS/TS namespace: `import * as ns from
+    /// "pkg"` → `["pkg"]` for bare `ns`). 011-02: for a JS/TS namespace-
+    /// aliased MEMBER (`ns.member`), the app passes the package's real path
+    /// instead (e.g. `["pkg", "member"]`) — see [`scope_qualified_alias`].
+    /// For a path-shaped Rust symbol the app may pass the enclosing item
+    /// chain instead (carried, not consumed by the providers today). Empty
+    /// when the app has no hint (no such import, unimplemented language,
+    /// failed parse) — a provider MUST then degrade to its exact no-hint
     /// behavior (the byte-for-byte degradation contract).
     pub scope: Vec<String>,
     /// The buffer's language (lowercase, e.g. `"python"` — matching the
@@ -157,6 +161,27 @@ pub(crate) fn scope_qualified(sep: &str, symbol: &str, scope: &[String]) -> Opti
     } else {
         None
     }
+}
+
+/// The 011-02 namespace-member rewrite: a PATH-SHAPED symbol whose first
+/// segment is a local alias (`ns.member` from `import * as ns from "pkg"`)
+/// plus a scope hint of the package's real path ending in the SAME item
+/// (`["pkg", "member"]`) → the joined hint (the provider then resolves it
+/// through its ordinary package/item machinery). `None` when the hint is
+/// empty, the hint's item does not equal the symbol's own item (it is not
+/// a rewrite of THIS symbol), or the hint IS the symbol's own path
+/// (identity — the symbol's path already wins, never touched).
+pub(crate) fn scope_qualified_alias(sep: &str, symbol: &str, scope: &[String]) -> Option<String> {
+    if scope.is_empty() || !symbol.contains(sep) {
+        // A bare symbol is `scope_qualified`'s domain, not a rewrite.
+        return None;
+    }
+    let item = symbol.rsplit(sep).next()?;
+    if item.is_empty() || scope.last()?.as_str() != item {
+        return None;
+    }
+    let joined = scope.join(sep);
+    (joined != symbol).then_some(joined)
 }
 
 /// Guess the crate name from a use-path-shaped symbol
@@ -402,6 +427,33 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// (011-02) The namespace-member rewrite: only a hint ending in the
+    /// symbol's OWN item, and only when it is not the identity, rewrites.
+    #[test]
+    fn scope_qualified_alias_rewrites_namespace_member() {
+        assert_eq!(
+            scope_qualified_alias(".", "ac.doThing", &["acme".into(), "doThing".into()]),
+            Some("acme.doThing".to_string())
+        );
+        // Identity: the hint IS the symbol's own path — the path wins.
+        assert_eq!(
+            scope_qualified_alias(".", "acme.doThing", &["acme".into(), "doThing".into()]),
+            None
+        );
+        // Item mismatch: not a rewrite of THIS symbol.
+        assert_eq!(
+            scope_qualified_alias(".", "ac.doThing", &["acme".into(), "other".into()]),
+            None
+        );
+        // A bare symbol is `scope_qualified`'s job, not this one.
+        assert_eq!(
+            scope_qualified_alias(".", "doThing", &["acme".into(), "doThing".into()]),
+            None
+        );
+        // No hint.
+        assert_eq!(scope_qualified_alias(".", "ac.doThing", &[]), None);
     }
 
     #[test]
