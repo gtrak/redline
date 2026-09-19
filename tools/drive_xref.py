@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
-"""Drive M-. (xref-find-definitions) — cursor-aware selection + resolver
-fall-through (plan 006 issue 02) against the shared fixture.
+"""M-. xref thin tier (loop-04): the same-file jump smoke.
 
-Legs (fixture /tmp/redline_pyte_repo — a git repo WITHOUT a Cargo.toml, so
-the cargo provider fails fast and offline):
-  L1 same-file:   cursor at the END of the `target_one` call → jump to the
-                  SAME-FILE definition (struct+impl-style case; the old
-                  cross-file filter made this unjumpable).
-  L2 cross-file:  cursor at the end of `target_lib` in a fresh src/leg.rs →
-                  jump to src/lib.rs.
-  L3 bare miss:   cursor at the end of `other` in `let other = 9;` — not in
-                  the index (it is a let binding), no enclosing symbol →
-                  resolver fall-through → a clear
-                  "no provider resolution for `other`" message.
-  L4 path token:  cursor at the end of `tokio` in `tokio::spawn(f);` — the
-                  miss report names the PATH token `tokio::spawn` (the raw
-                  token under the point is what the resolver gets).
-  L5 ownership guard (006-02b item 1): a PATH dependency OUTSIDE the
-                  fixture root lands via the same external-landing path as
-                  a registry source (read-only `open_external_path`); the
-                  C-x C-q override AND C-x C-s are refused there ("external
-                  buffer is read-only (not project-owned)"). The temporary
-                  Cargo.toml + external crate are removed afterwards — the
-                  fixture baseline is explicitly cargo-less.
-  L6 middle landing (plan 004 issue 07): M-. from a call to a definition
-  ~150 lines below lands the definition on the MIDDLE row of the content
-  area (emacs `xref-after-jump-hook` = `(recenter ...)`), NOT the last
-  content row (the pre-004-07 minimal-scroll landing).
+One leg of the original six stays PTY: L1 (M-. at the END of the `target_one`
+call jumps to the SAME-FILE definition — the user's core complaint — lands
+on it, and M-, returns to the call site). The state halves of the rest are
+unit twins (src/app/flow_tests.rs, loop-04):
+
+  * L2 cross-file jump          -> unit_flow_xref_l2
+  * L3 bare-miss report         -> unit_flow_xref_l3
+  * L4 raw `::` path token      -> unit_flow_xref_l4
+  * L5 external landing guard   -> unit_flow_xref_l5 (the path-dep's cargo
+                                   metadata resolution itself is the
+                                   resolver corpus's)
+  * L6 middle-landing recenter  -> unit_flow_xref_l6
+
+What stays PTY-only here is the live terminal: the real M-. input through
+the terminal encoder and the live landing/repaint.
+
+Fixture: /tmp/redline_pyte_repo (a git repo WITHOUT a Cargo.toml — the
+fixture baseline is explicitly cargo-less; the leg files are removed after).
 """
 import os
 import shutil
@@ -39,9 +31,6 @@ from pyte_driver import App
 
 REPO = "/tmp/redline_pyte_repo"
 LEG_RS = os.path.join(REPO, "src", "leg.rs")
-CALL_RS = os.path.join(REPO, "src", "call.rs")
-LONG_RS = os.path.join(REPO, "src", "long.rs")
-EXT_CRATE = "/tmp/redline_xref_extcrate"
 MINI = 22  # minibuffer row (content rows 0..20 in a 24-row PTY, 1-based
            # terminal row 23 is the status line)
 
@@ -83,35 +72,14 @@ def top_content(app):
 
 
 reset()
-print("=== M-. cursor-aware jump + resolver fall-through ===")
-# Belt and braces: a crashed prior L5 run must not have left cargo state
-# (the fixture baseline is explicitly cargo-less; reset() does not know
-# about these files).
-for stray in ("Cargo.toml", "Cargo.lock"):
-    try:
-        os.remove(os.path.join(REPO, stray))
-    except FileNotFoundError:
-        pass
-shutil.rmtree(os.path.join(REPO, "target"), ignore_errors=True)
-shutil.rmtree(EXT_CRATE, ignore_errors=True)
+print("=== M-. same-file jump (thin tier) ===")
 os.makedirs(os.path.join(REPO, "src"), exist_ok=True)
 with open(LEG_RS, "w") as f:
     f.write("fn leg() {\n    target_lib();\n}\ntokio::spawn(f);\n")
-# L6: a 220-line file whose `far_target` definition sits at 1-based line
-# 160 (~150 lines below any top-of-file call), plus the call-site file.
-with open(LONG_RS, "w") as f:
-    for i in range(1, 221):
-        if i == 160:
-            f.write("pub fn far_target() {\n    // body\n}\n")
-        else:
-            f.write(f"// filler {i}\n")
-with open(CALL_RS, "w") as f:
-    f.write("fn caller() {\n    far_target();\n}\n")
 
 app = App(REPO)
 app.wait_ready()
 try:
-    # ── L1: same-file jump (the user's core complaint) ──────────────────
     open_file(app, "src/main.rs")
     goto(app, 4)  # "target_one();"
     app.key("M-f", 0.8)  # point to the END of the `target_one` run
@@ -127,103 +95,9 @@ try:
     back = "target_one();" in app.screen_text()
     rec("L1 same-file: M-, back to the call site", back,
         f"screen has call site={back}")
-
-    # ── L2: cross-file jump ─────────────────────────────────────────────
-    open_file(app, "src/leg.rs")
-    goto(app, 2)  # "    target_lib();"
-    app.key("M-f", 0.8)  # end of `target_lib` (skips `fn`... no: line 2 IS the call)
-    app.key("M-.", 1.5)
-    ok, msg = poll(app, "jumped to src/lib.rs", timeout=5.0)
-    rec("L2 cross-file: message", ok, f"minibuffer={msg!r}")
-    ok = "pub fn target_lib() {}" in top_content(app)
-    rec("L2 cross-file: window landed on lib.rs definition", ok,
-        f"top={top_content(app)!r}")
-
-    # ── L3: bare (field-shaped) name → resolver fall-through ────────────
-    open_file(app, "src/main.rs")
-    goto(app, 6)  # "let other = 9;"
-    app.key("M-f M-f", 0.8)  # end of `let`, then end of `other`
-    app.key("M-.", 1.5)
-    ok, msg = poll(app, "provider(s): rust", timeout=25.0)
-    ok = ok and "`other`" in msg and "`tokio`" not in msg
-    rec("L3 bare miss: graceful resolver report", ok, f"minibuffer={msg!r}")
-
-    # ── L4: `::`-path token reaches the resolver raw ────────────────────
-    open_file(app, "src/leg.rs")
-    goto(app, 4)  # "tokio::spawn(f);"
-    app.key("M-f", 0.8)  # end of `tokio`
-    app.key("M-.", 1.5)
-    ok, msg = poll(app, "provider(s): rust", timeout=25.0)
-    ok = ok and "`tokio::spawn`" in msg
-    rec("L4 path token: resolver gets the raw `tokio::spawn`", ok,
-        f"minibuffer={msg!r}")
-
-    # ── L5: the ownership guard on an external landing (006-02b item 1) ─
-    # A PATH dependency outside the fixture root resolves (cargo metadata)
-    # to a source dir OUTSIDE the project root → the resolver lands it via
-    # open_external_path (read-only), exactly like a registry source.
-    os.makedirs(os.path.join(EXT_CRATE, "src"), exist_ok=True)
-    with open(os.path.join(EXT_CRATE, "Cargo.toml"), "w") as f:
-        f.write('[package]\nname = "extdep"\nversion = "0.1.0"\nedition = "2021"\n')
-    with open(os.path.join(EXT_CRATE, "src", "lib.rs"), "w") as f:
-        f.write("pub fn ext_target() {}\n")
-    # The dep is RENAMED (`extleg`) so the crate name `extdep` never
-    # appears as a key the project symbol-indexer would index as a
-    # definition (a bare `extdep` key makes M-. jump to Cargo.toml
-    # instead of falling through — the drive_external_notes trick).
-    with open(os.path.join(REPO, "Cargo.toml"), "w") as f:
-        f.write('[package]\nname = "pyte_repo"\nversion = "0.1.0"\nedition = "2021"\n\n'
-                f'[dependencies]\nextleg = {{ package = "extdep", path = "{EXT_CRATE}" }}\n')
-    # Probe line: TOP-LEVEL call in leg.rs (no enclosing symbol → the M-.
-    # selection falls through to the tooling resolver).
-    with open(LEG_RS, "w") as f:
-        f.write("fn leg() {\n    target_lib();\n}\ntokio::spawn(f);\nextdep::ext_target();\n")
-    open_file(app, "src/leg.rs")
-    goto(app, 5)  # "extdep::ext_target();"
-    app.key("M-f", 0.8)  # point to the END of the `extdep` run
-    app.key("M-.", 1.5)
-    ok, msg = poll(app, "jumped to", timeout=45.0)
-    rec("L5 external landing: M-. resolves the path dep OUTSIDE the root",
-        ok and EXT_CRATE in msg, f"minibuffer={msg!r}")
-    app.key("C-x C-q", 1.0)
-    ok, msg = poll(app, "external buffer is read-only", timeout=10.0)
-    rec("L5 ownership guard: C-x C-q is refused on the external buffer",
-        ok, f"minibuffer={msg!r}")
-    app.key("C-x C-s", 1.0)
-    ok, msg = poll(app, "external buffer is read-only", timeout=10.0)
-    rec("L5 ownership guard: C-x C-s is refused on the external buffer",
-        ok, f"minibuffer={msg!r}")
-
-    # ── L6: jump-landing recenter (plan 004 issue 07) ────────────────────
-    # Content rows are 0..20 (terminal rows 1..21) in the 24-row PTY; the
-    # middle content row is 10 (terminal row 11). The pre-004-07
-    # minimal-scroll landing put a below-window target on the LAST content
-    # row (terminal row 21) instead.
-    open_file(app, "src/call.rs")
-    goto(app, 2)  # "    far_target();"
-    app.key("M-f", 0.8)  # point to the END of the `far_target` run
-    app.key("M-.", 1.5)
-    ok, msg = poll(app, "jumped to src/long.rs", timeout=10.0)
-    rec("L6 middle landing: jumped to the long-file definition", ok,
-        f"minibuffer={msg!r}")
-    def_rows = [i for i in range(app.rows)
-                if "pub fn far_target" in app.row_text(i)]
-    ok = len(def_rows) == 1 and 8 <= def_rows[0] <= 14
-    rec("L6 middle landing: definition row is mid-window, not the last row",
-        ok, f"def rows={def_rows} (want ~11; the last content row is 21)")
 finally:
     app.kill()
-    # L5 leftovers: restore the cargo-less fixture baseline for the other
-    # fixture suites and remove the temporary external crate.
-    for stray in ("Cargo.toml", "Cargo.lock"):
-        try:
-            os.remove(os.path.join(REPO, stray))
-        except FileNotFoundError:
-            pass
-    shutil.rmtree(os.path.join(REPO, "target"), ignore_errors=True)
-    shutil.rmtree(EXT_CRATE, ignore_errors=True)
-    # L6 leftovers: drive_xref-only files; keep the shared fixture clean.
-    for stray in (CALL_RS, LONG_RS):
+    for stray in (LEG_RS,):
         try:
             os.remove(stray)
         except FileNotFoundError:

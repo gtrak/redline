@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Broad automated UX sweep: drive many key sequences across views and flag
-ANOMALIES rather than asserting specific values. Complements the targeted
-probes; its job is to surface the unexpected:
+"""Broad automated UX sweep — thin tier (loop-04).
+
+Drives the same key sequences across every view and flags ANOMALIES rather
+than asserting specific values:
 
   * a hard panic / process death
   * "unbound key" echoes (a key we expect to work is not bound)
@@ -9,6 +10,17 @@ probes; its job is to surface the unexpected:
   * rows wider than the terminal (layout overflow) or stray control chars
   * a "changed on disk" marker or error message appearing unprompted
   * the hardware cursor parked off-screen (row/col outside the frame)
+
+What changed in loop-04: the keymap-coverage STATE half (which keys are
+bound in which view, blank-view and cursor-in-range invariants) is now the
+unit twin `unit_flow_ux_keymap_coverage` in src/app/flow_tests.rs (every
+key of every leg, driven through `AppStore::key_event`, the known-unbound
+window-split keys parity-pinned). This file keeps the terminal tier: the
+same per-key anomaly scan through the REAL terminal — input encoding,
+process liveness, the hardware cursor, raw pixels — but in TWO App
+sessions instead of thirteen (one 80-col session drives every normal leg
+in order; one 40-col session drives the narrow-terminal stress), so the
+pool battery pays two launches, not thirteen.
 
 Run: python3 tools/ux_sweep.py [--cols N] [--rows N]
 Exit code 0 always (diagnostic); prints a findings list.
@@ -21,8 +33,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from pyte_driver import App
 from fixture import reset
-
-CTRL_RE = None
 
 
 def frame_text(app):
@@ -40,8 +50,7 @@ def anomalies(app, label, cols, rows):
         if len(app.row_text(r)) > cols:
             out.append(f"row {r} wider than {cols}")
             break
-    # unbound-key echo (we track which keys are expected to be bound by
-    # passing expect_bound=False for deliberate probes)
+    # unbound-key echo (a key we expected to be bound is not)
     if "unbound key" in text:
         out.append("unbound-key echo")
     # cursor parked outside the frame
@@ -61,52 +70,74 @@ def main():
 
     findings = []
 
-    def drive(label, keys, setup=None, settle=0.5):
-        app = App(root, rows=args.rows, cols=args.cols)
+    def drive(app, label, setup, keys, settle=0.5):
         try:
-            if setup:
-                for k in setup:
-                    app.key(k, settle=settle)
+            for k in setup:
+                app.key(k, settle=settle)
             for k in keys:
                 app.key(k, settle=settle)
                 for a in anomalies(app, label, args.cols, args.rows):
                     findings.append(f"{label}: key {k!r}: {a}")
         except Exception as e:  # process died
             findings.append(f"{label}: EXCEPTION {type(e).__name__}: {e}")
-        finally:
-            try:
-                app.kill()
-            except Exception:
-                pass
 
-    # each view, driven with its own navigation keys
-    drive("buffer-view", ["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b",
-                          "M-<", "M->", "C-v", "M-v", "C-d", "C-u", "C-l", "j", "k"],
-          setup=["C-x C-f", "lib.rs", "RET"])
-    drive("magit", ["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"],
-          setup=["C-x g"], settle=0.7)
-    drive("log", ["n", "p", "RET", "q"], setup=["C-x g", "l"], settle=0.7)
-    drive("blame", ["n", "p", "q"], setup=["C-x g", "b"], settle=0.7)
-    drive("find-file", ["x", "y", "z", "C-g"], setup=["C-x C-f"], settle=0.5)
-    drive("buffer-list", ["n", "p", "C-g"], setup=["C-x C-b"], settle=0.5)
-    drive("transient-menu", ["C-x", "C-g", "?", "C-g"], setup=[], settle=0.6)
-    drive("search", ["C-g", "C-g"], setup=["C-c p s s"], settle=0.6)
-    drive("notes-edit", ["a", "b", "C-h", "C-g"], setup=["C-x n"], settle=0.5)
-    # the tree over a BUFFER view: pre-06a this scenario booted on the
-    # scratch buffer, so open a file first (06a boots on the home view,
-    # whose keymap is intentionally empty — C-n/C-p there are unbound by
-    # design, and the tree-on-home leg lives in sweep.py "home -> file").
-    drive("tree", ["C-n", "C-p", "RET", "C-g"],
-          setup=["C-x C-f", "lib.rs", "RET", "M-x", "toggle-tree", "RET"],
-          settle=0.6)
-    drive("window-splits", ["C-x 2", "C-x o", "C-x o", "C-x 1", "C-x 0"],
-          setup=["C-x C-f", "lib.rs", "RET"], settle=0.6)
-    # narrow terminal stress
+    # ONE session drives every normal leg (loop-04: the per-key anomaly
+    # scan is preserved; only the launch count drops). Each leg ends with
+    # the keys that return to the home view, so the next leg starts from a
+    # clean state exactly like the old fresh-App drives.
+    app = App(root, rows=args.rows, cols=args.cols)
+    try:
+        drive(app, "buffer-view", ["C-x C-f lib.rs RET"],
+              ["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b",
+               "M-<", "M->", "C-v", "M-v", "C-d", "C-u", "C-l", "j", "k",
+               "q"], settle=0.4)
+        drive(app, "magit", ["C-x g"],
+              ["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"],
+              settle=0.7)
+        # log: RET opens the commit diff (q closes it back to the log, then
+        # the final q closes the log itself).
+        drive(app, "log", ["C-x g", "l"], ["n", "p", "RET", "q", "q"],
+              settle=0.7)
+        # blame: q closes the blame back to magit status, then home.
+        drive(app, "blame", ["C-x g", "b"], ["n", "p", "q", "q"], settle=0.7)
+        drive(app, "find-file", ["C-x C-f"], ["x", "y", "z", "C-g"],
+              settle=0.5)
+        # buffer list: C-g does not close it (global cancel); q does.
+        drive(app, "buffer-list", ["C-x C-b"], ["n", "p", "C-g", "q"],
+              settle=0.5)
+        drive(app, "transient-menu", [], ["C-x", "C-g", "?", "C-g"],
+              settle=0.6)
+        drive(app, "search", ["C-c p s s"], ["C-g", "C-g"], settle=0.6)
+        drive(app, "notes-edit", ["C-x n"], ["a", "b", "C-h", "C-g", "q"],
+              settle=0.5)
+        # the tree over a BUFFER view: pre-06a this scenario booted on the
+        # scratch buffer, so open a file first (06a boots on the home view,
+        # whose keymap is intentionally empty — C-n/C-p there are unbound by
+        # design, and the tree-on-home leg lives in sweep.py "home -> file").
+        # M-x toggle-tree RET switches the tree OFF again before closing.
+        drive(app, "tree",
+              ["C-x C-f lib.rs RET", "M-x toggle-tree RET"],
+              ["C-n", "C-p", "RET", "C-g", "M-x toggle-tree RET", "q"],
+              settle=0.6)
+        # window-splits: C-x 2 / C-x 1 / C-x 0 are UNBOUND by design (the 3
+        # pre-existing findings — the unit twin parity-pins them); C-x o
+        # (open-scratch) is bound.
+        drive(app, "window-splits", ["C-x C-f lib.rs RET"],
+              ["C-x 2", "C-x o", "C-x o", "C-x 1", "C-x 0", "q"],
+              settle=0.6)
+    finally:
+        app.kill()
+
+    # narrow terminal stress (its own sized session, as before)
     old_cols = args.cols
     args.cols = 40
-    drive("narrow-40", ["C-n", "C-e", "M->", "C-l", "?", "C-g"],
-          setup=["C-x C-f", "lib.rs", "RET"], settle=0.5)
-    args.cols = old_cols
+    narrow = App(root, rows=args.rows, cols=args.cols)
+    try:
+        drive(narrow, "narrow-40", ["C-x C-f lib.rs RET"],
+              ["C-n", "C-e", "M->", "C-l", "?", "C-g"], settle=0.5)
+    finally:
+        narrow.kill()
+        args.cols = old_cols
 
     print("=== UX SWEEP FINDINGS ===")
     if not findings:

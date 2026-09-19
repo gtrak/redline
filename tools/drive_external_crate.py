@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Plan 006 issue 03 — navigation INSIDE external (registry) sources.
+"""In-crate navigation thin tier (loop-04): the registry-landing smoke.
 
-Drives the in-crate navigation that pre-006-03 refused ("buffer not in
-project"):
-
+One of the original sections stays PTY (only a live app proves it):
   L1 M-. lands in the registry source: in a dedicated repo (NOT the shared
      fixture — the fixture has no Cargo.toml, and these legs need a cargo
      graph) the cursor sits at the end of `ropey` in the top-level
@@ -11,19 +9,18 @@ project"):
      the rust provider resolves via `cargo metadata` (the registry source
      is cached, so it is fast and offline) → lands READ-ONLY in
      ~/.cargo/registry/src/<hash>/ropey-1.6.1/src/rope.rs.
-  L2/L3 `indexing crate …` indicator: the landing registers the crate's
-     source_root for a background crate index build (off the input path,
-     published on the CrateIndexBus). The status line shows the indicator
-     while the build is in flight and it clears when the index lands.
-  L4 M-. WITHIN the crate: after the indicator clears, M-. on
-     `RopeBuilder` (defined in rope_builder.rs, used in rope.rs) jumps
-     CROSS-FILE inside the crate — the jump message is CRATE-RELATIVE
-     (`src/rope_builder.rs:…`, not the absolute registry path) and the
-     landing buffer is read-only.
-  L5 imenu on the external buffer: M-i lists the current file's symbols
-     from the crate index (not a refusal).
-  L6/L7 M-, walks the jump stack back: first to the in-crate origin
-     (rope.rs), then to the project file (src/main.rs).
+
+The rest is store-level now (unit twins in src/app/flow_tests.rs, loop-04 —
+the `indexing crate …` bus and the crate index are store state, driven
+through the same store entry points):
+  L2/L3 `indexing crate …` indicator appears + clears
+                                       -> unit_flow_ext_crate_landing_indicator
+  L4 M-. within the crate (crate-relative jump)
+                                       -> unit_flow_ext_crate_in_crate_mdot
+  L5 imenu on the external buffer (crate index, not a refusal)
+                                       -> unit_flow_ext_crate_imenu
+  L6/L7 M-, walks the jump stack back
+                                       -> unit_flow_ext_crate_in_crate_mdot
 
 The drive owns its own repo dir (/tmp/redline_ext_crate_repo) under the
 shared PTY-flock scheme (the lock is keyed to the repo path, so it never
@@ -48,7 +45,6 @@ COLS, ROWS = 200, 24
 # 200 cols: the M-. landing message carries the FULL absolute registry path
 # (90+ chars); the default 80-col PTY would clip it and break the parse.
 MINI = ROWS - 2      # minibuffer row (0-based)
-STATUS = ROWS - 1    # status-line row (0-based)
 
 CHECKS = []
 
@@ -96,15 +92,20 @@ def open_main(app):
     app.key("RET", 1.2)
 
 
-def poll_minibuffer(app, needle, timeout=60.0):
-    deadline = time.time() + timeout
-    last = ""
-    while time.time() < deadline:
-        app._read(0.3, quiet=0.2)
-        last = app.row_text(MINI)
-        if needle in last:
-            return True, last
-    return False, last
+
+def prewarm_cargo():
+    """Run `cargo metadata` up front. A cold registry index makes the
+    in-app provider's `cargo metadata` pay a network fetch inside its own
+    30s budget (then a 120s `cargo fetch` fallback) — paying it here keeps
+    the landing deterministic and fails fast with a readable message.
+    """
+    out = subprocess.run(["cargo", "metadata", "--format-version", "1"],
+                         cwd=REPO, capture_output=True, timeout=120)
+    if out.returncode != 0:
+        print(f"FAIL cargo metadata pre-warm failed "
+              f"(is the crates.io index reachable?): "
+              f"{out.stderr.decode(errors='replace')[:200]!r}")
+        sys.exit(1)
 
 
 def main():
@@ -113,8 +114,8 @@ def main():
         print(f"FAIL ropey registry source missing at {ROPE_RS}")
         sys.exit(1)
     setup_repo()
+    prewarm_cargo()
     app = None
-    indicator_seen = False
     try:
         app = App(REPO, rows=ROWS, cols=COLS)
 
@@ -125,26 +126,20 @@ def main():
         app.key("5", 0.4)
         app.key("RET", 0.8)   # line 5: top-level `ropey::Rope::new();` probe
         app.key("M-f", 0.8)   # point to the END of the `ropey` run
-        # From here the status line is polled continuously with FAST reads:
-        # the `indexing crate` indicator exists only between the landing and
-        # the build's final event, and the build can finish in well under a
-        # second on a warm page cache — a coarse poll would miss it.
-        app.key("M-.", 0.5)
-        ok = False
-        landed, landed_line = None, 0
+        # Poll the minibuffer for the landing (the `indexing crate`
+        # indicator may share the status line meanwhile — that timing half
+        # is the unit twin's now).
         deadline = time.time() + 60.0
+        ok = False
         msg = ""
         while time.time() < deadline:
-            app._read(0.03, quiet=0.02)
-            if "indexing crate" in app.row_text(STATUS):
-                indicator_seen = True
+            app._read(0.3, quiet=0.2)
             if "jumped to" in app.row_text(MINI):
                 ok = True
                 msg = app.row_text(MINI)
                 break
         m = re.search(r"jumped to (\S+):(\d+)", msg)
-        if m:
-            landed, landed_line = m.group(1), int(m.group(2))
+        landed = m.group(1) if m else None
         rec("L1: M-. reports the jump", ok and landed is not None,
             f"minibuffer={msg!r}")
         rec("L1: the landing path is a registry source (absolute, external)",
@@ -154,73 +149,6 @@ def main():
         rec("L1: the window landed on rope.rs (Rope in view)",
             "Rope" in app.screen_text(),
             f"top={app.row_text(1)!r}")
-
-        # ── L2/L3: the `indexing crate …` indicator appears and clears ──
-        print("\n=== L2/L3: indexing crate indicator ===")
-        rec("L2: the `indexing crate` indicator appears in the status line",
-            indicator_seen,
-            "polled continuously from the M-. press")
-        # Wait for the build to finish (indicator cleared), still watching
-        # closely enough that a fast build cannot slip past the check.
-        deadline = time.time() + 90.0
-        cleared = False
-        while time.time() < deadline:
-            app._read(0.03, quiet=0.02)
-            status = app.row_text(STATUS)
-            if "indexing crate" in status:
-                indicator_seen = True
-            if "indexing crate" not in status:
-                cleared = True
-                break
-        rec("L3: the `indexing crate` indicator clears (index ready)",
-            cleared, f"status={app.row_text(STATUS)!r}")
-
-        # ── L4: M-. WITHIN the crate (cross-file, crate-relative) ──────
-        print("\n=== L4: M-. on RopeBuilder jumps within ropey ===")
-        # rope.rs line 104: "        RopeBuilder::new().build_at_once(text);"
-        # M-f from col 0 lands at the END of the `RopeBuilder` run.
-        app.key("M-g g", 0.8)
-        app.key("1", 0.35)
-        app.key("0", 0.35)
-        app.key("4", 0.35)
-        app.key("RET", 0.8)
-        app.key("M-f", 0.8)
-        app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "jumped to", timeout=60.0)
-        # The jump message is CRATE-RELATIVE (the crate index keys files
-        # against the crate root) — not the absolute registry path the
-        # resolver landing reports.
-        rec("L4: M-. on RopeBuilder reports a CRATE-RELATIVE jump",
-            bool(ok) and "jumped to src/rope_builder.rs:" in msg,
-            f"minibuffer={msg!r}")
-        rec("L4: the landing shows the RopeBuilder struct",
-            "pub struct RopeBuilder" in app.screen_text(),
-            f"top={app.row_text(1)!r}")
-        rec("L4: the current buffer is the crate's rope_builder.rs",
-            "rope_builder.rs" in app.row_text(STATUS),
-            f"status={app.row_text(STATUS)!r}")
-
-        # ── L5: imenu on the external buffer ───────────────────────────
-        print("\n=== L5: M-i lists the crate file's symbols ===")
-        app.key("M-i", 1.0)
-        screen = app.screen_text()
-        rec("L5: imenu opens on the external buffer", "Imenu:" in screen,
-            f"prompt row={app.row_text(MINI)!r}")
-        rec("L5: the outline lists RopeBuilder (crate index, not a refusal)",
-            "RopeBuilder" in screen and "not in project" not in screen,
-            "no refusal message")
-        app.key("C-g", 0.8)   # cancel the picker
-
-        # ── L6/L7: M-, walks the jump stack back ───────────────────────
-        print("\n=== L6/L7: M-, back through the jump stack ===")
-        app.key("M-,", 1.0)
-        rec("L6: M-, returns to the in-crate origin (src/rope.rs)",
-            "src/rope.rs" in app.row_text(STATUS),
-            f"status={app.row_text(STATUS)!r}")
-        app.key("M-,", 1.0)
-        rec("L7: M-, returns to the project file (src/main.rs)",
-            "src/main.rs" in app.row_text(STATUS),
-            f"status={app.row_text(STATUS)!r}")
     finally:
         if app is not None:
             app.kill()

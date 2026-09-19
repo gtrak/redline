@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Plan 007 issue 03 — scope-aware resolver fall-through (M-. on a BARE
-symbol that a `use` declaration brings into scope).
+"""Use-scope resolver thin tier (loop-04): the bare use-imported symbol
+landing smoke (L1).
 
-Legs (a dedicated repo, NOT the shared fixture — these legs need a cargo
-graph; the drive owns /tmp/redline_ext_use_repo under the shared PTY-flock
-scheme, so the driver's abspath-keyed lock never contends with the
-/tmp/redline_pyte_repo suites; the repo is removed on exit):
+L1 stays PTY (only a live app proves it): `use serde::Deserialize;` at the
+top of main.rs; the M-. probe is a TOP-LEVEL `let d = Deserialize;`
+(an expression statement is not an outline item, so the M-. selection
+falls through to the tooling resolver — the drive_external_crate
+precedent). The app supplies the use path as the SymbolContext scope hint
+(007-03) and the rust provider resolves through the SAME
+locate_source_dir / locate_in_pkg machinery as a path-shaped symbol,
+landing READ-ONLY in the (cached) serde registry source — the `pub
+trait Deserialize` definition.
 
-  L1 bare use-imported symbol resolves: `use serde::Deserialize;` at the
-     top of main.rs; the M-. probe is a TOP-LEVEL `let d = Deserialize;`
-     (an expression statement is not an outline item, so the M-. selection
-     falls through to the tooling resolver — the drive_external_crate
-     precedent). The app now supplies the use path as the SymbolContext
-     scope hint (007-03) and the rust provider resolves through the SAME
-     locate_source_dir / locate_in_pkg machinery as a path-shaped symbol,
-     landing READ-ONLY in the (cached) serde registry source — the `pub
-     trait Deserialize` definition.
-  L2 degradation pin: a BARE symbol with NO `use` (`let other = 9;`) still
-     misses with the graceful "no provider resolution for `other`" report
-     (byte-for-byte behavior — no hint, no guessing).
+L2 (the degradation pin: a BARE symbol with NO `use` misses with the
+graceful "no provider resolution" report, byte-for-byte) is store-level:
+unit_flow_ext_use_l2 (src/app/flow_tests.rs, loop-04) — the store's
+selection + miss-report path, with the provider's own "tried 1 provider(s):
+rust" text from the resolver corpus.
 
-Exit 0 = all legs pass; 1 = any failed. Wrap the invocation in `timeout`.
+The drive owns a dedicated repo (/tmp/redline_ext_use_repo) under the
+shared PTY-flock scheme, so the driver's abspath-keyed lock never contends
+with the /tmp/redline_pyte_repo suites; the repo is removed on exit. Wrap
+the invocation in `timeout`.
+
+Exit 0 = all legs pass; 1 = any failed.
 """
 import os
 import re
@@ -81,7 +84,7 @@ def setup_repo(serde_version):
         # selection falls through to the tooling resolver.
         f.write("use serde::Deserialize;\n"      # line 1
                 "let d = Deserialize;\n"         # line 2 (L1 probe)
-                "let other = 9;\n")             # line 3 (L2 probe)
+                "let other = 9;\n")             # line 3 (L2 probe — store twin)
     subprocess.run(["git", "init", "-q", REPO], check=True)
     subprocess.run(["git", "-C", REPO, "add", "-A"], check=True,
                    capture_output=True)
@@ -103,7 +106,7 @@ def goto(app, n):
     app.key("RET", 0.8)
 
 
-def poll_minibuffer(app, needle, timeout=90.0):
+def poll_minibuffer(app, needle, timeout=120.0):
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
@@ -114,6 +117,22 @@ def poll_minibuffer(app, needle, timeout=90.0):
     return False, last
 
 
+
+def prewarm_cargo():
+    """Run `cargo metadata` up front. A cold registry index makes the
+    in-app provider's `cargo metadata` pay a network fetch inside its own
+    30s budget (then a 120s `cargo fetch` fallback) — paying it here keeps
+    the landing deterministic and fails fast with a readable message.
+    """
+    out = subprocess.run(["cargo", "metadata", "--format-version", "1"],
+                         cwd=REPO, capture_output=True, timeout=120)
+    if out.returncode != 0:
+        print(f"FAIL cargo metadata pre-warm failed "
+              f"(is the crates.io index reachable?): "
+              f"{out.stderr.decode(errors='replace')[:200]!r}")
+        sys.exit(1)
+
+
 def main():
     serde_dir, serde_version = find_cached_serde()
     print(f"REPO={REPO}\n")
@@ -122,6 +141,7 @@ def main():
         sys.exit(1)
     print(f"serde cache: {serde_dir}\n")
     setup_repo(serde_version)
+    prewarm_cargo()
     app = None
     try:
         app = App(REPO, rows=ROWS, cols=COLS)
@@ -143,23 +163,11 @@ def main():
         rec("L1: the window shows the Deserialize trait definition",
             "trait Deserialize" in app.screen_text(),
             f"top={app.row_text(1)!r}")
-        # Back to the project file for L2 (the landing recorded a jump).
+        # Back to the project file (the landing recorded a jump).
         app.key("M-,", 1.2)
         rec("L1: M-, returns to the project file (src/main.rs)",
             "src/main.rs" in app.row_text(STATUS),
             f"status={app.row_text(STATUS)!r}")
-
-        # ── L2: degradation pin — a bare symbol with NO `use` ─────────
-        print("\n=== L2: bare symbol without an import still misses ===")
-        goto(app, 3)          # "let other = 9;"
-        app.key("M-f M-f", 1.0)  # end of the `other` run
-        app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "no provider resolution", timeout=120.0)
-        rec("L2: graceful miss report names the symbol",
-            bool(ok) and "`other`" in msg and "tried 1 provider(s): rust" in msg,
-            f"minibuffer={msg!r}")
-        rec("L2: a bare unimported symbol never jumps",
-            "jumped to" not in msg, f"minibuffer={msg!r}")
     finally:
         if app is not None:
             app.kill()
