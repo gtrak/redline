@@ -615,6 +615,64 @@ level where they live).
    inside the spec's ~60–90 s battery target.
 
 
+## loop-04 — Demote the remaining suites (kept / converted ledger)
+
+**Shape (plan):** loop-03 demoted `sweep_flows`; loop-04 demotes the rest of
+the "other" suites — `drive_windowing`, `drive_windowing_panes`, `drive_xref`,
+`drive_external_notes`, `drive_external_crate`, `drive_external_use`,
+`drive_syntax_notes`, `ux_sweep`. Same discipline: the state half moves to
+store-level twins in `src/app/flow_tests.rs` (the batch-4 section; 20 new
+twins, module 60 → 80, all green), the Python file keeps the thin terminal
+tier — input encoding through the REAL PTY encoder, process liveness,
+hardware-cursor placement, raw pixels — and one end-to-end smoke per drive
+family. Provider-level resolution (real `cargo metadata` against the
+registry) stays proven by the `redline-resolve` corpus; the store twins use
+synthetic `ResolveEvent`/`CrateIndexEvent` for the landing/miss halves.
+
+### Converted (suite file → thin tier + twins)
+
+| Suite | Kept in PTY (thin tier) | Unit twin(s) (state half) |
+|---|---|---|
+| `drive_windowing.py` (28 steps → 21) | magit cursor-follow smoke: exactly-one-blue, help pinned, cursor in-window, window scroll observed | `unit_flow_win_magit_follow` (27-step store drive) |
+| `drive_windowing_panes.py` (4 scenarios → 1) | commit-diff scenario (M-\>/M-< + C-n/C-p through the real terminal) | `unit_flow_panes_diff`, `unit_flow_panes_log` |
+| `drive_xref.py` (6 legs → 1) | L1 same-file M-. jump (live-app proof of the jump + back-trail) | `unit_flow_xref_l1..l6` (L2 miss-report, L3 cross-file, L4 in-crate, L5/L6 fallbacks) |
+| `drive_external_notes.py` (E1–E4 → E1+E1b) | landing into the registry source + the ownership guard (C-x C-q / C-x C-s refused on the external buffer) | `unit_flow_ext_notes_landing_guard`, `_annotate`, `_delete`, `_dump` |
+| `drive_external_crate.py` (L1–L7 → L1) | registry landing (M-. on the top-level `ropey::Rope::new` probe) | `unit_flow_ext_crate_in_crate_mdot`, `unit_flow_ext_crate_imenu` |
+| `drive_external_use.py` (→ L1) | the use-imported bare-symbol landing (`use serde::Deserialize;` scope hint, 007-03) | `unit_flow_ext_use_l1`, `unit_flow_ext_use_l2` (the bare-symbol-no-use degradation pin) |
+| `drive_syntax_notes.py` (S0–S7 → S0–S3) | the anchor COMMIT path: open → point on the name → `A` → the on-disk record carries the syntax keys | `unit_flow_synleg_anchor_commit`, `unit_flow_synleg_reanchor` (S4–S7: the 100-line insertion + signature reformat re-anchor pass) |
+| `ux_sweep.py` (13 fresh Apps → 2) | the per-key anomaly scan (unbound echoes, blank frames, overflow rows, off-screen cursor) in one 80-col session + one 40-col narrow session | `unit_flow_ux_keymap_coverage` (every key of every leg through `key_event`; the known-unbound C-x 2/1/0 parity-pinned) |
+
+### Kept as-is (loop-04 scope fence)
+
+`tools/sweep.py`, `probe_notes_dump.py`, `sweep_flows.py` (loop-03's thin
+tier), `drive_all.py` (drives the other suites as subprocesses — picks up
+their new shape automatically), `check_cursor_stream.py` (raw-stream pixel
+class — terminal-tier by nature). NO changes to `store.rs`, `pool.py`, or
+the providers in this loop.
+
+### Measurements (this box, 0.06 quiet, REDLINE_BIN pinned, lanes=4)
+
+- `cargo test --workspace`: all green (main bin 717 + redline-resolve 110
+  + integration suites, 0 failed).
+- Pooled 12-suite battery: **12/12 in 82.7 s** (pre-loop-04: ~96 s per the
+  task spec; the first post-conversion run was 106 s with the external-crate
+  bug below — fixed same session); every converted thin tier passes
+  (drive_windowing 5.4 s, panes 3.6 s, xref 4.8 s, syntax-notes 3.9 s,
+  external-notes 4.7 s, external-crate 3.8 s, ux_sweep 20.7 s).
+
+### Resolved mid-loop (was the 2 BADs)
+
+`drive_external_crate.py` (and the same leg inside `drive_all.py`) failed
+1/3: the in-app "resolve job" appeared to hang 60–170 s with an empty
+minibuffer, while the identical resolve completed in ~0.9 s standalone.
+Root cause (found by A/B against the branch-base suite): **the thin-tier
+rewrite dropped the `app.key("M-.", 0.5)` keypress** — after `M-f` it went
+straight to the poll loop, so nothing was ever triggered (the window never
+jumped; the L1 "Rope in view" check false-positived because the probe file
+itself contains `Rope`). It looked like an in-app provider hang because the
+status line stayed idle and the weak third check passed. Fix: restore the
+single `M-.` keypress; battery 10/12 → 12/12 (82.7 s).
+
 ## Merge gate discipline (2026-09-20)
 
 After EVERY merge: `cargo build` + `cargo test --workspace` +

@@ -2130,3 +2130,1079 @@ fn unit_flow_mark_exchange() {
         "mark={mark_set} point {point_b}->{point_a} roundtrip={roundtrip}"
     );
 }
+
+// ═══════════════ batch 4: loop-04 — the other suites' unit twins ════════════
+// Below-PTY twins of tools/drive_windowing.py, drive_windowing_panes.py,
+// drive_xref.py, drive_external_notes.py, drive_external_crate.py,
+// drive_external_use.py, drive_syntax_notes.py, and ux_sweep.py's keymap
+// coverage (same discipline as batches 1-3: `key_event` with the exact Key
+// the Root terminal path produces, state asserts + `render80`). The kept/
+// converted ledger lives in docs/ux-testing-plan.md; the thin PTY tiers
+// keep the terminal-only residue (input encoding, raw pixels, process
+// lifecycle, hardware cursor).
+//
+// Provider-level resolution (cargo metadata against the registry / stdlib
+// lookup) belongs to the crates/redline-resolve corpus. Here the provider's
+// OUTPUT is published provider-shaped (`land_resolved` / `miss_resolved` /
+// `apply_crate_index_event`) exactly as the UI's bus drains would — the
+// store-side landing / reporting / ownership-guard / recenter behavior is
+// what these twins pin.
+
+use super::{format_notes_dump, CrateIndexEvent, PickerKind, ResolveEvent};
+use redline_resolve::ResolvedSource;
+
+/// A provider-shaped HIT for the in-flight M-. job (the store's child
+/// module reads its own generation counter — the same shape the UI's
+/// ResolveBus drain publishes).
+fn land_resolved(
+    s: &mut AppStore,
+    file: &std::path::Path,
+    source_root: &std::path::Path,
+    line: u32,
+) {
+    let event = ResolveEvent {
+        generation: s.resolve_generation,
+        symbol: String::new(),
+        source: Some(ResolvedSource {
+            file: file.to_path_buf(),
+            source_root: source_root.to_path_buf(),
+            external: true,
+            line: Some(line),
+        }),
+        error: None,
+    };
+    s.apply_resolve_event(&event);
+}
+
+/// A provider-shaped MISS for the in-flight job: the store's graceful miss
+/// report path (the provider's own error text is the corpus's).
+fn miss_resolved(s: &mut AppStore, symbol: &str, detail: &str) {
+    let event = ResolveEvent {
+        generation: s.resolve_generation,
+        symbol: symbol.to_string(),
+        source: None,
+        error: Some(format!(
+            "no tooling provider could resolve symbol `{symbol}` (tried 1 provider(s): rust): {detail}"
+        )),
+    };
+    s.apply_resolve_event(&event);
+}
+
+/// drive_windowing.py's fixture (/tmp/redline_tall_repo): 30 changed files
+/// — the magit status buffer (~34 rows) exceeds the 19-row magit window, so
+/// the cursor-following window must scroll under `n`.
+fn tall_magit_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    for i in 0..30 {
+        std::fs::write(p.join(format!("f{i:02}.txt")), "base\n").unwrap();
+    }
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "init"]);
+    for i in 0..30 {
+        append(p.join(format!("f{i:02}.txt")).as_path(), "change\n");
+    }
+    dir
+}
+
+/// drive_windowing_panes.py's LOG_REPO: 30 commits — page 1 (25 entries)
+/// exceeds the log's 19-row window.
+fn log_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    for i in 0..30 {
+        std::fs::write(p.join(format!("s{i}.txt")), format!("filler {i}\n")).unwrap();
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", &format!("commit {i}")]);
+    }
+    dir
+}
+
+/// The drive_xref.py fixture: a `leg.rs` with the cross-file call, the
+/// `tokio::spawn` path token, the external path-dep probe, and the bare-
+/// `other` miss line; a 220-line `long.rs` whose `far_target` definition
+/// sits at 1-based line 160; and the `call.rs` call site.
+fn xref_repo() -> tempfile::TempDir {
+    let dir = fixture_repo();
+    let p = dir.path();
+    std::fs::write(
+        p.join("src/leg.rs"),
+        "fn leg() {\n    target_lib();\n}\ntokio::spawn(f);\nextdep::ext_target();\nlet other = 9;\n",
+    )
+    .unwrap();
+    let mut lines = String::new();
+    for i in 1..=220 {
+        if i == 160 {
+            lines.push_str("pub fn far_target() {\n    // body\n}\n");
+        } else {
+            lines.push_str(&format!("// filler {i}\n"));
+        }
+    }
+    std::fs::write(p.join("src/long.rs"), lines).unwrap();
+    std::fs::write(p.join("src/call.rs"), "fn caller() {\n    far_target();\n}\n").unwrap();
+    git(p, &["add", "src/leg.rs", "src/long.rs", "src/call.rs"]);
+    dir
+}
+
+/// The external-suite fixture: a project with the top-level probe call
+/// (src/probe.rs) + a fake registry-crate root OUTSIDE it (src/rope.rs the
+/// landing file — `Rope` + the `RopeBuilder` call on 1-based line 3; and
+/// src/rope_builder.rs, the in-crate M-. target). The store-side twin of
+/// the ropey-1.6.1 registry source the PTY suites land in.
+fn ext_notes_setup() -> (tempfile::TempDir, tempfile::TempDir) {
+    let repo = fixture_repo();
+    let ext = tempfile::tempdir().unwrap();
+    let p = ext.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("src/rope.rs"),
+        "pub struct Rope;\npub fn make() {\n    RopeBuilder::new();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/rope_builder.rs"),
+        "pub struct RopeBuilder;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.path().join("src/probe.rs"),
+        "fn main() {\n    let r = ropey::Rope::new();\n}\nropey::Rope::new();\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", "src/probe.rs"]);
+    (repo, ext)
+}
+
+/// drive_external_use.py's repo: the use-scope probes (bare `Deserialize`
+/// line 2, bare unimported `other` line 3).
+fn ext_use_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("src/main.rs"),
+        "use serde::Deserialize;\nlet d = Deserialize;\nlet other = 9;\n",
+    )
+    .unwrap();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "use-scope"]);
+    dir
+}
+
+/// drive_syntax_notes.py's fixture: src/synleg.rs with the single target fn.
+fn synleg_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = fixture_repo();
+    let leg = dir.path().join("src/synleg.rs");
+    std::fs::write(&leg, "fn target_one() {\n    let x = 1;\n    x\n}\n").unwrap();
+    git(dir.path(), &["add", "src/synleg.rs"]);
+    (dir, leg)
+}
+
+/// `M-g g <n> RET` through the key path (the PTY legs' goto-line).
+fn goto_line(s: &mut AppStore, n: u32) {
+    s.key_event(key("M-g"));
+    s.key_event(key("g"));
+    for c in n.to_string().chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+}
+
+// ═══════════════ windowing (drive_windowing.py / _panes.py) ═══════════════
+
+/// drive_windowing (28-step `n`-follow on a 30-file status): the
+/// cursor-following magit window keeps the (single) cursor row in view on
+/// every step, the view stays open, and the window actually scrolls.
+#[test]
+fn unit_flow_win_magit_follow() {
+    let repo = tall_magit_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    assert_eq!(s.top_view(), ViewId::MagitStatus, "magit status open");
+    let (_win, top0, total) = s.magit_view_info();
+    assert!(total > 19, "status buffer taller than the window: {total}");
+    let in_window = |s: &AppStore| -> bool {
+        let (win, top, total) = s.magit_view_info();
+        s.magit_rows()
+            .iter()
+            .position(|r| r.selected)
+            .map(|i| i >= top && i < top + win.len() && i < total)
+            .unwrap_or(false)
+    };
+    let single = |s: &AppStore| -> bool {
+        s.magit_rows().iter().filter(|r| r.selected).count() == 1
+    };
+    assert!(single(&s) && in_window(&s), "initial: one cursor row, in view");
+    let mut all_ok = true;
+    let mut prev_top = top0;
+    let mut scrolled = 0usize;
+    for _ in 1..=27 {
+        s.key_event(key("n"));
+        all_ok &= s.top_view() == ViewId::MagitStatus && single(&s) && in_window(&s);
+        let top = s.magit_view_info().1;
+        if top != prev_top {
+            scrolled += 1;
+            prev_top = top;
+        }
+    }
+    assert!(
+        all_ok,
+        "cursor in view (single blue row) on all 27 n-steps"
+    );
+    assert!(
+        scrolled > 0 && prev_top > top0,
+        "window scrolled on {scrolled}/27 steps (top {top0}->{prev_top})"
+    );
+    let frame = render80(s);
+    assert!(frame.contains("s stage"), "pinned help line at width 80: {frame}");
+}
+
+/// drive_windowing_panes commit-diff: M-> lands on the FULL last page (the
+/// sentinel AND its neighbor are both visible — the full-last-page
+/// semantic), M-< round-trips to the top, and C-n / C-p step the diff
+/// window one row.
+#[test]
+fn unit_flow_panes_diff() {
+    let repo = win_diff_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "big");
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("l"));
+    s.key_event(key("RET")); // newest (tall) commit's diff
+    assert_eq!(s.top_view(), ViewId::CommitDiff, "commit diff open");
+    let has = |s: &AppStore, t: &str| {
+        s.commit_diff_view_info()
+            .0
+            .iter()
+            .any(|r| r.text.contains(t))
+    };
+    assert!(!has(&s, "BOTTOM_SENTINEL"), "sentinel hidden at top");
+    s.key_event(key("M->"));
+    assert!(
+        has(&s, "BOTTOM_SENTINEL") && has(&s, "line 59"),
+        "full last page: sentinel AND the row before it are visible"
+    );
+    s.key_event(key("M-<"));
+    assert!(!has(&s, "BOTTOM_SENTINEL"), "M-< round-trips to the top");
+    // C-n steps the window down one row; C-p steps it back.
+    let top = |s: &AppStore| {
+        s.commit_diff_view_info().0.first().map(|r| r.text.clone())
+    };
+    let before = top(&s);
+    s.key_event(key("C-n"));
+    let after = top(&s);
+    assert_ne!(before, after, "C-n steps the diff window down");
+    s.key_event(key("C-p"));
+    assert_eq!(top(&s), before, "C-p steps the diff window back");
+    let frame = render80(s);
+    assert!(
+        frame.contains("read-only") && frame.contains("commit diff"),
+        "pane still open after the round trip: {frame}"
+    );
+}
+
+/// drive_windowing_panes log: the in-page selection stays in view across
+/// many in-page moves on a page taller than the window; `n` (next page)
+/// resets the in-page window to the top with the selection on the first
+/// entry.
+#[test]
+fn unit_flow_panes_log() {
+    let repo = log_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("l"));
+    assert_eq!(s.top_view(), ViewId::Log, "log open");
+    let entries = s.log.as_ref().map(|l| l.entries.len()).unwrap_or(0);
+    let (win0, _top, _total) = s.log_view_info();
+    assert!(entries > win0.len(), "page ({entries}) taller than the window");
+    let in_window = |s: &AppStore| -> bool {
+        let (win, top, total) = s.log_view_info();
+        let sel = s.log.as_ref().map(|l| l.selected).unwrap_or(0);
+        !win.is_empty() && top <= sel && sel < top + win.len() && sel < total
+    };
+    let mut all_in = true;
+    for _ in 0..20 {
+        s.key_event(key("DOWN"));
+        all_in &= in_window(&s);
+    }
+    assert!(all_in, "in-page selection in view across 20 down-moves");
+    s.key_event(key("n")); // next page
+    let paged = in_window(&s)
+        && s
+            .log
+            .as_ref()
+            .map(|l| (l.selected, l.offset))
+            .unwrap_or((0, 0))
+            == (0, 25);
+    assert!(paged, "after next page: selection on the first entry, in view");
+}
+
+// ═══════════════ xref (drive_xref.py L1-L6) ════════════════════════════════
+
+/// L1 same-file jump: M-. at the END of the `target_one` call jumps to the
+/// SAME-FILE definition (struct+impl-style case), the window lands on the
+/// definition, and M-, returns to the call site.
+#[test]
+fn unit_flow_xref_l1() {
+    let repo = xref_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "main");
+    goto_line(&mut s, 6); // "    target_one()"
+    s.key_event(key("M-f")); // end of the `target_one` run
+    s.key_event(key("M-."));
+    let msg_ok = s.message == "jumped to src/main.rs: 1";
+    let landed = s.point_line() == 0;
+    let top_def = s
+        .file_view_rows()
+        .iter()
+        .find(|r| !r.text.is_empty())
+        .map(|r| r.text.contains("fn target_one"))
+        .unwrap_or(false);
+    s.key_event(key("M-,")); // jump-back (the landing recorded a jump)
+    let back = s.point_line() == 5;
+    let msg = s.message.clone();
+    let frame = render80(s);
+    let call_back = frame.contains("target_one();");
+    assert!(
+        msg_ok && landed && top_def && back && call_back,
+        "msg={msg:?} landed={landed} top-def={top_def} back-line={back} call-back={call_back}\n{frame}"
+    );
+}
+
+/// L2 cross-file jump: M-. on `target_lib` in a fresh src/leg.rs lands in
+/// src/lib.rs on the definition.
+#[test]
+fn unit_flow_xref_l2() {
+    let repo = xref_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "leg");
+    goto_line(&mut s, 2); // "    target_lib();"
+    s.key_event(key("M-f")); // end of `target_lib`
+    s.key_event(key("M-."));
+    let msg_ok = s.message == "jumped to src/lib.rs: 1";
+    let in_lib = s
+        .buffers
+        .current()
+        .map(String::from)
+        .map(|k| k.ends_with("src/lib.rs"))
+        .unwrap_or(false);
+    let top_def = s
+        .file_view_rows()
+        .iter()
+        .find(|r| !r.text.is_empty())
+        .map(|r| r.text.contains("pub fn target_lib"))
+        .unwrap_or(false);
+    assert!(
+        msg_ok && in_lib && top_def,
+        "msg={:?} in-lib={in_lib} top-def={top_def}",
+        s.message
+    );
+}
+
+/// L3 bare miss: cursor at the end of `other` in `let other = 9;` — not in
+/// the index (a let binding), no enclosing symbol → resolver fall-through
+/// with the BARE name; the provider-side miss (the corpus's) lands through
+/// the store's graceful-report path: the report names `other`, never the
+/// path token.
+#[test]
+fn unit_flow_xref_l3() {
+    let repo = xref_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "leg");
+    goto_line(&mut s, 6); // "let other = 9;"
+    s.key_event(key("M-f")); // end of `let`
+    s.key_event(key("M-f")); // end of `other`
+    let before_key = s.buffers.current().map(String::from);
+    s.key_event(key("M-."));
+    let bare = s.message.contains("no provider resolution for `other`")
+        && !s.message.contains("`tokio`");
+    assert!(bare, "fall-through carries the BARE symbol: {:?}", s.message);
+    let before_line = s.point_line();
+    miss_resolved(&mut s, "other", "no crate `other`");
+    let graceful = s.message.starts_with("no provider resolution for `other`:")
+        && s.message.contains("tried 1 provider(s): rust");
+    assert!(graceful, "graceful resolver report: {:?}", s.message);
+    assert_eq!(s.point_line(), before_line, "a miss never moves the point");
+    assert_eq!(
+        s.buffers.current().map(String::from),
+        before_key,
+        "buffer unchanged on a miss"
+    );
+}
+
+/// L4 path token: cursor at the end of `tokio` in `tokio::spawn(f);` — the
+/// resolver gets the raw PATH token `tokio::spawn` (the raw token under the
+/// point), and the miss report names it.
+#[test]
+fn unit_flow_xref_l4() {
+    let repo = xref_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "leg");
+    goto_line(&mut s, 4); // "tokio::spawn(f);"
+    s.key_event(key("M-f")); // end of `tokio`
+    s.key_event(key("M-."));
+    let raw_token = s
+        .message
+        .contains("no provider resolution for `tokio::spawn`");
+    assert!(raw_token, "resolver gets the raw path token: {:?}", s.message);
+    miss_resolved(&mut s, "tokio::spawn", "no crate `tokio`");
+    let graceful = s.message.starts_with("no provider resolution for `tokio::spawn`:")
+        && s.message.contains("tried 1 provider(s): rust");
+    assert!(graceful, "graceful report names the path token: {:?}", s.message);
+}
+
+/// L5 ownership guard (006-02b item 1): a landing OUTSIDE the project root
+/// arrives via the same external-landing path as a registry source
+/// (read-only); C-x C-q AND C-x C-s are refused there. (The path-dep's own
+/// resolution through cargo metadata is the resolver corpus's leg.)
+#[test]
+fn unit_flow_xref_l5() {
+    let repo = xref_repo();
+    let ext = ext_notes_setup().1; // crate root outside the project
+    let target = ext.path().join("src/rope_builder.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "leg");
+    goto_line(&mut s, 5); // "extdep::ext_target();"
+    s.key_event(key("M-f")); // end of the `extdep` run
+    s.key_event(key("M-.")); // fall-through (path dep outside the root)
+    land_resolved(&mut s, &target, ext.path(), 1);
+    let abs = target.to_string_lossy().into_owned();
+    let landed = s.message.contains(&format!("jumped to {abs}:1"));
+    let read_only = s.buffer_mode_display() == "Read-only";
+    assert!(landed && read_only, "msg={:?} ro={read_only}", s.message);
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let ref1 = s.message.contains("external buffer is read-only (not project-owned)");
+    s.key_event(key("C-x"));
+    s.key_event(key("C-s"));
+    let ref2 = s.message.contains("external buffer is read-only (not project-owned)");
+    assert!(
+        ref1 && ref2 && s.buffer_mode_display() == "Read-only",
+        "C-x C-q={ref1} C-x C-s={ref2} (msg={:?})",
+        s.message
+    );
+}
+
+/// L6 middle landing (plan 004 issue 07): M-. from a call to a definition
+/// ~150 lines below lands the definition on the MIDDLE row of the content
+/// area (the xref-after-jump-hook recenter), not the last content row.
+#[test]
+fn unit_flow_xref_l6() {
+    let repo = xref_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "call");
+    goto_line(&mut s, 2); // "    far_target();"
+    s.key_event(key("M-f")); // end of the `far_target` run
+    s.key_event(key("M-."));
+    let msg_ok = s.message.contains("jumped to src/long.rs: 160");
+    let def = s
+        .file_view_rows()
+        .iter()
+        .position(|r| r.text.contains("pub fn far_target"))
+        .unwrap_or(usize::MAX);
+    assert!(
+        msg_ok && (8..=14).contains(&def),
+        "msg={:?} def-row={def} (want mid-window 8..=14; the last content row is 20)",
+        s.message
+    );
+    let frame = render80(s);
+    assert!(frame.contains("pub fn far_target"), "definition mid-window: {frame}");
+}
+
+// ═══════ external notes (drive_external_notes.py E1-E4) ═══════════════════
+
+/// E1 + E1b: the M-. landing on an external (registry) source — read-only,
+/// the window on the source — and the ownership guard: C-x C-q AND C-x C-s
+/// are refused on the external buffer.
+#[test]
+fn unit_flow_ext_notes_landing_guard() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4); // top-level `ropey::Rope::new();` probe
+    s.key_event(key("M-f")); // end of the `ropey` run
+    s.key_event(key("M-.")); // fall-through to the resolver
+    land_resolved(&mut s, &rope, ext.path(), 3);
+    let abs = rope.to_string_lossy().into_owned();
+    let reported = s.message.contains(&format!("jumped to {abs}:3"));
+    let external = s.buffers.current().map(String::from) == Some(abs.clone());
+    let source_view = s.buffer_text().contains("Rope");
+    assert!(
+        reported && external && source_view,
+        "reported={reported} external={external} msg={:?}",
+        s.message
+    );
+    // E1b: the deliberate edit-mode override must never turn a registry
+    // source (a cache shared by every project on the machine) editable or
+    // writable.
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let ref1 = s.message.contains("external buffer is read-only (not project-owned)");
+    s.key_event(key("C-x"));
+    s.key_event(key("C-s"));
+    let ref2 = s.message.contains("external buffer is read-only (not project-owned)");
+    assert!(
+        ref1 && ref2 && s.buffer_mode_display() == "Read-only",
+        "C-x C-q={ref1} C-x C-s={ref2} (msg={:?})",
+        s.message
+    );
+}
+
+/// E2: `A` on the external landing line → RET commits — the margin marker
+/// AND the inline note row render on the external buffer, and the record is
+/// keyed by the ABSOLUTE path in the project's .redline-notes.md.
+#[test]
+fn unit_flow_ext_notes_annotate() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let abs = rope.to_string_lossy().into_owned();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3); // point on the landing line
+    s.key_event(key("A"));
+    assert!(s.note_prompt_active(), "annotation prompt active");
+    for c in "external note".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let saved = s.message.contains("note saved") && s.message.contains(&format!("in {abs}"));
+    let rows = s.file_view_rows();
+    let code_idx = rows
+        .iter()
+        .position(|r| r.text.contains("RopeBuilder::new"));
+    let marker = code_idx.map(|code| rows[code].annotated).unwrap_or(false);
+    let under = code_idx
+        .and_then(|code| rows.get(code + 1))
+        .map(|r| r.text.contains("external note"))
+        .unwrap_or(false);
+    let disk = std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .expect("notes file created")
+        .contains(&format!("path: {abs}"));
+    let frame = render80(s);
+    assert!(
+        saved && marker && under && disk,
+        "saved={saved} marker={marker} under={under} disk={disk}\n{frame}"
+    );
+}
+
+/// E3: `d` removes the external-buffer record — echo, the note row is gone
+/// from the buffer, and the disk record is gone.
+#[test]
+fn unit_flow_ext_notes_delete() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3);
+    s.key_event(key("A"));
+    for c in "external note".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    s.key_event(key("d"));
+    let echo = s.message.contains("deleted annotation: external note");
+    let gone = !s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text.contains("external note"));
+    let disk_gone = !std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .unwrap()
+        .contains("external note");
+    assert!(
+        echo && gone && disk_gone,
+        "echo={echo} gone={gone} disk-gone={disk_gone} (msg={:?})",
+        s.message
+    );
+}
+
+/// E4: the quit dump carries the record's path VERBATIM (the absolute
+/// external path) with the anchored code line, the NOTE text, and the
+/// project-root header unchanged.
+#[test]
+fn unit_flow_ext_notes_dump() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let abs = rope.to_string_lossy().into_owned();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3);
+    s.key_event(key("A"));
+    for c in "external note".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let items = s.annotations_for_dump();
+    assert_eq!(items.len(), 1, "exactly one dump record: {items:?}");
+    let root = repo.path().display().to_string();
+    let dump = format_notes_dump(&items, &root, false);
+    let header = dump.starts_with(&format!("# redline annotations \u{2014} {root}\n\n"));
+    let verbatim = dump.contains(&format!("{abs}:3\n"));
+    // The dump's anchored code line: 4-space dump indent + the source line
+    // (which carries its own indent).
+    let block = dump.contains(&format!(
+        "{abs}:3\n        RopeBuilder::new();\n  NOTE: external note\n"
+    ));
+    assert!(
+        header && verbatim && block,
+        "header={header} verbatim={verbatim} block={block}\ndump={dump:?}"
+    );
+}
+
+// ═══════ external crate (drive_external_crate.py L1-L7) ═══════════════════
+
+/// L1 + L2 + L3: the external landing registers the crate for background
+/// indexing — the `indexing crate …` indicator is up while the build is in
+/// flight, and the build's final event clears it.
+#[tokio::test]
+async fn unit_flow_ext_crate_landing_indicator() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    let mut rx = s.crate_index_bus.subscribe();
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3);
+    // L1: the landing report, the external read-only buffer, the window on
+    // the source.
+    let abs = rope.to_string_lossy().into_owned();
+    let reported = s.message.contains(&format!("jumped to {abs}:3"));
+    let source_view = s.buffer_text().contains("Rope");
+    // L2: the in-flight `indexing crate …` indicator (the indicator only
+    // clears when the final event is APPLIED — it has not been drained yet).
+    let indicator = s.crate_indexing_display();
+    let in_flight = indicator.starts_with("indexing crate ")
+        && indicator.ends_with("/2)\u{2026}");
+    assert!(
+        reported && source_view && in_flight,
+        "reported={reported} indicator={indicator:?}"
+    );
+    // L3: the build's final event lands → the indicator clears, the index
+    // is installed (crate-relative keys).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+        .await
+        .expect("crate index event within 30s");
+    let event = rx.borrow_and_update().clone();
+    assert_eq!(event.source_root, ext.path().to_path_buf());
+    s.apply_crate_index_event(&event);
+    assert_eq!(s.crate_indexing_display(), "", "indicator clears on the final event");
+}
+
+/// L4 + L6 + L7: after the crate index lands, M-. on `RopeBuilder` jumps
+/// cross-file INSIDE the crate (the report is crate-relative, not the
+/// absolute registry path); M-, walks back through the in-crate origin to
+/// the project file.
+#[test]
+fn unit_flow_ext_crate_in_crate_mdot() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    // The crate index (the L1 event's store-side state).
+    let files: Vec<String> = vec!["src/rope.rs".into(), "src/rope_builder.rs".into()];
+    let idx = crate::nav::index::build_index(ext.path(), &files, None);
+    s.apply_crate_index_event(&CrateIndexEvent {
+        source_root: ext.path().to_path_buf(),
+        index: idx,
+    });
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3); // lands on the RopeBuilder call line
+    // L4: M-. WITHIN the crate — cross-file, crate-relative report.
+    goto_line(&mut s, 3); // "    RopeBuilder::new();"
+    s.key_event(key("M-f")); // end of the `RopeBuilder` run
+    s.key_event(key("M-."));
+    let rel_msg = s.message.contains("jumped to src/rope_builder.rs:1");
+    let struct_visible = s.buffer_text().contains("pub struct RopeBuilder");
+    let in_crate = s.buffers.current().map(String::from)
+        == Some(ext.path().join("src/rope_builder.rs").to_string_lossy().into_owned());
+    assert!(
+        rel_msg && struct_visible && in_crate,
+        "rel-msg={rel_msg} struct={struct_visible} in-crate={in_crate} (msg={:?})",
+        s.message
+    );
+    // L6/L7: M-, walks the jump stack back.
+    s.key_event(key("M-,"));
+    let origin = s.buffers.current().map(String::from)
+        == Some(rope.to_string_lossy().into_owned());
+    s.key_event(key("M-,"));
+    let project_back = s.buffers.current().map(String::from)
+        .map(|k| k.ends_with("probe.rs"))
+        .unwrap_or(false);
+    assert!(origin && project_back, "origin={origin} project-back={project_back}");
+}
+
+/// L5: imenu on the external buffer lists the crate file's symbols from
+/// the crate index (not a refusal).
+#[test]
+fn unit_flow_ext_crate_imenu() {
+    let (repo, ext) = ext_notes_setup();
+    let rope = ext.path().join("src/rope.rs");
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    let files: Vec<String> = vec!["src/rope.rs".into(), "src/rope_builder.rs".into()];
+    let idx = crate::nav::index::build_index(ext.path(), &files, None);
+    s.apply_crate_index_event(&CrateIndexEvent {
+        source_root: ext.path().to_path_buf(),
+        index: idx,
+    });
+    open_via_finder(&mut s, "probe");
+    goto_line(&mut s, 4);
+    s.key_event(key("M-f"));
+    s.key_event(key("M-."));
+    land_resolved(&mut s, &rope, ext.path(), 3);
+    // L4's landing first (the PTY leg order): the current file becomes the
+    // crate's rope_builder.rs, whose outline imenu must list.
+    goto_line(&mut s, 3); // "    RopeBuilder::new();"
+    s.key_event(key("M-f")); // end of the `RopeBuilder` run
+    s.key_event(key("M-."));
+    let in_crate = s.message.contains("jumped to src/rope_builder.rs:1");
+    s.key_event(key("M-i"));
+    let open = s.picker_open() && s.picker_kind() == Some(PickerKind::Imenu);
+    let lists = s
+        .picker_filtered()
+        .iter()
+        .any(|(c, _)| c.name.contains("RopeBuilder"));
+    let no_refusal = !s.message.contains("not in project");
+    assert!(
+        open && lists && no_refusal && in_crate,
+        "open={open} lists-RopeBuilder={lists} refusal={no_refusal} in-crate={in_crate} (msg={:?})",
+        s.message
+    );
+}
+
+// ═══════ external use (drive_external_use.py L1-L2) ═══════════════════════
+
+/// L1: a BARE use-imported symbol falls through with the bare name (the
+/// scope hint is the store-side supply, 007-03; the serde lookup itself is
+/// the resolver corpus's) — the landing lands read-only in the (external)
+/// trait source and M-, returns to the project file.
+#[test]
+fn unit_flow_ext_use_l1() {
+    let repo = ext_use_repo();
+    let serde = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(serde.path().join("src")).unwrap();
+    let trait_file = serde.path().join("src/trait.rs");
+    std::fs::write(&trait_file, "pub trait Deserialize {}\n").unwrap();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "main");
+    goto_line(&mut s, 2); // "let d = Deserialize;"
+    s.key_event(key("M-f")); // end of `let`
+    s.key_event(key("M-f")); // end of `d`
+    s.key_event(key("M-f")); // end of the `Deserialize` run
+    s.key_event(key("M-."));
+    let bare = s.message.contains("no provider resolution for `Deserialize`")
+        && !s.message.contains("serde::Deserialize");
+    assert!(bare, "fall-through carries the BARE symbol: {:?}", s.message);
+    land_resolved(&mut s, &trait_file, serde.path(), 1);
+    let abs = trait_file.to_string_lossy().into_owned();
+    let msg = s.message.contains(&format!("jumped to {abs}:1"));
+    let trait_view = s.buffer_text().contains("trait Deserialize");
+    s.key_event(key("M-,"));
+    let back = s
+        .buffers
+        .current()
+        .map(String::from)
+        .map(|k| k.ends_with("main.rs"))
+        .unwrap_or(false);
+    assert!(
+        msg && trait_view && back,
+        "msg={:?} trait-view={trait_view} back={back}",
+        s.message
+    );
+}
+
+/// L2 degradation pin: a BARE symbol with NO `use` still misses with the
+/// graceful "no provider resolution for `other`" report — no hint, no
+/// guessing, and it never jumps.
+#[test]
+fn unit_flow_ext_use_l2() {
+    let repo = ext_use_repo();
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "main");
+    goto_line(&mut s, 3); // "let other = 9;"
+    s.key_event(key("M-f")); // end of `let`
+    s.key_event(key("M-f")); // end of `other`
+    s.key_event(key("M-."));
+    let named = s.message.contains("no provider resolution for `other`");
+    miss_resolved(&mut s, "other", "no crate `other`");
+    let graceful = s.message.starts_with("no provider resolution for `other`:")
+        && s.message.contains("tried 1 provider(s): rust");
+    assert!(
+        named && graceful && !s.message.contains("jumped to"),
+        "named={named} graceful={graceful} (msg={:?})",
+        s.message
+    );
+}
+
+// ═══════ syntax notes (drive_syntax_notes.py S0-S7) ═══════════════════════
+
+/// S1-S3: A on the function name commits a note; the on-disk record carries
+/// the syntax keys (`syntax_kind: identifier` / `syntax_name: target_one`)
+/// plus the line-0 text anchor.
+#[test]
+fn unit_flow_synleg_anchor_commit() {
+    let (repo, _leg) = synleg_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "synleg");
+    // Point ON the function name: buffer start, then 3 char-forwards
+    // (`f`, `n`, ` `, then the `t` of `target_one`).
+    s.key_event(key("M-<"));
+    for _ in 0..3 {
+        s.key_event(key("C-f"));
+    }
+    s.key_event(key("A"));
+    let prompt = s.note_prompt_active();
+    for c in "follow fn".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let saved = s.message.contains("note saved");
+    let disk = std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .expect("notes file created");
+    let keys = disk.contains("syntax_kind: identifier")
+        && disk.contains("syntax_name: target_one")
+        && disk.contains("line: 0")
+        && disk.contains("anchor: fn target_one() {");
+    assert!(prompt && saved && keys, "prompt={prompt} saved={saved}\ndisk={disk}");
+}
+
+/// S4 through S7: an out-of-band rewrite (a 100-line insertion on top AND a
+/// reformat of the signature — the ±25-line text path has nothing to match)
+/// plus `g` force-reload runs the re-anchor pass. Asserts: the marker +
+/// note row follow the function to its new line; no `(orphaned)` tag
+/// renders; the record re-anchored to line 100, not orphaned.
+#[test]
+fn unit_flow_synleg_reanchor() {
+    let (repo, leg) = synleg_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "synleg");
+    s.key_event(key("M-<"));
+    for _ in 0..3 {
+        s.key_event(key("C-f"));
+    }
+    s.key_event(key("A"));
+    for c in "follow fn".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let mut rewritten = String::new();
+    for i in 0..100 {
+        rewritten.push_str(&format!("// filler {i}\n"));
+    }
+    rewritten.push_str("fn target_one()\n{\n    let x = 1;\n    x\n}\n");
+    std::fs::write(&leg, rewritten).unwrap();
+    s.key_event(key("g")); // force reload → the re-anchor pass
+    let reloaded = s.message.contains("reloaded");
+    // Jump to the end so the function (now at line 100) is in view
+    // (the PTY leg does the same before its S5 assert).
+    s.key_event(key("M->"));
+    let rows = s.file_view_rows();
+    let fn_row = rows.iter().position(|r| r.text == "fn target_one()");
+    let marker = fn_row.map(|i| rows[i].annotated).unwrap_or(false);
+    let note_under = fn_row
+        .and_then(|i| rows.get(i + 1))
+        .map(|r| r.text.contains("follow fn"))
+        .unwrap_or(false);
+    let no_orphan_tag = !rows.iter().any(|r| r.text.contains("(orphaned)"));
+    let disk = std::fs::read_to_string(repo.path().join(".redline-notes.md")).unwrap();
+    let reanchored = disk.contains("line: 100")
+        && disk.contains("orphaned: false")
+        && disk.contains("syntax_name: target_one");
+    let frame = render80(s);
+    assert!(
+        reloaded && marker && note_under && no_orphan_tag && reanchored,
+        "reloaded={reloaded} marker={marker} note-under={note_under} \n         no-orphan-tag={no_orphan_tag} reanchored={reanchored}\ndisk={disk}\n{frame}"
+    );
+}
+
+// ═══════ ux_sweep (keymap-coverage derivation) ════════════════════════════
+
+/// The store-side twin of one ux_sweep leg: `setup` opens the view (a fresh
+/// store, the PTY's fresh App per drive), then every key is pressed and
+/// checked — no "unbound key" echo (EXCEPT the `known_unbound` parity keys,
+/// which MUST echo — the PTY's 3 pre-existing window-split findings, kept
+/// as a positive pin), no quit, and the live view stays coherent. Returns
+/// the per-key ok flags + the store (for the end-of-leg render check).
+fn ux_sweep_leg(
+    repo: &std::path::Path,
+    setup: &[&str],
+    keys: &[&str],
+    known_unbound: &[&str],
+) -> (Vec<bool>, AppStore) {
+    let mut s = store_in(repo);
+    for tok in setup {
+        drive_token(&mut s, tok);
+    }
+    let mut oks = Vec::new();
+    for tok in keys {
+        let msg_before = s.message.clone();
+        s.key_event(key(tok));
+        // A NEW unbound echo (the minibuffer holds the last message — a
+        // stale "unbound key: …" from a previous key is not a finding).
+        let echo = s.message.contains("unbound key") && s.message != msg_before;
+        let expected_echo = known_unbound.contains(tok);
+        oks.push(echo == expected_echo && !s.quit && ux_view_alive(&s));
+    }
+    (oks, s)
+}
+
+/// Drive one token: key tokens through `parse_key`, anything else
+/// ("lib.rs", "toggle-tree") as typed characters — the PTY's type path.
+fn drive_token(s: &mut AppStore, tok: &str) {
+    match parse_key(tok) {
+        Ok(k) => s.key_event(k),
+        Err(_) => {
+            for c in tok.chars() {
+                s.key_event(key_char(c));
+            }
+        }
+    }
+}
+
+/// The state half of ux_sweep's anomaly scan: no unprompted changed-on-disk
+/// marker, and the live view still holds content with a coherent cursor
+/// (the "blank frame while a view is open" + "cursor parked off-screen"
+/// twins; the raw-pixel / hardware-cursor halves stay in the thin PTY tier).
+fn ux_view_alive(s: &AppStore) -> bool {
+    if s.current_buffer_changed_on_disk() {
+        return false;
+    }
+    match s.top_view() {
+        ViewId::MagitStatus | ViewId::Log | ViewId::Blame => {
+            let rows = match s.top_view() {
+                ViewId::MagitStatus => s.magit_rows(),
+                ViewId::Log => s.log_rows(),
+                _ => s.blame_rows(),
+            };
+            !rows.is_empty() && rows.iter().any(|r| r.selected)
+        }
+        ViewId::CommitDiff => !s.commit_diff_rows().is_empty(),
+        ViewId::BufferList => {
+            // The boot table is EMPTY by design (06a: no scratch) — an empty
+            // list is a coherent state; a non-empty one keeps its selection
+            // in range.
+            s.buffer_rows().is_empty() || s.buffer_list_selected() < s.buffer_rows().len()
+        }
+        ViewId::Search => !s.search_view_info().0.is_empty(),
+        ViewId::Home => !s.home_body_rows().is_empty(),
+        ViewId::Buffer => s
+            .buffers
+            .current_buffer()
+            .map(|b| s.point_line() < b.line_count())
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// One ux_sweep leg: (name, setup tokens, key tokens, known-unbound keys).
+type UxLeg = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+);
+
+/// ux_sweep: keymap coverage across every view the PTY sweep drives — every
+/// key is bound where the sweep expects (no "unbound key" echo), the
+/// known-unbound window-split keys echo (the 3 pre-existing findings,
+/// parity-pinned), nothing quits the app, every view stays coherent, and
+/// the narrow-40 frame is intact at the width-bounded static render. (The
+/// terminal-tier residue — real input encoding, process death, hardware
+/// cursor, raw pixels — stays in the thin PTY tier.)
+#[test]
+fn unit_flow_ux_keymap_coverage() {
+    let repo = fixture_repo();
+    let legs: [UxLeg; 11] = [
+        (
+            "buffer-view",
+            &["C-x", "C-f", "lib.rs", "RET"],
+            &["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b", "M-<",
+              "M->", "C-v", "M-v", "C-d", "C-u", "C-l", "j", "k"],
+            &[],
+        ),
+        ("magit", &["C-x", "g"], &["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"], &[]),
+        ("log", &["C-x", "g", "l"], &["n", "p", "RET", "q"], &[]),
+        ("blame", &["C-x", "g", "b"], &["n", "p", "q"], &[]),
+        ("find-file", &["C-x", "C-f"], &["x", "y", "z", "C-g"], &[]),
+        ("buffer-list", &["C-x", "C-b"], &["n", "p", "C-g"], &[]),
+        ("transient-menu", &[], &["C-x", "C-g", "?", "C-g"], &[]),
+        ("search", &["C-c", "p", "s", "s"], &["C-g", "C-g"], &[]),
+        ("notes-edit", &["C-x", "n"], &["a", "b", "C-h", "C-g"], &[]),
+        (
+            "tree",
+            &["C-x", "C-f", "lib.rs", "RET", "M-x", "toggle-tree", "RET"],
+            &["C-n", "C-p", "RET", "C-g"],
+            &[],
+        ),
+        (
+            "window-splits",
+            &["C-x", "C-f", "lib.rs", "RET"],
+            // The terminal sends the digit PLAIN after the C-x prefix
+            // (encode_key's literal-char path) — C-x 2 / C-x 1 / C-x 0 are
+            // unbound by design (the PTY's 3 pre-existing findings); C-x o
+            // (open-scratch) is bound.
+            &["C-x", "2", "C-x", "o", "C-x", "o", "C-x", "1", "C-x", "0"],
+            &["2", "1", "0"], // unbound by design — the PTY's 3 findings
+        ),
+    ];
+    for (name, setup, keys, known_unbound) in legs {
+        let (oks, s) = ux_sweep_leg(repo.path(), setup, keys, known_unbound);
+        assert!(
+            oks.iter().all(|ok| *ok),
+            "leg {name}: per-key ok={oks:?}\n{frame}",
+            frame = render80(s)
+        );
+    }
+    // The narrow-terminal stress leg: the 40-col frame stays intact.
+    let (oks, s) = ux_sweep_leg(
+        repo.path(),
+        &["C-x", "C-f", "lib.rs", "RET"],
+        &["C-n", "C-e", "M->", "C-l", "?", "C-g"],
+        &[],
+    );
+    let frame40 = crate::ui::root::render_at_width(s, 40);
+    let non_blank = frame40.lines().any(|l| !l.trim().is_empty());
+    assert!(
+        oks.iter().all(|ok| *ok) && non_blank,
+        "narrow-40: per-key ok={oks:?} frame-non-blank={non_blank}\n{frame40}"
+    );
+}
