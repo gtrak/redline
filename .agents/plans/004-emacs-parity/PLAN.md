@@ -35,6 +35,17 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 
 ### Added mid-plan (user reports + UX sweeps, 2026-09-18)
 
+- **07** (DONE, `ea532ac`, review PASS; 547 tests): recenter after a jump —
+  emacs' `xref-after-jump-hook` is `(recenter ...)` so jumps land the target
+  on the MIDDLE row; we minimal-scrolled and landed below-window targets on
+  the BOTTOM row (user report). `recenter_top_for` shared by `C-l` (cycle
+  row) and the new jump-only `recenter_landing` (middle row, cycle untouched);
+  applied at every jump landing (M-., resolver, crate landing, Xref/imenu
+  selection, M-,) and NOT at goto-line/isearch/search-RET/clicks/motion.
+  drive_xref +L6 (mid-window landing) → 12/12; live: ~296-line jump lands
+  mid-viewport. Divergence kept deliberately: emacs does not recenter M-,
+  (documented).
+
 - **05b** (committed 220208c): file-view (line,col) point + emacs motion keys
   (C-n/C-p/C-f/C-b/arrows/C-a/C-e/M-</M->, goal column, scroll screen-row
   pinning, cursor_cell at the point). Answers the user's "cursor stuck at
@@ -115,5 +126,6 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 - [04 — quit save-prompt](04-quit-save-prompt.md)
 - [05 — cursor visibility on real terminals](05-cursor-visibility.md)
 - [06 — discovery home](06-discovery-home.md)
+- [07 — recenter after a jump](07-jump-recenter.md)
 
 When complete, archive per plan-process.

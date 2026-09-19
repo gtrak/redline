@@ -11804,8 +11804,14 @@ mod tests {
 
     #[test]
     fn jump_landing_does_not_perturb_recenter_cycle() {
-        // A jump between two C-ls neither resets nor advances the
-        // middle→top→bottom cycle (a jump is not a `C-l`).
+        // `recenter_landing` ITSELF does not touch the cycle: it must not
+        // advance it (a jump is not a `C-l`) and must not rely on resetting
+        // it. NOTE: in production every key dispatches through `dispatch()`,
+        // which resets `recenter_cycle` for any command that is not literally
+        // `recenter` (the pre-existing 05c `recenter-last-op` behavior, which
+        // matches emacs keying `recenter-top-bottom` off `last-command`) — so
+        // this test drives the helpers directly, below `dispatch`, to isolate
+        // the helper's own contract.
         let (mut s, _dir) = store_with_lines(200);
         s.set_viewport_lines(21);
         s.set_point_line(50);

@@ -33,6 +33,11 @@ def reset():
     # exactly the baseline (see docs/ux-testing-plan.md backlog #8/#12).
     for stray in ("src/leg.rs", "src/wordleg.rs", "src/cursorleg.rs",
                   "src/whichfn.rs", "src/wideleg.rs", "wideleg.rs",
+                  # drive_xref's jump legs (L5 external landing, L6 mid-window
+                  # landing) create these; a `timeout`-killed run skips their
+                  # finally, and untracked leftovers perturb every later
+                  # suite's tree/status/file-listing renders (backlog-#12).
+                  "src/call.rs", "src/long.rs",
                   # drive_xref's external-landing leg (L5) adds a path-dep
                   # Cargo.toml/Cargo.lock to the SHARED fixture; if that run is
                   # killed by the mandated `timeout` (SIGTERM/SIGKILL skips its
