@@ -1,11 +1,35 @@
 # 007 — Redline: syntax-aware linking (tree-sitter beyond highlighting)
 
-Status: planned (roadmap; not yet scheduled)
+Status: in progress — 01+02 PASS; 03 spec ready; 04 unscheduled
 Phases: 1 · Issues: 01–04
 Depends on: plan 005 (annotations) for 02; plan 006 (resolver chain) for 03
 Origin: user question 2026-09-18 — "could our linking benefit from
 tree-sitter concepts?" — with the answer grounded in the existing tree
 (`src/syntax/queries.rs`, `src/nav/index.rs`).
+
+## Outcome record
+
+- **01 PASS** (`c94a315` + review fixes `65afdfa`): `src/syntax/node.rs` —
+  `node_at(lang, source, byte) -> Option<NodeInfo{text,kind,start_byte,end_byte,scope_path}>`
+  and `scope_path_at(...)`, Rust-first (every other LanguageId degrades to
+  None/[]), plain Rust, unwired API. Review follow-ups folded in: generic
+  `impl<T> Vec<T>` yields the BARE scope name (not `Vec<T>` — 007-03 matches
+  plain names), `function_signature_item` contributes scope, one shared
+  grammar pin. 535 tests.
+- **02 PASS** (`512f1eb`, reviewer verdict OK; no P1/P0, three safe-direction
+  P2 notes): syntax-anchored annotations — optional
+  `SyntaxAnchor { kind, name }` on the record, captured at commit time from
+  `node_at` at the POINT's byte offset (line-head is usually a keyword where
+  `node_at` has no identifier node). `syntax_kind:`/`syntax_name:` emitted
+  only when present; legacy records parse as `syntax: None` and round-trip
+  byte-identically; re-anchor order = syntax (unique kind+name anywhere in
+  the file, any distance) → exact-line text → ±25-line window → orphan; one
+  parse per pass, only when a record for the file has a syntax anchor.
+  Headline test proves survival of a 100-line insertion + reformat with the
+  anchor text gone, and that `syntax: None` orphans (so the window alone
+  fails). 543 tests; new `tools/drive_syntax_notes.py` 8/8 (PTY-driven).
+- **03** spec ready (`.agents/tasks/issue-007-03-impl.md`).
+- **04** (incremental parse reuse) unscheduled — perf only.
 
 ## Why
 

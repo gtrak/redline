@@ -308,6 +308,37 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
 | 2026-09-17 | U-sweep round 2 (43 flows) + carried items | sized-pty 80×24 (pyte) + cargo | plan-003-03 | **ALL PASS** | Plan 003 issue 03 (FINAL — sweep round & carried items): (1) **Banner hint per kind** (the only src behavior change): the "⚠ changed on disk" banner now renders the accurate key per buffer kind — editable → "press M-x reload-buffer to reload" (plain `g` self-inserts by design), plain file → "press g to reload". New store accessor `current_buffer_editable` drives the per-kind hint; both texts unit-tested (`changed_on_disk_hint_plain_says_g` / `changed_on_disk_hint_editable_says_reload_buffer`); the reachable editable (notes) case is PTY-driven (U-BHN: type in notes → external append → banner says "M-x reload-buffer", never "press g to reload"). The plain-file "g" hint is unit-only: plain file buffers are read-only and never locally-owned, so they auto-reload and never render the banner — not PTY-reachable (flow_f4's no-marker leg). (2) **Carried non-blockings** (each with a test/note): F4 tracked-path magit-refresh unit test (`apply_project_change_tracked_path_refreshes_magit_counts`: tracked-path change → dirty counts updated; the classifier `any_tracked` was already tested, this drives the refresh leg); flow_c6 bottom-anchor assert (last content row reads "line 50" after M-> AND after G, not just "the first row changed"); flow_g3 typed-char precondition assert (the typed 'x' is present in the notes buffer BEFORE the reload supersedes it); flow_b3 partial-leg mark (recorded as "U-B3 (no-match leg only)" — the Backspace-edit + empty-query legs are not PTY-driven, per the log's own partial-leg convention); D-group N/A clause trimmed (dropped the overbroad "not a single-PTY pyte assertion" clause for imenu/symbol pickers, kept the true unit-test claim); tree.rs test doc-comment precision ("before the store is moved" → "before the store is wrapped in Arc<Mutex<_>> for the render context"). (3) **New sweep flows** (thin legs; deep drives live in `tools/drive_windowing_panes.py` and are cited): U-CDS commit-diff scroll (M-> lands on the last page, M-< round-trips); U-BLW blame windowing (cursor stays in view across C-n moves past the bottom + M-> to the last line); U-NSL notes-scroll (typing near the bottom scrolls the active row into view); U-BHN banner-hint check per kind (above). (4) **Backlog**: banner (#3) + the carried items (#4) flipped to resolved/closed; two new candidates added — #5 `search_keep_visible` repoint-to-helper and #6 commit-editor unwindowed (both from the issue-02 review). **cargo test: 357 passed / 0 failed / 2 ignored** (+3 new over the 354 baseline: the 2 banner-hint unit tests + `apply_project_change_tracked_path_refreshes_magit_counts`) — clippy `--all-targets -- -D warnings` clean. **sweep_flows.py: 43/43 PASS** (39 baseline + U-CDS / U-BLW / U-NSL / U-BHN); **sweep.py: 14/14; drive_windowing.py: 28/28; drive_all.py: 6/6; drive_windowing_panes.py: 4/4**. **Coverage split**: test-covered — both banner-hint texts + the F4 magit-refresh leg + all carried item assertions; PTY-covered — U-CDS / U-BLW / U-NSL / U-BHN (banner hint on the real render) + the baseline 39; manual-only — none (the deferred items — menu overflow "+N more", armed-discard TOCTOU, misleading "nothing staged" error, insertion-point cue — remain open in the backlog, not driven here). |
 | 2026-09-19 | edit-mode legs (NEW ×4) | sized-pty 80×24 (pyte) + cargo | plan-005-01 working tree | **ALL PASS** | Plan 005 issue 01 (file edit mode): C-x C-q toggles the current file buffer between Read-only and Edit (status-line mode word); C-x C-s saves in place. New PTY legs (dedicated src/edit.rs, own App, removed after — fixture baseline untouched): **edit-toggle** (open → status `Read-only`; C-x C-q → `Edit` + "editable" message; no-edit toggle-back is immediate, no confirm; C-x C-q → `Edit` again); **edit-save** (type `zz` → lands in the buffer; C-x C-s → "wrote" message AND the on-disk file ends in `zz` (bytes asserted); idle 1.5 s past the 400 ms debounce → NO false "changed on disk" marker — the new saved-path self-write suppression with the expected-mtime check); **edit-confirm** (type `qq` → C-x C-q arms the "Discard unsaved edits in src/edit.rs to make it read-only? (y or n)" confirm, flip deferred; C-g cancels → edit mode + `zzqq` text kept; re-arm → `y` accepts → `Read-only`, `zzqq` gone (buffer re-reads disk), disk never written); **edit-conflict** (contrast: read-only file buffer auto-reloads an out-of-band append with no marker — pre-005 behavior preserved; then edit mode + type + out-of-band append → "changed on disk" marker, the edit text intact, NO auto-clobber). Unit tests (store): toggle on/off, scratch/non-buffer-view no-ops, typing in edit mode sets locally_modified, save clears it + writes disk, read-only save refuses, confirm arm/cancel(n, C-g, ESC)/accept, saved-path suppression (own event suppressed, repeat event conflicts), genuine external write after save still conflicts, read-only auto-reload unchanged, edit-mode-without-edits locally owned. Model test: `is_locally_owned` edit-mode leg. UI test: status-line mode word. **Gates (actual harness output)**: cargo build ok; clippy `--all-targets -- -D warnings` clean; **cargo test: 465 passed / 0 failed / 2 ignored** (2 ignored = pre-existing doc-placeholder + perf harness); sweep.py 14/14; **sweep_flows.py: 57/57** (53-flow tree baseline + 4 new — the spec's "46/46" predates the 004-04/05h legs); drive_all.py 6/6; drive_windowing.py 28/28; drive_windowing_panes.py 4/4; check_cursor_stream.py 68/68; ux_sweep.py: 3 findings, all pre-existing (window-split keys C-x 2/1/0 unbound by design — parity log row 10 "KEEP"); palette count 101 → 102 (`toggle-read-only` registered). |
 
+## Pooled parallel sweep (tools/pool.py)
+
+The 12 PTY suites share fixture repos, and `pyte_driver` takes an exclusive
+flock keyed on the repo **abspath** to prevent two suites corrupting each
+other (backlog #13). That made the battery strictly serial: sum(), not max(),
+~400s of wall time.
+
+`tools/pool.py` gives each concurrently-running suite a private **lane**
+(copied fixtures + a rewritten `tools/` copy pointing at them + a per-lane
+`XDG_CACHE_HOME`). Lane copies have different abspaths, so the flock never
+contends and the suites run for real. Measured on the same binary:
+**12/12 suites, verdicts identical to serial, 219s vs 425s serial (-48%)**
+at 4 lanes (a 24-core box measured fine at 4-6).
+
+```bash
+tools/gate.sh pooled          # fast + the battery pooled (~3.8 min)
+tools/gate.sh full            # the sequential fallback, always works
+python3 tools/pool.py clean   # drop the lanes (~105 MB at 4 lanes)
+```
+
+Two constraints, both learned the hard way:
+- **Lane fixture paths must not be LONGER than main's.** A longer path
+  overflows the 80-col status line and wraps it onto a second row, shifting
+  every content row and breaking suites that assert a fixed row (the
+  hardcoded minibuffer row, U-J3). `pool.py` uses `/tmp/rl/<i>/` for that
+  reason. (This also drove a real app fix: the status line is now
+  `TextWrap::NoWrap` + hidden overflow, so a deep project path clips instead
+  of wrapping — pinned by `status_line_long_text_stays_one_row`.)
+- **Preserve fixture basenames** (`redline_pyte_repo`, ...): suites assert
+  those literals in the mode line and in U-A1/U-J3/U-G5.
+
 ## Backlog (plan-003 candidates)
 
 | # | Item | Source | Notes |
