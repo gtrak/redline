@@ -89,6 +89,27 @@ Two hard-won constraints (they are not obvious):
 Cleanup: `tools/pool.py clean` removes the whole pool root (see backlog #17
 for the disk-use note).
 
+## Harness note: never leave a PTY probe un-bounded
+
+A worker probing emacs recenter geometry wrote an elisp file via a mangled
+heredoc, then ran `emacs ... -l probe.el` under a `pty.fork()` +
+`os.waitpid(pid, 0)` with **no timeout**. Elisp failed to load, emacs never
+exited, and `waitpid` blocked forever — the worker's `bash` tool stayed open
+for 6+ minutes, no activity, and a steering message could not be delivered
+until the orphan emacs was killed externally (2026-09-19).
+
+Rules this produced:
+- **Every interactive reference-tool invocation needs a hard bound.** Wrap
+  the whole probe in `timeout N ...` (and give `waitpid` a deadline with a
+  `kill -9` fallback) — a `pty.fork` + blocking `waitpid` has no natural
+  timeout, unlike subprocess with `timeout=`.
+- Prefer running a reference tool (`emacs -Q -nw`) through the existing
+  `tools/drive_emacs.py` `EmacsSession` harness, which already bounds its
+  pumps, instead of ad-hoc `pty.fork` scripts.
+- When a subagent shows "no activity" + a long-open shell tool, check for a
+  stuck child process (`ps`) before assuming it is thinking — kill the child
+  and the queued steer will deliver.
+
 ## Bug report template
 
 ```
