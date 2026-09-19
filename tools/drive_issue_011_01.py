@@ -3,18 +3,24 @@
 
 In a dedicated repo (NOT the shared fixture — it has no Python project),
 the cursor sits at the end of `os` in the top-level `os.path.join('a',
-'b')` probe. M-. misses the project symbol index; the chain now carries
-the buffer's language ("python") and MUST dispatch to PythonProvider
-ONLY — with all four providers registered, a broken dispatch would probe
-cargo first (and in a non-cargo project fail with "no Cargo.toml",
-shadowing the real error). The miss message must therefore name exactly
-ONE attempted provider: python.
+'b')` probe. M-. misses the project symbol index; the chain carries the
+buffer's language ("python") and MUST dispatch to PythonProvider ONLY —
+with all four providers registered, a broken dispatch would probe cargo
+first (and in a non-cargo project fail with "no Cargo.toml", shadowing
+the real error).
 
-Bare-symbol LANDING in a Python buffer is deliberately NOT asserted
-here: bare `os` needs the tree-sitter scope hint (011-02/03 syntax
-work), and the python provider's path-shaped landing (os.path.join →
-real stdlib source) is verified by the resolver unit tests, which shell
-out to the real python3.
+011-06 SUPERSEDED THE MISS PIN: the pre-011-06 leg asserted the exact
+bail ("no provider resolution … tried 1 provider(s): python") — the
+`::`-only extraction fed the BARE `os`. Since 011-06 the M-. token IS
+the dotted path `os.path.join`, so the python provider's dotted handling
+LANDS (exact stdlib `posixpath.py:72`). The dispatch guarantee (python
+probed, cargo never) is now carried by the resolver-crate unit pins
+(`language_dispatch_only_matching_provider_attempted`,
+`python_context_never_reaches_cargo_provider`) plus this leg's landing
+itself: a broken dispatch probing cargo first would FAIL with "no
+Cargo.toml" in this non-cargo project, never land. (The live "tried 1
+provider(s): python" miss pin remains in drive_issue_011_02 L2's prelude
+`print` leg.)
 
 The drive owns its own repo dir (/tmp/redline_011_01_py_repo) under the
 shared PTY-flock scheme (the lock is keyed to the repo path, so it never
@@ -84,13 +90,15 @@ def main():
         app.key("3", 0.4)
         app.key("RET", 0.8)   # line 3: top-level `os.path.join('a', 'b')`
         app.key("M-f", 0.8)   # point to the END of the `os` run
-        print("=== L1: M-. in a python buffer dispatches to python ONLY ===")
+        print("=== L1: M-. in a python buffer LANDS via python ONLY (011-06) ===")
         app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "no provider resolution", timeout=90.0)
-        rec("L1: M-. reaches the resolver (not the no-runtime fast path)",
-            ok and "no background runtime" not in msg, f"minibuffer={msg!r}")
-        rec("L1: exactly ONE provider was attempted — python (dispatch)",
-            "tried 1 provider(s): python" in msg, f"minibuffer={msg!r}")
+        ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+        rec("L1: M-. on `os.path.join` LANDS (011-06 dotted token; not a bail)",
+            ok and "no provider resolution" not in msg
+            and "no background runtime" not in msg,
+            f"minibuffer={msg!r}")
+        rec("L1: the landing is EXACTLY the stdlib path.join (posixpath.py:72)",
+            "posixpath.py:72" in msg, f"minibuffer={msg!r}")
         rec("L1: the cargo provider was never probed (no Cargo.toml confusion)",
             "cargo" not in msg.lower() and "Cargo.toml" not in msg,
             f"minibuffer={msg!r}")

@@ -69,13 +69,21 @@ SHARED_SUITES=(
                         # `indexing crate` indicator appears), and a second
                         # M-. INSIDE the dependency jumps in-crate through
                         # the freshly built index
-  drive_issue_011_05.py # resolver parity lock-in (011-05): python legs
-                        # live (bare-import landing; plain-import
-                        # path-shaped use bails byte-for-byte; external
-                        # blame bails) + js legs live (namespace entry
-                        # lands; ns.member bails; in-crate follow-up);
-                        # go leg skips LOUD when the toolchain is absent
+  drive_issue_011_05.py # resolver parity (011-05; L-P2/L-J1a re-pinned
+                        # to the 011-06 truth — the dotted LANDINGS,
+                        # superseding the pre-011-06 bail pins): python
+                        # legs live (bare-import landing; json.dumps
+                        # lands; external blame bails) + js legs live
+                        # (namespace entry lands; ns.member lands on the
+                        # member's own line; in-crate follow-up); go leg
+                        # skips LOUD when the toolchain is absent
                         # (unit-covered only — never a silent pass)
+  drive_issue_011_06.py # language-aware M-. tokens (011-06): the dotted
+                        # use sites LAND live — python `json.dumps` in
+                        # the stdlib json source, js `fakelib.apply` in
+                        # the package entry file (the two changed
+                        # matrix cells); loud skip per runtime when
+                        # absent; go stays unit-covered (no leg)
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.
