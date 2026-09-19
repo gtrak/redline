@@ -114,6 +114,26 @@ default `cargo test` output.
   mechanism is unexplained. Treat a single such failure as re-run-before-believe
   (the counts are otherwise deterministic).
 
+## Harness note: parallel lanes need DISJOINT files, and a worktree
+
+Running two workers at once is only safe with one writer per tree. The pattern
+that works (used 2026-09-19 for 011-01 + loop-02):
+
+- `git worktree add -b <branch> /tmp/redline-<name> HEAD` gives the second lane
+  its own checkout, its own `target/`, and its own binary
+  (`REDLINE_BIN=/tmp/redline-<name>/target/debug/redline`). Never let two lanes
+  edit the same file, and never let a lane touch the other's worktree.
+- Pick lanes that are FILE-DISJOINT (e.g. resolver crate + store.rs vs
+  tools/ + docs/). Overlapping scope serializes instead — say so in the spec.
+- **The PTY fixtures are still a single shared resource** even across
+  worktrees: the recomposed tools copy the same `/tmp/redline_*` repos. Two
+  lanes both running PTY suites therefore contend on the driver's flock (by
+  design — it exits 3 rather than corrupt state). Give a lane its own
+  `REDLINE_POOL_ROOT` so `tools/pool.py` copies fixtures into a private lane
+  set instead of sharing.
+- Merge order matters only for overlapping hunks; verify with
+  `git merge-tree --write-tree <main> <branch>` (read-only) before landing.
+
 ## Harness note: bound the WORKER, not just the probe
 
 Two lanes on 2026-09-19 burned far past a reasonable budget for their task
