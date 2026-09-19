@@ -24,6 +24,11 @@
 #   note     — why this probe exists; the honest-degradation bails are
 #              pinned here on purpose.
 #
+# 011-08 fix-jsrel P2-7 (`e2281a2`): the relative probes' `scope`
+# values are no longer a forward-looking contract pin — the app now
+# EMITS them (`js_ts_specifier` accepts `./…` / `../…` specifiers). The
+# goldens keep pinning the provider's landed behavior, unchanged.
+#
 # Expected outcomes live in golden/<id>.golden — a resolution (external,
 # source_root, file, line) or the EXACT bail message (byte-for-byte,
 # workspace root normalized to <ws>).
