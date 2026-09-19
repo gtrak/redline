@@ -74,6 +74,11 @@ Verified state (2026-09-19):
   attempts exactly ONE provider (python), the cargo provider is never probed;
   new `tools/drive_issue_011_01.py` 3/3 on real python3.
 
+- **Mapping honesty (011-01 review P2-4, deliberate UX change)**: registry
+  languages with no provider (c/cpp/json/yaml/toml/sh/md) now bail
+  "no tooling provider handles language `X`" instead of the pre-011-01 cargo
+  probe. Correct per the contract — no wrong provider is ever probed — and
+  the honest bail is more informative than a guaranteed cargo failure.
 ## Key decisions
 
 - **Path-shaped first, bare second.** Issue 01 delivers value with zero syntax
