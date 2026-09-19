@@ -608,8 +608,11 @@ level where they live).
    `render_at_width_catches_offscreen_picker_count_line` — proven
    discriminating (removing the df95113 width pins makes it FAIL).
 3. **Measurements (this box, 0.06 quiet):** sweep_flows 65 flows / ~87 s →
-   15 records / ~24 s; 60 unit twins run in ~2.5 s. Full battery and pooled
-   numbers in the run log below the commit that lands this.
+   15 records / ~24 s; 60 unit twins run in ~2.5 s. Post-merge full gate
+   (build + clippy + workspace tests + pooled 12-suite PTY battery,
+   lanes=4, REDLINE_BIN pinned to this tree): pooled battery **70.5 s**
+   (pre-loop-03: ~117 s); sweep_flows leg 23.7 s; 12/12 suites OK —
+   inside the spec's ~60–90 s battery target.
 
 
 ## Merge gate discipline (2026-09-20)
