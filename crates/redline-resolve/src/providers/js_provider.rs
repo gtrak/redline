@@ -113,10 +113,16 @@ impl JsProvider {
             .or_else(|| scope_qualified_alias(".", &ctx.symbol, &ctx.scope));
         let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
         let (pkg_spec, item) = split_symbol(symbol);
-        // A bare (dot-free) symbol has no package path; resolving it to a
-        // concrete package would require scope info (tree-sitter) not yet
-        // provided by the app. Bail rather than guess an install name.
-        if item.is_none() {
+        // 011-02 review P2-1: a bare (dot-free) symbol bails UNLESS a scope
+        // hint names the package entry itself — `import * as ns from "pkg"`
+        // (or a CJS whole-module binding) emits `["pkg"]`, and `ns` should
+        // land on the package's entry file. With NO hint, resolving to a
+        // concrete package would be a guess: bail (byte-for-byte unchanged).
+        // `item.is_none() && qualified.is_some()` holds iff the hint is
+        // exactly 1 segment (a longer hint joins to a dotted path, so `item`
+        // would be Some).
+        let hinted_entry = item.is_none() && qualified.is_some();
+        if item.is_none() && !hinted_entry {
             anyhow::bail!(
                 "bare symbol `{}` has no package path; resolving it to a package \n\
                  needs scope info (tree-sitter) not yet provided by the app",
@@ -900,6 +906,44 @@ mod tests {
         assert!(src.external);
         assert_eq!(src.file, dep.join("lib/main.js"));
         assert_eq!(src.line, Some(1));
+    }
+
+    /// 011-02 review P2-1: a 1-segment hint names the package ENTRY itself
+    /// (`import * as ns from "pkg"` → bare `ns` with `["pkg"]`): the symbol
+    /// lands on the package's entry file (main), not a bail. And the no-hint
+    /// bare-symbol bail is unchanged (byte-for-byte).
+    #[test]
+    fn bare_namespace_hint_lands_on_package_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws","version":"1.0.0"}"#).unwrap();
+        let dep = ws.join("node_modules").join("acme");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(dep.join("package.json"), r#"{"name":"acme","main":"lib/main.js"}"#).unwrap();
+        fs::create_dir_all(dep.join("lib")).unwrap();
+        fs::write(dep.join("lib/main.js"), "export default 1;\n").unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "ns".to_string(), // `import * as ns from "acme"`
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["acme".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().resolve(&ctx).unwrap();
+        assert!(src.external);
+        assert_eq!(src.file, dep.join("lib/main.js"), "the entry file");
+        assert_eq!(src.line, None, "entry landings carry no line");
+
+        // No hint → the byte-for-byte bail.
+        let mut no_hint = ctx.clone();
+        no_hint.scope = Vec::new();
+        let err = JsProvider::new().resolve(&no_hint).unwrap_err().to_string();
+        assert!(
+            err.contains("needs scope info"),
+            "no-hint bail unchanged, got: {err}"
+        );
     }
 
     /// Regression pin: an identity hint (`import * as acme from "acme"` →
