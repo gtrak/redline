@@ -15,9 +15,19 @@ degradable.
 
 ## Prerequisite
 
-011-01 + 011-02 in HEAD (providers registered + per-language hints), and
-007-01's Rust implementation present. Check `git log --oneline -5`; STOP and
-report if absent.
+**Correction (orchestrator, 2026-09-19):** this issue has NO code dependency on
+011-01/011-02. `src/syntax/node.rs` is self-contained and this change is purely
+ADDITIVE — new per-language predicates/scope walks behind the existing
+extension point, with Rust behavior untouched and unimplemented languages still
+returning None. Landing it before the provider wiring merely means nothing
+consumes the new data yet; no behavior can change.
+
+The only real prerequisite is **007-01's Rust implementation present** (the
+per-language extension point and `NodeInfo` you are extending). Check
+`git log --oneline -5` for the 007-01 commit (`node_at`/`scope_path_at` in
+`src/syntax/node.rs`); STOP and report only if 007-01 is absent.
+
+If 011-01/011-02 ARE present, that is fine too — just do not modify them.
 
 ## What to build
 
