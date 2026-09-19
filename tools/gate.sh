@@ -69,6 +69,13 @@ SHARED_SUITES=(
                         # `indexing crate` indicator appears), and a second
                         # M-. INSIDE the dependency jumps in-crate through
                         # the freshly built index
+  drive_issue_011_05.py # resolver parity lock-in (011-05): python legs
+                        # live (bare-import landing; plain-import
+                        # path-shaped use bails byte-for-byte; external
+                        # blame bails) + js legs live (namespace entry
+                        # lands; ns.member bails; in-crate follow-up);
+                        # go leg skips LOUD when the toolchain is absent
+                        # (unit-covered only — never a silent pass)
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.
