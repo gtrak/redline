@@ -1,0 +1,21 @@
+# 016 — src/-layout workspace package (011-08 finding 2): the SAME
+# `gears` package under `src/` (PEP 621 src layout), probe root
+# `project_src`. The probe root is NOT on the package's import path, so
+# the CWD-based find_spec misses; the provider walks up from `from_file`'s
+# dir (src/main.py → src/) to the FOUND `pyproject.toml` at the probe
+# root, sees the sibling `src/` dir, and re-probes find_spec with that
+# dir on sys.path — honest root discovery derived from a found file, not
+# a guess (no pyproject / no `src/` dir leaves the offline-refusal bail
+# untouched, pinned by the provider unit tests). Lands on
+# src/gears/engine.py, the `spin` definition (line 6 — same line the
+# flat-layout twin 003 pins in project/). Before the fix this probe
+# bailed in the offline-refusal shape — the flip it discriminates.
+symbol=gears.engine.spin
+from_file=src/main.py
+scope=[]
+root=project_src
+kind=resolved
+external=false
+file=project_src/src/gears/engine.py
+source_root=project_src
+line=6

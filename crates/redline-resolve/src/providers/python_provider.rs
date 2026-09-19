@@ -4,7 +4,8 @@
 //! Flow: parse the module chain and item from the dotted symbol →
 //! choose the interpreter (prefer workspace venv, else `python3`) →
 //! `importlib.util.find_spec` via a timed subprocess to locate the module file
-//! (walking up the dotted chain on failure) → if not found and not stdlib,
+//! (walking up the dotted chain on failure; a src/-layout re-probe when the
+//! CWD probe misses) → if not found and not stdlib,
 //! `pip install` (sanctioned) and re-locate → a content scan finds the line
 //! for the item's definition.
 //!
@@ -163,7 +164,8 @@ impl PythonProvider {
         let module_chain = segments[..segments.len() - 1].join(".");
 
         // Locate the module file (find_spec → pip install if needed).
-        let file = provider.locate_module_file(workspace_root, &module_chain)?;
+        let file =
+            provider.locate_module_file(workspace_root, &ctx.from_file, &module_chain)?;
 
         // Find the item's definition line in the resolved file.
         let line = find_item_line(&file, item).ok_or_else(|| {
@@ -198,10 +200,24 @@ impl PythonProvider {
     fn locate_module_file(
         &self,
         workspace_root: &Path,
+        from_file: &Path,
         module_chain: &str,
     ) -> anyhow::Result<PathBuf> {
-        if let Some(file) = self.find_spec(workspace_root, module_chain)? {
+        if let Some(file) = self.find_spec(workspace_root, None, module_chain)? {
             return Ok(file);
+        }
+
+        // CWD miss: honest src/-layout discovery (011-08 finding 2). A
+        // src/-layout package (PEP 621, sources under `<root>/src/`) is not
+        // importable from the CWD. If a `pyproject.toml` with a `src/` dir is
+        // found by walking up from `from_file`'s directory, re-probe
+        // find_spec with that dir on sys.path — the sys.path entry is derived
+        // from a FOUND file on disk, not a guess; no pyproject (or no `src/`
+        // dir) leaves the miss untouched (byte-for-byte degradation).
+        if let Some(src_dir) = src_layout_root(workspace_root, from_file) {
+            if let Some(file) = self.find_spec(workspace_root, Some(&src_dir), module_chain)? {
+                return Ok(file);
+            }
         }
 
         // Not found: check if it's stdlib (never install stdlib).
@@ -222,7 +238,7 @@ impl PythonProvider {
         self.run_pip_install(workspace_root, top_pkg)?;
 
         // Re-locate after install.
-        self.find_spec(workspace_root, module_chain)
+        self.find_spec(workspace_root, None, module_chain)
             .ok()
             .flatten()
             .ok_or_else(|| {
@@ -234,20 +250,33 @@ impl PythonProvider {
 
     /// Run `find_spec` via a Python subprocess. Returns the origin file path
     /// or `None` if the module cannot be located.
+    ///
+    /// `extra_sys_path` (the discovered `src/` dir of a src/-layout project)
+    /// is inserted at the front of `sys.path` before probing; `None` keeps
+    /// the CWD-based probe untouched.
     fn find_spec(
         &self,
         workspace_root: &Path,
+        extra_sys_path: Option<&Path>,
         module_chain: &str,
     ) -> anyhow::Result<Option<PathBuf>> {
         // The find_origin script:
+        // 0. Optionally insert the discovered src/-layout root at the front
+        //    of sys.path (011-08 finding 2).
         // 1. Try `importlib.util.find_spec(module_chain)`.
         // 2. If origin is a file path, print it.
         // 3. If origin is 'frozen' or 'built-in' (e.g. `os`, `os.path` in
         //    CPython 3.11+), import the module and print its `__file__`.
         // 4. On failure, walk up the dotted chain (`a.b.c` → `a.b` → `a`).
+        // `{p:?}` is a Rust-quoted string literal, which is also a valid
+        // Python string literal for the (path) values involved.
+        let path_prefix = match extra_sys_path {
+            Some(p) => format!("import sys\nsys.path.insert(0, {p:?})\n"),
+            None => String::new(),
+        };
         let code = format!(
             r#"
-import importlib.util, importlib
+{path_prefix}import importlib.util, importlib
 
 def find_origin(module_chain):
     try:
@@ -321,6 +350,32 @@ impl ToolingProvider for PythonProvider {
 }
 
 
+
+/// Honest src/-layout root discovery: walk up from `from_file`'s
+/// directory (bounded by `workspace_root`) for a `pyproject.toml` (PEP 621
+/// project marker); if the project carries a `src/` dir (the src layout),
+/// that dir is the sys.path entry that makes the package importable.
+/// Returns `None` when no enclosing project with a `src/` layout is found —
+/// the caller then leaves the CWD miss untouched (no guessing).
+fn src_layout_root(workspace_root: &Path, from_file: &Path) -> Option<PathBuf> {
+    let file_path = workspace_root.join(from_file);
+    // `from_file` is workspace-relative; a root-level file has no own dir,
+    // so the walk starts at the workspace root itself.
+    let start = file_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(workspace_root);
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("pyproject.toml").is_file() && dir.join("src").is_dir() {
+            return Some(dir.join("src"));
+        }
+        if dir == *workspace_root {
+            return None;
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
 
 /// Determine the source root for an external (non-workspace) Python file.
 ///
@@ -774,6 +829,92 @@ mod tests {
                 "no-op case bailed with: {err}"
             );
         }
+    }
+
+    // ── 011-08 finding 2: src/-layout workspace-root discovery ──────────
+
+    /// Discriminating (corpus probe 016): a src/-layout package (PEP 621,
+    /// sources under `src/`) is not importable from the CWD; the provider
+    /// walks up from `from_file`'s dir to the FOUND `pyproject.toml`, sees
+    /// the sibling `src/` dir, and re-probes find_spec with that dir on
+    /// sys.path — landing on the package through the SAME find_spec
+    /// machinery (no guessing: no pyproject → the offline refusal below).
+    #[test]
+    fn resolve_src_layout_workspace_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "[project]\nname = \"demo\"\n")
+            .unwrap();
+        let pkg_dir = tmp.path().join("src").join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("__init__.py"),
+            "def hello():\n    return 'hi'\n",
+        )
+        .unwrap();
+
+        let provider = PythonProvider::new().offline();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "mypkg.hello".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("src/main.py"),
+            language: None,
+        };
+        let result = provider.resolve(&ctx).unwrap();
+        assert_eq!(result.file, pkg_dir.join("__init__.py"));
+        assert!(!result.external);
+        assert_eq!(result.line, Some(1));
+    }
+
+    /// No-op pin: a `src/` package WITHOUT a `pyproject.toml` on the
+    /// `from_file` chain is NOT discovered (a guess) — the CWD miss flows
+    /// to the offline refusal, byte-for-byte.
+    #[test]
+    fn src_layout_without_pyproject_is_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("src").join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("__init__.py"), "def hello():\n    pass\n").unwrap();
+
+        let provider = PythonProvider::new().offline();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "mypkg.hello".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("src/main.py"),
+            language: None,
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("offline mode refuses"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn src_layout_root_walks_up_for_pyproject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Flat layout: pyproject but no `src/` dir → None.
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        assert_eq!(src_layout_root(root, Path::new("main.py")), None);
+        assert_eq!(src_layout_root(root, Path::new("x/main.py")), None);
+        // src layout: the nearest enclosing pyproject + `src/` dir wins.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(
+            src_layout_root(root, Path::new("src/main.py")),
+            Some(root.join("src"))
+        );
+        // Walk-up: a nested from_file finds the root's project.
+        std::fs::create_dir_all(root.join("src").join("deep")).unwrap();
+        assert_eq!(
+            src_layout_root(root, Path::new("src/deep/util.py")),
+            Some(root.join("src"))
+        );
+        // No pyproject at all → None (no guessing).
+        let bare = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(bare.path().join("src")).unwrap();
+        assert_eq!(src_layout_root(bare.path(), Path::new("src/main.py")), None);
     }
 
     // ── live E2E: resolve a real installed third-party module ───────────────
