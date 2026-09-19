@@ -144,6 +144,10 @@ pub struct HighlightCache {
 
 impl HighlightCache {
     pub fn new() -> Self {
+        // Store-construction warmup (before any render): build the reuse
+        // engines now so the first highlight is a map lookup, not a
+        // lazy ~188ms debug-build build on the render critical path.
+        crate::syntax::highlight::warm_reuse_engines();
         Self::default()
     }
 
