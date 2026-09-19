@@ -114,6 +114,29 @@ default `cargo test` output.
   mechanism is unexplained. Treat a single such failure as re-run-before-believe
   (the counts are otherwise deterministic).
 
+## Harness note: SPLIT the largest issue before dispatching it
+
+004-06 (discovery home / drop `*scratch*`) sat in the queue as the largest and
+riskiest item for hours. Its own spec said "if this proves larger than a single
+issue, STOP and report — I will split it", which is the right instinct but a
+waste of a worker's budget: the worker discovers the size AFTER being
+dispatched.
+
+Do the pre-check read-only and split FIRST. For 004-06 the orchestrator
+pre-check (no build cost, ~1 minute of greps) found:
+
+- `BufferTable::new()` inserts a fresh `*scratch*` at boot (`buffer.rs:188`);
+- 37 `current_buffer()` uses vs 40 existing `None` guards in `store.rs` — the
+  empty state is partly prepared but boot-path consumers need auditing;
+- 96 `ViewId` references (adding `Home` touches name/keymap/render);
+- existing tests + flows assert `*scratch*` at boot, so counts change.
+
+That was enough to split into 06a (empty table + Home render — the risky,
+invariant-carrying half) and 06b (retire the remaining scratch affordances and
+update flow expectations), each independently verifiable, with the split
+boundary written into both specs. A spec that says "split if too big" is a
+prompt to split, not a licence to hand a worker a coin flip.
+
 ## Harness note: parallel lanes need DISJOINT files, and a worktree
 
 Running two workers at once is only safe with one writer per tree. The pattern
