@@ -937,9 +937,8 @@ mod tests {
                 _ => {
                     // delete a whole line that carries no braces (a
                     // statement/comment line) — stays valid
-                    let mut end_line = rng() % n_lines;
-                    for _ in 0..n_lines {
-                        let line = end_line % n_lines;
+                    for offset in 0..n_lines {
+                        let line = (rng() % n_lines + offset) % n_lines;
                         let ls = old_rope.line_to_char(line);
                         let le = old_rope.line_to_char((line + 1).min(n_lines));
                         let text: String = old_rope.slice(ls..le).chars().collect();
@@ -949,7 +948,6 @@ mod tests {
                             old_rope.remove(ls..le);
                             break;
                         }
-                        end_line += 1;
                     }
                 }
             }
