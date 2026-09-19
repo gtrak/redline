@@ -162,22 +162,23 @@ deliberately invented none)
   so import-based bare-symbol hints do not apply — there is no import
   machinery for C to rebuild qualified paths from.
 
-### Markdown (unit-covered ONLY — NO PROVIDER; M-. targets are ATX
-headings only, verified, not assumed)
+### Markdown (unit-covered ONLY — NO PROVIDER; M-. targets are ATX +
+SETEXT headings, verified, not assumed)
 
 - **M-. from a project buffer degrades to the bail** (same 011-01
   dispatch: `no tooling provider handles language `markdown``).
 - **011-07 walk set**: `md/markdown/mdx` (the full registry map). The
-  definition query's atx branch captures `#`/`##`/… headings as
-  `Heading` symbols, so a landed markdown tree's atx headings become
-  M-. targets through the crate index (`crate_index_builds_for_markdown_dependency_tree`).
-- **HONEST SCOPE — verified, not assumed**: the query's SETEXT branch is
-  DORMANT — `Title\n====` extracts ZERO symbols (pinned by
-  `setext_only_markdown_file_contributes_no_symbols` and the absent
-  `docs/setext.md` entry in the e2e test). So M-. targets in a markdown
-  dependency are atx headings only: no setext, no paragraphs, no links.
-  Fixing the setext query is `queries.rs` territory (out of 011-07's
-  scope fence), filed as a follow-up observation.
+  definition query captures `#`/`##`/… atx headings AND `Title\n====`
+  setext headings as `Heading` symbols, so a landed markdown tree's
+  headings become M-. targets through the crate index
+  (`crate_index_builds_for_markdown_dependency_tree`).
+- **HONEST SCOPE — verified, not assumed**: both heading kinds extract
+  (`# Alpha` → `Alpha`, `Delta\n====` → `Delta`); the setext branch's
+  node shape is `setext_heading → paragraph → inline` (verified against
+  the pinned tree-sitter-md 0.3.2 grammar — its first draft was
+  structurally unmatchable and fixed in the 011-07 follow-up). No
+  paragraphs, no links. Pinned by `setext_markdown_file_contributes_heading_symbols`
+  and the present `docs/setext.md` entry in the e2e test.
 - **in-library follow-up**: unit-covered only (same app-unreachable
   reason as C/C++: no provider can land in a markdown dependency).
 
@@ -237,6 +238,6 @@ observable live behavior — the honest no-provider bail — shares 011-01's
 language-parameterized dispatch with the live-pinned python/js misses,
 so a live leg would re-prove the same code path. The 011-07 evidence is
 the unit set: the extended round-trip test + the three e2e
-`start_crate_indexing` tests (C, C++, Markdown) + the setext dormancy
+`start_crate_indexing` tests (C, C++, Markdown) + the setext extraction
 pin. (For the same reason, a C *toolchain* is not needed by anything in
 this issue — the fixture never runs, it only parses.)
