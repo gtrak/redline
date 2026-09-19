@@ -69,6 +69,17 @@ def text(app):
     return "\n".join(app.row_text(r) for r in range(app.rows))
 
 
+def flat_text(app):
+    """Screen text with all whitespace runs collapsed to single spaces.
+
+    A prompt or message that wraps past 80 cols (the pool-lane fixture paths
+    are longer than the shared /tmp ones, so the quit-save prompt's key list
+    wraps onto the next row) must not defeat substring assertions: the wrap
+    point is a layout artifact, not a missing prompt.
+    """
+    return re.sub(r"\s+", " ", text(app))
+
+
 def row0(app):
     return app.row_text(0)
 
@@ -98,7 +109,16 @@ def pump(app, secs):
 
 def wait_for(app, pred, timeout=4.0):
     """Poll the pyte screen until `pred()` is true (real wall-clock deadline).
-    Returns whether it landed before `timeout`."""
+    Returns whether it landed before `timeout`.
+
+    Positive-gated settle (loop-02): use this instead of a fixed `app.wait()`
+    before any absence-style assertion ("X" not in screen, count == 0,
+    unchanged). `pred()` must be a POSITIVE completion signal proving the
+    action rendered (a prompt/count line, an echo, the mode line back to
+    `ready`, the target row). Without the gate a too-short read-quiet window
+    makes the absence check run before the repaint — a vacuous pass that
+    ships a regression green.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         app._read(0.2, quiet=0.0)
@@ -132,14 +152,19 @@ def flow_b1(app):
 
 
 def flow_b2(app):
-    """U-B2 Ignored paths (.git/, target/) never appear in candidates."""
+    """U-B2 Ignored paths (.git/, target/) never appear in candidates.
+    The full candidate list must be on screen before the absence checks:
+    positive gate = prompt + count line (loop-02; the walk can still be
+    landing rows, and an empty screen trivially contains no .git/)."""
     app.key("C-x C-f")
-    app.wait(0.8)
+    list_open = wait_for(app, lambda: "Find file:" in text(app)
+                         and count_line(app) is not None, 4.0)
     t = text(app)
     git_leak = ".git/" in t
     target_leak = "target/" in t  # this repo has no target/ dir; walk ignores it anyway
-    ok = not git_leak and not target_leak
-    record("U-B2", "C-x C-f", ok, f".git/ leaked={git_leak} target/ leaked={target_leak}")
+    ok = list_open and not git_leak and not target_leak
+    record("U-B2", "C-x C-f", ok, f".git/ leaked={git_leak} target/ leaked={target_leak} "
+           f"full-list-rendered={list_open}")
     app.key("C-g")
 
 
@@ -149,11 +174,14 @@ def flow_b3(app):
     not PTY-driven here (marked partial in the record, per the log's own
     convention for partial legs, e.g. the B5 populate-leg note)."""
     app.key("C-x C-f")
-    app.wait(0.6)
+    wait_for(app, lambda: "Find file:" in text(app), 4.0)
     for ch in "zzzznomatch":
         app.key(ch, settle=0.2)
-    t = text(app)
-    empty_ok = ("0 of" in t) or ("0 candidates" in t) or (has(app, "0 of"))
+    # The count line is the positive signal that the filter completed; the
+    # '0 of' state IS the assertion (loop-02: gate the empty-state check on
+    # the count line rather than a fixed settle).
+    empty_ok = wait_for(app, lambda: ("0 of" in text(app))
+                        or ("0 candidates" in text(app)), 4.0)
     ok = empty_ok
     record("U-B3 (no-match leg only)", "C-x C-f,zzzznomatch", ok,
            f"clean-empty-state(count line present)={empty_ok} "
@@ -329,11 +357,14 @@ def flow_h2(app):
     app.wait(0.8)
     picker_open = "Find file:" in text(app)
     app.key("C-g")
-    app.wait(0.6)
+    # Positive gate (loop-02): the cancel echo + back-in-buffer prove the
+    # close actually rendered before the "Find file: gone" absence check.
+    closed = wait_for(app, lambda: "cancel" in app.row_text(app.rows - 2)
+                       and "*scratch*" in row0(app), 4.0)
     picker_gone = "Find file:" not in text(app)
     echo = "cancel" in app.row_text(app.rows - 2)
     back = "*scratch*" in row0(app)
-    record("U-H2 picker", "C-x C-f,C-g", picker_open and picker_gone and echo and back,
+    record("U-H2 picker", "C-x C-f,C-g", closed and picker_open and picker_gone and echo and back,
            f"picker-opened={picker_open} closed-by-C-g={picker_gone} "
            f"cancel-echo={echo} back-to-buffer={back}")
 
@@ -342,10 +373,13 @@ def flow_h2(app):
     app.wait(0.5)
     pending_shown = "[C-x]" in app.row_text(app.rows - 1)
     app.key("C-g")
-    app.wait(0.5)
+    # Positive gate (loop-02): echo + prefix-gone together prove the clear
+    # rendered before the absence check.
+    cleared = wait_for(app, lambda: "cancel" in app.row_text(app.rows - 2)
+                       and "[C-x]" not in app.row_text(app.rows - 1), 4.0)
     pending_cleared = "[C-x]" not in app.row_text(app.rows - 1)
     echo2 = "cancel" in app.row_text(app.rows - 2)
-    record("U-H2 pending", "C-x,C-g", pending_shown and pending_cleared and echo2,
+    record("U-H2 pending", "C-x,C-g", cleared and pending_shown and pending_cleared and echo2,
            f"pending-shown={pending_shown} cleared-by-C-g={pending_cleared} "
            f"cancel-echo={echo2}")
 
@@ -355,11 +389,14 @@ def flow_h2(app):
     app.wait(0.5)
     isearch_on = "I-search" in app.row_text(app.rows - 2)
     app.key("C-g")
-    app.wait(0.5)
+    # Positive gate (loop-02): echo + mode-gone together prove the exit
+    # rendered before the absence check.
+    exited = wait_for(app, lambda: "cancel" in app.row_text(app.rows - 2)
+                      and "I-search" not in app.row_text(app.rows - 2), 4.0)
     isearch_off = "I-search" not in app.row_text(app.rows - 2)
     echo3 = "cancel" in app.row_text(app.rows - 2)
     view_kept = "*scratch*" in row0(app)
-    record("U-H2 isearch", "C-s,C-g", isearch_on and isearch_off and echo3 and view_kept,
+    record("U-H2 isearch", "C-s,C-g", exited and isearch_on and isearch_off and echo3 and view_kept,
            f"isearch-armed={isearch_on} exited-by-C-g={isearch_off} "
            f"cancel-echo={echo3} view-kept={view_kept}")
 
@@ -372,9 +409,13 @@ def flow_h2_search(app):
     app.key("C-c p s s")
     for ch in "target":
         app.key(ch, settle=0.15)
-    app.feed(encode_key("RET") + encode_key("C-g"), settle=1.5)
-    t = text(app)
-    cancelled = "search cancelled" in app.row_text(app.rows - 2)
+    app.feed(encode_key("RET") + encode_key("C-g"))
+    # Positive gate (loop-02): the cancel message IS the assertion — poll
+    # for it instead of a fixed settle. If the walk finished before C-g
+    # landed the message never appears and the flow FAILs (no longer an
+    # in-flight cancel).
+    cancelled = wait_for(app, lambda: "search cancelled"
+                         in app.row_text(app.rows - 2), 4.0)
     view_stays = "Search:" in row0(app)
     alive = "(cancelled)" in row0(app)
     record("U-H2 search", "C-c p s s,target,RET+C-g(fast)", cancelled and view_stays and alive,
@@ -452,7 +493,11 @@ def flow_graft():
     try:
         app = App(REPO, rows=ROWS, cols=COLS)
         app.key("C-x C-f")
-        app.wait(0.8)
+        # Positive gate (loop-02): the full list must have rendered
+        # (prompt + a known candidate row) before "graft not in list"
+        # can mean anything — an unrepainted screen trivially lacks it.
+        list_open = wait_for(app, lambda: "Find file:" in text(app)
+                             and "src/main.rs" in text(app), 4.0)
         t = text(app)
         # No graft path may appear in the candidate list (empty query: the
         # full list is on screen). The query itself is empty here, so the
@@ -461,19 +506,20 @@ def flow_graft():
         # Fuzzy-filtering on the query 'graft' must yield a clean empty
         # state: the count line reads '0 of N' (a graft candidate would
         # make it '1 of N'). The query text itself echoes in the prompt
-        # line, so the count line is the discriminator.
+        # line, so the count line is the discriminator (the '0 of' line is
+        # also the positive gate that the filter completed).
         for ch in "graft":
             app.key(ch, settle=0.2)
+        empty_state = wait_for(app, lambda: "0 of" in text(app), 4.0)
         t2 = text(app)
-        empty_state = "0 of" in t2
         app.key("C-g")
         app.wait(0.5)
         app.kill()
     finally:
         shutil.rmtree(graft, ignore_errors=True)
     record("graft-pollution", "C-x C-f,graft",
-           no_graft_full and empty_state,
-           f"graft-in-full-list={not no_graft_full} "
+           list_open and no_graft_full and empty_state,
+           f"full-list-rendered={list_open} graft-in-full-list={not no_graft_full} "
            f"empty-state-on-query={empty_state} (count line: "
            f"{[l for l in t2.splitlines() if 'of' in l and l.strip().startswith(('0','1'))][:1]})")
 
@@ -718,11 +764,15 @@ def flow_qquit(app):
 def flow_notes(app):
     """Finding (plan 002): opening notes must NOT flag a false 'changed on disk'."""
     app.key("C-x n")
-    app.wait(0.8)
+    notes_open = wait_for(app, lambda: ".redline-notes.md" in row0(app), 4.0)
+    # Wall-clock hold PAST the ~500 ms watcher debounce (loop-02): a false
+    # marker can only appear after the debounce fires, so the absence check
+    # must be gated on real elapsed time, not just a repaint.
+    pump(app, 0.7)
     t = text(app)
     conflict = "changed on disk" in t
-    ok = not conflict
-    record("notes", "C-x n", ok, f"false-conflict-marker={conflict} (title={row0(app)!r})")
+    ok = notes_open and not conflict
+    record("notes", "C-x n", ok, f"notes-open={notes_open} false-conflict-marker={conflict} (title={row0(app)!r})")
     app.key("C-g")
     app.wait(0.4)
 
@@ -730,11 +780,14 @@ def flow_notes(app):
 def flow_palette(app):
     """Finding (plan 002): the palette must not show demo/placeholder commands."""
     app.key("M-x")
-    app.wait(0.8)
+    # Positive gate (loop-02): the palette must have rendered (a real command
+    # row on screen) before the "no demo commands" absence check.
+    opened = wait_for(app, lambda: "open-palette" in text(app)
+                      or "quit" in text(app), 4.0)
     t = text(app)
     demo_leak = any(x in t for x in ("demo-message-1", "demo-message-2", "insert-demo-text"))
-    ok = not demo_leak and "open-palette" in t or (not demo_leak and "quit" in t)
-    record("palette", "M-x", ok, f"demo-commands-leaked={demo_leak}")
+    ok = opened and not demo_leak and ("open-palette" in t or "quit" in t)
+    record("palette", "M-x", ok, f"palette-rendered={opened} demo-commands-leaked={demo_leak}")
     app.key("C-g")
     app.wait(0.4)
 
@@ -771,7 +824,9 @@ def flow_f3(app):
     hidden); TAB reveals them, TAB again hides them, and RET on the file row
     opens that file in the buffer view."""
     app.key("C-x g")
-    app.wait(1.0)
+    # Positive gate (loop-02): magit status must have rendered before the
+    # "hunk rows absent (folded)" absence check.
+    magit_open = wait_for(app, lambda: "Staged" in text(app), 4.0)
 
     def has_hunk():
         # Unfolded src/lib.rs shows its hunk header (@@ ...) and added marker
@@ -791,9 +846,9 @@ def flow_f3(app):
     app.key("RET")
     app.wait(1.2)
     visited = "src/lib.rs" in row0(app) and "staged_change_marker" in text(app)
-    ok = folded and unfolded and refolded and visited
+    ok = magit_open and folded and unfolded and refolded and visited
     record("U-F3", "C-x g,TAB,TAB,TAB,RET", ok,
-           f"hunk-folded-at-start={folded} TAB-reveals={unfolded} "
+           f"magit-open={magit_open} hunk-folded-at-start={folded} TAB-reveals={unfolded} "
            f"TAB-again-hides={refolded} RET-opens-file={visited} title={row0(app)!r}")
 
 
@@ -875,7 +930,10 @@ def flow_f5(app, repo):
         >= {"src/lib.rs", "README.md"}
     app.key("c")
     app.wait(0.8)
-    editor_open = "commit" in row0(app) and "Staged changes" in text(app)
+    # Positive gate (loop-02): the commit editor must have rendered before
+    # the leg proceeds (typing must land in the editor, not the status view).
+    editor_open = wait_for(
+        app, lambda: "commit" in row0(app) and "Staged changes" in text(app), 4.0)
     for ch in "sweepf5marker":
         app.key(ch, settle=0.15)
     app.key("C-c C-c")
@@ -1162,6 +1220,9 @@ def flow_commit_diff_scroll():
         app.wait(0.8)
         app.key("RET")    # open the newest (tall) commit's diff
         app.wait(1.2)
+        # Positive gate (loop-02): the read-only diff pane must be on screen
+        # before the "sentinel hidden at top" absence check.
+        diff_open = wait_for(app, lambda: "read-only" in app.screen_text(), 4.0)
         top_hidden = "BOTTOM_SENTINEL" not in app.screen_text()
         app.key("M->")
         app.wait(0.8)
@@ -1169,7 +1230,7 @@ def flow_commit_diff_scroll():
         app.key("M-<")
         app.wait(0.8)
         roundtrip = "BOTTOM_SENTINEL" not in app.screen_text()
-        ok = top_hidden and bottom_shown and roundtrip
+        ok = diff_open and top_hidden and bottom_shown and roundtrip
         record("U-CDS", "C-x g,l,RET;M->;M-<", ok,
                f"top-hidden={top_hidden} M->-bottom-shown={bottom_shown} "
                f"M-<-roundtrip={roundtrip} (deep drive: drive_windowing_panes.py)")
@@ -1196,6 +1257,9 @@ def flow_blame_windowing():
         app.key("C-x g")
         app.key("b")         # blame the current buffer's file
         app.wait(1.2)
+        # Positive gate (loop-02): the blame view must be on screen before the
+        # cursor-in-window checks run.
+        blame_open = wait_for(app, lambda: "blame:" in app.row_text(0), 4.0)
         in_window = []
         for _ in range(20):
             b = app.blue_rows()
@@ -1205,7 +1269,7 @@ def flow_blame_windowing():
         app.wait(0.6)
         b = app.blue_rows()
         last_ok = len(b) == 1 and 1 <= b[0] <= app.rows - 3
-        ok = all(in_window) and last_ok
+        ok = blame_open and all(in_window) and last_ok
         record("U-BLW", "C-c p i;C-x C-f,big,RET;C-x g,b;C-n x20;M->", ok,
                f"cursor-in-view {sum(in_window)}/{len(in_window)}, M->-last-line "
                f"{last_ok} (deep drive: drive_windowing_panes.py)")
@@ -1223,6 +1287,9 @@ def flow_notes_scroll():
     try:
         app.key("C-x n")    # open notes (loads the 30-line file)
         app.wait(1.2)
+        # Positive gate (loop-02): notes content must be on screen before the
+        # "bottom line hidden" absence check.
+        notes_open = wait_for(app, lambda: "note line 1" in app.screen_text(), 4.0)
         before = app.screen_text()
         bottom_hidden = "note line 30" not in before
         app.key("Z")        # type one char at the end (the insertion row)
@@ -1230,7 +1297,7 @@ def flow_notes_scroll():
         after = app.screen_text()
         bottom_shown = "note line 30" in after
         edited = "note line 30Z" in after
-        ok = bottom_hidden and bottom_shown and edited
+        ok = notes_open and bottom_hidden and bottom_shown and edited
         record("U-NSL", "C-x n;Z", ok,
                f"bottom-hidden-before={bottom_hidden} bottom-shown-after={bottom_shown} "
                f"self-insert={edited} (deep drive: drive_windowing_panes.py)")
@@ -1359,7 +1426,20 @@ def flow_banner_hint():
             with open(notes_path, "a") as f:
                 f.write("\nbanner_hint_marker\n")
             # Wait for the watcher to raise the "changed on disk" banner.
-            banner_landed = wait_for(app, lambda: "changed on disk" in text(app), 4.0)
+            # (loop-02) The notes file is CREATED BY THE APP on `C-x n`; its
+            # first watcher event is consumed by design (store created_paths
+            # guard) and the debouncer coalesces that creation with a rapid
+            # first external append into ONE swallowed batch — the banner
+            # then legitimately does not fire for that batch. A second,
+            # genuine external edit MUST raise the banner; that is the
+            # discriminating assertion, the first append is only a trigger.
+            # If the banner never lands after the bounded retry, FAIL.
+            banner_landed = wait_for(app, lambda: "changed on disk" in text(app), 2.0)
+            if not banner_landed:
+                with open(notes_path, "a") as f:
+                    f.write("second_external_edit\n")
+                banner_landed = wait_for(
+                    app, lambda: "changed on disk" in text(app), 4.0)
             # The banner is a single row; capture it to assert the per-kind hint.
             hint = ""
             for r in range(app.rows):
@@ -1675,9 +1755,14 @@ def flow_quit_prompt_y():
         app.key("Q", settle=0.4)
         app.key("Y", settle=0.4)
         app.key("C-x C-c", settle=1.0)
-        t = text(app)
-        prompted = (PROMPT_HEAD in t and ".redline-notes.md" in t
-                    and PROMPT_KEYS in t)
+        # Positive gate (loop-02): the prompt must render before the
+        # path/keys asserts — a quit that hasn't painted yet is not a
+        # verdict (and exit-0 below independently gates it: a pending
+        # prompt blocks the exit).
+        prompted = wait_for(
+            app, lambda: (PROMPT_HEAD in flat_text(app)
+                          and ".redline-notes.md" in flat_text(app)
+                          and PROMPT_KEYS in flat_text(app)), 4.0)
         alive = reap(app) is None
         app.key("y", settle=2.0)
         status = wait_exit(app)
@@ -1711,7 +1796,7 @@ def flow_quit_prompt_n():
         app.wait(0.8)
         app.key("X", settle=0.4)
         app.key("C-x C-c", settle=1.0)
-        prompted = PROMPT_HEAD in text(app)
+        prompted = wait_for(app, lambda: PROMPT_HEAD in flat_text(app), 4.0)
         app.key("n", settle=2.0)
         status = wait_exit(app)
         on_disk = _read_notes(notes)
@@ -1744,16 +1829,18 @@ def flow_quit_prompt_cg():
         app.key("Q", settle=0.4)
         app.key("Z", settle=0.4)
         app.key("C-x C-c", settle=1.0)
-        prompted = PROMPT_HEAD in text(app)
+        prompted = wait_for(app, lambda: PROMPT_HEAD in flat_text(app), 4.0)
         app.key("C-g", settle=0.8)
-        t = text(app)
-        cancelled = ("cancel" in t and PROMPT_HEAD not in t
-                     and "QZ" in t)  # buffer content still on screen
+        # Positive gate (loop-02): echo + prompt-gone + content all prove the
+        # cancel rendered (content "QZ" is the positive anchor).
+        cancelled = wait_for(
+            app, lambda: ("cancel" in text(app) and PROMPT_HEAD not in text(app)
+                          and "QZ" in text(app)), 4.0)
         alive = reap(app) is None
         # Re-quit: the buffer is still modified → the prompt returns;
         # answering `n` finishes the quit.
         app.key("C-x C-c", settle=1.0)
-        reprompted = PROMPT_HEAD in text(app)
+        reprompted = wait_for(app, lambda: PROMPT_HEAD in flat_text(app), 4.0)
         app.key("n", settle=2.0)
         status = wait_exit(app)
         on_disk = _read_notes(notes) or ""
@@ -1788,7 +1875,7 @@ def flow_quit_prompt_save_fail():
         app.wait(0.8)
         app.key("F", settle=0.4)
         app.key("C-x C-c", settle=1.0)
-        prompted = PROMPT_HEAD in text(app)
+        prompted = wait_for(app, lambda: PROMPT_HEAD in flat_text(app), 4.0)
         app.key("y", settle=1.0)
         echo = app.row_text(app.rows - 2)
         failed = "save failed" in echo
@@ -1864,7 +1951,7 @@ def flow_quit_prompt_bang():
         app.key("Q", settle=0.4)
         app.key("B", settle=0.4)
         app.key("C-x C-c", settle=1.0)
-        prompted = PROMPT_HEAD in text(app)
+        prompted = wait_for(app, lambda: PROMPT_HEAD in flat_text(app), 4.0)
         app.key("!", settle=3.0)
         status = wait_exit(app)
         d1 = _read_notes(notes1) or ""
@@ -2197,8 +2284,10 @@ def flow_annotation_delete(app):
     app.key("C-n")
     app.wait(0.3)
     app.key("d")
-    app.wait(0.5)
-    echo = "deleted annotation: check bounds" in app.row_text(app.rows - 2)
+    # Positive gate (loop-02): the delete echo proves the `d` dispatched and
+    # rendered before the cue-gone / count-gone / disk-gone absence checks.
+    echo = wait_for(app, lambda: "deleted annotation: check bounds"
+                    in app.row_text(app.rows - 2), 4.0)
     # Content rows only: the minibuffer's echo legitimately contains the
     # note text, so the cue check excludes it.
     cue_gone = not any("\u25b8 check bounds" in app.row_text(r)
@@ -2208,8 +2297,18 @@ def flow_annotation_delete(app):
     app.key("C-p")
     app.wait(0.3)
     app.key("d")
-    app.wait(0.3)
-    no_ann_msg = "no annotation on this line" in app.row_text(app.rows - 2)
+    # Positive gate (loop-02): the no-op message IS the assertion — poll for
+    # the transient echo instead of a fixed settle that can race the repaint.
+    # If a late repaint (e.g. the in-flight watcher re-anchor from the
+    # orphan leg's disk write) overwrote the echo, re-arm with the same
+    # idempotent no-op `d`: the echo re-prints, the assertion is unchanged,
+    # and a `d` that never echoes still FAILs both polls.
+    no_ann_msg = wait_for(app, lambda: "no annotation on this line"
+                          in app.row_text(app.rows - 2), 1.5)
+    if not no_ann_msg:
+        app.key("d")
+        no_ann_msg = wait_for(app, lambda: "no annotation on this line"
+                              in app.row_text(app.rows - 2), 4.0)
     ok = echo and cue_gone and count_gone and disk_gone and no_ann_msg
     record("ann-delete", "d on annotated line; d on clean line", ok,
            f"echo={echo} cue-gone={cue_gone} count-gone={count_gone} "

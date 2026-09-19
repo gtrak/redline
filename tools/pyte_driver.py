@@ -25,11 +25,16 @@ ROWS = int(os.environ.get("ROWS", "24"))
 # work — the single largest tax on every PTY suite (559 .key() + 212
 # .wait() call sites; ~250 s of pure slack across the gate set).
 #
-# Default stays 0.2 (byte-for-byte the old behavior) so nothing silently
-# changes semantics; set REDLINE_PTY_QUIET=0.04..0.08 for the fast loop.
+# Default is the FAST 0.06 window (loop-02, backlog #16): sweep_flows'
+# timing-sensitive flows were converted to positive-gated waits
+# (wait_for on the render-completion signal, then assert) so a short
+# window can no longer turn a missing repaint into a vacuous absence pass,
+# and the full battery is proven verdict-identical at 0.06 (tools/gate.sh
+# equiv). Escape hatch: REDLINE_PTY_QUIET=0.2 restores the old conservative
+# window byte-for-byte.
 # The select granularity is decoupled from `quiet` (below) so shrinking
 # `quiet` actually takes effect instead of being floored at 100 ms.
-PTY_QUIET = float(os.environ.get("REDLINE_PTY_QUIET", "0.2"))
+PTY_QUIET = float(os.environ.get("REDLINE_PTY_QUIET", "0.06"))
 # Max select() block. Must be <= the quiet window or the quiet check can
 # only fire after a full granularity tick (the old 0.1 s cap is exactly
 # why a smaller `quiet` alone would NOT have helped).
