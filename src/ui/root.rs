@@ -878,11 +878,20 @@ fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Into<AnyElemen
         text.push_str(&format!("  [{}B]", size));
     }
     element! {
-        View(flex_shrink: 0.0, background_color: face_bg(face)) {
+        // `NoWrap` + hidden overflow: the status line must occupy EXACTLY one
+        // row. A deep project path (e.g. /tmp/redline_pool/lane0/...) plus
+        // mode/activity can exceed the terminal width; without this iocraft
+        // wraps it onto a second row, which pushes every content row up and
+        // breaks any flow that asserts the bottom row (U-J3 "status line on
+        // exactly one row, no wrap artifact"; also the minibuffer-row reads).
+        // Truncation is the right UX: the leftmost info (project, view) is
+        // what matters most and stays visible.
+        View(flex_shrink: 0.0, background_color: face_bg(face), overflow: Overflow::Hidden) {
             Text(
                 content: text,
                 color: face_color(face),
                 weight: face_weight(face),
+                wrap: TextWrap::NoWrap,
             )
         }
     }
