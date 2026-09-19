@@ -101,9 +101,18 @@ gate-battery leg; no cell mislabeled in either direction (reviewer-audited).
   no-op guards unit-pinned. Reviewer PASS; follow-up P2s: retrofit the
   bless flow into golden_python.rs + golden_rust.rs; matrix test-count/
   alias-leg note; two flipped goldens keep their historical names.
-- **Fix: JS relative degradation** (in review): relative specifiers now
-  LAND against from_file's dir (a real feature); absolute/file-ish get
-  dedicated bails; node_modules/. refused both layers.
+- **Fix: JS relative degradation** DONE (`0905a18`+review fixes, merged
+  `b213fdf`): relative specifiers LAND against from_file's dir (a real
+  go-to-definition feature); absolute/file-ish get dedicated bails;
+  node_modules/. refused at both layers; `npm install "."` funnel closed
+  by construction. Review PASS (7 P2s: the cheap ones applied —
+  entry-point never names a missing file, extension-walk order pinned,
+  file-ish collision pinned, js corpus README added); remaining P2s:
+  .d.ts omission in the relative walk (inconsistent with the package
+  walk), symlink-escape cfg(unix) test, the app-side relative-hint
+  emission (P2-7 — the goldens are a contract pin for that follow-up),
+  a pre-existing find_local_path_dep walk quirk (stops at the first
+  ancestor lacking package.json) for a future issue.
 - Still queued: Markdown setext query, python src/-layout roots,
   JSON/TOML/YAML/Bash walk sets (open question).
 
