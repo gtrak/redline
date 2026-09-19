@@ -1,11 +1,13 @@
 # Provider Matrix — the honest answer to "do we have resolver parity across languages?"
 
-Plan 011, issue 05 (2026-09). Issues 01–04 made the non-Rust providers
-reachable and per-language; this issue **locks it in** with drives
-(`tools/drive_issue_011_05.py`, plus the 011-01/02/04 legs already in the
-gate battery) and records the end state here. Every cell below was
-checked against the actual code path or a live PTY leg at the commit that
-added this file; the "verified" column says which.
+Plan 011, issue 05 (2026-09); 011-07 extends it with the C / C++ /
+Markdown columns (walk sets; no new providers). Issues 01–04 made the
+non-Rust providers reachable and per-language; issue 05 **locked it
+in** with drives (`tools/drive_issue_011_05.py`, plus the 011-01/02/04
+legs already in the gate battery) and recorded the end state here.
+Every cell below was checked against the actual code path or a live
+PTY leg at the commit that added this file; the "verified" column says
+which.
 
 ## Capability terms (so the cells cannot be misread)
 
@@ -33,13 +35,13 @@ added this file; the "verified" column says which.
 
 ## The matrix
 
-| Capability | Rust | JS/TS | Python | Go |
-|---|---|---|---|---|
-| path-shaped | works (live) | **partial** — the namespace ENTRY lands; `ns.member` bails (both live) | **degrades to the bail** (live) | unit-covered only |
-| bare via import | works (live) | works (live) | works (live) | unit-covered only |
-| in-library follow-up | works (live) | works (live) | works (live) | unit-covered only |
-| blame, project file | works (live, U-F7) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) |
-| blame, external landing | **degrades to the bail** (`no git history for external sources`) — same for every language, one code path (`store.rs::open_blame` external branch), live-pinned in the python leg | | | |
+| Capability | Rust | JS/TS | Python | Go | C | C++ | Markdown |
+|---|---|---|---|---|---|---|---|
+| path-shaped | works (live) | **partial** — the namespace ENTRY lands; `ns.member` bails (both live) | **degrades to the bail** (live) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
+| bare via import | works (live) | works (live) | works (live) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
+| in-library follow-up | works (live) | works (live) | works (live) | unit-covered only | unit-covered only (011-07) | unit-covered only (011-07) | unit-covered only (011-07) |
+| blame, project file | works (live, U-F7) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) |
+| blame, external landing | **degrades to the bail** (`no git history for external sources`) — same for every language, one code path (`store.rs::open_blame` external branch), live-pinned in the python leg | | | | | | |
 
 ### Rust
 
@@ -114,6 +116,60 @@ sandbox)
   (a fixture with no toolchain to run against would be a fake), and the
   gate never silently passes a language it could not check.
 
+### C / C++ (unit-covered ONLY — NO PROVIDER: no package-manager
+machinery for these languages exists in this repo, and 011-07
+deliberately invented none)
+
+- **M-. from a project buffer degrades to the bail, byte-for-byte**: no
+  tooling provider handles language `c` / `cpp`, so the dispatch emits
+  011-01's honest message — `no tooling provider handles language `c``
+  (`(N provider(s) registered, none attempted)`) — instead of probing
+  cargo, **for symbols outside the project index: in-project definitions
+  still jump through the project index** (the project walk has no
+  extension filter). Same code path and message shape as the live-pinned
+  python/js misses (011-05 L-P2 / L-J1a); the language parameter is the
+  only difference, so no live leg was added (the units are sufficient —
+  see the "Drives" note below).
+- **011-07 gave these languages their 011-04 walk sets**, derived from
+  `registry.rs`'s extension map (the authority): C `c/h`, C++
+  `cc/cpp/cxx/hh/hpp/hxx`. HEADERS ARE DEFINITION SOURCES: a landed C/C++
+  tree indexes its `.h`/`.hpp`/`.hh` files alongside the implementation
+  files (functions, structs, classes — pinned by
+  `crate_index_builds_for_c_dependency_tree` /
+  `crate_index_builds_for_cpp_dependency_tree`, incl. header symbols and
+  a landing on the `.hpp` itself). The pre-011-07 end state (empty set →
+  walk finds 0 files → no index, silent) is gone for these languages.
+- **in-library follow-up is unit-covered only — and app-unreachable
+  today**: the follow-up lookup (`xref_candidates` against the owning
+  crate's index) is language-agnostic and live-pinned for python/js, and
+  the C/C++ index side is unit-pinned (above). But no provider can ever
+  LAND in a C/C++ dependency, so the live app cannot produce such a
+  landing; the cell is the honest “would answer if a landing existed”
+  state, not a live-verified jump.
+- **011-03 degradation (deliberate)**: the per-language `node_at`/scope
+  walks stay `None` for C/C++ (no identifier predicates in this issue),
+  so import-based bare-symbol hints do not apply — there is no import
+  machinery for C to rebuild qualified paths from.
+
+### Markdown (unit-covered ONLY — NO PROVIDER; M-. targets are ATX
+headings only, verified, not assumed)
+
+- **M-. from a project buffer degrades to the bail** (same 011-01
+  dispatch: `no tooling provider handles language `markdown``).
+- **011-07 walk set**: `md/markdown/mdx` (the full registry map). The
+  definition query's atx branch captures `#`/`##`/… headings as
+  `Heading` symbols, so a landed markdown tree's atx headings become
+  M-. targets through the crate index (`crate_index_builds_for_markdown_dependency_tree`).
+- **HONEST SCOPE — verified, not assumed**: the query's SETEXT branch is
+  DORMANT — `Title\n====` extracts ZERO symbols (pinned by
+  `setext_only_markdown_file_contributes_no_symbols` and the absent
+  `docs/setext.md` entry in the e2e test). So M-. targets in a markdown
+  dependency are atx headings only: no setext, no paragraphs, no links.
+  Fixing the setext query is `queries.rs` territory (out of 011-07's
+  scope fence), filed as a follow-up observation.
+- **in-library follow-up**: unit-covered only (same app-unreachable
+  reason as C/C++: no provider can land in a markdown dependency).
+
 ## Regression guard: a miss probes only the matching providers
 
 - Unit (011-01, `crates/redline-resolve/src/lib.rs`):
@@ -141,7 +197,11 @@ sandbox)
 - **Languages with no provider** (C/C++, JSON, YAML, TOML, shell,
   Markdown, …): the dispatch bails honestly — "no tooling provider
   handles language `X`" (011-01 mapping honesty) — instead of probing
-  cargo.
+  cargo. 011-07 split this class: C, C++, and Markdown now have 011-04
+  walk sets (a landed tree would index; M-. from a project buffer still
+  bails — unit-pinned, see their sections), while JSON/TOML/YAML/Bash
+  keep 011-04's judgment that their outline queries are not M-. source
+  walks (data/config/shell files stay out of the index walk).
 
 ## Drives (all in `tools/gate.sh` SHARED_SUITES, `timeout`-wrapped,
 per-repo flock)
@@ -153,3 +213,14 @@ per-repo flock)
 | `drive_issue_011_04.py` | python stdlib tree IS indexed; in-crate M-. answers | python3 |
 | `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped degrade + dispatch pin · js: L-J1a ns.member bail + dispatch pin, L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
 | `drive_external_crate.py` / `drive_external_use.py` | the Rust column (registry landing, in-crate jump, bare `use` landing) | cargo |
+
+No 011-07 drive: a live C/C++/Markdown landing is IMPOSSIBLE in this
+app (no provider can resolve a symbol into those files — the landing
+that would trigger `start_crate_indexing` never happens), and the one
+observable live behavior — the honest no-provider bail — shares 011-01's
+language-parameterized dispatch with the live-pinned python/js misses,
+so a live leg would re-prove the same code path. The 011-07 evidence is
+the unit set: the extended round-trip test + the three e2e
+`start_crate_indexing` tests (C, C++, Markdown) + the setext dormancy
+pin. (For the same reason, a C *toolchain* is not needed by anything in
+this issue — the fixture never runs, it only parses.)
