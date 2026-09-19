@@ -38,29 +38,31 @@ pub struct NodeInfo {
 ///
 /// `byte` is a **byte offset into the raw source string** (not a char
 /// offset) in `[0, source.len())`; callers pass a rope slice. The answer is
-/// the smallest identifier-ish node containing `byte` — a `scoped_identifier`
-/// / `scoped_type_identifier` comes back whole regardless of which segment
-/// the offset sits on. Offsets at `source.len()` or past EOF return `None`
-/// (nothing contains them); an offset at byte 0 is a normal containment
-/// check (the `fn` keyword at a file start is not identifier-ish, so it
-/// yields `None`).
+/// the smallest identifier-ish node containing `byte` — a whole dotted path
+/// (`tokio::spawn`, `a.b.c`, `pkg.Fn`) comes back as ONE node regardless
+/// of which segment the offset sits on. Offsets at `source.len()` or past
+/// EOF return `None` (nothing contains them); an offset at byte 0 is a
+/// normal containment check (a keyword at a file start is not
+/// identifier-ish, so it yields `None`).
 ///
-/// Rust is fully implemented; every other `LanguageId` returns `None`
-/// (the plan's "Rust first, graceful degradation" decision — callers
-/// degrade to today's behavior).
+/// Rust, JavaScript, TypeScript/TSX, Python, and Go are implemented;
+/// every other `LanguageId` (including `Plain`) returns `None` (the
+/// plan's "Rust first, graceful degradation" decision — callers degrade
+/// to today's behavior).
 pub fn node_at(lang: LanguageId, source: &str, byte: usize) -> Option<NodeInfo> {
     let tree = parse_source(lang, source)?;
     let leaf = innermost_at(tree.root_node(), byte)?;
-    let node = nearest_identifier(leaf)?;
+    let node = nearest_identifier(leaf, lang)?;
     let source_bytes = source.as_bytes();
     Some(NodeInfo {
         text: node.utf8_text(source_bytes).ok()?.to_string(),
         kind: node.kind().to_string(),
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
-        scope_path: rust_scope_path(leaf, source_bytes),
+        scope_path: scope_path_for(lang, leaf, source_bytes),
     })
 }
+
 
 /// The enclosing item chain (outermost → innermost) at a byte offset —
 /// available at offsets where `node_at` returns `None` (e.g. on a keyword
@@ -79,22 +81,23 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
         Some(n) => n,
         None => return Vec::new(),
     };
-    rust_scope_path(leaf, source.as_bytes())
+    scope_path_for(lang, leaf, source.as_bytes())
 }
 
-/// Parse `source` for `lang`. Per-language extension point: only Rust is
-/// implemented today; every other `LanguageId` (including `Plain`) degrades
-/// to `None`. Future languages slot in here without restructuring the
-/// public surface.
+/// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
+/// and Go are implemented; every other `LanguageId` (including `Plain`)
+/// degrades to `None`. Future languages slot in here without
+/// restructuring the public surface.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
-    // Rust only (the plan's "Rust first, graceful degradation" decision);
-    // every other id falls through to the wrong-arm guard before the
-    // grammar lookup. The grammar itself comes from the shared
-    // `queries::language_for` pin so the tree-sitter grammar versions live
-    // in exactly one place (no second registry, no duplicated pin).
-    if lang != LanguageId::Rust {
-        return None;
+    match lang {
+        LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
+        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go => {}
+        _ => return None,
     }
+    // The grammar itself comes from the shared `queries::language_for` pin
+    // so the tree-sitter grammar versions live in exactly one place (no
+    // second registry, no duplicated pin); `Plain` and unimplemented ids
+    // never reach the grammar lookup.
     let language = crate::syntax::queries::language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -135,34 +138,87 @@ fn innermost_at(root: Node, byte: usize) -> Option<Node> {
 /// `scoped_identifier` in value position, the outer
 /// `scoped_type_identifier` in type position. `None` when no ancestor is
 /// identifier-ish.
-fn nearest_identifier(leaf: Node) -> Option<Node> {
+fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
     let mut cur = leaf;
     loop {
-        if !is_path_segment(cur) && cur.is_named() && is_rust_identifier_kind(cur.kind()) {
+        if !is_path_segment(cur, lang) && cur.is_named() && is_identifier_kind(lang, cur.kind()) {
             return Some(cur);
         }
         cur = cur.parent()?;
     }
 }
 
-/// Whether `node` is a part of a larger `::` path rather than a complete
-/// identifier of its own: it must be a child of a `scoped_identifier` /
-/// `scoped_type_identifier` and be one of that path's segment kinds.
-fn is_path_segment(node: Node) -> bool {
-    matches!(
-        node.parent().map(|p| p.kind()),
-        Some("scoped_identifier") | Some("scoped_type_identifier")
-    )
-        && (node.kind() == "::"
-            || (node.is_named()
+/// Whether `node` is a part of a larger dotted path rather than a complete
+/// identifier of its own (so `nearest_identifier` skips it and returns the
+/// whole path as one node). The path container and its segment kinds
+/// differ per language (each verified against the pinned grammar's
+/// `NODE_TYPES`):
+/// - Rust: `scoped_identifier` / `scoped_type_identifier` with `::` tokens
+///   and identifier-ish segments;
+/// - JS/TS: `member_expression` (`a.b.c` — object, `.`, property) and
+///   `nested_type_identifier` / `nested_identifier` (`A.B.C` in type
+///   position, TS only);
+/// - Python: `attribute` (`a.b.c` — value, `.`, attribute; the value may
+///   itself be an `attribute`, so chains nest);
+/// - Go: `selector_expression` (`pkg.Fn`) and `qualified_type` (`pkg.T`).
+fn is_path_segment(node: Node, lang: LanguageId) -> bool {
+    let parent_kind = node.parent().map(|p| p.kind());
+    match lang {
+        LanguageId::Rust => matches!(
+            parent_kind,
+            Some("scoped_identifier") | Some("scoped_type_identifier")
+        ) && (
+            node.kind() == "::"
+                || (node.is_named()
+                    && matches!(
+                        node.kind(),
+                        "identifier"
+                            | "type_identifier"
+                            | "primitive_type"
+                            | "scoped_identifier"
+                            | "scoped_type_identifier"
+                    ))
+        ),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            matches!(
+                parent_kind,
+                Some("member_expression")
+                    | Some("nested_type_identifier")
+                    | Some("nested_identifier")
+            ) && (
+                node.kind() == "."
+                    || (node.is_named()
+                        && matches!(
+                            node.kind(),
+                            "identifier"
+                                | "property_identifier"
+                                | "type_identifier"
+                                | "member_expression"
+                                | "nested_identifier"
+                                | "nested_type_identifier"
+                        ))
+            )
+        }
+        LanguageId::Python => parent_kind == Some("attribute")
+            && (node.kind() == "."
+                || (node.is_named()
+                    && matches!(node.kind(), "identifier" | "attribute"))),
+        LanguageId::Go => {
+            (parent_kind == Some("selector_expression")
+                && node.is_named()
                 && matches!(
                     node.kind(),
-                    "identifier"
-                        | "type_identifier"
-                        | "primitive_type"
-                        | "scoped_identifier"
-                        | "scoped_type_identifier"
-                )))
+                    "identifier" | "field_identifier" | "selector_expression"
+                ))
+                || (parent_kind == Some("qualified_type")
+                    && node.is_named()
+                    && matches!(
+                        node.kind(),
+                        "identifier" | "type_identifier" | "qualified_type"
+                    ))
+        }
+        _ => false,
+    }
 }
 
 /// The Rust identifier-ish node-kind predicate (per-language extension
@@ -178,6 +234,62 @@ fn is_rust_identifier_kind(kind: &str) -> bool {
             | "scoped_type_identifier"
             | "primitive_type"
     )
+}
+
+/// JavaScript identifier-ish node kinds (verified against the pinned
+/// tree-sitter-javascript `NODE_TYPES`: `property_identifier` is JS's
+/// name-leaf kind; `type_identifier` / `nested_type_identifier` do NOT
+/// exist in the JS grammar — they are TypeScript-only kinds).
+fn is_js_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier" | "property_identifier" | "member_expression"
+    )
+}
+
+/// TypeScript/TSX identifier-ish node kinds (verified against the pinned
+/// tree-sitter-typescript `NODE_TYPES` for both the TS and TSX grammars).
+fn is_ts_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "property_identifier"
+            | "type_identifier"
+            | "member_expression"
+            | "nested_type_identifier"
+    )
+}
+
+/// Python identifier-ish node kinds (verified against the pinned
+/// tree-sitter-python `NODE_TYPES`).
+fn is_python_identifier_kind(kind: &str) -> bool {
+    matches!(kind, "identifier" | "attribute")
+}
+
+/// Go identifier-ish node kinds (verified against the pinned
+/// tree-sitter-go `NODE_TYPES`).
+fn is_go_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "selector_expression"
+            | "qualified_type"
+    )
+}
+
+/// The identifier-kind predicate for `lang` — the per-language extension
+/// point used by `nearest_identifier`.
+fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
+    match lang {
+        LanguageId::Rust => is_rust_identifier_kind(kind),
+        LanguageId::JavaScript => is_js_identifier_kind(kind),
+        LanguageId::TypeScript | LanguageId::Tsx => is_ts_identifier_kind(kind),
+        LanguageId::Python => is_python_identifier_kind(kind),
+        LanguageId::Go => is_go_identifier_kind(kind),
+        _ => false,
+    }
 }
 
 /// Walk ancestors of `leaf` and capture each enclosing scope item's name
@@ -218,6 +330,103 @@ fn rust_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
             if let Ok(text) = name_node.utf8_text(source) {
                 names.push(text.to_string());
             }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// Dispatch the enclosing-scope walk to the per-language implementation;
+/// unimplemented languages (including `Plain`) contribute nothing.
+fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
+    match lang {
+        LanguageId::Rust => rust_scope_path(leaf, source),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            js_ts_scope_path(leaf, source)
+        }
+        LanguageId::Python => python_scope_path(leaf, source),
+        LanguageId::Go => go_scope_path(leaf, source),
+        _ => Vec::new(),
+    }
+}
+
+/// Walk ancestors of `leaf` and capture each enclosing scope item's name
+/// child, outermost → innermost. Scope items: `function_declaration`,
+/// `method_definition`, `class_declaration`, `abstract_class_declaration`
+/// (TS) — name child in the `name` field — plus an `arrow_function`
+/// assigned to a variable (`const f = () => …`): the arrow has no name of
+/// its own, so the enclosing `variable_declarator`'s `name` field carries
+/// it. Blocks, loops, and anonymous functions are intentionally not scope
+/// items — keep it simple and honest.
+fn js_ts_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_declaration" | "method_definition" | "class_declaration"
+            | "abstract_class_declaration" => node.child_by_field_name("name"),
+            "arrow_function" => node
+                .parent()
+                .filter(|p| p.kind() == "variable_declarator")
+                .and_then(|p| p.child_by_field_name("name")),
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Python enclosing-scope walk: `function_definition` and
+/// `class_definition` (name child in the `name` field), outermost →
+/// innermost. Comprehensions and lambdas are intentionally not scope items.
+fn python_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if (node.kind() == "function_definition"
+            || node.kind() == "class_definition")
+            && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Go enclosing-scope walk: `function_declaration`,
+/// `method_declaration` (name child in the `name` field), and
+/// `type_declaration` (the name lives in its `type_spec` child's `name`
+/// field). Multi-spec declarations (`type (A int; B string)`) are
+/// reported by the FIRST spec's name — a deliberate simplification; such
+/// groupings are rare in Go.
+fn go_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_declaration" | "method_declaration" => {
+                node.child_by_field_name("name")
+            }
+            "type_declaration" => (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| c.kind() == "type_spec")
+                .and_then(|spec| spec.child_by_field_name("name")),
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
         }
         cur = node.parent();
     }
@@ -376,20 +585,371 @@ mod tests {
         assert!(scope_path_at(LanguageId::Rust, src, usize::MAX).is_empty());
     }
 
+    /// Languages without a node-at implementation still degrade gracefully
+    /// (`node_at` → `None`, `scope_path_at` → `[]`) — 007-01's "Rust
+    /// first, graceful degradation" decision now covers the languages not
+    /// yet adopted by 011-03.
     #[test]
-    fn non_rust_languages_return_none() {
-        for id in LanguageId::ALL {
-            if *id == LanguageId::Rust {
-                continue;
-            }
-            let src = "def f():\n    return 1\n";
-            assert!(node_at(*id, src, 4).is_none(), "{id:?} node_at");
+    fn unimplemented_languages_return_none() {
+        let cases: [(LanguageId, &str, &str); 8] = [
+            (LanguageId::C, "int main(void) { return 0; }", "main"),
+            (LanguageId::Cpp, "int main() { return 0; }", "main"),
+            (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
+            (LanguageId::Json, "{\"key\": 1}", "key"),
+            (LanguageId::Yaml, "key: value\n", "key"),
+            (LanguageId::Bash, "echo hi\n", "hi"),
+            (LanguageId::Markdown, "# Heading\n", "Heading"),
+            (LanguageId::Plain, "abc", "abc"),
+        ];
+        for (id, src, marker) in cases {
+            let byte = src.find(marker).unwrap_or(0);
+            assert!(node_at(id, src, byte).is_none(), "{id:?} node_at");
             assert!(
-                scope_path_at(*id, src, 4).is_empty(),
+                scope_path_at(id, src, byte).is_empty(),
                 "{id:?} scope_path_at"
             );
         }
         assert!(node_at(LanguageId::Plain, "abc", 1).is_none());
+    }
+
+    /// Shared helper for the whole-path (discriminating) assertions: the
+    /// node at BOTH segment offsets must be the identical whole-path node.
+    fn assert_whole_path(lang: LanguageId, src: &str, first_at: usize, last_at: usize, kind: &str, text: &str) {
+        let first = node_at(lang, src, first_at).expect("node at first segment");
+        assert_eq!(first.kind, kind, "kind at first segment");
+        assert_eq!(first.text, text, "text at first segment");
+        assert_eq!(first.start_byte, first_at);
+        assert_eq!(first.end_byte, src.find(text).unwrap() + text.len());
+        let last = node_at(lang, src, last_at).expect("node at last segment");
+        assert_eq!(last.kind, kind, "kind at last segment");
+        assert_eq!(last.text, text, "text at last segment");
+        assert_eq!(last.start_byte, first.start_byte);
+        assert_eq!(last.end_byte, first.end_byte);
+    }
+
+    // ── JavaScript (011-03) ─────────────────────────────────────────
+
+    /// Discriminating: `a.b.c` must come back WHOLE (one
+    /// `member_expression` node) for an offset on any segment.
+    #[test]
+    fn js_member_path_comes_back_whole() {
+        let src = "function f() { console.log(a.b.c); }\n";
+        let a_at = src.find("a.b").expect("fixture");
+        let c_at = src.find(".c").expect("fixture") + 1;
+        assert_whole_path(
+            LanguageId::JavaScript,
+            src,
+            a_at,
+            c_at,
+            "member_expression",
+            "a.b.c",
+        );
+    }
+
+    #[test]
+    fn js_plain_identifier_top_level() {
+        let src = "const x = 1;\n";
+        let info = node_at(LanguageId::JavaScript, src, src.find("x").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn js_scope_chain_function_class_method_arrow() {
+        let src = "function outer() { class Inner { method() { const inner = () => this.ref; } } }\n";
+        let at = src.find("ref").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::JavaScript, src, at),
+            vec![
+                String::from("outer"),
+                String::from("Inner"),
+                String::from("method"),
+                String::from("inner"),
+            ]
+        );
+        // Same chain via NodeInfo (and `this.ref` is one whole path).
+        let info = node_at(LanguageId::JavaScript, src, at).expect("node at `ref`");
+        assert_eq!(info.kind, "member_expression");
+        assert_eq!(info.text, "this.ref");
+        assert_eq!(
+            info.scope_path,
+            vec![
+                String::from("outer"),
+                String::from("Inner"),
+                String::from("method"),
+                String::from("inner"),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_scope_chain_method_in_class() {
+        let src = "class A { m() { let q = 1; } }\n";
+        let at = src.find("q").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::JavaScript, src, at),
+            vec![String::from("A"), String::from("m")]
+        );
+    }
+
+    #[test]
+    fn js_boundary_offsets_do_not_panic() {
+        let src = "function f() { g(); }\n";
+        // Byte 0 sits on the `function` keyword (not identifier-ish → no
+        // node), but the scope is still reported.
+        assert!(node_at(LanguageId::JavaScript, src, 0).is_none());
+        assert_eq!(
+            scope_path_at(LanguageId::JavaScript, src, 0),
+            vec![String::from("f")]
+        );
+        // An identifier at byte 0 does resolve; top-level → no scope.
+        let src2 = "x\n";
+        let info = node_at(LanguageId::JavaScript, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::JavaScript, src, src.len()).is_none());
+        assert!(node_at(LanguageId::JavaScript, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::JavaScript, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::JavaScript, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn js_broken_source_does_not_panic() {
+        let src = "function f() { g(";
+        let pos = src.find("f").expect("fixture");
+        if let Some(info) = node_at(LanguageId::JavaScript, src, pos) {
+            assert_eq!(info.text, "f");
+        }
+        let _ = scope_path_at(LanguageId::JavaScript, src, pos);
+    }
+
+    // ── TypeScript / TSX (011-03) ───────────────────────────────────
+
+    /// Discriminating: `a.b.c` must come back WHOLE (one
+    /// `member_expression` node) for an offset on any segment — for both
+    /// the TS and TSX grammars.
+    #[test]
+    fn ts_member_path_comes_back_whole() {
+        for lang in [LanguageId::TypeScript, LanguageId::Tsx] {
+            let src = "function f() { console.log(a.b.c); }\n";
+            let a_at = src.find("a.b").expect("fixture");
+            let c_at = src.find(".c").expect("fixture") + 1;
+            assert_whole_path(lang, src, a_at, c_at, "member_expression", "a.b.c");
+        }
+    }
+
+    /// Discriminating: a dotted NAME path in type position (`A.B.C`)
+    /// comes back whole as a `nested_type_identifier` — TS-only grammar
+    /// kind.
+    #[test]
+    fn ts_nested_type_identifier_comes_back_whole() {
+        for lang in [LanguageId::TypeScript, LanguageId::Tsx] {
+            let src = "type T = Outer.Nested.Leaf;\n";
+            let outer_at = src.find("Outer").expect("fixture");
+            let leaf_at = src.find("Leaf").expect("fixture");
+            assert_whole_path(
+                lang,
+                src,
+                outer_at,
+                leaf_at,
+                "nested_type_identifier",
+                "Outer.Nested.Leaf",
+            );
+        }
+    }
+
+    #[test]
+    fn ts_scope_chain_function_class_method_arrow() {
+        let src = "function outer() { abstract class Inner { method() { const inner = () => this.ref; } } }\n";
+        let at = src.find("ref").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::TypeScript, src, at),
+            vec![
+                String::from("outer"),
+                String::from("Inner"),
+                String::from("method"),
+                String::from("inner"),
+            ]
+        );
+        // A plain class + method, for both grammars.
+        for lang in [LanguageId::TypeScript, LanguageId::Tsx] {
+            let src2 = "class A { m() { let q = 1; } }\n";
+            let at2 = src2.find("q").expect("fixture");
+            assert_eq!(
+                scope_path_at(lang, src2, at2),
+                vec![String::from("A"), String::from("m")]
+            );
+        }
+    }
+
+    #[test]
+    fn ts_boundary_offsets_do_not_panic() {
+        for lang in [LanguageId::TypeScript, LanguageId::Tsx] {
+            let src = "function f() { g(); }\n";
+            assert!(node_at(lang, src, 0).is_none());
+            assert_eq!(scope_path_at(lang, src, 0), vec![String::from("f")]);
+            let src2 = "x\n";
+            let info = node_at(lang, src2, 0).expect("identifier at byte 0");
+            assert_eq!(info.text, "x");
+            assert!(info.scope_path.is_empty());
+            assert!(node_at(lang, src, src.len()).is_none());
+            assert!(node_at(lang, src, src.len() + 4096).is_none());
+            assert!(scope_path_at(lang, src, src.len()).is_empty());
+            assert!(scope_path_at(lang, src, usize::MAX).is_empty());
+        }
+    }
+
+    #[test]
+    fn ts_broken_source_does_not_panic() {
+        let src = "function f() { g(";
+        for lang in [LanguageId::TypeScript, LanguageId::Tsx] {
+            let pos = src.find("f").expect("fixture");
+            if let Some(info) = node_at(lang, src, pos) {
+                assert_eq!(info.text, "f");
+            }
+            let _ = scope_path_at(lang, src, pos);
+        }
+    }
+
+    // ── Python (011-03) ─────────────────────────────────────────────
+
+    /// Discriminating: `a.b.c` must come back WHOLE (one `attribute`
+    /// node) for an offset on any segment.
+    #[test]
+    fn python_attribute_path_comes_back_whole() {
+        let src = "def f():\n    return a.b.c\n";
+        let a_at = src.find("a.b").expect("fixture");
+        let c_at = src.find(".c").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Python, src, a_at, c_at, "attribute", "a.b.c");
+    }
+
+    #[test]
+    fn python_plain_identifier_top_level() {
+        let src = "x = 1\n";
+        let info = node_at(LanguageId::Python, src, 0).expect("identifier at byte 0");
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn python_scope_chain_function_in_class() {
+        let src = "class Foo:\n    def bar(self):\n        return 1\n";
+        let at = src.find("return").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Python, src, at),
+            vec![String::from("Foo"), String::from("bar")]
+        );
+        let info = node_at(LanguageId::Python, src, src.find("bar").expect("fixture")).unwrap();
+        assert_eq!(
+            info.scope_path,
+            vec![String::from("Foo"), String::from("bar")]
+        );
+    }
+
+    #[test]
+    fn python_boundary_offsets_do_not_panic() {
+        let src = "def f():\n    return g()\n";
+        // Byte 0 sits on the `def` keyword (not identifier-ish → no
+        // node), but the scope is still reported.
+        assert!(node_at(LanguageId::Python, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Python, src, 0), vec![String::from("f")]);
+        let src2 = "x\n";
+        let info = node_at(LanguageId::Python, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        assert!(node_at(LanguageId::Python, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Python, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Python, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Python, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn python_broken_source_does_not_panic() {
+        let src = "def f(:\n    g = ";
+        let pos = src.find("f").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Python, src, pos) {
+            assert_eq!(info.text, "f");
+        }
+        let _ = scope_path_at(LanguageId::Python, src, pos);
+    }
+
+    // ── Go (011-03) ─────────────────────────────────────────────────
+
+    /// Discriminating: `p.a.b` must come back WHOLE (one
+    /// `selector_expression` node) for an offset on any segment.
+    #[test]
+    fn go_selector_path_comes_back_whole() {
+        let src = "var v = p.a.b\n";
+        let p_at = src.find("p.a").expect("fixture");
+        let b_at = src.find(".b").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Go, src, p_at, b_at, "selector_expression", "p.a.b");
+    }
+
+    /// Discriminating: `x.T` in type position comes back whole as a
+    /// `qualified_type`.
+    #[test]
+    fn go_qualified_type_comes_back_whole() {
+        let src = "func f() x.T { return 0 }\n";
+        let x_at = src.find("x.T").expect("fixture");
+        let t_at = src.find(".T").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Go, src, x_at, t_at, "qualified_type", "x.T");
+    }
+
+    #[test]
+    fn go_plain_identifier_top_level() {
+        let src = "const Z = 3\n";
+        let info = node_at(LanguageId::Go, src, src.find("Z").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "Z");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn go_scope_chain_method_and_function() {
+        // Go has no nesting: a method is associated with a type by its
+        // receiver but declared at TOP LEVEL — so a method body has no
+        // enclosing type scope (the "function inside a class/type" case
+        // is impossible in Go; not written vacuously, asserted as-is).
+        let src = "type Foo struct {\n\tname string\n}\nfunc (f Foo) Bar() {\n\tx := 1\n}\n";
+        let at = src.find("x :=").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Go, src, at),
+            vec![String::from("Bar")]
+        );
+        // Top-level function scope only.
+        let src2 = "func main() {\n\t_ = 0\n}\n";
+        let at2 = src2.find("_ =").expect("fixture");
+        assert_eq!(scope_path_at(LanguageId::Go, src2, at2), vec![String::from("main")]);
+    }
+
+    #[test]
+    fn go_boundary_offsets_do_not_panic() {
+        let src = "func f() { g() }\n";
+        // Byte 0 sits on the `func` keyword (not identifier-ish → no
+        // node), but the scope is still reported.
+        assert!(node_at(LanguageId::Go, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Go, src, 0), vec![String::from("f")]);
+        let src2 = "var x int\n";
+        let info = node_at(LanguageId::Go, src2, src2.find("x").expect("fixture")).unwrap();
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        assert!(node_at(LanguageId::Go, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Go, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Go, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Go, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn go_broken_source_does_not_panic() {
+        let src = "func f() {";
+        let pos = src.find("f").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Go, src, pos) {
+            assert_eq!(info.text, "f");
+        }
+        let _ = scope_path_at(LanguageId::Go, src, pos);
     }
 
     #[test]
@@ -429,3 +989,4 @@ mod tests {
         );
     }
 }
+
