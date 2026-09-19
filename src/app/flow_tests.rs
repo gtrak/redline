@@ -671,12 +671,16 @@ fn unit_flow_editable_keys() {
 fn unit_flow_j3() {
     let repo = fixture_repo();
     let name = repo.path().file_name().unwrap().to_string_lossy().to_string();
-    // Home view.
+    // File view (loop-03 review P2-5: the BUFFER status line carries mode
+    // + which-function + position — the closest-to-overflow case, strictly
+    // stronger than the sparser home header).
     {
-        let frame = render80(store_in(repo.path()));
+        let mut s = store_in(repo.path());
+        open_via_finder(&mut s, "leg");
+        let frame = render80(s);
         let rows = rows_containing(&frame, &name);
         let last = frame.lines().count() - 1;
-        assert!(rows.contains(&last), "status row carries the project: {frame:?}");
+        assert!(rows.contains(&last), "buffer status row carries the project: {frame:?}");
         assert!(
             !rows.iter().any(|&r| r == last - 1),
             "no spill onto the minibuffer row: {frame:?}"
@@ -1317,6 +1321,7 @@ fn unit_flow_g2() {
     git(repo.path(), &["add", "src/g_watch.rs"]);
     let mut s = store_in(repo.path());
     open_via_finder(&mut s, "g_watch");
+    let pre_point_line = s.point_line();
     for i in 0..10 {
         append(&gw, &format!("G2_CHURN_{i}\n"));
     }
@@ -1326,16 +1331,19 @@ fn unit_flow_g2() {
         "final content shown after the burst"
     );
     // Responsive = the store is still coherent after the burst: the next
-    // keypress processes (state stays sane) and the view still renders the
-    // final content.
+    // keypress processes (the point moves — the original U-G2 "a keypress
+    // repaints" half, asserted as an effect, not just a render) and the
+    // view still renders the final content.
+    s.key_event(key("C-n"));
+    assert_ne!(
+        s.point_line(),
+        pre_point_line,
+        "a keypress after the watcher burst still moves the point"
+    );
     let frame = render80(s);
     assert!(frame.contains("G2_CHURN_9"), "post-burst frame coherent: {frame}");
 }
 
-/// U-F4 live status on a FILE buffer: an external disk edit is picked up
-/// and the file view shows it, with no keypress; a plain (non-locally-
-/// owned) file buffer auto-reloads rather than raising the marker; `g`
-/// force-reloads either way.
 #[test]
 fn unit_flow_f4() {
     let repo = fixture_repo();

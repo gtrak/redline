@@ -548,10 +548,10 @@ level where they live).
 
 | Kept flow | Why it needs a live app | Unit twin (state half) |
 |---|---|---|
-| U-A1 | boot/frame smoke: launch → home render (drive-family smoke) | — (smoke is its purpose) |
+| U-A1 | boot/frame smoke: launch → home render (drive-family smoke) | unit_flow_a1 (boot smoke twin; the PTY record additionally proves the real launch path) |
 | editable-keys | input encoding: multi-key sequences + self-insert through the REAL terminal encoder (C-x g dispatch vs self-insert) | `unit_flow_editable_keys` |
-| U-H2 search | in-flight cancel: C-g must land while a real rg walk over 6000 files is in flight (wall-clock race) | `unit_flow_h2_search` |
-| U-BHN | banner debounce: the hint only lands after the watcher cadence (repaint-race class) | `unit_flow_banner_hint` |
+| U-H2 search | in-flight cancel: C-g must land while a real rg walk over 6000 files is in flight (wall-clock race) | `search_c_g_cancels_without_closing (store.rs — the state half; the timing half stays in the kept PTY record)` |
+| U-BHN | banner debounce: the hint only lands after the watcher cadence (repaint-race class) | `changed_on_disk_hint_plain_says_g / changed_on_disk_hint_editable_says_reload_buffer (src/ui/file_view.rs — the state half; the timing half is the kept PTY record)` |
 | annotation suite (create/toggle/crossing/notes-editable/drift/orphan/delete/cu-scroll) | ann-delete's transient-echo / repaint race + the raw space-byte encoding through the PTY encoder | `unit_flow_ann_*` (8 twins) |
 | U-G6 | watcher SUSPENDED: a disk edit produces no reload — the gate is at the watcher source, which the store-level apply path deliberately bypasses | `unit_flow_g6` |
 | U-G1 | watcher delivery smoke: disk append → repaint + scroll anchor (one end-to-end watcher leg) | `unit_flow_g1` |
