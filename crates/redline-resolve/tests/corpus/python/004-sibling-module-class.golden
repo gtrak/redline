@@ -1,0 +1,10 @@
+# 004 — class in a sibling module (pins `class X:` def-shape scanning).
+symbol=gears.engine.Motor
+from_file=main.py
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=18

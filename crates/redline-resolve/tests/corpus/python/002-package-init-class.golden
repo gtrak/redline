@@ -1,0 +1,10 @@
+# 002 — class definition in the workspace package's __init__.
+symbol=gears.Gearbox
+from_file=main.py
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/gears/__init__.py
+source_root=project
+line=14

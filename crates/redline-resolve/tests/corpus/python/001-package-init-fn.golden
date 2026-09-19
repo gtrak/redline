@@ -1,0 +1,11 @@
+# 001 — dotted use site into the workspace package's __init__ (LIVE python3 leg:
+# find_spec resolves `gears` via the corpus-project CWD, content scan pins the line).
+symbol=gears.hello
+from_file=main.py
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/gears/__init__.py
+source_root=project
+line=9

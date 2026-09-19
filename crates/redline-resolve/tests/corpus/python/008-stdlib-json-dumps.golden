@@ -1,0 +1,14 @@
+# 008 — STDlib-shaped import (LIVE python3 leg): `json` is a real stdlib
+# package; find_spec returns its __init__.py. Pinned on python 3.14.4
+# (json/__init__.py:185 was verified live by 011-02 and re-verified here).
+# stdlib lines drift across python versions — see README.
+symbol=json.dumps
+from_file=gears/render.py
+scope=[]
+root=project
+kind=resolved
+external=true
+path_base=stdlib
+file=json/__init__.py
+source_root=.
+line=185
