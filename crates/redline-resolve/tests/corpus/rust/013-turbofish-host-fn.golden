@@ -1,0 +1,11 @@
+# The host function of the corpus's turbofish call site
+# (`HashMap::<u32, f64>::new()` in gear_lookup): a plain `crate::item`
+# landing on the fn definition.
+symbol = gearbox::gear_lookup
+from_file = gearbox/src/main.rs
+scope = []
+kind = resolved
+external = false
+file = project/gearbox/src/lib.rs
+source_root = project/gearbox
+line = 31

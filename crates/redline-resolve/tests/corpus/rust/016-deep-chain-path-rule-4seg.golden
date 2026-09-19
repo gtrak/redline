@@ -1,0 +1,13 @@
+# OBSERVATION twin of probe 005: a path-shaped 4-segment chain
+# (`gearbox::engine::piston::describe`) still takes the SECOND segment
+# (`engine`) as the item — the landing is the module declaration, not
+# `fn describe` in piston.rs. The bare+hint shape (probe 006) is how the
+# leaf is reached today.
+symbol = gearbox::engine::piston::describe
+from_file = gearbox/src/main.rs
+scope = []
+kind = resolved
+external = false
+file = project/gearbox/src/lib.rs
+source_root = project/gearbox
+line = 7

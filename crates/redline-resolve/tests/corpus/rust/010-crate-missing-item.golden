@@ -1,0 +1,8 @@
+# Honest degradation: the crate IS located (external vendored frobnicator)
+# but the item is not defined in its source — the located-but-missing
+# bail. `{corpus}` is the corpus copy root (dynamic absolute path).
+symbol = frobnicator::Phantom
+from_file = gearbox/src/main.rs
+scope = []
+kind = bail
+bail = crate `frobnicator` located at {corpus}/frobnicator but no definition of `Phantom` was found in its source

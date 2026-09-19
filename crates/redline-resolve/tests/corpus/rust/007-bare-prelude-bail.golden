@@ -1,0 +1,7 @@
+# Honest degradation: a bare PRELUDE-style name with no scope hint is never
+# guessed — the exact no-hint bail, byte-for-byte.
+symbol = String
+from_file = gearbox/src/main.rs
+scope = []
+kind = bail
+bail = bare symbol `String` has no crate path; resolving it to a crate needs scope info (tree-sitter) not yet provided by the app

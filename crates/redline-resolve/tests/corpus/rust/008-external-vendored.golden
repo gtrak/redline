@@ -1,0 +1,11 @@
+# External source root: frobnicator is a path dependency OUTSIDE the
+# workspace root (a vendored sibling), so the landing is external — no
+# registry fetch involved (live `cargo metadata`, offline graph).
+symbol = frobnicator::Frobnicator
+from_file = gearbox/src/main.rs
+scope = []
+kind = resolved
+external = true
+file = frobnicator/src/lib.rs
+source_root = frobnicator
+line = 7

@@ -1,0 +1,11 @@
+# Bare symbol + a 4-segment scope hint: the hint's LAST segment (`sum_sq`)
+# is the item, landing in the nested module file — the contrast to probe
+# 016, whose path-shaped symbol lands on the second segment instead.
+symbol = sum_sq
+from_file = gearbox/src/main.rs
+scope = ["gearbox", "core", "math", "sum_sq"]
+kind = resolved
+external = false
+file = project/gearbox/src/core/math.rs
+source_root = project/gearbox
+line = 4

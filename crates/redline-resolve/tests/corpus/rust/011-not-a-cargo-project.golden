@@ -1,0 +1,8 @@
+# Honest degradation: the probe's workspace root has no Cargo.toml at all.
+# `{root}` is this probe's workspace root (the `not_a_crate` directory).
+root = not_a_crate
+symbol = gearbox::Drivetrain
+from_file = src/lib.rs
+scope = []
+kind = bail
+bail = no Cargo.toml under workspace root {root}; not a cargo project

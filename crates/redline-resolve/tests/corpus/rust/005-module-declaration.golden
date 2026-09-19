@@ -1,0 +1,10 @@
+# A two-segment path whose item IS a module: the landing is the `mod`
+# declaration (the strongest definition-shaped match for `engine`).
+symbol = gearbox::engine
+from_file = gearbox/src/lib.rs
+scope = []
+kind = resolved
+external = false
+file = project/gearbox/src/lib.rs
+source_root = project/gearbox
+line = 7

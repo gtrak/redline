@@ -1,0 +1,11 @@
+# Bin-target source: the scan includes the bin's main.rs (the lib target's
+# src dir is the shared scan root); `fn main` is the only definition
+# shaped as `main` in the gearbox crate.
+symbol = gearbox::main
+from_file = gearbox/src/main.rs
+scope = []
+kind = resolved
+external = false
+file = project/gearbox/src/main.rs
+source_root = project/gearbox
+line = 8

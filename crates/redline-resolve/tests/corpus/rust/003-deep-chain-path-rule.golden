@@ -1,0 +1,13 @@
+# OBSERVATION, not a promise: a path-shaped DEEP chain (`widgets::gear::Gear`)
+# keeps the historical second-segment rule, so the located item is `gear`
+# (the module) and the landing is the module declaration in
+# widgets/src/lib.rs, NOT `struct Gear` in gear.rs. The bare+hint twin
+# (probe 004) lands on the struct.
+symbol = widgets::gear::Gear
+from_file = gearbox/src/main.rs
+scope = []
+kind = resolved
+external = false
+file = project/widgets/src/lib.rs
+source_root = project/widgets
+line = 5

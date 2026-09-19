@@ -1,0 +1,8 @@
+# Honest degradation: a crate not in the workspace's cargo graph (anywhere
+# in the graph, registry or path) — the workspace-miss bail. `{root}` is
+# the probe's workspace root (dynamic absolute path).
+symbol = anyhow::Error
+from_file = gearbox/src/main.rs
+scope = []
+kind = bail
+bail = crate `anyhow` is not in the workspace's cargo graph (workspace {root})

@@ -1,0 +1,7 @@
+# Honest degradation: the symbol's first segment is not an identifier, so
+# no crate name can be parsed — the exact entry-point bail.
+symbol = ??::x
+from_file = gearbox/src/main.rs
+scope = []
+kind = bail
+bail = cannot parse a crate name from symbol `??::x`

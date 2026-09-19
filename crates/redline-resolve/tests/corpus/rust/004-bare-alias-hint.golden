@@ -1,0 +1,11 @@
+# use-alias: main.rs imports `use widgets::gear::Gear as DriveGear;`. The
+# hint is the ORIGINAL import path, so the item is the hint's last segment
+# (`Gear`), not the alias — landing on the struct, not the module.
+symbol = DriveGear
+from_file = gearbox/src/main.rs
+scope = ["widgets", "gear", "Gear"]
+kind = resolved
+external = false
+file = project/widgets/src/gear.rs
+source_root = project/widgets
+line = 7

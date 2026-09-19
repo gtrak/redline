@@ -1,0 +1,11 @@
+# Bare symbol + scope hint whose item lives in a directory module
+# (`engine/mod.rs`): the hint's last segment (`Engine`) lands on the
+# struct; the lower-priority `impl Engine` loses.
+symbol = Engine
+from_file = gearbox/src/main.rs
+scope = ["gearbox", "engine", "Engine"]
+kind = resolved
+external = false
+file = project/gearbox/src/engine/mod.rs
+source_root = project/gearbox
+line = 9

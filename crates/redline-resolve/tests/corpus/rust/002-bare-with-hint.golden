@@ -1,0 +1,11 @@
+# Bare symbol + the app's use-path scope hint (`use gearbox::Drivetrain;`
+# shape): normalizes to the same `gearbox::Drivetrain` path as probe 001
+# (same-machinery landing).
+symbol = Drivetrain
+from_file = gearbox/src/main.rs
+scope = ["gearbox", "Drivetrain"]
+kind = resolved
+external = false
+file = project/gearbox/src/lib.rs
+source_root = project/gearbox
+line = 13
