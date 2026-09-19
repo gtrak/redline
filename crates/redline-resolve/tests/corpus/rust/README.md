@@ -30,3 +30,10 @@ Probe 003/016 pin an observation, not a promise: path-shaped DEEP chains
 (`a::b::c`) use the historical second-segment rule, so they land on the
 second segment (the module declaration), while the bare+scope-hint twins
 (004, 006, 017) land on the leaf item.
+
+## Suite coverage note (011-08 review P2-2)
+
+The golden suite runs `cargo metadata` only — it does NOT type-check the
+sample sources. A corpus edit that breaks compilation passes the gate
+silently; keep the samples compiling (out-of-band `cargo check` on a
+scratch copy when you edit them).
