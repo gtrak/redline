@@ -89,6 +89,26 @@ Two hard-won constraints (they are not obvious):
 Cleanup: `tools/pool.py clean` removes the whole pool root (see backlog #17
 for the disk-use note).
 
+## Harness note: bound the WORKER, not just the probe
+
+Two lanes on 2026-09-19 burned far past a reasonable budget for their task
+size (140 turns / 21M tokens; 98 turns / 7.7M tokens). Neither was stuck in
+the end — one was a genuine multi-file feature, the other was thrashing on
+reference-tool probes — but by the time it showed, the tokens were spent.
+
+Rules this produced:
+- **Every worker spec states an explicit budget expectation** ("land the
+  implementation within N tool calls; do not start new investigations after
+  the implementation compiles") — cheap to add to `.agents/tasks/*.md`, and it
+  gives the worker a reason to stop polishing.
+- **Cap reference-tool probing.** If a spec needs a parity answer from emacs
+  (or any external tool), state the answer in the spec if it is already known,
+  or bound the probe to a handful of calls. Do not leave "probe the reference
+  tool" open-ended — that is where the unbounded loops come from.
+- **Watch the turn count, not just the clock.** "Active but long-running"
+  with a high turn count means thrashing even when it is technically making
+  progress; steer it to the write-up with the facts it already has.
+
 ## Harness note: never leave a PTY probe un-bounded
 
 A worker probing emacs recenter geometry wrote an elisp file via a mangled
