@@ -8588,6 +8588,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     ///   directory (exact file → JS-extension walk → directory entry)
     ///   and lands workspace-locally (`external = false`), so the hint
     ///   carries it, item included.
+    ///
     /// Absolute paths and any other `.`-leading shape (bare `.`/`..`) stay
     /// out: the provider bails dedicated on absolute, and a bare `.`/`..`
     /// never reaches its relative branch (it is not a `./`-prefixed spec)
