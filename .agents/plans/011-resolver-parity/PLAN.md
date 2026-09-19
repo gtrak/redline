@@ -1,6 +1,6 @@
 # 011 — Redline: resolver parity across languages
 
-Status: 01+02+03 PASS+MERGED; 04 landed (1effdef, in review); 05 last
+Status: 01-04 PASS+MERGED; 05 last
 Phases: 2 · Issues: 01–05
 Depends on: 007-03 (`SymbolContext` scope field) for 01; 007-01 (node-at-point)
 for 03–04
