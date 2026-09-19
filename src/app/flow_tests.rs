@@ -30,6 +30,31 @@ fn key(s: &str) -> Key {
     parse_key(s).unwrap()
 }
 
+/// A printable char key (a bare space is not nameable by `parse_key`).
+fn key_char(c: char) -> Key {
+    if c == ' ' {
+        Key::char(' ')
+    } else {
+        parse_key(&c.to_string()).unwrap()
+    }
+}
+
+/// C-SPC: the terminal delivers it as the NUL byte, which crossterm/iocraft
+/// decode as `Char(' ') + CONTROL` (the store's set-mark binding).
+fn key_null() -> Key {
+    Key::ctrl_char(' ')
+}
+
+/// Build the symbol index synchronously and install it (no tokio runtime
+/// in unit tests — the UI's drain task can't run, so the index job's
+/// output is produced directly; `store_with_index` in store.rs does the
+/// same).
+fn install_index(s: &mut AppStore, root: &std::path::Path) {
+    let files_list = crate::model::files::FileList::build(root).unwrap();
+    let index = crate::nav::index::build_index(root, &files_list.files, None);
+    s.set_index(index);
+}
+
 /// A store rooted in `dir` with persistence under a throwaway sibling
 /// base, the PTY-matrix viewport (24-row terminal → 21 content rows).
 fn store_in(dir: &std::path::Path) -> AppStore {
@@ -168,18 +193,10 @@ fn open_via_finder(store: &mut AppStore, query: &str) {
     store.key_event(key("C-f"));
     assert!(store.picker_open(), "find-file picker must open");
     for c in query.chars() {
-        store.key_event(key(&c.to_string()));
+        store.key_event(key_char(c));
     }
     store.key_event(key("RET"));
     assert!(!store.picker_open(), "RET must close the picker");
-}
-
-/// Drive `C-c p i` (re-walk) then open a file through the finder.
-fn rew_walk_and_open(store: &mut AppStore, query: &str) {
-    store.key_event(key("C-c"));
-    store.key_event(key("p"));
-    store.key_event(key("i"));
-    open_via_finder(store, query);
 }
 
 /// Drain the search bus into the store until `Finished` (bounded) — the
@@ -276,7 +293,7 @@ fn unit_flow_b1() {
     s.key_event(key("C-f"));
     let prompt_ok = s.picker_prompt() == "Find file: ";
     for c in "main".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     let filtered = s
         .picker_filtered()
@@ -329,7 +346,7 @@ fn unit_flow_b3() {
     s.key_event(key("C-x"));
     s.key_event(key("C-f"));
     for c in "zzzznomatch".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     let (n, m) = s.picker_count();
     assert_eq!(n, 0, "no candidates");
@@ -397,7 +414,8 @@ fn unit_flow_b6() {
     let lib_path = repo.path().join("src/lib.rs");
     let backup = repo.path().join("src/lib.rs.bak");
     std::fs::rename(&lib_path, &backup).unwrap();
-    let result = (|| {
+    let result;
+    {
         s.key_event(key("C-c"));
         s.key_event(key("p"));
         s.key_event(key("e"));
@@ -411,8 +429,8 @@ fn unit_flow_b6() {
         let lib_absent = !names.iter().any(|n| n == "src/lib.rs");
         let frame = render80(s);
         assert!(frame.contains("Recent file:"), "{frame}");
-        (main_listed, lib_absent)
-    })();
+        result = (main_listed, lib_absent);
+    }
     std::fs::rename(&backup, &lib_path).unwrap();
     let (main_listed, lib_absent) = result;
     assert!(
@@ -598,10 +616,10 @@ fn unit_flow_graft() {
     let mut s = store_in(repo.path());
     s.key_event(key("C-x"));
     s.key_event(key("C-f"));
-    let full = s.picker_filtered().clone();
+    let full = s.picker_filtered();
     let no_graft_full = !full.iter().any(|(c, _)| c.name.contains("graft"));
     for c in "graft".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     let (n, m) = s.picker_count();
     assert_eq!(n, 0, "graft query must yield a clean empty state");
@@ -626,7 +644,7 @@ fn unit_flow_editable_keys() {
     let notes_open = current_is_notes(&s);
     assert!(notes_open, "notes open");
     for c in "abc".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     let text = s.buffer_text();
     assert!(text.contains("abc"), "self-insert landed: {text:?}");
@@ -782,6 +800,7 @@ fn unit_flow_c6() {
         .find(|r| !r.text.is_empty())
         .map(|r| r.text.as_str())
         == Some("line 50");
+    assert!(m_gt_bottom_anchor, "M-> bottom anchor (last content row line 50)");
     // M-<: back to top.
     s.key_event(key("M-<"));
     let rows = s.file_view_rows();
@@ -821,7 +840,7 @@ fn unit_flow_e1() {
     }
     assert_eq!(s.message, "Search: ", "prompt active");
     for c in "target".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     s.key_event(key("RET"));
     drain_search_finished(&mut s, &mut rx);
@@ -844,7 +863,7 @@ fn unit_flow_e3() {
         s.key_event(key(tok));
     }
     for c in "target".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     s.key_event(key("RET"));
     drain_search_finished(&mut s, &mut rx);
@@ -860,8 +879,7 @@ fn unit_flow_e3() {
     let jumped = s
         .buffers
         .current_buffer()
-        .map(|b| b.path.as_ref())
-        .flatten()
+        .and_then(|b| b.path.as_ref())
         .map(|p| p.ends_with("main.rs"))
         .unwrap_or(false);
     assert!(jumped, "landed in src/main.rs");
@@ -880,7 +898,7 @@ fn unit_flow_e2() {
             s.key_event(key(tok));
         }
         for c in "target".chars() {
-            s.key_event(key(&c.to_string()));
+            s.key_event(key_char(c));
         }
         s.key_event(key("RET"));
         drain_search_finished(&mut s, &mut rx);
@@ -981,8 +999,7 @@ fn unit_flow_f3() {
         && s
             .buffers
             .current_buffer()
-            .map(|b| b.path.as_ref())
-            .flatten()
+            .and_then(|b| b.path.as_ref())
             .map(|p| p.ends_with("lib.rs"))
             .unwrap_or(false);
     assert!(
@@ -1040,7 +1057,7 @@ fn unit_flow_f5() {
         && s.commit_editor_title().contains("commit");
     assert!(editor_render, "editor chrome (title + staged section)");
     for c in "sweepf5marker".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     s.key_event(key("C-c"));
     s.key_event(key("C-c"));
@@ -1100,8 +1117,15 @@ fn unit_flow_f7() {
     let mut s = store_in(repo.path());
     open_via_finder(&mut s, "main");
     // The current-file check reads the status line's which-function
-    // (a symbol from src/main.rs), not the view title.
+    // (a symbol from src/main.rs), not the view title. The index job runs
+    // off-thread in the live app; build it synchronously here.
+    install_index(&mut s, repo.path());
     let file_current = s.which_function().contains("target_one");
+    assert!(
+        file_current,
+        "which-function names the current file's symbol: {:?}",
+        s.which_function()
+    );
     s.key_event(key("C-x"));
     s.key_event(key("g"));
     s.key_event(key("b"));
@@ -1354,7 +1378,7 @@ fn unit_flow_g3() {
     // Force-reload via the M-x command path (the reload-buffer command).
     s.key_event(key("M-x"));
     for c in "reload-buffer".chars() {
-        s.key_event(key(&c.to_string()));
+        s.key_event(key_char(c));
     }
     let (n, _) = s.picker_count();
     assert_eq!(n, 1, "the command filter must be unique");
@@ -1388,7 +1412,7 @@ fn unit_flow_g6() {
     let toggle = |s: &mut AppStore| {
         s.key_event(key("M-x"));
         for c in "toggle-watcher".chars() {
-            s.key_event(key(&c.to_string()));
+            s.key_event(key_char(c));
         }
         s.key_event(key("RET"));
     };
@@ -1446,5 +1470,655 @@ fn unit_flow_g5() {
         switched && msg && landed,
         "switched={switched} msg={msg} landed-in-new-project-find-file={landed} (msg={:?})",
         s.message
+    );
+}
+
+// ═══════════════════ batch 3: quit prompts / edit mode / annotations / marks ═══════════════
+
+/// A store with the notes buffer open in `repo` (the UI-reachable modified
+/// buffer).
+fn notes_store(repo: &std::path::Path) -> AppStore {
+    let mut s = store_in(repo);
+    s.key_event(key("C-x"));
+    s.key_event(key("n"));
+    s
+}
+
+/// quit-prompt-none: unmodified notes + `C-x C-c` → immediate quit, no
+/// prompt rendered.
+#[test]
+fn unit_flow_quit_prompt_none() {
+    let repo = fixture_repo();
+    let mut s = notes_store(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    assert!(s.quit, "unmodified buffers must quit immediately");
+    assert!(!s.quit_prompt_active(), "no save prompt with zero modified buffers");
+    assert!(!s.message.contains("Save this buffer"), "msg={:?}", s.message);
+}
+
+/// quit-prompt-y: modified notes + `C-x C-c` → the prompt names the path
+/// (on screen at width 80, including across a wrap); `y` writes the file
+/// and the quit proceeds.
+#[test]
+fn unit_flow_quit_prompt_y() {
+    let repo = fixture_repo();
+    let mut s = notes_store(repo.path());
+    s.key_event(key("Q"));
+    s.key_event(key("Y"));
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    assert!(s.quit_prompt_active(), "the prompt must hold the quit");
+    let notes_path = repo.path().join(".redline-notes.md");
+    assert_eq!(
+        s.quit_prompt_buffer().unwrap(),
+        notes_path.display().to_string(),
+        "prompt names the modified buffer's path"
+    );
+    // The prompt is on screen at width 80 (the PTY's flat-text check: a
+    // wrap must not defeat it).
+    let mut s2 = notes_store(repo.path());
+    s2.key_event(key("Q"));
+    s2.key_event(key("Y"));
+    s2.key_event(key("C-x"));
+    s2.key_event(key("C-c"));
+    let frame = render80(s2);
+    let f = flat(&frame);
+    assert!(
+        f.contains("Save this buffer:") && f.contains(".redline-notes.md")
+            && f.contains("(y, n, !, C-g)"),
+        "prompt on screen at width 80:\n{frame}"
+    );
+    // Back on the first store: `y` saves and quits.
+    s.key_event(key("y"));
+    assert!(s.quit, "y on the last modified buffer must quit");
+    let on_disk = std::fs::read_to_string(&notes_path).unwrap();
+    assert!(on_disk.contains("QY"), "y must write the edit to disk");
+}
+
+/// quit-prompt-n: `n` exits without writing — the edit is knowingly
+/// discarded (the file is byte-identical to the seed).
+#[test]
+fn unit_flow_quit_prompt_n() {
+    let repo = fixture_repo();
+    let mut s = notes_store(repo.path());
+    let notes_path = repo.path().join(".redline-notes.md");
+    let seed = std::fs::read_to_string(&notes_path).unwrap();
+    s.key_event(key("X"));
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    assert!(s.quit_prompt_active());
+    s.key_event(key("n"));
+    assert!(s.quit, "n on the last modified buffer must quit");
+    let on_disk = std::fs::read_to_string(&notes_path).unwrap();
+    assert_eq!(on_disk, seed, "n must NOT write the edit to disk");
+}
+
+/// quit-prompt-cg: `C-g` cancels the whole quit — prompt gone, buffer
+/// content intact, the store is still alive; a re-quit re-enters the
+/// prompt.
+#[test]
+fn unit_flow_quit_prompt_cg() {
+    let repo = fixture_repo();
+    let mut s = notes_store(repo.path());
+    s.key_event(key("Q"));
+    s.key_event(key("Z"));
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    assert!(s.quit_prompt_active());
+    s.key_event(key("C-g"));
+    assert!(!s.quit && !s.quit_prompt_active(), "C-g cancels the quit");
+    assert_eq!(s.message, "cancel");
+    let intact = s.buffer_text().contains("QZ");
+    // Re-quit: the buffer is still modified → the prompt returns.
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    let reprompted = s.quit_prompt_active();
+    s.key_event(key("n"));
+    let finished = s.quit;
+    assert!(
+        intact && reprompted && finished,
+        "intact={intact} reprompted={reprompted} finished={finished}"
+    );
+}
+
+/// quit-prompt-save-fail: a failing save reports the error, RE-PROMPTS THE
+/// SAME buffer (a second `y` still routes to the prompt), and `C-g`
+/// cancels out with the file untouched.
+#[test]
+#[cfg(unix)]
+fn unit_flow_quit_prompt_save_fail() {
+    let repo = fixture_repo();
+    let mut s = notes_store(repo.path());
+    let notes_path = repo.path().join(".redline-notes.md");
+    let seed = std::fs::read_to_string(&notes_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&notes_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    s.key_event(key("F"));
+    s.key_event(key("C-x"));
+    s.key_event(key("C-c"));
+    assert!(s.quit_prompt_active());
+    s.key_event(key("y"));
+    let failed = s.message.contains("save failed");
+    // Re-prompt of the SAME buffer: a second `y` is still routed to the
+    // prompt (and fails again), not treated as typing.
+    s.key_event(key("y"));
+    let reprompt_same = s.quit_prompt_active() && s.message.contains("save failed");
+    s.key_event(key("C-g"));
+    let cancelled = !s.quit && !s.quit_prompt_active();
+    let on_disk = std::fs::read_to_string(&notes_path).unwrap();
+    assert!(
+        failed && reprompt_same && cancelled && on_disk == seed,
+        "failed={failed} reprompt-same={reprompt_same} cancelled={cancelled} \
+         file-unchanged={}",
+        on_disk == seed
+    );
+}
+
+/// A dedicated `src/edit.rs` fixture (created before startup so the walk
+/// lists it; removed by the tempdir), mirroring the sweep's edit-mode legs.
+fn edit_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = fixture_repo();
+    let path = dir.path().join("src/edit.rs");
+    std::fs::write(&path, "edit line one\nedit line two\n").unwrap();
+    git(dir.path(), &["add", "src/edit.rs"]);
+    (dir, path)
+}
+
+fn open_edit_file(store: &mut AppStore) {
+    open_via_finder(store, "edit.rs");
+}
+
+/// edit-toggle: C-x C-q toggles Read-only ⇄ Edit; the status line shows
+/// the mode word; with no edits the toggle back is immediate (no confirm
+/// prompt).
+#[test]
+fn unit_flow_edit_toggle() {
+    let (repo, _) = edit_repo();
+    let mut s = store_in(repo.path());
+    open_edit_file(&mut s);
+    let ro = s.buffer_mode_display() == "Read-only";
+    let frame = render80({
+        let mut s2 = store_in(repo.path());
+        open_edit_file(&mut s2);
+        s2
+    });
+    let status_ro = frame.lines().last().unwrap().contains("Read-only");
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let edit_on = s.buffer_mode_display() == "Edit";
+    let editable_msg = s.message.contains("editable");
+    // No edits yet: toggle straight back (no confirm prompt).
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let ro_again = s.buffer_mode_display() == "Read-only";
+    let no_confirm = !s.message.contains("Discard unsaved edits");
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let edit_again = s.buffer_mode_display() == "Edit";
+    assert!(
+        ro && status_ro && edit_on && editable_msg && ro_again && no_confirm && edit_again,
+        "ro={ro} status-ro={status_ro} edit={edit_on} msg={editable_msg} ro-again={ro_again} \
+         no-confirm={no_confirm} edit-again={edit_again} (msg={:?})\n{frame}",
+        s.message
+    );
+}
+
+/// edit-save: type + save — the edit lands, C-x C-s writes it to disk
+/// (asserted byte-for-byte), and the saved-path self-write is suppressed
+/// (no false 'changed on disk' marker).
+#[test]
+fn unit_flow_edit_save() {
+    let (repo, path) = edit_repo();
+    let mut s = store_in(repo.path());
+    open_edit_file(&mut s);
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q")); // into edit mode
+    s.key_event(key("z"));
+    s.key_event(key("z"));
+    let typed = s.buffer_text().contains("zz");
+    s.key_event(key("C-x"));
+    s.key_event(key("C-s"));
+    let wrote = s.message.contains("wrote");
+    let disk = std::fs::read_to_string(&path).unwrap();
+    let disk_ok = disk.ends_with("zz");
+    // The watcher event for OUR OWN save (mtime still matches the
+    // recorded one) must not raise a false marker.
+    publish_change(&mut s, &path, ChangeKind::Modify);
+    let no_false_marker = !s.current_buffer_changed_on_disk();
+    assert!(
+        typed && wrote && disk_ok && no_false_marker,
+        "typed={typed} wrote={wrote} disk={disk_ok} no-false-marker={no_false_marker}"
+    );
+}
+
+/// edit-confirm: toggle back with unsaved edits arms the discard confirm;
+/// C-g cancels (edit mode + the text are kept); re-arming and `y` accepts:
+/// the unsaved text is discarded (the buffer re-reads the disk content) and
+/// the buffer goes read-only — the disk is never written on the confirm.
+#[test]
+fn unit_flow_edit_confirm() {
+    let (repo, path) = edit_repo();
+    let mut s = store_in(repo.path());
+    open_edit_file(&mut s);
+    let base = std::fs::read_to_string(&path).unwrap();
+    // Into edit mode with unsaved edits, then toggle back: the discard
+    // confirm arms (the flip is deferred until the answer).
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    s.key_event(key("q"));
+    s.key_event(key("q"));
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let prompt = s.message.contains("Discard unsaved edits");
+    let still_edit = s.buffer_mode_display() == "Edit";
+    s.key_event(key("C-g"));
+    let cancel_kept_edit = s.buffer_mode_display() == "Edit";
+    let cancel_kept_text = s.buffer_text().contains("qq");
+    // Re-arm and accept: y discards the unsaved 'qq'.
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    let prompt_again = s.message.contains("Discard unsaved edits");
+    s.key_event(key("y"));
+    let read_only = s.buffer_mode_display() == "Read-only";
+    let discarded = !s.buffer_text().contains("qq");
+    let disk_untouched = std::fs::read_to_string(&path).unwrap() == base;
+    assert!(
+        prompt && still_edit && cancel_kept_edit && cancel_kept_text
+            && prompt_again && read_only && discarded && disk_untouched,
+        "prompt={prompt} still-edit={still_edit} cancel-kept-edit={cancel_kept_edit} \
+         cancel-kept-text={cancel_kept_text} re-armed={prompt_again} ro={read_only} \
+         discarded={discarded} disk-untouched={disk_untouched} (msg={:?})",
+        s.message
+    );
+}
+
+/// edit-conflict: external change while in edit mode → 'changed on disk'
+/// marker and NO auto-reload (the buffer text stays intact). Contrast:
+/// a plain read-only file buffer still auto-reloads with no marker.
+#[test]
+fn unit_flow_edit_conflict() {
+    let (repo, path) = edit_repo();
+    let mut s = store_in(repo.path());
+    open_edit_file(&mut s);
+    // Contrast leg: read-only auto-reload, no marker.
+    append(&path, "EXT1");
+    publish_change(&mut s, &path, ChangeKind::Modify);
+    let reloaded_ro = s.buffer_text().contains("EXT1");
+    let no_marker_ro = !s.current_buffer_changed_on_disk();
+    // Edit mode, type, then an external append must CONFLICT, not clobber.
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    s.key_event(key("q"));
+    s.key_event(key("q"));
+    append(&path, "EXT2");
+    publish_change(&mut s, &path, ChangeKind::Modify);
+    let marker = s.current_buffer_changed_on_disk();
+    let edit_intact = s.buffer_text().contains("EXT1qq");
+    let no_clobber = !s.buffer_text().contains("EXT2");
+    assert!(
+        reloaded_ro && no_marker_ro && marker && edit_intact && no_clobber,
+        "ro-reload={reloaded_ro} no-marker-ro={no_marker_ro} marker={marker} \
+         intact={edit_intact} no-clobber={no_clobber}"
+    );
+}
+
+/// The inline-annotation suite's fixtures (created before startup so the
+/// cached walk lists them).
+fn ann_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = fixture_repo();
+    let ann = dir.path().join("src/notes_ann.rs");
+    let ann2 = dir.path().join("src/notes_ann2.rs");
+    let mut lines = "ann line one\nann line two\nann line three\nann line four\n"
+        .to_string();
+    for i in 5..=30 {
+        lines.push_str(&format!("ann filler {i:02}\n"));
+    }
+    std::fs::write(&ann, lines).unwrap();
+    let mut cu = String::new();
+    for i in 1..=30 {
+        cu.push_str(&format!("cu line {i}\n"));
+    }
+    std::fs::write(&ann2, cu).unwrap();
+    git(dir.path(), &["add", "src/notes_ann.rs", "src/notes_ann2.rs"]);
+    (dir, ann, ann2)
+}
+
+/// ann-create: A on a line → the prompt; typing + RET commits — a ▎ marker
+/// on the code row, the note as a row directly under it, the status
+/// count, and a real record in .redline-notes.md.
+#[test]
+fn unit_flow_ann_create() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n")); // point at line 2 ("ann line three")
+    s.key_event(key("A"));
+    assert!(s.note_prompt_active(), "annotation prompt active");
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let saved = s.message.contains("note saved");
+    assert!(saved, "note saved echo (msg={:?})", s.message);
+    // Marker + note row directly under the annotated code row.
+    let rows = s.file_view_rows();
+    let code_idx = rows
+        .iter()
+        .position(|r| r.text == "ann line three")
+        .expect("annotated code row present");
+    let marker = rows[code_idx].annotated;
+    let under = rows.get(code_idx + 1).map(|r| r.text.contains("check bounds")).unwrap_or(false);
+    // Status count.
+    let count = s.annotation_count_display().contains("1 note");
+    // The on-disk record.
+    let notes = std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .expect("notes file created");
+    let disk_rec = notes.contains("[annotation]")
+        && notes.contains("note: check bounds")
+        && notes.contains("anchor: ann line three");
+    let frame = render80(s);
+    assert!(
+        marker && under && count && disk_rec,
+        "marker={marker} under={under} count={count} disk={disk_rec}\n{frame}"
+    );
+}
+
+/// ann-toggle: C-c a hides the note rows (the marker stays) and shows
+/// them again.
+#[test]
+fn unit_flow_ann_toggle() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let with_note = |st: &mut AppStore| {
+        st.file_view_rows()
+            .iter()
+            .any(|r| r.text.contains("check bounds"))
+    };
+    assert!(with_note(&mut s), "note row present before toggle");
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    let hidden_msg = s.message.contains("note rows: hidden");
+    let note_gone = !with_note(&mut s);
+    let marker_stays = s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text == "ann line three" && r.annotated);
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    let shown_msg = s.message.contains("note rows: shown");
+    let note_back = with_note(&mut s);
+    assert!(
+        hidden_msg && note_gone && marker_stays && shown_msg && note_back,
+        "hidden={hidden_msg} gone={note_gone} marker={marker_stays} shown={shown_msg} back={note_back}"
+    );
+}
+
+/// ann-crossing: with the cursor on the annotated line, C-n lands on the
+/// NEXT CODE line (L4, not the note row) and C-p returns (L3); the note
+/// row still sits between the two code rows on screen.
+#[test]
+fn unit_flow_ann_crossing() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    s.key_event(key("C-n"));
+    let l4 = s.file_view_position_display().starts_with("L4,");
+    s.key_event(key("C-p"));
+    let l3 = s.file_view_position_display().starts_with("L3,");
+    let rows = s.file_view_rows();
+    let r3 = rows.iter().position(|r| r.text == "ann line three");
+    let r4 = rows.iter().position(|r| r.text == "ann line four");
+    let between = r3.zip(r4).map(|(a, b)| b - a == 2).unwrap_or(false);
+    assert!(
+        l4 && l3 && between,
+        "L4={l4} L3={l3} note-row-between={between} (pos={:?})",
+        s.file_view_position_display()
+    );
+}
+
+/// ann-notes-editable: in the EDITABLE notes buffer `d`/`A` self-insert as
+/// printables (no prompt, no silent delete, no unbound-key echo).
+#[test]
+fn unit_flow_ann_notes_editable() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("n"));
+    let edit_mode = s.buffer_mode_display() == "Edit";
+    let before = s.buffer_text().clone();
+    s.key_event(key("d"));
+    let no_delete = !s.message.contains("deleted annotation")
+        && !s.message.contains("no annotation");
+    let self_inserted = s.buffer_text().ends_with('d')
+        && s.buffer_text().len() > before.len();
+    s.key_event(key("A"));
+    let no_prompt = !s.message.contains("Note: ");
+    let a_inserted = s.buffer_text().ends_with("dA");
+    assert!(
+        edit_mode && no_delete && self_inserted && no_prompt && a_inserted,
+        "edit-mode={edit_mode} no-delete={no_delete} d-inserted={self_inserted} \
+         no-prompt={no_prompt} A-inserted={a_inserted} (text={:?} msg={:?})",
+        s.buffer_text(),
+        s.message
+    );
+}
+
+/// ann-drift: an out-of-band edit moves the anchored line — the
+/// auto-reload's re-anchor pass moves the cue with the content.
+#[test]
+fn unit_flow_ann_drift() {
+    let (repo, ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let old = std::fs::read_to_string(&ann).unwrap();
+    std::fs::write(&ann, format!("top extra line\n{old}")).unwrap();
+    publish_change(&mut s, &ann, ChangeKind::Modify);
+    let reloaded = s.buffer_text().starts_with("top extra line");
+    let marker_moved = s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text == "ann line three" && r.annotated);
+    let note_under = s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text.contains("check bounds"));
+    let count = s.annotation_count_display().contains("1 note");
+    assert!(
+        reloaded && marker_moved && note_under && count,
+        "reloaded={reloaded} marker={marker_moved} note={note_under} count={count}"
+    );
+}
+
+/// ann-orphan: delete the anchored line out-of-band — the annotation is
+/// NOT lost: it is flagged orphaned and the record stays in the notes
+/// file.
+#[test]
+fn unit_flow_ann_orphan() {
+    let (repo, ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    let text = std::fs::read_to_string(&ann).unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| *l != "ann line three").collect();
+    std::fs::write(&ann, lines.join("\n") + "\n").unwrap();
+    publish_change(&mut s, &ann, ChangeKind::Modify);
+    let orphaned = s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text.contains("orphaned"));
+    let record_kept = s.annotation_count_display().contains("1 note");
+    let disk_kept = std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .unwrap()
+        .contains("note: check bounds");
+    assert!(
+        orphaned && record_kept && disk_kept,
+        "orphaned={orphaned} record={record_kept} disk={disk_kept}"
+    );
+}
+
+/// ann-delete (state twin): d on the annotated line deletes the record —
+/// cue gone, count gone, disk record gone; d on an unannotated line is a
+/// no-op with a clear message. (The PTY leg KEEPS the transient-echo /
+/// repaint-race assertion — the thin tier's raison d'être.)
+#[test]
+fn unit_flow_ann_delete() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    s.key_event(key("d"));
+    let echo = s.message.contains("deleted annotation: check bounds");
+    let cue_gone = !s
+        .file_view_rows()
+        .iter()
+        .any(|r| r.text.contains("check bounds"));
+    let count_gone = !s.annotation_count_display().contains("1 note");
+    let disk_gone = !std::fs::read_to_string(repo.path().join(".redline-notes.md"))
+        .unwrap()
+        .contains("check bounds");
+    // d on an unannotated line: the clear no-op message.
+    s.key_event(key("C-p"));
+    s.key_event(key("d"));
+    let no_ann_msg = s.message.contains("no annotation on this line");
+    assert!(
+        echo && cue_gone && count_gone && disk_gone && no_ann_msg,
+        "echo={echo} cue-gone={cue_gone} count-gone={count_gone} disk-gone={disk_gone} \
+         no-ann-msg={no_ann_msg} (msg={:?})",
+        s.message
+    );
+}
+
+/// ann-cu guard: C-u is still half-page scroll (the annotate bindings did
+/// not shadow it). At the bottom of a 30-line file the window top is
+/// "cu line 11"; C-u moves the window up a half-page to "cu line 1".
+#[test]
+fn unit_flow_ann_cu() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann2.rs");
+    s.key_event(key("G"));
+    let at_bottom = s.file_view_position_display() == "Bot";
+    let top_before = s.file_view_rows().iter().find(|r| !r.text.is_empty()).map(|r| r.text.clone());
+    s.key_event(key("C-u"));
+    let top_after = s.file_view_rows().iter().find(|r| !r.text.is_empty()).map(|r| r.text.clone());
+    let moved_up = top_before.as_deref() == Some("cu line 11") && top_after.as_deref() == Some("cu line 1");
+    assert!(
+        at_bottom && moved_up && top_before != top_after,
+        "at-bottom={at_bottom} top {top_before:?} -> {top_after:?} moved-up={moved_up}"
+    );
+}
+
+/// U-M1..M7: mark/region/kill/yank — C-SPC sets the mark, C-n/C-p move the
+/// point (region active), M-w copies to the ring, C-y yanks cross-buffer,
+/// M-y yank-pops (end of ring), and C-g clears the region.
+#[test]
+fn unit_flow_mark_kill_yank() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "main");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n")); // point at line 2
+    s.key_event(key_null()); // C-SPC (NUL): set the mark
+    let mark_set = s.message == "Mark set";
+    s.key_event(key("C-p"));
+    s.key_event(key("C-p")); // point back at line 0
+    let region = s.region_line_range();
+    assert!(region.is_some(), "region active: {region:?}");
+    // M-w: copy the region to the kill ring (read-only: buffer unchanged).
+    let text_before = s.buffer_text().clone();
+    s.key_event(key("M-w"));
+    let copy_echo = s.message.contains("copied to kill ring");
+    let ring = s.kill_ring.len() == 1;
+    let buffer_unchanged = s.buffer_text() == text_before;
+    // Cross-buffer yank into the notes buffer.
+    s.key_event(key("C-x"));
+    s.key_event(key("n"));
+    let before = s.buffer_text().clone();
+    s.key_event(key("C-y"));
+    let yank_landed = s.buffer_text() != before;
+    let yank_done = !s.message.contains("Kill ring is empty");
+    // M-y: yank-pop (only one ring entry → "end of kill ring", not a panic).
+    s.key_event(key("M-y"));
+    let alive_after_m_y = !s.message.contains("unbound");
+    // C-g clears the region (back on the file view).
+    s.key_event(key("C-x"));
+    s.key_event(key("C-f"));
+    for c in "main".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    s.key_event(key("C-g"));
+    let region_cleared = s.region_line_range().is_none();
+    assert!(
+        mark_set && ring && copy_echo && buffer_unchanged && yank_landed && yank_done
+            && alive_after_m_y && region_cleared,
+        "mark={mark_set} ring={ring} copy={copy_echo} unchanged={buffer_unchanged} \
+         yank={yank_landed}/{yank_done} m-y-alive={alive_after_m_y} cleared={region_cleared} \
+         (msg={:?}, region={region:?})",
+        s.message
+    );
+}
+
+/// U-M8: C-x C-x exchanges point and mark (point moves to the mark's
+/// line; a second exchange round-trips).
+#[test]
+fn unit_flow_mark_exchange() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "main");
+    s.key_event(key_null()); // mark at line 0
+    let mark_set = s.message == "Mark set";
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n")); // point at line 2
+    let point_b = s.file_view_point().0;
+    s.key_event(key("C-x"));
+    s.key_event(key("C-x"));
+    let point_a = s.file_view_point().0;
+    let exchanged_to_mark = point_a != point_b && point_a == 0;
+    s.key_event(key("C-x"));
+    s.key_event(key("C-x"));
+    let roundtrip = s.file_view_point().0 == point_b;
+    assert!(
+        mark_set && exchanged_to_mark && roundtrip,
+        "mark={mark_set} point {point_b}->{point_a} roundtrip={roundtrip}"
     );
 }
