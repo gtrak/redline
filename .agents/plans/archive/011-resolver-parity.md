@@ -95,11 +95,17 @@ gate-battery leg; no cell mislabeled in either direction (reviewer-audited).
   go.sum version-fallback leg unreachable (reported, unpinnable).
   ISSUE 08 CLOSED — 67 goldens across 4 languages, 8 real degradations
   pinned with fix-flip acceptance criteria.
-- **Fix issues queued (acceptance = golden flips)**: JS relative/side-effect
-  degradation (goldens 1-3), python+go `scope_qualified_alias` composition
-  (goldens 4+6), node_modules-dir-as-package corner, src/-layout python
-  roots, CWD-resolution, Markdown setext query (queries.rs), JSON/TOML/
-  YAML/Bash walk sets (open question).
+- **Fix: alias composition** DONE (`29042f3`, merged `966c8f8`): python +
+  go providers now compose `scope_qualified_alias` (js pattern); goldens
+  013 (`engine.py:11`) + go 08 (`wrap.go:5`) flipped; 65/67 byte-identical;
+  no-op guards unit-pinned. Reviewer PASS; follow-up P2s: retrofit the
+  bless flow into golden_python.rs + golden_rust.rs; matrix test-count/
+  alias-leg note; two flipped goldens keep their historical names.
+- **Fix: JS relative degradation** (in review): relative specifiers now
+  LAND against from_file's dir (a real feature); absolute/file-ish get
+  dedicated bails; node_modules/. refused both layers.
+- Still queued: Markdown setext query, python src/-layout roots,
+  JSON/TOML/YAML/Bash walk sets (open question).
 
 
 ## Carry-forwards
