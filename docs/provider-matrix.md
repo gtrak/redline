@@ -124,10 +124,12 @@ deliberately invented none)
   tooling provider handles language `c` / `cpp`, so the dispatch emits
   011-01's honest message — `no tooling provider handles language `c``
   (`(N provider(s) registered, none attempted)`) — instead of probing
-  cargo. Same code path and message shape as the live-pinned python/js
-  misses (011-05 L-P2 / L-J1a); the language parameter is the only
-  difference, so no live leg was added (011-07 judged the units
-  sufficient — see “Drives” note below).
+  cargo, **for symbols outside the project index: in-project definitions
+  still jump through the project index** (the project walk has no
+  extension filter). Same code path and message shape as the live-pinned
+  python/js misses (011-05 L-P2 / L-J1a); the language parameter is the
+  only difference, so no live leg was added (the units are sufficient —
+  see the "Drives" note below).
 - **011-07 gave these languages their 011-04 walk sets**, derived from
   `registry.rs`'s extension map (the authority): C `c/h`, C++
   `cc/cpp/cxx/hh/hpp/hxx`. HEADERS ARE DEFINITION SOURCES: a landed C/C++
