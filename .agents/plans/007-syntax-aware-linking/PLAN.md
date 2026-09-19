@@ -38,7 +38,7 @@ tree-sitter concepts?" — with the answer grounded in the existing tree
   bare `Deserialize` → serde-1.0.229/src/core/de/mod.rs:554. 656 workspace
   tests. Review P2s fixed: group entries SKIP instead of aborting the group
   (`use a::b::{self, c}` still hints `c`), plus negative-shape pins.
-- **04** (incremental parse reuse) unscheduled — perf only.
+- **04** PASS (branch `link-tree`: `825edae`+`594e209`+`952f464`, merged; reviewer PASS; 4 P2s fixed): per-buffer retained Tree + InputEdit incremental reparse. Measurement (release, 3.2MB): parse 22x faster (399ms→18ms), end-to-end ~1.5x — honest read recorded: per-keystroke reparse was never the live cost (edits don't trigger rebuilds in the render tick); kept for the large-file tail (re-open/jump/reload rebuilds on multi-MB buffers). Review P2-1: retained tree dropped on all 4 content-replacement paths (mtime-preserving/coarse-granularity fs could hint a stale tree); P2-2: the stress loop was fully vacuous (0/150 incremental steps — invalid insert texts + mid-token edits poisoned the baseline; now valid-line edits + a >=20 real-incremental-steps assert). Also fixed a real first-frame latency bug: the lazy reuse-engine build (~188ms) sat on the first-highlight critical path; now warmed at cache construction.
 
 ## Why
 
