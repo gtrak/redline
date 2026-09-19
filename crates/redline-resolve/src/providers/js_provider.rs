@@ -42,8 +42,14 @@ use serde_json::Value;
 
 use crate::{run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext, ToolingProvider};
 
-/// File extensions considered JavaScript/TypeScript sources.
-const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts"];
+/// File extensions considered JavaScript/TypeScript sources. `d.ts`
+/// sits at the tail: Node has no `.d.ts` runtime convention (the
+/// runtime extensions keep their LOAD_AS_FILE order), but go-to-
+/// definition WANTS declaration files — `import type {X} from "./types"`
+/// where only `types.d.ts` exists must land, not bail. (For
+/// `walk_js_files` the entry is inert: `types.d.ts`'s `extension()` is
+/// `ts`, so declaration files were already scanned package-side.)
+const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts", "d.ts"];
 
 /// File extensions that make a dotted name file-ish (a FILE NAME, not a
 /// `package.item` path): the JS/TS sources plus the static assets a
@@ -375,10 +381,11 @@ fn is_file_ish(symbol: &str) -> bool {
 }
 
 /// The concrete file a relative specifier names, next to the importing
-/// buffer: the exact file, then the JS-extension walk, then a directory
-/// import (its package.json entry point, else `index.<ext>`). A dotted
-/// tail that is NOT a JS extension (a static asset, `./styles.css`) is the
-/// exact file only — no walk.
+/// buffer: the exact file, then the JS-extension walk (declaration files
+/// last — `types.d.ts` only resolves when no runtime source twin exists,
+/// see [`JS_EXT`]), then a directory import (its package.json entry
+/// point, else `index.<ext>`). A dotted tail that is NOT a JS extension
+/// (a static asset, `./styles.css`) is the exact file only — no walk.
 fn resolve_relative_file(ws: &Path, from_file: &Path, spec: &str) -> Option<PathBuf> {
     // The buffer's directory: from_file is workspace-relative in the probe
     // harness and may be absolute in the app; a bare file name has no
@@ -468,7 +475,15 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// if no local path dependency named `base_pkg` is declared.
 fn find_local_path_dep(start: &Path, base_pkg: &str) -> Option<PathBuf> {
     for dir in ancestors_including_self(start) {
-        let pj = read_pkg_json(&dir)?;
+        // 011-08 polish (js-polish): a MISSING package.json is just a
+        // non-project level — skip it and keep climbing (a `file:` dep
+        // declared two levels up used to be invisible). A MALFORMED one
+        // bails the walk: it is a project root whose dependency map cannot
+        // be read, and climbing past a broken manifest would be a guess.
+        let Ok(s) = std::fs::read_to_string(dir.join("package.json")) else {
+            continue;
+        };
+        let pj = serde_json::from_str(&s).ok()?;
         let spec = dep_spec(&pj, base_pkg)?;
         let target = spec.strip_prefix("file:").or_else(|| spec.strip_prefix("link:"))?;
         let pb = PathBuf::from(target);
@@ -924,6 +939,47 @@ mod tests {
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(!src.external);
         assert_eq!(src.file.file_name().unwrap(), "index.js");
+        assert_eq!(src.source_root, local);
+        assert_eq!(src.line, Some(1));
+    }
+
+    /// 011-08 polish: a `file:` dependency declared TWO levels up must
+    /// still be found — the intermediate dir (and the workspace root
+    /// itself) carry NO package.json. Pre-fix, the walk stopped at the
+    /// first package-less ancestor and bailed (the `?` on
+    /// `read_pkg_json`); now the package-less levels are skipped and the
+    /// outer project root's manifest is read.
+    #[test]
+    fn local_path_dep_walks_past_packageless_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path();
+        let ws = outer.join("middle").join("ws");
+        let local = outer.join("packages").join("mylocal");
+        // Two package-less levels between the workspace and the manifest.
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        fs::write(
+            local.join("package.json"),
+            r#"{"name":"mylocal","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(local.join("index.js"), "export function hello() { return 1; }\n").unwrap();
+        fs::write(
+            outer.join("package.json"),
+            r#"{"name":"outer","dependencies":{"mylocal":"file:packages/mylocal"}}"#,
+        )
+        .unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "mylocal.hello".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("index.js"),
+            language: None,
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, local.join("index.js"));
         assert_eq!(src.source_root, local);
         assert_eq!(src.line, Some(1));
     }
@@ -1433,6 +1489,63 @@ mod tests {
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
         assert_eq!(src.file, ws.join("src").join("mod.js"), "the .js twin wins");
+    }
+
+    /// fix-jsrel review P2-1 remainder (js-polish): `import type {X} from
+    /// "./types"` with only `types.d.ts` present lands in the declaration
+    /// file — the relative extension walk carries `d.ts` at its tail, and
+    /// a runtime source TWIN still wins over the declaration file.
+    #[test]
+    fn relative_extension_walk_resolves_dts_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join("src/app.js"), "import type { T } from './types';\n").unwrap();
+        fs::write(ws.join("src/types.d.ts"), "export type T = number;\n").unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "T".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./types".to_string(), "T".to_string()],
+            language: Some("typescript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("types.d.ts"), "the declaration file");
+
+        // A runtime source twin outranks the declaration file (`.ts` is
+        // earlier in the walk than the `d.ts` tail).
+        fs::write(ws.join("src/types.ts"), "export type T = number;\n").unwrap();
+        let src2 = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert_eq!(src2.file, ws.join("src").join("types.ts"), "the .ts twin wins");
+    }
+
+    /// 011-08 polish: a workspace symlink pointing OUTSIDE the workspace
+    /// bails with the dedicated out-of-workspace message. The symlink IS a
+    /// real (resolvable) file lexically, so the pre-canonicalize
+    /// containment check would pass on the un-canonicalized path — the
+    /// canonicalize-BEFORE-contains order in `resolve_relative` is what
+    /// neutralizes it, pinned here as the claim's regression guard.
+    #[cfg(unix)]
+    #[test]
+    fn relative_symlink_escape_outside_workspace_bails() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(ws.join("src")).unwrap();
+        let outside = tmp.path().join("outside.js");
+        fs::write(&outside, "export const x = 1;\n").unwrap();
+        symlink(&outside, ws.join("src").join("link.js")).unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "x".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./link.js".to_string()],
+            language: None,
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(err.contains("outside the workspace"), "err: {err}");
     }
 
     /// fix-jsrel review P2-3: the file-ish collision class is ACCEPTED —

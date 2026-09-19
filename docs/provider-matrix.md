@@ -40,7 +40,7 @@ which.
 
 | Capability | Rust | JS/TS | Python | Go | C | C++ | Markdown |
 |---|---|---|---|---|---|---|---|
-| path-shaped | works (live) | **works (live)** (011-06) | **works (live)** (011-06) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
+| path-shaped | works (live) | **works (live)** (011-06) | **works (live)** (011-06; 011-08 alias rewrite unit-pinned) | unit-covered only (incl. 011-08 alias rewrite) | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
 | bare via import | works (live) | works (live) | works (live) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
 | in-library follow-up | works (live) | works (live) | works (live) | unit-covered only | unit-covered only (011-07) | unit-covered only (011-07) | unit-covered only (011-07) |
 | blame, project file | works (live, U-F7) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) |
@@ -95,6 +95,12 @@ hand-rolled `node_modules/fakelib` — no install runs)
   pinned live by 011-05 L-P2). The `os.path` frozen-fallback chain shape
   is unit-covered (`python_provider.rs`); the app-side deep-chain token
   (`os.path.join` → the whole path) is unit-pinned in `store.rs`.
+  011-08: the ALIASED path-shaped use (`engine.torque` from
+  `from gears import engine`, the app's hint naming the original import
+  path) rewrites the alias to `gears.engine` and lands through the same
+  `find_spec` machinery — unit-pinned
+  (`aliased_dotted_use_rewrites_to_original_path` + its no-op pins);
+  the live cell above is the non-aliased shape.
 - bare via import: works live (011-05 L-P1: `from json import dumps` →
   stdlib `def dumps`; first pinned by `drive_issue_011_02`).
   Module aliases (`import a.b as c`) and from-imports with aliases are
@@ -114,9 +120,13 @@ hand-rolled `node_modules/fakelib` — no install runs)
 ### Go (unit-covered ONLY — the `go` toolchain is ABSENT in this
 sandbox)
 
-- Every Go cell above is covered by `go_provider.rs`'s 39 unit tests
+- Every Go cell above is covered by `go_provider.rs`'s 41 unit tests
   (which shell out through overridable binaries / injected module
-  caches, so they pass without a toolchain), the 011-02 Go import-walk
+  caches, so they pass without a toolchain — incl. the 011-08 path-
+  shaped alias rewrite, `pe.Wrap` under `import pe "github.com/pkg/`
+  `errors"`, pinned by
+  `aliased_dot_qualified_use_rewrites_to_real_package` + its no-op
+  twins), the 011-02 Go import-walk
   unit pins (`resolver_scope_go_*`), and the 011-04 pure-tree-sitter Go
   walk/extraction tests. Since 011-06 the app-side token extraction is
   also unit-pinned (`symbol_at_point_dotted_path_extends_token_per_
@@ -178,7 +188,11 @@ SETEXT headings, verified, not assumed)
   the pinned tree-sitter-md 0.3.2 grammar — its first draft was
   structurally unmatchable and fixed in the 011-07 follow-up). No
   paragraphs, no links. Pinned by `setext_markdown_file_contributes_heading_symbols`
-  and the present `docs/setext.md` entry in the e2e test.
+  and the present `docs/setext.md` entry in the e2e test. **The e2e
+  alone would not catch a LOOSE-PARAGRAPH regression** (a query that
+  started matching plain paragraphs would still land the heading set in
+  the e2e's dependency tree): the unit pin is the extraction-shape
+  guard.
 - **in-library follow-up**: unit-covered only (same app-unreachable
   reason as C/C++: no provider can land in a markdown dependency).
 
