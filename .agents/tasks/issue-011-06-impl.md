@@ -41,7 +41,23 @@ re-run the gate before starting if main moved.
      resolves on its OWN path (`scope_qualified` returns None for symbols
      containing the separator — the symbol's own path wins; the import-walk
      hint is only for BARE symbols). Verify no double-application.
-2. **Per-language PTY legs** (or one drive with per-language legs, following
+2. **A Rust golden-corpus test suite** (dedicated, not inline assertions):
+   a checked-in corpus of REAL Rust sources (the repo's own `src/**/*.rs` are
+   ideal — genuinely shaped code, no fabrication) plus a probe grid, with
+   expected results snapshotted to golden files and asserted. Cover the
+   shapes where extraction can silently regress: deep `::` chains
+   (`a::b::c::d`), turbofish (`Vec::<u8>::with_capacity`), generic args
+   (`HashMap<K, V>::new`), comments/strings/raw strings containing `::` and
+   `.`, lifetimes (`'a`), char literals (`':'`), nested `impl`/`mod` scopes,
+   macro invocations, method chains across lines. Probe deterministically:
+   one parse per file, then a fixed byte-grid over the file (e.g. every 64
+   bytes + every identifier start), asserting (ident, path_token) pairs.
+   Use `insta` (already a dev-dependency) or plain `.golden` files — either
+   way the goldens are reviewable artifacts: a behavior change shows up as a
+   deliberate golden diff, not a silent regression. Rust `::` behavior must
+   be byte-stable across this suite (if the goldens change, the change is
+   wrong unless consciously accepted and re-snapshotted with a reason).
+3. **Per-language PTY legs** (or one drive with per-language legs, following
    `drive_issue_011_05.py`'s pattern — own repo/flock, `SHARED_SUITES`,
    `timeout`):
    - Python (live): `json.dumps('x')` at the use site lands in the stdlib
@@ -51,10 +67,10 @@ re-run the gate before starting if main moved.
      source via the provider's dotted machinery; namespace `ns.member` keeps
      working (the alias rewrite + dotted token must not fight).
    - Go: unit-covered only (toolchain absent) — loud skip if you add a leg.
-3. **Update `docs/provider-matrix.md`**: the path-shaped cells change from
+4. **Update `docs/provider-matrix.md`**: the path-shaped cells change from
    "degrades to the bail" to the new truth, per language, with verification
    status. Keep the capability-terms discipline (cells cannot be misread).
-4. **Degradation is byte-for-byte**: no parse / unsupported shape → the exact
+5. **Degradation is byte-for-byte**: no parse / unsupported shape → the exact
    current bare-extraction behavior (a bare symbol with no import hint still
    bails with the exact existing message).
 
