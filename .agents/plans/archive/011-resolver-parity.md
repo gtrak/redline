@@ -84,7 +84,7 @@ gate-battery leg; no cell mislabeled in either direction (reviewer-audited).
   as goldens (relative specifiers collapse to base package `.` with
   empty-backtick messages; node_modules dir probed as a package; side-effect
   imports mis-split) — fixes get their own issues; corpus observes.
-- **06** (in flight): language-aware symbol_at_point — legacy bail pins in
+- **06** PASS (`252522d`+`368339a`, merged): language-aware M-. path tokens activate the providers' dotted handling — Python/JS path-shaped cells now works (live) (`json.dumps`→stdlib, `fakelib.apply`→package source, `os.path.join`→posixpath). Review BLOCKING→fixed: the whole-path upgrade now requires EVERY dot-delimited segment to be a bare identifier (`a?.b`/`foo().bar`/`(*p).field` degraded to bare instead of feeding providers `a?`/`foo()`/`(*p)` as package names — unintended npm/pip shell-outs); 3 superseded legacy bail legs re-pinned as exact landings (sanctioned amendment). - **06** superseded original text: — legacy bail pins in
   011-01/011-05 drives superseded (sanctioned fence amendment, worker
   updating legs in place with the dispatch guarantee preserved).
 - Go corpus lane queued.
