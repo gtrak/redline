@@ -612,7 +612,10 @@ fn resolve_entry_point(pkg_dir: &Path) -> Option<PathBuf> {
             return Some(idx);
         }
     }
-    Some(candidate)
+    // fix-jsrel review P2-2: naming a NON-EXISTENT entry file surfaced as
+    // `cannot canonicalize … (os error 2)` downstream instead of the
+    // dedicated "no entry point" bail. None is the honest answer.
+    None
 }
 
 /// Resolve the `exports` field (modern truth) to a relative entry path.
@@ -1402,6 +1405,62 @@ mod tests {
         assert_eq!(
             locate_in_node_modules(tmp.path(), "acme"),
             Some(tmp.path().join("node_modules").join("acme"))
+        );
+    }
+
+    /// fix-jsrel review P2-1: the extension-walk order is DETERMINISTIC —
+    /// `.js` wins over a same-named `.ts` (Node's LOAD_AS_FILE convention,
+    /// language-agnostic today; make the order a conscious artifact).
+    #[test]
+    fn relative_extension_walk_prefers_js_over_ts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(
+            ws.join("src/app.js"),
+            "import { go } from './mod';\n",
+        )
+        .unwrap();
+        fs::write(ws.join("src/mod.js"), "export function go() {}\n").unwrap();
+        fs::write(ws.join("src/mod.ts"), "export function go(): void {}\n").unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "./mod.go".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./mod".to_string(), "go".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("mod.js"), "the .js twin wins");
+    }
+
+    /// fix-jsrel review P2-3: the file-ish collision class is ACCEPTED —
+    /// a resolvable package whose member is extension-shaped (`pkg.json`)
+    /// bails with the dedicated file-ish message even though the landing
+    /// machinery could have found it. Documented tradeoff; pinned here so
+    /// narrowing the extension set later is a conscious diff.
+    #[test]
+    fn file_ish_member_of_resolvable_package_bails_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+        let dep = ws.join("node_modules").join("somelib");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(dep.join("package.json"), r#"{"name":"somelib","main":"index.js"}"#).unwrap();
+        fs::write(dep.join("index.js"), "export const json = 1;\n").unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "somelib.json".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["somelib".to_string(), "json".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(
+            err.contains("file-ish name"),
+            "the accepted file-ish bail, got: {err}"
         );
     }
 
