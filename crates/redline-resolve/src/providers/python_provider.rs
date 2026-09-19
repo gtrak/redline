@@ -214,10 +214,10 @@ impl PythonProvider {
         // find_spec with that dir on sys.path — the sys.path entry is derived
         // from a FOUND file on disk, not a guess; no pyproject (or no `src/`
         // dir) leaves the miss untouched (byte-for-byte degradation).
-        if let Some(src_dir) = src_layout_root(workspace_root, from_file) {
-            if let Some(file) = self.find_spec(workspace_root, Some(&src_dir), module_chain)? {
-                return Ok(file);
-            }
+        if let Some(src_dir) = src_layout_root(workspace_root, from_file)
+            && let Some(file) = self.find_spec(workspace_root, Some(&src_dir), module_chain)?
+        {
+            return Ok(file);
         }
 
         // Not found: check if it's stdlib (never install stdlib).
