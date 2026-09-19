@@ -7,17 +7,22 @@
 #   tools/gate.sh full      everything at the fast 0.06 quiet
 #                           (PTY battery ~150 s after loop-03 demoted ~50 of
 #                           sweep_flows' 65 flows to unit twins — before:
-#                           ~255 s; at the old 0.2 window ~415 s, loop-02)
+#                           ~255 s; at the old 0.2 window ~415 s, loop-02.
+#                           loop-04 demoted the other 7 suites to thin
+#                           smokes + 20 unit twins: the converted legs are
+#                           3-21 s each now, but the battery total is still
+#                           dominated by the kept heavy suites)
 #   tools/gate.sh full-fast redundant alias for `full` since loop-02
 #                           (the 0.06 window IS the default; kept for old scripts)
 #   tools/gate.sh equiv     A/B the quiet window (0.2 vs 0.06) across the
 #                           full battery — run once after changing the driver
 #   tools/gate.sh pooled    fast + the PTY battery POOLED across private
 #                           per-lane fixture copies (tools/pool.py): the
-#                           12-suite battery in ~90 s (lanes=4, 0.06 quiet,
-#                           post-loop-03) vs full's ~150 s serial; same
-#                           verdicts. Full stays the sequential, always-
-#                           works fallback.
+#                           12-suite battery in ~90-110 s (lanes=4, 0.06 quiet,
+#                           post-loop-04: 106 s measured with the converted
+#                           thin tiers; pre-loop-03: ~117 s) vs full's ~150 s
+#                           serial; same verdicts. Full stays the sequential,
+#                           always-works fallback.
 #
 # Stale-binary trap (loop-03): the pooled lanes run the binary pool.py
 # builds ONCE from the CURRENT checkout — if you `git checkout` another
