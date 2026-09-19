@@ -89,6 +89,31 @@ Two hard-won constraints (they are not obvious):
 Cleanup: `tools/pool.py clean` removes the whole pool root (see backlog #17
 for the disk-use note).
 
+## Harness note: the gate must cover the whole WORKSPACE
+
+`Cargo.toml` declares `[workspace] members = ["crates/*"]` but no
+`default-members`, so a bare `cargo test` / `cargo clippy` operates on the
+ROOT PACKAGE ONLY. Every gate run before 2026-09-19 therefore silently
+skipped `crates/redline-resolve`: **92 tests (85 lib + 7 integration) and all
+of its clippy lints never ran**, while the plan worked on that crate
+(006-01/02/03, 007-03). Found when 007-03 added a public `scope` field to the
+crate and the worker observed only "0 tests" for `-p redline-resolve` in the
+default `cargo test` output.
+
+- `tools/gate.sh` now uses `--workspace` on build, clippy, and test
+  (4 test binaries, 648 tests total). Do not drop it.
+- **Lesson**: when a workspace gains a member, verify the gate actually
+  compiles and tests it — `cargo test -p <member>` should show a non-zero
+  test count. A gate that cannot see a crate is worse than no gate, because it
+  reports green.
+- Separately observed once (1 in 6 on a cold-compile run, 8/8 clean under
+  deliberate parallel load): `git::repo::tests::stage_file_then_unstage_matches_cli`
+  failed during a concurrent workspace test run, then passed 5/5 in isolation
+  and 8/8 under load. Not reproducible; the resolver integration tests use
+  fresh tempdirs + isolated `CARGO_HOME` and do not touch the repo, so the
+  mechanism is unexplained. Treat a single such failure as re-run-before-believe
+  (the counts are otherwise deterministic).
+
 ## Harness note: bound the WORKER, not just the probe
 
 Two lanes on 2026-09-19 burned far past a reasonable budget for their task
