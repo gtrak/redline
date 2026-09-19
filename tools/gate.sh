@@ -64,6 +64,11 @@ SHARED_SUITES=(
   drive_issue_011_02.py # per-language scope hints (011-02): a bare imported
                         # `dumps` lands in the json stdlib source; prelude
                         # `print` (no import) bails byte-for-byte
+  drive_issue_011_04.py # per-language source index (011-04): the python
+                        # stdlib tree IS indexed after landing (the
+                        # `indexing crate` indicator appears), and a second
+                        # M-. INSIDE the dependency jumps in-crate through
+                        # the freshly built index
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.

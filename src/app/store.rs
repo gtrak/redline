@@ -44,7 +44,7 @@ use crate::search::references;
 use crate::search::rg::{self, Hit, SearchBus, SearchConfig, SearchEvent};
 use crate::syntax::cache::{CacheKey, HighlightCache};
 use crate::syntax::highlight::{self, HighlightResult};
-use crate::syntax::registry::GrammarRegistry;
+use crate::syntax::registry::{GrammarRegistry, LanguageId};
 use crate::theme::Theme;
 
 /// The result the background tooling-resolver job publishes to the app via
@@ -3484,7 +3484,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // path; the LRU cap governs) so M-. / imenu work INSIDE it. The
         // landing itself is never blocked on the index.
         if source.external {
-            self.start_crate_indexing(&source.source_root);
+            self.start_crate_indexing(&source.source_root, &source.file);
         }
         self.set_point_line(line);
         self.recenter_landing();
@@ -8688,15 +8688,20 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     // ── external crate index cache (plan 006 issue 03) ───────────────
 
     /// Start the background index build for an EXTERNAL source tree
-    /// (plan 006 issue 03): walk `**/*.rs` under `root` and run the
-    /// project indexer's machinery (`nav::index::build_index` is
-    /// root-agnostic) on `spawn_blocking`; the finished index publishes
-    /// on the `CrateIndexBus`. NEVER blocks the landing. Single-flight
-    /// per source_root (already cached or already in flight: no-op).
+    /// (plan 006 issue 03; the per-language generalization is plan 011
+    /// issue 04): walk the OWNING language's source extensions under
+    /// `root` — the language of the LANDED `landed_file` (the registry's
+    /// extension map is the authority: Rust `rs`, JS/TS `js/jsx/ts/tsx/
+    /// mjs/cjs`, Python `py/pyi`, Go `go`; any other language: nothing,
+    /// the pre-011-04 end state) — and run the project indexer's
+    /// machinery (`nav::index::build_index` is root-agnostic) on
+    /// `spawn_blocking`; the finished index publishes on the
+    /// `CrateIndexBus`. NEVER blocks the landing. Single-flight per
+    /// source_root (already cached or already in flight: no-op).
     /// Refused with a clear message above `EXT_INDEX_FILE_CAP` files (no
     /// known registry crate approaches it); silent no-op without a tokio
     /// runtime (plain unit tests).
-    pub fn start_crate_indexing(&mut self, root: &Path) {
+    pub fn start_crate_indexing(&mut self, root: &Path, landed_file: &Path) {
         if !root.is_dir() {
             return;
         }
@@ -8709,13 +8714,19 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let files = Self::crate_rs_files(root);
+        // 011-04: the file-selection predicate is the OWNING language's
+        // extension set (006-03's `**/*.rs` is the Rust case of this) —
+        // NOT a global "index everything" walk.
+        let lang = self
+            .grammar_registry
+            .language_for(&landed_file.to_string_lossy());
+        let files = Self::crate_source_files(root, Self::source_extensions_for(lang));
         if files.is_empty() {
             return;
         }
         if files.len() > EXT_INDEX_FILE_CAP {
             self.minibuffer_message(&format!(
-                "crate too large to index ({} .rs files; cap {})",
+                "crate too large to index ({} source files; cap {})",
                 files.len(),
                 EXT_INDEX_FILE_CAP
             ));
@@ -8742,16 +8753,44 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         });
     }
 
-    /// The `**/*.rs` walk of an external source tree (crate-relative,
-    /// forward-slash paths — the same key shape the project index uses).
-    fn crate_rs_files(root: &Path) -> Vec<String> {
+    /// The file-extension set the 011-04 index walk collects for the
+    /// OWNING language (`registry.rs`'s extension map is the authority —
+    /// each set here is the union of the extensions that map to the
+    /// language's grammar family): Rust `rs`; JS/TS (JavaScript /
+    /// TypeScript / Tsx) `js/jsx/ts/tsx/mjs/cjs`; Python `py/pyi`; Go
+    /// `go`. Every other language: nothing — the walk finds no files, so
+    /// no index builds (the same end state 006-03's `.rs`-only walk had
+    /// for every non-Rust landing).
+    fn source_extensions_for(lang: LanguageId) -> &'static [&'static str] {
+        match lang {
+            LanguageId::Rust => &["rs"],
+            LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx =>
+                &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
+            LanguageId::Python => &["py", "pyi"],
+            LanguageId::Go => &["go"],
+            _ => &[],
+        }
+    }
+
+    /// The source walk of an external tree for `exts` (the owning
+    /// language's extensions, 011-04; crate-relative, forward-slash
+    /// paths — the same key shape the project index uses). Nested
+    /// `node_modules` trees are skipped (011-04 item 4): they hold OTHER
+    /// packages (transitive deps), never the landed dependency's own
+    /// source — the js provider's definition walk skips them the same
+    /// way; the refusal cap stays the backstop for every other tree.
+    fn crate_source_files(root: &Path, exts: &[&str]) -> Vec<String> {
         ignore::Walk::new(root)
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_some_and(|t| t.is_file())
                     && e.path()
                         .extension()
-                        .is_some_and(|x| x.eq_ignore_ascii_case("rs"))
+                        .is_some_and(|x| {
+                            let ext = x.to_string_lossy();
+                            exts.iter().any(|wanted| ext.eq_ignore_ascii_case(wanted))
+                        })
+                    && !Self::under_node_modules(root, e.path())
             })
             .filter_map(|e| {
                 e.path()
@@ -8760,6 +8799,24 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
             })
             .collect()
+    }
+
+    /// True when `path` (under `root`) is inside a `node_modules`
+    /// DIRECTORY component of its crate-relative path — never for the
+    /// file name itself. The root itself may BE a `node_modules` dir
+    /// (a landed `node_modules/<pkg>`), so only components AFTER `root`
+    /// count.
+    fn under_node_modules(root: &Path, path: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(root) else {
+            return false;
+        };
+        let mut comps = rel.components();
+        // Drop the file name: only a directory component can be the
+        // `node_modules` boundary.
+        let _ = comps.next_back();
+        comps.any(|c| {
+            matches!(c, std::path::Component::Normal(n) if n == "node_modules")
+        })
     }
 
     /// Install a crate-index event into the store (called by the UI's
@@ -8831,7 +8888,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
 
     /// The crate-relative index key for `path` under `root` —
     /// forward-slash normalized (006-03b item 3): the SAME key shape
-    /// `crate_rs_files` builds with, so a native-`\`-separated `rel`
+    /// `crate_source_files` builds with, so a native-`\`-separated `rel`
     /// never breaks the same-file-first ordering or the `outline` lookup
     /// (the Windows separator case). `None` when `path` is not under
     /// `root` (callers treat that as the empty result, never a panic —
@@ -14352,7 +14409,7 @@ mod tests {
             }
             std::fs::write(&path, content).unwrap();
         }
-        let crate_files = AppStore::crate_rs_files(root.path());
+        let crate_files = AppStore::crate_source_files(root.path(), &["rs"]);
         let index = build_index(root.path(), &crate_files, None);
         s.apply_crate_index_event(&CrateIndexEvent {
             source_root: root.path().to_path_buf(),
@@ -14377,7 +14434,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.path().join("src/other.rs"), "pub fn helper() {}\n").unwrap();
         let mut rx = s.crate_index_bus.subscribe();
-        s.start_crate_indexing(root.path());
+        s.start_crate_indexing(root.path(), &root.path().join("src/lib.rs"));
         // The in-flight indicator mirrors the project indexing indicator.
         assert!(
             s.crate_indexing_display().starts_with("indexing crate "),
@@ -14409,7 +14466,7 @@ mod tests {
         assert_eq!(idx.definition_count("deep"), 1);
         assert!(idx.has("src/lib.rs"), "crate-relative key");
         // A second start for the same root is a no-op (already cached).
-        s.start_crate_indexing(root.path());
+        s.start_crate_indexing(root.path(), &root.path().join("src/lib.rs"));
         assert!(s.crate_indexing.is_empty(), "no duplicate build");
     }
 
@@ -14646,7 +14703,7 @@ mod tests {
         // Land in A: its index arrives, its buffer becomes current.
         s.apply_crate_index_event(&CrateIndexEvent {
             source_root: root_a.to_path_buf(),
-            index: build_index(root_a, &AppStore::crate_rs_files(root_a), None),
+            index: build_index(root_a, &AppStore::crate_source_files(root_a, &["rs"]), None),
         });
         s.open_external_path(&root_a.join("src/lib.rs")).unwrap();
         // Consult the three other crates: their indexes land while A's
@@ -14748,7 +14805,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/crate.rs"), "pub fn target() {}\n").unwrap();
-        let crate_files = AppStore::crate_rs_files(root.path());
+        let crate_files = AppStore::crate_source_files(root.path(), &["rs"]);
         s.apply_crate_index_event(&CrateIndexEvent {
             source_root: root.path().to_path_buf(),
             index: build_index(root.path(), &crate_files, None),
@@ -14806,7 +14863,297 @@ mod tests {
             )
             .unwrap();
         }
-        s.start_crate_indexing(root.path());
+        s.start_crate_indexing(root.path(), &root.path().join("f0.rs"));
+        assert!(
+            s.message.contains("crate too large to index")
+                && s.message.contains("2001"),
+            "{}",
+            s.message
+        );
+        assert!(s.crate_indexing.is_empty(), "no in-flight build armed");
+        assert!(s.external_indexes.is_empty(), "no cache entry");
+    }
+
+    // ── plan 011 issue 04: per-language source index ───────────────────
+
+    /// 011-04: the walk's extension sets stay in lockstep with
+    /// `registry.rs`'s extension map (the authority): every walked
+    /// extension must resolve (through the registry map) to a language
+    /// whose OWN set includes it — the sets are per grammar family.
+    #[test]
+    fn source_extensions_round_trip_through_registry_map() {
+        use crate::syntax::registry::resolve_language;
+        for lang in [
+            LanguageId::Rust,
+            LanguageId::JavaScript,
+            LanguageId::TypeScript,
+            LanguageId::Tsx,
+            LanguageId::Python,
+            LanguageId::Go,
+        ] {
+            for ext in AppStore::source_extensions_for(lang) {
+                let resolved = resolve_language(&format!("a.{ext}"));
+                assert!(
+                    AppStore::source_extensions_for(resolved).contains(ext),
+                    "`{ext}` (owned by {lang:?}) must resolve to a language"
+                );
+            }
+        }
+        // Documented exclusion: the registry maps `rsi` to Rust, but the
+        // walk indexes `rs` only (rust-analyzer interface files are not
+        // definition sources).
+        assert!(
+            !AppStore::source_extensions_for(LanguageId::Rust).contains(&"rsi"),
+            "rsi stays out of the Rust index set"
+        );
+        // Non-source languages index nothing (the pre-011-04 end state
+        // for every non-Rust landing).
+        for lang in [LanguageId::Plain, LanguageId::Json, LanguageId::Toml] {
+            assert!(AppStore::source_extensions_for(lang).is_empty());
+        }
+    }
+
+    /// 011-04: the extension predicate is PER LANGUAGE — a JS/TS tree
+    /// collects js/jsx/ts/tsx/mjs/cjs and only those; a Python tree
+    /// py/pyi; a Rust tree `rs` (the 006-03 set, unchanged). Nested
+    /// `node_modules` is never walked (item 4).
+    #[test]
+    fn crate_source_files_selects_own_language_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        for rel in [
+            "src/index.js",
+            "src/util.mjs",
+            "src/cfg.cjs",
+            "src/view.jsx",
+            "src/types.ts",
+            "src/app.tsx",
+            "README.md",
+            "package.json",
+            "node_modules/leftpad/index.js",
+            "node_modules/leftpad/package.json",
+        ] {
+            let path = p.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "// x\n").unwrap();
+        }
+        let mut js = AppStore::crate_source_files(
+            p,
+            &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
+        );
+        js.sort();
+        assert_eq!(
+            js,
+            vec![
+                "src/app.tsx",
+                "src/cfg.cjs",
+                "src/index.js",
+                "src/types.ts",
+                "src/util.mjs",
+                "src/view.jsx",
+            ],
+            "own-language extensions only: no .md/.json, no node_modules"
+        );
+
+        let pyr = tempfile::tempdir().unwrap();
+        std::fs::write(pyr.path().join("foo.py"), "\n").unwrap();
+        std::fs::create_dir_all(pyr.path().join("types")).unwrap();
+        std::fs::write(pyr.path().join("types/stubs.pyi"), "\n").unwrap();
+        std::fs::write(pyr.path().join("notes.txt"), "\n").unwrap();
+        let mut py = AppStore::crate_source_files(pyr.path(), &["py", "pyi"]);
+        py.sort();
+        assert_eq!(py, vec!["foo.py", "types/stubs.pyi"]);
+
+        // Rust: the 006-03 set, unchanged.
+        let rr = tempfile::tempdir().unwrap();
+        std::fs::write(rr.path().join("a.rs"), "\n").unwrap();
+        std::fs::write(rr.path().join("b.rsi"), "\n").unwrap();
+        std::fs::write(rr.path().join("c.md"), "\n").unwrap();
+        let rs = AppStore::crate_source_files(rr.path(), &["rs"]);
+        assert_eq!(rs, vec!["a.rs"]);
+    }
+
+    /// 011-04 (item 4): a `node_modules` DIRECTORY inside the root is
+    /// skipped even mid-path — but a root that IS a `node_modules` dir
+    /// (a landed `node_modules/<pkg>`) still indexes its own files (the
+    /// boundary is a component AFTER the root, never the file name).
+    #[test]
+    fn crate_source_files_node_modules_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("dist")).unwrap();
+        std::fs::write(p.join("index.js"), "\n").unwrap();
+        std::fs::write(p.join("dist/bundle.js"), "\n").unwrap();
+        // A directory NAMED like a source file: the file itself is fine.
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("src/util.js"), "\n").unwrap();
+        let mut files = AppStore::crate_source_files(p, &["js"]);
+        files.sort();
+        assert_eq!(files, vec!["dist/bundle.js", "index.js", "src/util.js"]);
+
+        // The root ITSELF named node_modules (a landed package dir):
+        // its own files are walked.
+        let nm = tempfile::tempdir().unwrap();
+        let p2 = nm.path();
+        std::fs::create_dir_all(p2.join("inner")).unwrap();
+        std::fs::write(p2.join("own.js"), "\n").unwrap();
+        std::fs::write(p2.join("inner/dep.js"), "\n").unwrap();
+        std::fs::create_dir_all(p2.join("inner/node_modules/other")).unwrap();
+        std::fs::write(p2.join("inner/node_modules/other/x.js"), "\n").unwrap();
+        let mut files2 = AppStore::crate_source_files(p2, &["js"]);
+        files2.sort();
+        assert_eq!(
+            files2,
+            vec!["inner/dep.js", "own.js"],
+            "the root node_modules is indexed; nested ones are not"
+        );
+    }
+
+    /// 011-04 discriminating: a synthetic out-of-root JS tree indexes
+    /// through the FULL path (language derivation from the landed file →
+    /// per-language walk → build_index → CrateIndexBus): crate-relative
+    /// keys and per-language symbol extraction. Pre-011-04 this tree
+    /// indexed NOTHING (the walk was `.rs`-only).
+    #[tokio::test]
+    async fn crate_index_builds_for_js_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("src/index.js"), "export function alpha() {}\n").unwrap();
+        std::fs::write(p.join("util.mjs"), "export function beta() {}\n").unwrap();
+        std::fs::write(p.join("README.md"), "docs\n").unwrap();
+        std::fs::create_dir_all(p.join("node_modules/leftpad")).unwrap();
+        std::fs::write(
+            p.join("node_modules/leftpad/index.js"),
+            "export function leftpad() {}\n",
+        )
+        .unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("src/index.js"));
+        // 2 OWN source files (README.md + node_modules excluded): the
+        // N/M counter is the file-set's size, not the tree's.
+        assert!(
+            s.crate_indexing_display().ends_with(")…")
+                && s.crate_indexing_display().contains("/2)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        assert_eq!(event.source_root, p);
+        s.apply_crate_index_event(&event);
+        assert_eq!(s.external_indexes.len(), 1);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("src/index.js"), "crate-relative key (.js)");
+        assert!(idx.has("util.mjs"), "crate-relative key (.mjs)");
+        assert_eq!(idx.definition_count("alpha"), 1, "js symbol extraction");
+        assert_eq!(idx.definition_count("beta"), 1);
+        assert!(!idx.has("README.md"), "non-source file not indexed");
+        assert!(
+            !idx.has("node_modules/leftpad/index.js"),
+            "item 4: nested node_modules never indexed"
+        );
+    }
+
+    /// 011-04 discriminating: a synthetic out-of-root Python tree
+    /// indexes through the full path (the `pyi` stub extension is the
+    /// registry's python-map pin; `build_index`'s symbol extraction is
+    /// language-aware via `registry::resolve_language` + the query
+    /// registry — no Rust-only path).
+    #[tokio::test]
+    async fn crate_index_builds_for_python_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("pkg")).unwrap();
+        std::fs::write(
+            p.join("pkg/foo.py"),
+            "def gamma():\n    return 1\n\nclass Gamma:\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("pkg/stubs.pyi"), "def delta(x: int) -> int: ...\n")
+            .unwrap();
+        std::fs::write(p.join("setup.cfg"), "[x]\n").unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("pkg/foo.py"));
+        assert!(
+            s.crate_indexing_display().contains("/2)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("pkg/foo.py"), "crate-relative key (.py)");
+        assert!(idx.has("pkg/stubs.pyi"), "crate-relative key (.pyi)");
+        assert_eq!(idx.definition_count("gamma"), 1, "python symbol extraction");
+        assert_eq!(idx.definition_count("Gamma"), 1);
+        assert_eq!(idx.definition_count("delta"), 1, "pyi stub extraction");
+        assert!(!idx.has("setup.cfg"));
+    }
+
+    /// 011-04: the Go set indexes Go definitions through the same walk +
+    /// build_index path (the go toolchain is absent in the sandbox —
+    /// the PROVIDER is unit-covered elsewhere; symbol extraction needs
+    /// no toolchain, it is pure tree-sitter).
+    #[test]
+    fn crate_index_walk_and_extraction_for_go_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("pkg")).unwrap();
+        std::fs::write(p.join("pkg/greet.go"), "package pkg\n\nfunc Greet() {}\n").unwrap();
+        std::fs::write(p.join("README.md"), "docs\n").unwrap();
+        let files = AppStore::crate_source_files(p, &["go"]);
+        assert_eq!(files, vec!["pkg/greet.go"]);
+        let index = build_index(p, &files, None);
+        assert!(index.has("pkg/greet.go"));
+        assert_eq!(index.definition_count("Greet"), 1, "go symbol extraction");
+    }
+
+    /// 011-04: the walk is the OWNING language's, never a global "index
+    /// everything" — a non-source landing (Plain) indexes nothing even
+    /// though the tree is full of other languages' source files.
+    #[tokio::test]
+    async fn crate_index_plain_language_landing_builds_nothing() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        for rel in ["a.rs", "b.py", "c.js", "d.go"] {
+            std::fs::write(p.join(rel), "x\n").unwrap();
+        }
+        s.start_crate_indexing(p, &p.join("notes.txt"));
+        assert!(s.crate_indexing.is_empty(), "no build armed");
+        assert!(s.external_indexes.is_empty(), "no cache entry");
+        assert_eq!(s.message, "", "no refusal message");
+    }
+
+    /// 011-04 (item 4): the refusal cap applies per LANGUAGE set — a JS
+    /// tree past `EXT_INDEX_FILE_CAP` own-language files is refused
+    /// exactly as a Rust tree is (the node_modules skip bounds the
+    /// transitive-dep case; the cap is the backstop for a genuinely
+    /// huge dependency's own tree).
+    #[tokio::test]
+    async fn crate_index_refuses_oversized_js_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..(EXT_INDEX_FILE_CAP + 1) {
+            std::fs::write(
+                root.path().join(format!("f{i}.js")),
+                "// x\n",
+            )
+            .unwrap();
+        }
+        s.start_crate_indexing(root.path(), &root.path().join("f0.js"));
         assert!(
             s.message.contains("crate too large to index")
                 && s.message.contains("2001"),
