@@ -39,6 +39,56 @@ Diagnostics: `~/.cache/redline/redline.log` (panics, watcher, exits).
 Reproduce frame-freeze suspects with the PTY harness *first* — a screenshot
 of nothing is not a report.
 
+## Pooled parallel sweep
+
+The release gate (`tools/gate.sh full`) runs the 12-PTY-suite battery
+**serially**: every suite hardcodes the same fixture paths (`/tmp/redline_*`),
+and the driver's per-repo `flock` (keyed on the repo **abspath**, backlog #13)
+refuses to run two fixture-touching suites at once. That lock is the whole
+reason the battery serializes — the suites are independent processes. Serial
+cost: **~399 s** of PTY time.
+
+`tools/pool.py` removes the serialization by giving each concurrently-running
+suite a **private lane** instead of a shared fixture:
+
+- `setup N` copies every `/tmp/redline_*` repo into `N` lanes under
+  `REDLINE_POOL_ROOT` (default `/tmp/rl/<i>/`), and into each lane a
+  **rewritten copy of `tools/`** whose fixture literals point at the lane's own
+  copies. Each lane also gets a private `XDG_CACHE_HOME` (`<lane>/xdg`).
+- Because each lane's repo has a **different abspath**, its `flock` never
+  contends with another lane's → real parallelism. A lane crash cannot corrupt
+  a sibling lane.
+- A lane is an **exclusive** resource: `run`/`runall` draw lanes from a queue,
+  one suite per lane, so jobs > lanes queue instead of colliding (the
+  corruption class of backlog #13).
+- `tools/gate.sh pooled` = the Rust gate + the battery run this way
+  (`pool.py setup` then `pool.py runall`), on the safe 0.2 quiet window.
+  Lane count is `REDLINE_POOL_LANES` (default 4; 4–6 measured well on a
+  24-core box). `full` stays the sequential, always-works fallback.
+
+**Measured, same binary** (4 lanes, 0.2 quiet): serial `full` ≈ **399 s** PTY
+(425 s incl. build/clippy/test); pooled ≈ **220 s** (−45%), **12/12 suites
+identical verdicts** — sweep 14/14, drive_all 8/8, windowing 28/28, panes 4/4,
+cursor-stream 80/80, notes 17/17, syntax-notes 8/8, xref 10/10,
+external-notes 16/16, external-crate 12/12, sweep_flows 65/65, ux_sweep 3
+pre-existing findings.
+
+Two hard-won constraints (they are not obvious):
+1. **Keep lane paths short.** The status line shows the project *name* (the
+   basename). A path long enough to overflow 80 cols used to wrap the status
+   line onto a second row and shift every content row (U-J3 asserts the status
+   line is exactly one row; several suites read a hardcoded minibuffer row,
+   `MINI=22`). The status-line `NoWrap` + hidden-overflow fix (see
+   `src/ui/root.rs` `StatusLine`, pinned by
+   `status_line_long_text_stays_one_row`) mitigates this, but the pool root is
+   kept tiny (`/tmp/rl`) so lane paths stay short regardless.
+2. **Preserve fixture BASENAMES** (`redline_pyte_repo`, …): suites assert those
+   literals (mode-line project name, U-A1/U-J3/U-G5). Only the *parent* dir is
+   swapped for the short lane dir; the basename is copied verbatim.
+
+Cleanup: `tools/pool.py clean` removes the whole pool root (see backlog #17
+for the disk-use note).
+
 ## Bug report template
 
 ```
@@ -327,4 +377,5 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
 | 12 | **Fixture drift (found while verifying 005-01 edit mode)**: an edit-mode PTY leg or manual probe that SAVES real edits into a tracked fixture file (`src/main.rs`) leaves it modified forever — `fixture.py` did not restore tracked files, so every later flow rendered mutated content (I hit this live: main.rs ended with `line 3/4/5` and a marker). Fixed: `reset()` now `git checkout -- .` first, then re-applies the markers, and also removes the stray leg files from backlog #8. | Orchestrator live drive | **FIXED** in tools/fixture.py (this commit); all 57 flows green after. |
 | 8 | **Harness hygiene**: `tools/check_cursor_stream.py` writes `src/leg.rs`, `src/wordleg.rs`, `src/cursorleg.rs`, `src/whichfn.rs` into the shared fixture repo and never removes them, so they accumulate as untracked files across runs. No flow currently asserts untracked-file counts (so this is latent, not active flakiness), but it pollutes the magit-status fixture and could make a future untracked-count assertion order-dependent. | Orchestrator UX sweep | Candidate; tools-only cleanup (delete the leg files in a `finally`, or add them to `fixture.py`'s reset). NOT edited while 004-05d holds that file. |
 | 16 | **Timing-fragile flows under a faster PTY read-quiet window**: reducing `REDLINE_PTY_QUIET` from 0.2 to 0.06 (tools/gate.sh fast modes) speeds suites ~2x but drops `sweep_flows` to 64/65 — U-BHN (waits on the watcher's ~500 ms banner debounce) and ann-delete (waits on a transient message) assume fixed sleeps, not the app's actual settle. NOT a regression: the old driver on the same binary is 65/65. Fix = replace those flows' fixed `wait()`s with `wait_for(pred)` polls; then the fast window can be the default everywhere. | Loop-speedup work | Candidate; tools-only. Until then `full` runs at 0.2 and `full-fast` (0.06) carries the caveat. |
+| 17 | **Pool-lane disk use**: `tools/gate.sh pooled` copies every `/tmp/redline_*` fixture into each lane, so the pool root (`REDLINE_POOL_ROOT`, default `/tmp/rl`) is ~27 MB per lane — **~105 MB for 4 lanes** (the 24 MB `redline_sweep_slow_repo` dominates). It is `/tmp`-ephemeral and never committed, but a 6-lane run grows to ~160 MB. `tools/pool.py clean` removes the whole root; `setup` is idempotent (rebuilds the lanes). | loop-01 (pooled sweep) | **DONE (loop-01)**: documented in the "Pooled parallel sweep" section above; lanes are disposable and cleaned with `pool.py clean`. Candidate to slim further: copy only the fixtures each lane's suite actually reads (the battery uses a subset of all `/tmp/redline_*`), or hardlink the large `sweep_slow_repo` instead of `cp -r`. |
 | 7 | Conflict **minibuffer message** at store.rs:4396 ("changed on disk — press g to reload") fires only in the locally-owned (editable) case where plain `g` self-inserts — repoint to the per-kind helper (M-x reload-buffer wording). Same family as backlog #3; found by the issue-03 review. | Issue-03 review (plan 003) | One-line src fix + message-text test. |
