@@ -702,3 +702,9 @@ fixtures — the quiet-window wait is the only documented mitigation.
 Gap: every battery (not just pooled) should use private per-lane
 fixtures (`REDLINE_POOL_ROOT`) or the fixture repos need per-lane copies
 at the driver level. Spec'd for the next harness lane.
+
+## loop-04 (2026-09-20): other suites demoted — DONE
+
+- All 8 remaining state+text suites → thin terminal tiers + 20 new store twins (`flow_tests.rs` 60 → 80). Kept: windowing cursor-follow smoke, commit-diff scenario, xref L1, external landing/ownership legs, syntax S0-S3, ux_sweep 2 sessions + per-key anomaly scan.
+- Pooled battery: 12/12 twice at 82.7s (was ~96s; 524s at session start).
+- Mid-flight lesson: the thin-tier rewrite DROPPED the `M-.` keypress in drive_external_crate (no resolve triggered; the "window landed" check false-positived on `"Rope" in screen_text()` matching the probe file itself). Caught by an A/B + a watchdog driver diff. Lesson: a reduced suite's checks must assert the MINIBUFFER message, not screen-content substrings that the probe file itself satisfies.
