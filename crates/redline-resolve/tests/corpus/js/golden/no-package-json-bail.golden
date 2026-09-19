@@ -1,0 +1,6 @@
+# golden for probe `no-package-json-bail`  (011-08 js lane)
+# anchor: src/app.js:43   symbol: `acme.doThing`   scope: []   mode: online-deterministic
+# note: not an npm project (no package.json up the tree): names the walked-from root. Online provider, but this shape bails before any npm spawn (deterministic).
+kind: bail
+message: |
+  no package.json found walking up from <ws>; not an npm project, so `acme` cannot be resolved

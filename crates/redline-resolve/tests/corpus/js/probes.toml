@@ -1,0 +1,225 @@
+# Probe spec for the 011-08 js-lane golden corpus (crates/redline-resolve).
+#
+# One [[probe]] per probe point. Fields:
+#   id       — golden file name (golden/<id>.golden); unique.
+#   file     — corpus file the probe is anchored at (workspace-relative).
+#   line     — 1-based anchor line (the use site, or a documented probe
+#              anchor comment for shapes with no honest live use site).
+#   symbol   — the symbol as the app navigates to it (bare or path-shaped,
+#              e.g. `local.add`).
+#   scope    — the app's tree-sitter import hint (the full path the symbol
+#              resolves to, item included; [] = no hint — the app produced
+#              nothing).
+#   language — context language when the corpus file is TypeScript
+#              (omitted = language-None context: every provider would be
+#              tried; here only the JS provider is registered).
+#   ws       — "corpus" = probe in a tempdir copy of this corpus (the
+#              provider's canonical workspace); "empty" = a bare tempdir
+#              with no package.json anywhere down from it.
+#   mode     — "deterministic" (offline provider: NO shell-outs, byte
+#              stable on any machine) | "online-deterministic" (online
+#              provider, probe shape bails before any npm spawn — no
+#              network needed) | "live" (real `npm install`; skipped
+#              LOUDLY when npm/node are absent from PATH).
+#   note     — why this probe exists; the honest-degradation bails are
+#              pinned here on purpose.
+#
+# Expected outcomes live in golden/<id>.golden — a resolution (external,
+# source_root, file, line) or the EXACT bail message (byte-for-byte,
+# workspace root normalized to <ws>).
+
+# ── landings: the local (file:) dependency, external = false ────────────────
+
+[[probe]]
+id = "jslocal-greet-named"
+file = "src/app.js"
+line = 28
+symbol = "greet"
+scope = ["jslocal", "greet"]
+language = "javascript"
+ws = "corpus"
+mode = "deterministic"
+note = "named import ({ greet }) via the 007-03 bare+hint path; lands in the local file: package."
+
+[[probe]]
+id = "jslocal-dotted-call"
+file = "src/app.js"
+line = 30
+symbol = "local.add"
+scope = ["jslocal", "add"]
+language = "javascript"
+ws = "corpus"
+mode = "deterministic"
+note = "dotted call site `local.add(…)` over a whole-module CJS binding: the 011-02 alias rewrite turns it into `jslocal.add`."
+
+[[probe]]
+id = "jslocal-namespace-member"
+file = "src/utils.mjs"
+line = 15
+symbol = "local.greet"
+scope = ["jslocal", "greet"]
+language = "javascript"
+ws = "corpus"
+mode = "deterministic"
+note = "ESM `import * as local` namespace member; same rewrite machinery as jslocal-dotted-call."
+
+[[probe]]
+id = "jslocal-namespace-entry"
+file = "src/utils.mjs"
+line = 24
+symbol = "local"
+scope = ["jslocal"]
+language = "javascript"
+ws = "corpus"
+mode = "deterministic"
+note = "bare namespace alias with the 1-segment hint: lands on the package ENTRY (line null), not a bail (011-02 P2-1)."
+
+[[probe]]
+id = "jslocal-typed-usage"
+file = "src/hooks.ts"
+line = 17
+symbol = "GreetResult"
+scope = ["jslocal", "GreetResult"]
+language = "typescript"
+ws = "corpus"
+mode = "deterministic"
+note = "TS `import type` usage: the provider scans .d.ts too (the walk covers ts extensions) and lands on the type alias."
+
+[[probe]]
+id = "scoped-subpath-member"
+file = "src/hooks.ts"
+line = 26
+symbol = "normalize"
+scope = ["@redline/fixture/util", "normalize"]
+language = "typescript"
+ws = "corpus"
+mode = "deterministic"
+note = "scoped package + SUBPATH: `/` stays inside the package name, the first `.` is the item boundary; lands in util.js."
+
+# ── bails: the honest-degradation contract, byte-for-byte ───────────────────
+
+[[probe]]
+id = "local-item-missing-bail"
+file = "src/app.js"
+line = 41
+symbol = "missing"
+scope = ["jslocal", "missing"]
+ws = "corpus"
+mode = "deterministic"
+note = "item absent from the local package: names the item, the base package, and the searched dir."
+
+[[probe]]
+id = "bare-no-hint-bail"
+file = "src/app.js"
+line = 28
+symbol = "greet"
+scope = []
+ws = "corpus"
+mode = "deterministic"
+note = "bare symbol with NO import hint: the byte-for-byte no-hint bail (no scope info from the app yet)."
+
+[[probe]]
+id = "relative-import-whole-bail"
+file = "src/legacy.cjs"
+line = 15
+symbol = "legacy"
+scope = ["./legacy-util"]
+ws = "corpus"
+mode = "deterministic"
+note = "relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal) — finding, not fixed in 011-08; candidate for a dedicated relative/absolute-specifier degradation."
+
+[[probe]]
+id = "relative-member-bail"
+file = "src/legacy.cjs"
+line = 11
+symbol = "legacyJoin"
+scope = ["./legacy-util", "legacyJoin"]
+ws = "corpus"
+mode = "deterministic"
+note = "relative specifier with an item: the FIRST `.` splits at the leading dot — empty package, the whole specifier kept, item dropped — so it degrades exactly like the whole-binding shape (base package `.`)."
+
+[[probe]]
+id = "absolute-import-bail"
+file = "src/app.js"
+line = 42
+symbol = "legacyJoin"
+scope = ["/abs/legacy-util", "legacyJoin"]
+ws = "corpus"
+mode = "deterministic"
+note = "absolute path specifier: no first segment -> empty base package, same offline refusal. Finding, not fixed in 011-08 — same candidate class."
+
+[[probe]]
+id = "side-effect-bail"
+file = "src/utils.mjs"
+line = 8
+symbol = "styles.css"
+scope = []
+language = "javascript"
+ws = "corpus"
+mode = "deterministic"
+note = "side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned, finding not fixed in 011-08."
+
+[[probe]]
+id = "no-package-json-bail"
+file = "src/app.js"
+line = 43
+symbol = "acme.doThing"
+scope = []
+ws = "empty"
+mode = "online-deterministic"
+note = "not an npm project (no package.json up the tree): names the walked-from root. Online provider, but this shape bails before any npm spawn (deterministic)."
+
+# ── live: real `npm install` (skipped loudly when npm/node absent) ──────────
+
+[[probe]]
+id = "live-leftpad-default"
+file = "src/utils.mjs"
+line = 11
+symbol = "defaultPad"
+scope = ["left-pad"]
+language = "javascript"
+ws = "corpus"
+mode = "live"
+note = "default import of a real registry CJS package: npm install fetches it; lands on the ENTRY (line null), external."
+
+[[probe]]
+id = "live-dotprop-named"
+file = "src/utils.mjs"
+line = 19
+symbol = "getProperty"
+scope = ["dot-prop", "getProperty"]
+language = "javascript"
+ws = "corpus"
+mode = "live"
+note = "named ESM import of a real registry package: npm install fetches it; lands on the definition line, external."
+
+[[probe]]
+id = "live-pascalcased-named"
+file = "src/app.js"
+line = 20
+symbol = "pascalCase"
+scope = ["pascal-case", "pascalCase"]
+language = "javascript"
+ws = "corpus"
+mode = "live"
+note = "CJS require of a compiled TS registry package: the `module` field (dist.es2015) wins over `main`; lands on the definition line, external."
+
+[[probe]]
+id = "live-dotprop-item-missing"
+file = "src/app.js"
+line = 45
+symbol = "get"
+scope = ["dot-prop", "get"]
+ws = "corpus"
+mode = "live"
+note = "the v6 `get` name against dot-prop v7 (which renamed it to getProperty): item search over a REAL installed package — byte-for-byte item-missing bail in node_modules."
+
+[[probe]]
+id = "relative-member-live-ws"
+file = "src/app.js"
+line = 47
+symbol = "legacyJoin"
+scope = ["./legacy-util", "legacyJoin"]
+ws = "corpus"
+mode = "live"
+note = "the relative hint probed where node_modules IS populated: the leading `.` of the relative specifier collapses the item to None and the base package to `.`, so the node_modules directory ITSELF is probed as a package — entry-point bail pinned as-is (finding, not fixed in this issue)."

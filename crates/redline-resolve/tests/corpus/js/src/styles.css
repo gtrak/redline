@@ -1,0 +1,8 @@
+/* styles.css — the real (side-effect) stylesheet import target of
+   utils.mjs. The import binds no symbol: the JS provider must never
+   claim this file (see the side-effect probe). */
+
+.row {
+  color: #20242b;
+  padding: 0 8px;
+}

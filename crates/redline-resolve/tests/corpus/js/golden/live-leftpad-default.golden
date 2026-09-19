@@ -1,0 +1,8 @@
+# golden for probe `live-leftpad-default`  (011-08 js lane)
+# anchor: src/utils.mjs:11   symbol: `defaultPad`   scope: ["left-pad"]   mode: live
+# note: default import of a real registry CJS package: npm install fetches it; lands on the ENTRY (line null), external.
+kind: resolved
+external: true
+source_root: node_modules/left-pad
+file: index.js
+line: null

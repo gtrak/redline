@@ -1,0 +1,8 @@
+# golden for probe `jslocal-typed-usage`  (011-08 js lane)
+# anchor: src/hooks.ts:17   symbol: `GreetResult`   scope: ["jslocal", "GreetResult"]   mode: deterministic
+# note: TS `import type` usage: the provider scans .d.ts too (the walk covers ts extensions) and lands on the type alias.
+kind: resolved
+external: false
+source_root: vendor/jslocal
+file: types.d.ts
+line: 1
