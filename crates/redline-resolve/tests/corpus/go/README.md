@@ -84,7 +84,7 @@ goes red.
 | 05 | `Version` / `["auxversion","Version"]` | resolved | ambiguous dot-import, disambiguated-hint twin |
 | 06 | `gearserv.NewApp` / `[]` | resolved | workspace-local root package (external=false) |
 | 07 | `lib.MintToken` / `[]` | resolved | local-path `replace` (external=false, fork) |
-| 08 | `pe.Wrap` / `["errors","Wrap"]` | bail | **FINDING**: aliased import + REAL hint still bails — the go provider never applies the 011-02 alias rewrite (`scope_qualified_alias`); js_provider does. If the provider gains the leg, this flips to a resolved landing in `wrap.go` |
+| 08 | `pe.Wrap` / `["errors","Wrap"]` | resolved | **FIXED in `29042f3a15b2`** (fix-alias, plan 011 follow-up): the go provider now applies the 011-02 alias rewrite (`scope_qualified_alias`, composed like js_provider) — `pe.Wrap` rewrites to `errors.Wrap` and lands in `wrap.go:5`; the former bail is a conscious golden flip |
 | 09 | `fmt.Println` / `[]` | bail | stdlib corner: no GOROOT leg, std package is not a go.mod require |
 | 10 | `util.Validate` / `[]` | bail | last-segment rule: intra-module imports bail as unrequired |
 | 11 | `jwt.Parse` / `[]` | bail | `/vN` major-version suffix breaks the last-segment mapping |
@@ -95,17 +95,22 @@ goes red.
 | 16 | `errors.NotDefined` / `[]` | bail | module present, item absent |
 | 17 | `fmt.Println` / `[]`, root `not_a_module` | bail | no go.mod under the probe root |
 
-## Findings the corpus exposes (report, do not fix — this issue)
+## Findings the corpus exposed (011-08) — status after the fix-alias follow-up
 
-1. **Probe 08 (real gap vs. the seam contract)**: `go_provider.rs` calls
-   only `scope_qualified` (bare-symbol hint); it never calls
-   `scope_qualified_alias`, so a PATH-SHAPED symbol whose first segment
-   is a local import alias (`pe.Wrap` from `import pe "github.com/
-   pkg/errors"`, hint `["errors","Wrap"]`) is parsed as
-   package `pe` and bails. `js_provider.rs` composes both. Probe 08
-   carries the REAL hint deliberately (the python-lane P2 lesson): an
-   empty-scope probe would bail byte-identically and pin nothing after
-   a fix.
+1. **Probe 08 (real gap vs. the seam contract) — FIXED in
+   `29042f3a15b2`**: `go_provider.rs` called only `scope_qualified`
+   (bare-symbol hint); it never called `scope_qualified_alias`, so a
+   PATH-SHAPED symbol whose first segment is a local import alias
+   (`pe.Wrap` from `import pe "github.com/
+   pkg/errors"`, hint `["errors","Wrap"]`) was parsed as
+   package `pe` and bailed. `js_provider.rs` composed both. The fix
+   composes `scope_qualified(...).or_else(scope_qualified_alias(...))` in
+   the go provider; probe 08 flipped from the bail to the RESOLVED
+   landing (`modcache/github.com/pkg/errors@v0.9.1/wrap.go:5`). The
+   probe deliberately carries the REAL hint (the python-lane P2 lesson):
+   an empty-scope probe would bail byte-identically and pin nothing
+   after the fix — those no-op cases are pinned by the provider unit
+   tests instead.
 2. **Observation (not golden-pinned)**: the go.sum version fallback in
    `go_provider.rs` is unreachable through `parse_go_mod` — a require
    line without a version is dropped by `parse_require_line`, so the

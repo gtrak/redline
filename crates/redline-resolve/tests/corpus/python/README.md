@@ -46,9 +46,12 @@ Key/value lines (`#` = comment), one file per probe:
   `python3 -c` puts the CWD on `sys.path`, which is how the workspace
   package resolves. When `python3` is absent the suite skips LOUDLY.
 - **Offline by construction:** the provider is built `.offline()`, so the
-  network `pip install` leg is never touched in the gate; the
-  missing-module degradation (probe 013) is pinned as the deterministic
-  offline-refusal bail. No PTY anywhere.
+  network `pip install` leg is never touched in the gate. Since the
+  fix-alias flip of probe 013 (below), no python probe pins the
+  missing-module offline-refusal bail — that degradation stays pinned by
+  the provider's unit tests (`offline_mode_refuses_missing_module`,
+  `aliased_dotted_identity_mismatched_and_unhinted_are_no_ops`). No PTY
+  anywhere.
 - **Unit-only:** the def-shape scanner (`def`/`async def`/`class`/
   `ITEM = …`) is pinned by the provider's own `#[cfg(test)]` suite; this
   corpus pins it through real files (probes 001–005).
@@ -69,15 +72,20 @@ spelling — `ntpath` on Windows), so a stdlib-upgrade on the gate host is a
 change. The test discovers the stdlib root live; only the paths-within
 and line numbers are pinned.
 
-## Findings (observed — NOT fixed in this issue)
+## Findings
 
-1. **The python provider never applies the 011-02 alias rewrite**
+1. **FIXED in `29042f3a15b2` (fix-alias, plan 011 follow-up)** — the
+   python provider never applied the 011-02 alias rewrite
    (`scope_qualified_alias`, used by the JS provider): a path-shaped
    symbol like `engine.torque` (use site of `from gears import engine`)
-   ignores the app's scope hint and looks for a top-level module
+   ignored the app's scope hint and looked for a top-level module
    `engine` → offline bail (probe 013) / a `pip install engine` attempt
-   online. The corpus pins current behavior; the rewrite gap is a
-   candidate follow-up.
+   online. The fix composes `scope_qualified(...).or_else(
+   scope_qualified_alias(...))` exactly like `js_provider`; probe 013
+   flipped from the offline-refusal bail to the RESOLVED landing
+   (`project/gears/engine.py:11`, the `torque` def), and the
+   identity/mismatched/unhinted no-op cases stay pinned by the provider
+   unit tests.
 2. **Workspace resolution is CWD-based**: the package must be importable
    as a top-level name from the workspace root (flat layout). A `src/`
    layout (`src/gears/`) would fail `find_spec` in the same offline-bail
@@ -86,9 +94,10 @@ and line numbers are pinned.
 
 ## Determinism notes (011-08 review P2-2)
 
-- Probe 013's bail assumes the gate host has NO top-level `engine`
-  module installed in its python3; a host-installed `engine` would
-  change the outcome LOUDLY (golden flip), never silently.
+- Probe 013 now RESOLVES inside the project (fix `29042f3a15b2`), so the
+  former "host-installed top-level `engine` module" hazard no longer
+  applies: `gears.engine` resolves via the CWD `sys.path` entry the
+  probe root provides, ahead of any site-packages `engine`.
 - Probe 009's `posixpath.py` landing goes through the frozen-stdib
   `__file__` fallback (CPython 3.11+ freezes `os.path`; `find_spec`
   origin is `frozen`, the provider imports and reads `__file__`). On
