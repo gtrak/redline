@@ -17,8 +17,12 @@ added this file; the "verified" column says which.
   dotted handling is reachable from M-.. Rust keeps `::` byte-for-byte
   (a Rust `.` field access still stays bare — fields are not in the
   index), and a parse failure / unsupported shape degrades to the
-  exact pre-011-06 bare extraction (never a guess). The cells record
-  what M-. does at a qualified use site, per language.
+  exact pre-011-06 bare extraction (never a guess; a whole-path upgrade
+  additionally requires EVERY dot-delimited segment to be a bare
+  identifier — wrong-container shapes like `a?.b`, `foo().bar`, `(*p).field`
+  degrade to the bare token rather than feeding a non-path token to a
+  provider). The cells record what M-. does at a qualified use site, per
+  language.
 - **bare via import** — M-. on a bare identifier that an import statement
   in the current buffer binds (the 011-02 scope hints).
 - **in-library follow-up** — after a landing, M-. on a symbol defined in
@@ -72,8 +76,10 @@ hand-rolled `node_modules/fakelib` — no install runs)
   `util.js:1` through the freshly built js-tree index — pre-011-04 this
   bailed to the resolver). Unit twin:
   `crate_index_builds_for_js_dependency_tree`.
-- The miss probes ONLY the js provider (011-05 L-J1a: "tried 1
-  provider(s): javascript").
+- The miss path's live dispatch pin: 011-02 L2's python twin is the
+  cross-language proof (same dispatch walk); the JS miss path itself is
+  unit-pinned in the resolver crate (`language_dispatch_*`). 011-05
+  L-J1a now pins the 011-06 LANDING (index.js:3).
 
 ### Python (verified live: python3 3.14.4 present)
 
@@ -99,7 +105,9 @@ hand-rolled `node_modules/fakelib` — no install runs)
   indicator appears and clears — impossible pre-011-04, whose `.rs`-only
   walk found 0 files under `/usr/lib/python3.14`).
 - The miss probes ONLY the python provider (011-01 live leg + 011-05
-  L-P2: "tried 1 provider(s): python").
+  live miss pin: 011-02 L2 `print` → "tried 1 provider(s): python" — the
+  011-05 L-P2 leg now pins the 011-06 LANDING (the bare-miss bail it used
+  to pin is superseded).
 
 ### Go (unit-covered ONLY — the `go` toolchain is ABSENT in this
 sandbox)
@@ -158,6 +166,6 @@ per-repo flock)
 | `drive_issue_011_01.py` | python buffer attempts exactly ONE provider; cargo never probed | python3 |
 | `drive_issue_011_02.py` | bare `dumps` lands; prelude `print` bails byte-for-byte | python3 |
 | `drive_issue_011_04.py` | python stdlib tree IS indexed; in-crate M-. answers | python3 |
-| `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped degrade + dispatch pin · js: L-J1a ns.member bail + dispatch pin, L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
+| `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped LANDING pin (011-06: json/__init__.py:185, was the bail) + dispatch pin · js: L-J1a ns.member LANDING pin (011-06: index.js:3, was the bail) + dispatch pin, L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
 | `drive_issue_011_06.py` | the two CHANGED path-shaped cells, live: L-P1 dotted `json.dumps` lands in the stdlib json source · L-J1 dotted `fakelib.apply` lands in the package entry file · loud per-runtime skip when absent (no go leg — unit-covered) | python3, node+npm |
 | `drive_external_crate.py` / `drive_external_use.py` | the Rust column (registry landing, in-crate jump, bare `use` landing) | cargo |

@@ -9472,6 +9472,20 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             && let Some(info) = crate::syntax::node::node_at(lang, text, byte)
             && Self::dotted_path_container(lang, &info.kind)
             && info.text.split('.').any(|seg| seg == identifier)
+            // 011-06 review P1: EVERY dot-delimited segment must be a bare
+            // identifier. The raw container text of a wrong-container shape
+            // is NOT a dotted path — `a?.b` (JS/TS optional chaining),
+            // `foo().bar` (Python attribute-on-call), `(*p).field` (Go
+            // pointer receiver) all match the segment-membership check but
+            // their non-identifier segments would be treated as package /
+            // module names by the providers (an unintended `npm install
+            // "a?"` / `pip install "foo()"` shell-out in online projects).
+            // Only a genuine path upgrades; these fall back to the
+            // byte-for-byte bare extraction.
+            && info
+                .text
+                .split('.')
+                .all(|seg| !seg.is_empty() && seg.chars().all(is_ident))
         {
             info.text
         } else {
@@ -14374,6 +14388,32 @@ mod tests {
         assert_eq!(
             satp(LanguageId::Plain, "json.dumps", 6),
             Some(("dumps".into(), "dumps".into()))
+        );
+        // 011-06 review P1: the WRONG-container shapes — a whole-path
+        // upgrade requires every dot-delimited segment to be a bare
+        // identifier; these containers match segment-membership but carry
+        // non-identifier segments, so they degrade to bare (feeding the
+        // providers `a?` / `foo()` / `(*p)` as a package name would cause
+        // unintended npm/pip shell-outs in online projects).
+        assert_eq!(
+            satp(LanguageId::JavaScript, "a?.b", 3),
+            Some(("b".into(), "b".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::JavaScript, "a.b?.c", 5),
+            Some(("c".into(), "c".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Python, "foo().bar", 8),
+            Some(("bar".into(), "bar".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Python, "foo().bar.b", 10),
+            Some(("b".into(), "b".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Go, "(*p).field", 5),
+            Some(("field".into(), "field".into()))
         );
         // A computed member `a[b]`: the node IS a member_expression, but
         // `b` is not a dot-delimited SEGMENT of `a[b]` (no dot at all) —
