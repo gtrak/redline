@@ -56,6 +56,8 @@ SHARED_SUITES=(
   drive_external_notes.py
   drive_external_crate.py
   drive_external_use.py
+  drive_issue_011_01.py # language-dispatch leg (011-01): a python buffer
+                        # attempts exactly ONE provider, cargo never probed
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.

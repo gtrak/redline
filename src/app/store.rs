@@ -13130,6 +13130,15 @@ mod tests {
         assert_eq!(s.resolution_language("src/lib.js"), Some("javascript".into()));
         assert_eq!(s.resolution_language("a.ts"), Some("typescript".into()));
         assert_eq!(s.resolution_language("a.tsx"), Some("tsx".into()));
+        // .jsx/.mjs/.cjs map to JavaScript (registry.rs has no Jsx variant):
+        // a JSX buffer must dispatch to the js provider, never silently fall
+        // back to the pre-dispatch walk (011-01 review P2-3).
+        assert_eq!(s.resolution_language("a.jsx"), Some("javascript".into()));
+        assert_eq!(s.resolution_language("a.mjs"), Some("javascript".into()));
+        assert_eq!(s.resolution_language("a.cjs"), Some("javascript".into()));
+        // A registry language with no provider maps to its name (an honest
+        // zero-eligible bail) rather than falling back to cargo.
+        assert_eq!(s.resolution_language("a.c"), Some("c".into()));
         assert_eq!(s.resolution_language("main.go"), Some("go".into()));
         // A Rust buffer still carries "rust" (the existing path, unchanged).
         assert_eq!(s.resolution_language("src/main.rs"), Some("rust".into()));
@@ -13150,6 +13159,23 @@ mod tests {
         s.start_symbol_resolution("os.path.join", "main.py");
         assert_eq!(s.resolve_generation, 1, "the fall-through fired exactly once");
         assert!(s.resolving_display().is_empty());
+        // 011-01 review P2-1: the pre-fix assertion was non-discriminating —
+        // the no-runtime fast path shares this message prefix. NOTE the two
+        // paths cannot both be asserted here: `start_symbol_resolution` checks
+        // for a background runtime BEFORE dispatching, and in a unit test
+        // there is none, so the no-runtime branch IS the reachable path here
+        // (the real chain + dispatch run off the input path under tokio).
+        // What this test CAN pin, and what discriminates dispatch: the
+        // language is mapped from the buffer's extension at the context seam
+        // (asserted in `resolution_language_maps_buffer_extensions`), and a
+        // REGRESSION that broke dispatch would be visible there, not here.
+        // So assert the runtime seam explicitly instead of the two prefixes
+        // being interchangeable.
+        assert!(
+            s.message.contains("no background runtime"),
+            "unit tests have no runtime, so the fast path is expected: {msg}",
+            msg = s.message
+        );
         assert!(
             s.message.contains("no provider resolution for `os.path.join`"),
             "graceful miss message, got: {}", s.message

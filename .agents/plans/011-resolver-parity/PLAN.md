@@ -1,6 +1,6 @@
 # 011 — Redline: resolver parity across languages
 
-Status: 01+03 PASS (01 landed 65111c7, in review); 02/04 queued; 05 last
+Status: 01+03 PASS+MERGED (01 = 65111c7); 02/04 queued; 05 last
 Phases: 2 · Issues: 01–05
 Depends on: 007-03 (`SymbolContext` scope field) for 01; 007-01 (node-at-point)
 for 03–04
