@@ -1,19 +1,21 @@
 # 013 — dotted from-entry (`from gears import engine`, use site
-# `engine.torque` in main.py): the PATH-SHAPED symbol wins over any hint
-# (the python provider does not apply the 011-02 alias rewrite), so the
-# provider looks for a TOP-LEVEL module `engine` — which does not exist.
-# Offline mode (no network in the gate) refuses the fetch-on-demand and
-# bails byte-for-byte. 011-08 review P1: the scope hint IS present (the
-# app would send ["gears","engine","torque"] — original import path,
-# item included) and the provider ignores it; with an EMPTY scope this
-# probe could not demonstrate hint-ignoring, and the documented fix
-# (scope_qualified_alias, cf. js_provider.rs) returns None unconditionally
-# on an empty scope — it would land silently. With the hint present the
-# current bail is unchanged (traced), and the fix flips this golden to a
-# RESOLVED landing (project/gears/engine.py:11) — a conscious diff.
+# `engine.torque` in main.py): the PATH-SHAPED symbol + the app's hint
+# (["gears","engine","torque"] — original import path, item included) is
+# the 011-02 alias rewrite: `engine.torque` → `gears.engine.torque`, so
+# the LIVE find_spec leg lands on project/gears/engine.py (probe root on
+# sys.path) and the content scan pins the `torque` definition (line 11).
+# 011-08 FINDING (python probe 013) — FIXED by the fix-alias composition
+# (the python provider now composes
+# scope_qualified(...).or_else(scope_qualified_alias(...)) exactly like
+# js_provider; the identity/mismatched/unhinted no-op cases stay pinned by
+# the provider unit tests): this golden flipped from the byte-for-byte
+# offline-refusal bail to the RESOLVED landing (a conscious diff).
 symbol=engine.torque
 from_file=main.py
 scope=["gears","engine","torque"]
 root=project
-kind=bail
-bail=module `engine` not found and offline mode refuses to pip install
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=11

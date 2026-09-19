@@ -23,7 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{
+    run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext,
+    ToolingProvider,
+};
 
 /// Timeout for `go env` (fast local call).
 const GO_ENV_TIMEOUT: Duration = Duration::from_secs(30);
@@ -134,7 +137,15 @@ impl GoProvider {
         // context) normalizes to `package.Item` up front and flows
         // through the SAME go.mod / module-cache machinery as a
         // dot-qualified symbol. No hint keeps the bail, byte-for-byte.
-        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        // 011-08: a PATH-SHAPED symbol whose first segment is a local
+        // import alias (`pe.Wrap` from `import pe "github.com/pkg/errors"`,
+        // hinted as `["errors", "Wrap"]` — the real package path, item
+        // included) is rewritten to the real package path and flows
+        // through the SAME go.mod / module-cache machinery; identity
+        // hints and non-rewrites leave the symbol's own path untouched
+        // (mirrors js_provider's composition).
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope)
+            .or_else(|| scope_qualified_alias(".", &ctx.symbol, &ctx.scope));
         let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
 
         let (package, item) = go_package_from_symbol(symbol).ok_or_else(|| {
@@ -1377,6 +1388,119 @@ exclude (
             err.to_string().contains("no definition of"),
             "err: {err}"
         );
+    }
+
+    // ── 011-08: path-shaped alias rewrite (`scope_qualified_alias`) ─────
+
+    /// Build an `errors`-module fixture: a go.mod requiring
+    /// `github.com/pkg/errors v0.9.1` plus a module-cache layout whose
+    /// `wrap.go` defines `Wrap` on line 5 (mirrors corpus probe 08).
+    /// Returns the workspace, the cache dir, and the module dir.
+    fn alias_rewrite_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        std::fs::write(
+            ws.join("go.mod"),
+            "module github.com/myorg/app\n\ngo 1.21\n\n\
+             require github.com/pkg/errors v0.9.1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("go.sum"),
+            "github.com/pkg/errors v0.9.1 h1:abc=\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("main.go"), "package main\nfunc main() {}\n").unwrap();
+
+        let mod_cache = ws.join("gomodcache");
+        let errors_dir = mod_cache.join("github.com/pkg/errors@v0.9.1");
+        std::fs::create_dir_all(&errors_dir).unwrap();
+        std::fs::write(
+            errors_dir.join("wrap.go"),
+            "package errors\n\n// Wrap annotates the given err with a message.\n\
+             // Wrapf is Wrap formatted.\n\
+             func Wrap(err error, message string) error {\n\treturn nil\n}\n",
+        )
+        .unwrap();
+
+        (tmp, mod_cache, errors_dir)
+    }
+
+    /// Discriminating (corpus probe 08 flip): `pe.Wrap` — the PATH-SHAPED
+    /// use site of the aliased import `import pe
+    /// "github.com/pkg/errors"` — with the hint naming the real package
+    /// path rewrites the alias (`pe` → `errors`) and lands on the `Wrap`
+    /// definition in the module cache, through the SAME go.mod /
+    /// module-cache machinery.
+    #[test]
+    fn aliased_dot_qualified_use_rewrites_to_real_package() {
+        let (tmp, mod_cache, errors_dir) = alias_rewrite_fixture();
+        let ws = tmp.path().to_path_buf();
+
+        let provider = GoProvider::new().offline().with_mod_cache(mod_cache);
+        let ctx = SymbolContext {
+            workspace_root: ws,
+            symbol: "pe.Wrap".to_string(),
+            from_file: PathBuf::from("main.go"),
+            scope: vec!["errors".to_string(), "Wrap".to_string()],
+            language: None,
+        };
+
+        let result = provider.resolve(&ctx).unwrap();
+        assert!(result.external);
+        assert_eq!(result.source_root, errors_dir);
+        assert_eq!(result.file.file_name().unwrap(), "wrap.go");
+        // Line 5 (1-based): "func Wrap(err error, message string) error {"
+        assert_eq!(result.line, Some(5));
+    }
+
+    /// No-op pins for the rewrite: an EMPTY scope (byte-for-byte
+    /// degradation), an identity hint (`errors.Wrap` +
+    /// `["errors", "Wrap"]` — the hint IS the symbol's own path), and a
+    /// mismatched-item hint (`pe.Wrap` + `["errors", "Other"]`) must all
+    /// leave the symbol's own path untouched: the identity case resolves
+    /// through the symbol's OWN package path, and the alias cases keep
+    /// `pe` → the byte-for-byte "not a required module" bail.
+    #[test]
+    fn aliased_dot_qualified_identity_mismatched_and_unhinted_are_no_ops() {
+        let (tmp, mod_cache, errors_dir) = alias_rewrite_fixture();
+        let ws = tmp.path().to_path_buf();
+        let provider = GoProvider::new().offline().with_mod_cache(mod_cache);
+
+        // Identity: the symbol's own path wins — same landing as the
+        // plain `errors.Wrap` resolve.
+        let ctx = SymbolContext {
+            workspace_root: ws.clone(),
+            symbol: "errors.Wrap".to_string(),
+            from_file: PathBuf::from("main.go"),
+            scope: vec!["errors".to_string(), "Wrap".to_string()],
+            language: None,
+        };
+        let result = provider.resolve(&ctx).unwrap();
+        assert!(result.external);
+        assert_eq!(result.source_root, errors_dir);
+        assert_eq!(result.file.file_name().unwrap(), "wrap.go");
+        assert_eq!(result.line, Some(5));
+
+        // Unhinted and mismatched-item: the alias `pe` is still taken as
+        // the package name → the byte-for-byte "not a required module".
+        for scope in [
+            Vec::new(),
+            vec!["errors".to_string(), "Other".to_string()],
+        ] {
+            let ctx = SymbolContext {
+                workspace_root: ws.clone(),
+                symbol: "pe.Wrap".to_string(),
+                from_file: PathBuf::from("main.go"),
+                scope,
+                language: None,
+            };
+            let err = provider.resolve(&ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("not a required module"),
+                "no-op case bailed with: {err}"
+            );
+        }
     }
 
     // ── live tests (require go toolchain) ────────────────────────────────────

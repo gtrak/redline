@@ -27,7 +27,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{
+    run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext,
+    ToolingProvider,
+};
 
 /// Timeout for the `find_spec` subprocess (should be fast).
 const FIND_SPEC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -135,8 +138,15 @@ impl PythonProvider {
         // symbol with a scope hint (007-03: the app's import path)
         // normalizes to `module.item` up front and flows through the SAME
         // find_spec machinery as a dotted symbol. No hint keeps the bail,
-        // byte-for-byte.
-        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        // byte-for-byte. 011-08: a PATH-SHAPED symbol whose first segment
+        // is a local alias (`engine.torque` from `from gears import
+        // engine`, hinted as `["gears", "engine", "torque"]` — the
+        // original import path, item included) is rewritten to the
+        // import's real path and flows through the SAME find_spec
+        // machinery; identity hints and non-rewrites leave the symbol's
+        // own path untouched (mirrors js_provider's composition).
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope)
+            .or_else(|| scope_qualified_alias(".", &ctx.symbol, &ctx.scope));
         let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
         let segments: Vec<&str> = symbol
             .split('.')
@@ -692,6 +702,78 @@ mod tests {
             err.to_string().contains("offline mode refuses"),
             "err: {err}"
         );
+    }
+
+    // ── 011-08: path-shaped alias rewrite (`scope_qualified_alias`) ─────
+
+    /// Build a `gears` workspace package: `gears/__init__.py` +
+    /// `gears/engine.py` with a `torque` definition.
+    fn alias_rewrite_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("gears");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+        std::fs::write(
+            pkg_dir.join("engine.py"),
+            "MAX_TORQUE = 320.0\n\n\ndef spin(rpm):\n    return rpm > 0\n\n\ndef torque(rpm):\n    return min(MAX_TORQUE, rpm / 10.0)\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// Discriminating (corpus probe 013 flip): `engine.torque` — the
+    /// PATH-SHAPED use site of `from gears import engine` — with the
+    /// app's hint naming the original import path rewrites the alias
+    /// (`engine` → `gears.engine`) and lands on the `torque` definition
+    /// in `gears/engine.py`, through the SAME find_spec machinery.
+    #[test]
+    fn aliased_dotted_use_rewrites_to_original_path() {
+        let tmp = alias_rewrite_workspace();
+        let pkg_dir = tmp.path().join("gears");
+
+        let provider = PythonProvider::new().offline();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "engine.torque".to_string(),
+            from_file: PathBuf::from("main.py"),
+            scope: vec!["gears".to_string(), "engine".to_string(), "torque".to_string()],
+            language: None,
+        };
+        let result = provider.resolve(&ctx).unwrap();
+        assert_eq!(result.file, pkg_dir.join("engine.py"));
+        assert!(!result.external);
+        // Line 8 (1-based): "def torque(rpm):"
+        assert_eq!(result.line, Some(8));
+    }
+
+    /// No-op pins for the rewrite: an EMPTY scope (byte-for-byte
+    /// degradation), an identity hint (the hint IS the symbol's own path),
+    /// and a mismatched-item hint (`spin` ≠ `torque`) must all leave the
+    /// symbol's own path untouched — `engine.torque` still walks its own
+    /// (top-level `engine`) path and hits the offline refusal, never a
+    /// silent landing on the hinted path.
+    #[test]
+    fn aliased_dotted_identity_mismatched_and_unhinted_are_no_ops() {
+        let tmp = alias_rewrite_workspace();
+        let provider = PythonProvider::new().offline();
+        for scope in [
+            Vec::new(),
+            vec!["engine".to_string(), "torque".to_string()],
+            vec!["gears".to_string(), "engine".to_string(), "spin".to_string()],
+        ] {
+            let ctx = SymbolContext {
+                workspace_root: tmp.path().to_path_buf(),
+                symbol: "engine.torque".to_string(),
+                from_file: PathBuf::from("main.py"),
+                scope,
+                language: None,
+            };
+            let err = provider.resolve(&ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("offline mode refuses"),
+                "no-op case bailed with: {err}"
+            );
+        }
     }
 
     // ── live E2E: resolve a real installed third-party module ───────────────
