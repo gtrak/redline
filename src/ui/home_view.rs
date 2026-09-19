@@ -28,7 +28,7 @@ pub struct HomeViewProps {
 pub fn HomeView(props: &HomeViewProps, mut _hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let t = theme::current();
     element! {
-        View(flex_grow: 1.0_f32, overflow: Overflow::Hidden) {
+        View(flex_grow: 1.0_f32, overflow: Overflow::Hidden, width: iocraft::Size::Percent(100.0)) {
             View(flex_direction: FlexDirection::Column, flex_grow: 1.0_f32, background_color: face_bg(t.view)) {
                 View(overflow: Overflow::Hidden) {
                     Text(

@@ -317,7 +317,6 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // forcing an 80-wide root there would clip/garble the layout — leave the
     // width unset there (content-sized) so the static tests keep working.
     let (tw_raw, term_h_raw) = hooks.use_terminal_size();
-    eprintln!("DEBUG-ROOT tw_raw={} term_h_raw={}", tw_raw, term_h_raw);
     use iocraft::Size;
     let term_w: Size = if tw_raw > 0 {
         Size::Length(tw_raw as u32)
@@ -732,7 +731,14 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     element! {
         View(flex_direction: FlexDirection::Column, width: term_w, height: term_h) {
-            View(flex_direction: FlexDirection::Row, flex_grow: 1.0f32) {
+            // The row and the inner column pin their width to the root's
+            // resolved width (100% each). Without this, a content-wide child
+            // (the home view's NoWrap command rows, which can run well past
+            // 80 cols) pins the column's width to its own content width and
+            // full-width children (the picker's right-aligned count line)
+            // render off-screen. In the static render path (root width Auto)
+            // 100% resolves to the same content width as before — no change.
+            View(flex_direction: FlexDirection::Row, flex_grow: 1.0f32, width: iocraft::Size::Percent(100.0)) {
                 #(if snap.tree_visible {
                     Some(element! {
                         TreeSidebar(
@@ -743,7 +749,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 } else {
                     None
                 })
-                View(flex_direction: FlexDirection::Column, flex_grow: 1.0f32) {
+                View(flex_direction: FlexDirection::Column, flex_grow: 1.0f32, width: iocraft::Size::Percent(100.0)) {
                     #(main_view)
                     #(if snap.picker {
                         Some(element! {
