@@ -1,0 +1,8 @@
+# golden for probe `live-dotprop-named`  (011-08 js lane)
+# anchor: src/utils.mjs:19   symbol: `getProperty`   scope: ["dot-prop", "getProperty"]   mode: live
+# note: named ESM import of a real registry package: npm install fetches it; lands on the definition line, external.
+kind: resolved
+external: true
+source_root: node_modules/dot-prop
+file: index.js
+line: 173

@@ -1,0 +1,6 @@
+# golden for probe `local-item-missing-bail`  (011-08 js lane)
+# anchor: src/app.js:41   symbol: `missing`   scope: ["jslocal", "missing"]   mode: deterministic
+# note: item absent from the local package: names the item, the base package, and the searched dir.
+kind: bail
+message: |
+  item `missing` not found in package `jslocal` (searched <ws>/vendor/jslocal)

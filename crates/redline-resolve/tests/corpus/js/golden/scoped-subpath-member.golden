@@ -1,0 +1,8 @@
+# golden for probe `scoped-subpath-member`  (011-08 js lane)
+# anchor: src/hooks.ts:26   symbol: `normalize`   scope: ["@redline/fixture/util", "normalize"]   mode: deterministic
+# note: scoped package + SUBPATH: `/` stays inside the package name, the first `.` is the item boundary; lands in util.js.
+kind: resolved
+external: false
+source_root: vendor/@redline/fixture
+file: util.js
+line: 6

@@ -1,0 +1,6 @@
+# golden for probe `relative-import-whole-bail`  (011-08 js lane)
+# anchor: src/legacy.cjs:15   symbol: `legacy`   scope: ["./legacy-util"]   mode: deterministic
+# note: relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal).
+kind: bail
+message: |
+  package `.` is not in node_modules and offline mode refuses to install it

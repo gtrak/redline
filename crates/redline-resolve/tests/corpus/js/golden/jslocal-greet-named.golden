@@ -1,0 +1,8 @@
+# golden for probe `jslocal-greet-named`  (011-08 js lane)
+# anchor: src/app.js:28   symbol: `greet`   scope: ["jslocal", "greet"]   mode: deterministic
+# note: named import ({ greet }) via the 007-03 bare+hint path; lands in the local file: package.
+kind: resolved
+external: false
+source_root: vendor/jslocal
+file: index.js
+line: 9

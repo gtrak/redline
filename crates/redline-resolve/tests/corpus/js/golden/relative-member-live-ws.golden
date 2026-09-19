@@ -1,0 +1,6 @@
+# golden for probe `relative-member-live-ws`  (011-08 js lane)
+# anchor: src/app.js:47   symbol: `legacyJoin`   scope: ["./legacy-util", "legacyJoin"]   mode: live
+# note: the relative hint probed where node_modules IS populated: the leading `.` of the relative specifier collapses the item to None and the base package to `.`, so the node_modules directory ITSELF is probed as a package — entry-point bail pinned as-is (finding, not fixed in this issue).
+kind: bail
+message: |
+  no entry point for package at <ws>/node_modules/. (no package.json exports/main/module)

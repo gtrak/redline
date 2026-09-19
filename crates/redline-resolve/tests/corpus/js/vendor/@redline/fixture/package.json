@@ -1,0 +1,6 @@
+{
+  "name": "@redline/fixture",
+  "version": "0.3.0",
+  "description": "The corpus's scoped local (file:) package: its @scope/name shape and ./util subpath exercise the provider's base-package normalization.",
+  "main": "index.js"
+}

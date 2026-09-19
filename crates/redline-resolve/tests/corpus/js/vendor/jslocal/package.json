@@ -1,0 +1,11 @@
+{
+  "name": "jslocal",
+  "version": "2.1.0",
+  "description": "The corpus's local (file:) package: a tiny greeter with the export shapes a real small CJS package has.",
+  "main": "index.js",
+  "types": "types.d.ts",
+  "exports": {
+    ".": { "require": "./index.js", "types": "./types.d.ts" },
+    "./package.json": "./package.json"
+  }
+}

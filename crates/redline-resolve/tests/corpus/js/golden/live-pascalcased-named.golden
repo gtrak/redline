@@ -1,0 +1,8 @@
+# golden for probe `live-pascalcased-named`  (011-08 js lane)
+# anchor: src/app.js:20   symbol: `pascalCase`   scope: ["pascal-case", "pascalCase"]   mode: live
+# note: CJS require of a compiled TS registry package: the `module` field (dist.es2015) wins over `main`; lands on the definition line, external.
+kind: resolved
+external: true
+source_root: node_modules/pascal-case
+file: dist.es2015/index.js
+line: 14

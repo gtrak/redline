@@ -1,0 +1,8 @@
+# golden for probe `jslocal-dotted-call`  (011-08 js lane)
+# anchor: src/app.js:30   symbol: `local.add`   scope: ["jslocal", "add"]   mode: deterministic
+# note: dotted call site `local.add(…)` over a whole-module CJS binding: the 011-02 alias rewrite turns it into `jslocal.add`.
+kind: resolved
+external: false
+source_root: vendor/jslocal
+file: index.js
+line: 13

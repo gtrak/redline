@@ -1,0 +1,6 @@
+# golden for probe `live-dotprop-item-missing`  (011-08 js lane)
+# anchor: src/app.js:45   symbol: `get`   scope: ["dot-prop", "get"]   mode: live
+# note: the v6 `get` name against dot-prop v7 (which renamed it to getProperty): item search over a REAL installed package — byte-for-byte item-missing bail in node_modules.
+kind: bail
+message: |
+  item `get` not found in package `dot-prop` (searched <ws>/node_modules/dot-prop)

@@ -1,0 +1,17 @@
+{
+  "name": "js-corpus-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "011-08 (js lane) golden corpus: a small realistic npm app the redline-resolve JS provider probes (deterministic and live legs).",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "dependencies": {
+    "@redline/fixture": "file:vendor/@redline/fixture",
+    "dot-prop": "^7.2.0",
+    "jslocal": "file:vendor/jslocal",
+    "left-pad": "^1.3.0",
+    "pascal-case": "^3.1.2"
+  }
+}

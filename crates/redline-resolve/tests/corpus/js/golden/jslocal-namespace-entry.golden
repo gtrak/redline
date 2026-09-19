@@ -1,0 +1,8 @@
+# golden for probe `jslocal-namespace-entry`  (011-08 js lane)
+# anchor: src/utils.mjs:24   symbol: `local`   scope: ["jslocal"]   mode: deterministic
+# note: bare namespace alias with the 1-segment hint: lands on the package ENTRY (line null), not a bail (011-02 P2-1).
+kind: resolved
+external: false
+source_root: vendor/jslocal
+file: index.js
+line: null

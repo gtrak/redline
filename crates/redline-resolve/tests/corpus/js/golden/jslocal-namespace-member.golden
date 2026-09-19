@@ -1,0 +1,8 @@
+# golden for probe `jslocal-namespace-member`  (011-08 js lane)
+# anchor: src/utils.mjs:15   symbol: `local.greet`   scope: ["jslocal", "greet"]   mode: deterministic
+# note: ESM `import * as local` namespace member; same rewrite machinery as jslocal-dotted-call.
+kind: resolved
+external: false
+source_root: vendor/jslocal
+file: index.js
+line: 9
