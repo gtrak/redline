@@ -18,7 +18,15 @@ cannot slip through); rerun without the env var to verify.
   online funnel into `npm install "."` is closed by construction (review
   P2-4: the absent-node_modules case is closed by construction, pinned
   offline by `relative-import-whole-bail`).
-- fix-jsrel review P2-7: the relative probes carry a scope hint the app
-  does not yet emit (the app never hints relative specifiers — pinned by
-  `resolver_scope_js_no_import_and_relative_are_not_guessed`); the goldens
-  are a contract pin for the follow-up that makes the app emit them.
+- fix-jsrel review P2-7 (RESOLVED, `e2281a2`): the relative probes' scope
+  hints are now EMITTED by the app — `js_ts_specifier` accepts `./`/`../`
+  specifiers (every binding shape the provider's relative branch lands:
+  named / aliased / default / destructured carry the item, whole-module
+  and namespace carry the specifier alone), so M-. on a relative use
+  site lands in the sibling file (`external = false`, editable project
+  buffer — live leg `xref_relative_import_lands_in_sibling_file_editable`;
+  hint shapes in `resolver_scope_js_relative_import_carries_sibling_path`).
+  The honest negatives stay negative: absolute / bare-`.` / side-effect
+  specs still never hint (`resolver_scope_js_no_import_absolute_and_
+  side_effect_are_not_guessed`). The goldens keep pinning the provider's
+  landed behavior byte-for-byte, now fed by the app's own hint.
