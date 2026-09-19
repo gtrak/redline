@@ -3484,6 +3484,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             self.start_crate_indexing(&source.source_root);
         }
         self.set_point_line(line);
+        self.recenter_landing();
         self.ensure_highlight();
         self.record_jump(&origin, "M-.");
         self.minibuffer_message(&format!("jumped to {display}:{}", line + 1));
@@ -4102,6 +4103,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                         // cache stays valid and 008-01 semantics hold).
                         if self.open_external_path(&root.join(file)).is_some() {
                             self.set_point_line(line - 1);
+                            self.recenter_landing();
                             self.ensure_highlight();
                             self.record_jump(&origin, "M-.");
                             self.minibuffer_message(&format!("jumped to {file}:{line}"));
@@ -4112,6 +4114,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                         self.open_path(file);
                         let key = self.buffers.current().map(String::from).unwrap_or_default();
                         self.set_point_line(line - 1);
+                        self.recenter_landing();
                         self.ensure_highlight();
                         let _ = key;
                         self.record_jump(&origin, "M-.");
@@ -4127,6 +4130,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 {
                     let origin = self.current_jump_entry();
                     self.set_point_line(line - 1);
+                    self.recenter_landing();
                     self.ensure_highlight();
                     self.record_jump(&origin, "M-i");
                 }
@@ -4618,26 +4622,36 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     pub fn recenter(&mut self) {
         let p = self.file_point();
         let total = self.current_line_count();
-        if total <= 1 {
-            return;
-        }
         let vp = self.viewport_lines.max(1);
-        let max_scroll = total.saturating_sub(vp);
-        if max_scroll == 0 {
-            // The whole buffer fits in the viewport; nothing to recenter.
-            return;
-        }
-        let mid = vp / 2;
-        let bottom = vp - 1;
         // Cycle order `(middle top bottom)` selected by the cycle index.
         let desired_row = match self.recenter_cycle % 3 {
-            0 => mid,
+            0 => vp / 2,
             1 => 0,
-            _ => bottom,
+            _ => vp - 1,
         };
-        self.recenter_cycle += 1;
-        let new_top = (p.line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize;
-        self.set_scroll_top(new_top);
+        if let Some(new_top) = recenter_top_for(p.line, desired_row, total, vp) {
+            self.recenter_cycle += 1;
+            self.set_scroll_top(new_top);
+        }
+    }
+
+    /// Jump-landing recenter (plan 004 issue 07): vanilla emacs
+    /// `xref-after-jump-hook` is `(recenter xref-pulse-momentarily)` —
+    /// every M-. jump (and the picker/imenu selections that record the
+    /// same jump) repositions the window so the landed line sits on the
+    /// MIDDLE row, instead of the minimal `keep_cursor_visible` scroll
+    /// that lands a below-window target on the BOTTOM row. Same
+    /// arithmetic as `recenter` (`recenter_top_for`), but a jump is not a
+    /// `C-l`: `recenter_cycle` is untouched, so a jump between two C-ls
+    /// neither resets nor advances the middle→top→bottom cycle. No-op
+    /// when the buffer does not scroll.
+    pub fn recenter_landing(&mut self) {
+        let line = self.point_line();
+        let total = self.current_line_count();
+        let vp = self.viewport_lines.max(1);
+        if let Some(new_top) = recenter_top_for(line, vp / 2, total, vp) {
+            self.set_scroll_top(new_top);
+        }
     }
 
     /// Compact position display for the status line (plan 004 row 11):
@@ -7340,6 +7354,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // owning crate MRU.
         self.bump_current_crate_recency();
         self.set_point(entry.line, entry.col, entry.col);
+        self.recenter_landing();
         self.ensure_highlight();
     }
 
@@ -7569,8 +7584,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             let origin = self.current_jump_entry();
             let def = &defs[0];
             self.open_path(&def.file);
-            // Move the point to the definition's line; the window follows.
+            // Move the point to the definition's line; the jump-landing
+            // recenter positions the window (plan 004 issue 07).
             self.set_point_line(def.symbol.line);
+            self.recenter_landing();
             self.ensure_highlight();
             self.record_jump(&origin, "M-.");
             self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
@@ -7969,6 +7986,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 let abs = root.join(&file);
                 if self.open_external_path(&abs).is_some() {
                     self.set_point_line(line);
+                    self.recenter_landing();
                     self.ensure_highlight();
                     self.record_jump(&origin, "M-.");
                     self.minibuffer_message(&format!(
@@ -9616,6 +9634,25 @@ fn keep_cursor_visible(scroll: usize, cursor: usize, total: usize, window: usize
         scroll = cursor + 1 - window;
     }
     scroll.min(total.saturating_sub(1))
+}
+
+/// The new scroll offset that puts buffer line `point_line` on screen row
+/// `desired_row`: `scroll_top = point_line - desired_row`, clamped to
+/// `[0, total - viewport]`. Returns `None` when the buffer does not scroll
+/// at all (nothing to recenter). Shared by `recenter` (C-l — the desired
+/// row is cycle-selected) and the jump-landing recenter (plan 004 issue
+/// 07 — always the fresh MIDDLE row; the only difference from `recenter`
+/// is that `recenter_cycle` is NOT advanced: a jump is not a `C-l`).
+fn recenter_top_for(point_line: usize, desired_row: usize, total: usize, viewport: usize) -> Option<usize> {
+    if total <= 1 {
+        return None;
+    }
+    let vp = viewport.max(1);
+    let max_scroll = total.saturating_sub(vp);
+    if max_scroll == 0 {
+        return None;
+    }
+    Some((point_line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize)
 }
 
 /// One log row: `<short_id> <subject>  <author>  <date>`.
@@ -11684,6 +11721,112 @@ mod tests {
         s.open_path("src/a.rs");
         s.recenter();
         assert_eq!(s.scroll_top(), 0, "no-op when buffer fits viewport");
+    }
+
+    // ── plan 004 issue 07: jump-landing recenter (middle row) ───────────
+    // These must FAIL against a landing that only minimal-scrolls
+    // (`keep_cursor_visible`): that puts a below-window target on the LAST
+    // row and an above-window target on the FIRST row; the jump landing
+    // recenters to the MIDDLE row (emacs `xref-after-jump-hook` =
+    // `(recenter xref-pulse-momentarily)`) without touching `recenter_cycle`.
+
+    #[test]
+    fn jump_landing_far_down_lands_on_middle_row() {
+        let (mut s, _dir) = store_with_lines(200);
+        s.set_viewport_lines(21);
+        // Jump DOWN from the top of the file to line 150.
+        s.set_point_line(150);
+        s.recenter_landing();
+        assert_eq!(
+            s.scroll_top(),
+            140,
+            "top = 150 - vp/2; a minimal scroll would leave the point on the last row (top 130)"
+        );
+    }
+
+    #[test]
+    fn jump_landing_far_up_lands_on_middle_row() {
+        let (mut s, _dir) = store_with_lines(200);
+        s.set_viewport_lines(21);
+        // Scroll to the bottom, then jump UP to line 50.
+        s.set_point_line(199); // minimal scroll → top 179
+        assert_eq!(s.scroll_top(), 179);
+        s.set_point_line(50);
+        s.recenter_landing();
+        assert_eq!(
+            s.scroll_top(),
+            40,
+            "top = 50 - vp/2; a minimal scroll would leave the point on row 0 (top 50)"
+        );
+    }
+
+    #[test]
+    fn jump_landing_short_file_clamps_without_panic() {
+        // The buffer barely exceeds the 21-row viewport (the last line is
+        // the trailing empty line rope counts after the final newline).
+        let (mut s, _dir) = store_with_lines(25);
+        s.set_viewport_lines(21);
+        s.set_point_line(0);
+        s.recenter_landing();
+        assert_eq!(s.scroll_top(), 0, "clamped at the top");
+        let max_scroll = s.current_line_count() - 21;
+        s.set_point_line(s.current_line_count() - 2); // last content line
+        s.recenter_landing();
+        assert_eq!(
+            s.scroll_top(),
+            max_scroll,
+            "clamped at max_scroll (a middle-row landing is unreachable there)"
+        );
+        // A buffer that FITS the viewport is a no-op (nothing to recenter):
+        // whole file visible, top stays 0, no panic.
+        let (mut s2, _dir2) = store_with_lines(10);
+        s2.set_viewport_lines(21);
+        s2.set_point_line(9);
+        s2.recenter_landing();
+        assert_eq!(s2.scroll_top(), 0, "fits the viewport: top stays 0");
+    }
+
+    #[test]
+    fn jump_landing_recenters_even_when_point_is_visible() {
+        // emacs recenter repositions the window unconditionally — a jump
+        // to a line already in view still lands it on the middle row.
+        let (mut s, _dir) = store_with_lines(200);
+        s.set_viewport_lines(21);
+        s.set_scroll_top(5);
+        s.set_point_line(12); // visible at row 7
+        s.recenter_landing();
+        assert_eq!(
+            s.scroll_top(),
+            2,
+            "window repositioned to the middle row; minimal scroll would keep top 5"
+        );
+    }
+
+    #[test]
+    fn jump_landing_does_not_perturb_recenter_cycle() {
+        // A jump between two C-ls neither resets nor advances the
+        // middle→top→bottom cycle (a jump is not a `C-l`).
+        let (mut s, _dir) = store_with_lines(200);
+        s.set_viewport_lines(21);
+        s.set_point_line(50);
+        s.recenter(); // fresh → middle: top 40, cycle 1
+        assert_eq!(s.scroll_top(), 40);
+        s.recenter(); // top: top 50, cycle 2
+        assert_eq!(s.scroll_top(), 50);
+        // A jump landing in between:
+        s.set_point_line(150);
+        s.recenter_landing();
+        assert_eq!(s.scroll_top(), 140);
+        assert_eq!(
+            s.recenter_cycle, 2,
+            "the jump neither reset nor advanced the cycle"
+        );
+        s.recenter(); // the cycle continues where it left off: bottom row
+        assert_eq!(
+            s.scroll_top(),
+            130,
+            "3rd C-l is the BOTTOM position (150 - (vp-1)); a reset cycle would give middle (140)"
+        );
     }
 
     // ── plan 004 row 11: position display ─────────────────────────────

@@ -23,6 +23,10 @@ the cargo provider fails fast and offline):
                   buffer is read-only (not project-owned)"). The temporary
                   Cargo.toml + external crate are removed afterwards — the
                   fixture baseline is explicitly cargo-less.
+  L6 middle landing (plan 004 issue 07): M-. from a call to a definition
+  ~150 lines below lands the definition on the MIDDLE row of the content
+  area (emacs `xref-after-jump-hook` = `(recenter ...)`), NOT the last
+  content row (the pre-004-07 minimal-scroll landing).
 """
 import os
 import shutil
@@ -35,6 +39,8 @@ from pyte_driver import App
 
 REPO = "/tmp/redline_pyte_repo"
 LEG_RS = os.path.join(REPO, "src", "leg.rs")
+CALL_RS = os.path.join(REPO, "src", "call.rs")
+LONG_RS = os.path.join(REPO, "src", "long.rs")
 EXT_CRATE = "/tmp/redline_xref_extcrate"
 MINI = 22  # minibuffer row (content rows 0..20 in a 24-row PTY, 1-based
            # terminal row 23 is the status line)
@@ -91,6 +97,16 @@ shutil.rmtree(EXT_CRATE, ignore_errors=True)
 os.makedirs(os.path.join(REPO, "src"), exist_ok=True)
 with open(LEG_RS, "w") as f:
     f.write("fn leg() {\n    target_lib();\n}\ntokio::spawn(f);\n")
+# L6: a 220-line file whose `far_target` definition sits at 1-based line
+# 160 (~150 lines below any top-of-file call), plus the call-site file.
+with open(LONG_RS, "w") as f:
+    for i in range(1, 221):
+        if i == 160:
+            f.write("pub fn far_target() {\n    // body\n}\n")
+        else:
+            f.write(f"// filler {i}\n")
+with open(CALL_RS, "w") as f:
+    f.write("fn caller() {\n    far_target();\n}\n")
 
 app = App(REPO)
 app.wait_ready()
@@ -177,6 +193,24 @@ try:
     ok, msg = poll(app, "external buffer is read-only", timeout=10.0)
     rec("L5 ownership guard: C-x C-s is refused on the external buffer",
         ok, f"minibuffer={msg!r}")
+
+    # ── L6: jump-landing recenter (plan 004 issue 07) ────────────────────
+    # Content rows are 0..20 (terminal rows 1..21) in the 24-row PTY; the
+    # middle content row is 10 (terminal row 11). The pre-004-07
+    # minimal-scroll landing put a below-window target on the LAST content
+    # row (terminal row 21) instead.
+    open_file(app, "src/call.rs")
+    goto(app, 2)  # "    far_target();"
+    app.key("M-f", 0.8)  # point to the END of the `far_target` run
+    app.key("M-.", 1.5)
+    ok, msg = poll(app, "jumped to src/long.rs", timeout=10.0)
+    rec("L6 middle landing: jumped to the long-file definition", ok,
+        f"minibuffer={msg!r}")
+    def_rows = [i for i in range(app.rows)
+                if "pub fn far_target" in app.row_text(i)]
+    ok = len(def_rows) == 1 and 8 <= def_rows[0] <= 14
+    rec("L6 middle landing: definition row is mid-window, not the last row",
+        ok, f"def rows={def_rows} (want ~11; the last content row is 21)")
 finally:
     app.kill()
     # L5 leftovers: restore the cargo-less fixture baseline for the other
@@ -188,6 +222,12 @@ finally:
             pass
     shutil.rmtree(os.path.join(REPO, "target"), ignore_errors=True)
     shutil.rmtree(EXT_CRATE, ignore_errors=True)
+    # L6 leftovers: drive_xref-only files; keep the shared fixture clean.
+    for stray in (CALL_RS, LONG_RS):
+        try:
+            os.remove(stray)
+        except FileNotFoundError:
+            pass
 
 print(f"\n{sum(results)}/{len(results)} legs passed")
 sys.exit(0 if all(results) else 1)
