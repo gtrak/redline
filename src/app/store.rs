@@ -174,6 +174,11 @@ enum ExternalXrefOutcome {
 /// renders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewId {
+    /// The home view (plan 004 issue 06a): rendered when no buffer is
+    /// current. Header (project + dirty counts + "redline"), the derived
+    /// command groups (live keymap × command registry), and the standard
+    /// help line. Home is NOT a buffer: opening a view replaces it.
+    Home,
     /// The main view: shows the current buffer's text.
     Buffer,
     /// The `C-x C-b` list-buffers view.
@@ -196,6 +201,7 @@ pub enum ViewId {
 impl ViewId {
     pub fn name(self) -> &'static str {
         match self {
+            ViewId::Home => "home",
             ViewId::Buffer => "buffer",
             ViewId::BufferList => "buffer-list",
             ViewId::MagitStatus => "magit-status",
@@ -433,6 +439,15 @@ impl ViewId {
                 km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('k')], "commit-editor-abort")
                     .unwrap();
                 km
+            }
+            ViewId::Home => {
+                // 06a: home has NO view-local bindings. `q` is deliberately
+                // unbound (there is no buffer to close); every entry point
+                // (C-x C-f, C-x g, C-x n, C-x b, C-x C-c, C-c p …, ?) is a
+                // GLOBAL binding, so they all work from home without any
+                // home-side inheritance. The render switch still shows home
+                // whenever the buffer view has no current buffer.
+                KeyMap::new()
             }
             ViewId::Search => {
                 // Results view (issue 06): n/p between matches, RET jump
@@ -1743,7 +1758,7 @@ impl AppStore {
             .bind(&[Key::alt_char('s'), Key::char('o')], "occur")
             .unwrap();
 
-        let view = ViewId::Buffer.keymap();
+        let view = ViewId::Home.keymap();
         let engine = KeymapEngine::new(global, view);
 
         let mut project_store = ProjectStore::open(base);
@@ -1764,7 +1779,7 @@ impl AppStore {
             theme: Theme::default(),
             registry,
             engine,
-            view_stack: vec![ViewId::Buffer],
+            view_stack: vec![ViewId::Home],
             buffers: BufferTable::new(),
             buffer_list_selected: 0,
             project,
@@ -1874,20 +1889,55 @@ impl AppStore {
         *self.view_stack.last().expect("view stack is never empty")
     }
 
+    /// The view the main pane actually RENDERS (plan 004 issue 06a): the
+    /// buffer view with no current buffer renders home (the table may be
+    /// empty — boot starts that way, and killing the last buffer lands
+    /// there). Never creates a buffer to satisfy the render.
+    pub fn render_view(&self) -> ViewId {
+        if self.top_view() == ViewId::Buffer && self.buffers.current().is_none() {
+            ViewId::Home
+        } else {
+            self.top_view()
+        }
+    }
+
+    /// Keep the top view consistent with the buffer table (plan 004
+    /// issue 06a): home renders only with NO current buffer, and the buffer
+    /// view renders only WITH one — so every view change re-normalizes the
+    /// top (home ⇄ buffer) and rebuilds the keymap for the new top.
+    fn normalize_top_view(&mut self) {
+        let swap = match self.view_stack.last() {
+            Some(&ViewId::Home) if self.buffers.current().is_some() => Some(ViewId::Buffer),
+            Some(&ViewId::Buffer) if self.buffers.current().is_none() => Some(ViewId::Home),
+            _ => None,
+        };
+        if let Some(view) = swap {
+            self.view_stack.pop();
+            self.view_stack.push(view);
+        }
+        let top = self.top_view();
+        let view_km = top.keymap();
+        self.engine = KeymapEngine::new(self.engine.global.clone(), view_km);
+    }
+
     pub fn view_name(&self) -> &'static str {
         self.top_view().name()
     }
 
     /// Status-line view name: the current buffer's display name (or
     /// `*list-buffers*` in the buffer-list view, `*magit-status*`,
-    /// `*search*`).
+    /// `*search*`). Renders through `render_view`, so a buffer view with no
+    /// current buffer reads `home` (06a), never a ghost `*scratch*`.
     pub fn view_name_display(&self) -> String {
-        match self.top_view() {
+        match self.render_view() {
             ViewId::Buffer => self
                 .buffers
                 .current()
                 .map(|key| self.buffer_display(key))
-                .unwrap_or_else(|| SCRATCH_NAME.to_string()),
+                // Unreachable via render_view (Buffer only renders with a
+                // current buffer); keep a defined value anyway.
+                .unwrap_or_default(),
+            ViewId::Home => "home".to_string(),
             ViewId::BufferList => "*list-buffers*".to_string(),
             ViewId::MagitStatus => "*magit-status*".to_string(),
             ViewId::Log => "*log*".to_string(),
@@ -1970,13 +2020,12 @@ impl AppStore {
     }
 
     /// Pop the top view (if a non-root view is on top) and restore the
-    /// new top view's keymap.
+    /// new top view's keymap (re-normalizing home ⇄ buffer, 06a).
     pub fn close_view(&mut self) {
         if self.view_stack.len() > 1 {
             self.view_stack.pop();
-            let view_km = self.top_view().keymap();
-            self.engine = KeymapEngine::new(self.engine.global.clone(), view_km);
             self.buffer_list_selected = 0;
+            self.normalize_top_view();
         }
     }
 
@@ -1993,9 +2042,9 @@ impl AppStore {
             let moved: Vec<ViewId> = self.view_stack.drain(start..).collect();
             self.view_stack.extend(moved);
         }
-        // Re-assert the top view's keymap after rotating.
-        let view_km = self.top_view().keymap();
-        self.engine = KeymapEngine::new(self.engine.global.clone(), view_km);
+        // Re-assert the top view's keymap after rotating (and re-normalize
+        // home ⇄ buffer, 06a).
+        self.normalize_top_view();
     }
 
     /// Insert text at the end of the current buffer (the shared editing
@@ -2076,15 +2125,17 @@ impl AppStore {
     }
 
     /// Switch to (creating if needed) the `*scratch*` buffer.
+    /// 06a: an EXPLICIT affordance (M-o / C-x o / M-x) — scratch is no
+    /// longer auto-created at boot; opening it replaces the home view.
     pub fn open_scratch(&mut self) {
         let key = SCRATCH_NAME.to_string();
         if self.buffers.get(&key).is_none() {
             self.buffers.insert(None, String::new());
         }
         self.buffers.set_current(&key);
+        self.normalize_top_view();
         self.minibuffer_message("switched to *scratch*");
     }
-
     /// Open (or create) the per-project notes file (`.redline-notes.md`) as
     /// an editable buffer. PART B item 8: the file is locally-owned
     /// (conflict rules identical to issue 04); editing is bounded
@@ -2135,6 +2186,7 @@ impl AppStore {
         self.notes_buffer_dirty = true;
         self.record_recent(NOTES_REL);
         self.ensure_highlight();
+        self.normalize_top_view();
         self.minibuffer_message("notes: C-x C-s to save");
     }
 
@@ -3419,6 +3471,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.reanchor_for_key(&key);
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
+        self.normalize_top_view();
         Ok(())
     }
 
@@ -3442,6 +3495,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.bump_current_crate_recency();
         // Build (or update) the highlight for the new current buffer.
         self.ensure_highlight();
+        self.normalize_top_view();
         Some(key)
     }
 
@@ -4090,6 +4144,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 // 006-03b item 1: a switched-to external buffer keeps its
                 // owning crate MRU.
                 self.bump_current_crate_recency();
+                self.normalize_top_view();
             }
             PickerKind::KillBuffer => self.kill_buffer(&name),
             PickerKind::Projects => self.switch_project_root(&name),
@@ -4222,8 +4277,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
 
     // ── buffers ─────────────────────────────────────────────────────────
 
-    /// Kill the buffer with key `key`; the current buffer falls back to
-    /// a fresh `*scratch*` when it was the one killed.
+    /// Kill the buffer with key `key`. 06a: no accidental buffer creation —
+    /// when the killed buffer was current, the MRU survivor becomes current
+    /// (emacs `kill-buffer` fallback); with the LAST buffer killed the main
+    /// view returns to home.
     pub fn kill_buffer(&mut self, key: &str) {
         let display = self.buffer_display(key);
         if !self.buffers.kill(key) {
@@ -4231,8 +4288,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             return;
         }
         if self.buffers.current().is_none() {
-            self.open_scratch();
+            let mru = self.buffers.list().first().map(|(k, _)| k.to_string());
+            if let Some(k) = mru {
+                self.buffers.set_current(&k);
+            }
         }
+        self.normalize_top_view();
         self.minibuffer_message(&format!("killed {display}"));
     }
 
@@ -4247,6 +4308,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // crate MRU.
         self.bump_current_crate_recency();
         self.close_view();
+        self.normalize_top_view();
     }
 
     pub fn buffer_list_next(&mut self) {
@@ -4371,7 +4433,11 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// touches the code point (the code point is set by code-pane clicks,
     /// and `RET` opens the selected file).
     pub fn tree_click_row(&mut self, terminal_row: usize) {
-        if !self.tree.visible || self.top_view() != ViewId::Buffer {
+        // 06a: the tree shares the main pane with home (home renders in the
+        // buffer slot), so clicks land while either is on top.
+        if !self.tree.visible
+            || !matches!(self.top_view(), ViewId::Buffer | ViewId::Home)
+        {
             return;
         }
         let Some(rel) = terminal_row.checked_sub(1) else {
@@ -6077,6 +6143,85 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// at the viewport height so the menu never exceeds the frame.
     pub fn menu_height(&self) -> u32 {
         (self.menu_rows().len() + 1).min(self.viewport_lines) as u32
+    }
+
+    /// The home view's derived body rows (plan 004 issue 06a): every
+    /// EFFECTIVE binding (the live keymap × global map, via `menu_bindings` —
+    /// on home the view map is empty, so these are the commands that work
+    /// from home), grouped by registry category and sorted by key within
+    /// each group — the same grouping `menu_rows` uses, queried at the
+    /// TOP level of the whole keymap (the "all top-level groups" query;
+    /// no new formatter, no hand-maintained list).
+    pub fn home_rows(&self) -> Vec<TransientMenuRow> {
+        let bindings = self.menu_bindings();
+        let mut by_cat: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for (seq, cmd) in bindings {
+            let key_display = seq
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let (docs, category) = match self.registry.get(&cmd) {
+                Some(m) => (m.docs.to_string(), m.category.to_string()),
+                None => (String::new(), String::new()),
+            };
+            by_cat.entry(category).or_default().push((key_display, docs));
+        }
+        let mut rows = Vec::new();
+        for (cat, mut entries) in by_cat {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            rows.push(TransientMenuRow {
+                is_header: true,
+                key_display: String::new(),
+                label: cat,
+                is_prefix: false,
+            });
+            for (key_display, docs) in entries {
+                rows.push(TransientMenuRow {
+                    is_header: false,
+                    key_display,
+                    label: docs,
+                    is_prefix: false,
+                });
+            }
+        }
+        rows
+    }
+
+    /// The home view's header: `redline · {project}` + the dirty counts
+    /// (`+` staged, `~` unstaged, `?` untracked — the status-line
+    /// convention) when git reports any.
+    pub fn home_title(&self) -> String {
+        let mut title = format!("redline · {}", self.project_display());
+        if let Some(d) = self.dirty_counts()
+            && d.staged + d.unstaged + d.untracked > 0
+        {
+            title.push_str(&format!("  +{} ~{} ?{}", d.staged, d.unstaged, d.untracked));
+        }
+        title
+    }
+
+    /// The home body rows bounded to the viewport (06a): the terminal is
+    /// `viewport_lines + 3` rows (the resize handler's contract: viewport =
+    /// height - 3), the main view is `viewport_lines + 1` of those
+    /// (minibuffer + status aside); home keeps its title + help chrome
+    /// (2 rows), and an open overlay (the 12-row picker canvas, the menu)
+    /// takes its fixed height — the body yields it, the way the file
+    /// view's canvas yields the same space.
+    pub fn home_body_rows(&self) -> Vec<TransientMenuRow> {
+        let overlay = if self.picker_open() {
+            12 // the picker's fixed canvas height (src/ui/picker.rs)
+        } else if self.menu_open() {
+            self.menu_height() as usize
+        } else {
+            0
+        };
+        let budget = self
+            .viewport_lines
+            .saturating_sub(1)
+            .saturating_sub(overlay);
+        self.home_rows().into_iter().take(budget).collect()
     }
 
     /// Handle a key while the menu is open: C-g closes; a listed leaf closes
@@ -10240,7 +10385,11 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // is the buffer view, arrows / page keys move the tree cursor and RET
         // opens the selected file. The emacs motion keys (C-n/C-p/j/k) still
         // scroll the file, so arrows and file-motion are cleanly split.
-        if self.tree_visible() && self.top_view() == ViewId::Buffer {
+        // 06a: home renders in the buffer slot, so the tree stays fully
+        // usable on top of it — RET opens the file and replaces home.
+        if self.tree_visible()
+            && matches!(self.top_view(), ViewId::Buffer | ViewId::Home)
+        {
             match key.code {
                 KeyCode::Down | KeyCode::PageDown => {
                     self.tree_move_down();
@@ -10789,28 +10938,32 @@ mod tests {
     }
 
     #[test]
-    fn bare_q_in_buffer_view_closes_view_not_quit() {
+    fn bare_q_in_home_view_is_unbound_not_quit() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
-        // Bare `q` on the root buffer view: a no-op close-view, NOT a quit
-        // (issue 05, finding 5: one stray q must not lose the session).
+        // 06a: bare `q` on the home view is UNBOUND (no buffer to close) —
+        // an unbound-key echo, NOT a quit and NOT a view change.
         s.key_event(key("q"));
         assert!(!s.quit, "bare q must not quit the app");
-        assert_eq!(s.view_stack.len(), 1, "the buffer view must remain");
+        assert_eq!(s.view_stack.len(), 1, "the home view must remain");
+        assert_eq!(s.top_view(), ViewId::Home);
+        assert!(s.message.contains("unbound key: q"), "msg: {}", s.message);
 
-        // `q` closes an overlay list view back to the buffer (consistent with
+        // `q` closes an overlay list view back to home (consistent with
         // the list views' `q`).
         s.key_event(key("C-x"));
         s.key_event(key("C-b")); // list-buffers
         assert_eq!(s.top_view(), ViewId::BufferList);
         s.key_event(key("q"));
-        assert_eq!(s.top_view(), ViewId::Buffer, "q must close the list view");
+        assert_eq!(s.top_view(), ViewId::Home, "q must close the list view");
         assert!(!s.quit);
 
-        // `C-x C-c` remains the quit.
+        // `C-x C-c` quits IMMEDIATELY from home (no buffers ⇒ nothing to
+        // prompt; the 004-04 semantics).
         s.key_event(key("C-x"));
         s.key_event(key("C-c"));
         assert!(s.quit, "C-x C-c must still quit");
+        assert!(!s.quit_prompt_active(), "no save prompt with zero buffers");
     }
 
     /// A store with an open notes buffer (the one UI-reachable modified
@@ -11176,7 +11329,13 @@ mod tests {
     fn toggle_read_only_noop_on_scratch_and_non_buffer_views() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
-        // Scratch (no path): no-op with a message, flag untouched.
+        // 06a: boot has NO current buffer — toggle is a no-op with a message
+        // (and must not create one). Then explicit scratch (the 06a
+        // affordance): scratch (no path) is a no-op with its own message.
+        s.toggle_read_only();
+        assert!(s.message.contains("not a buffer view"), "msg: {}", s.message);
+        assert_eq!(s.buffers.len(), 0, "toggle must not create a buffer");
+        s.open_scratch();
         s.toggle_read_only();
         assert!(s.message.contains("scratch"), "msg: {}", s.message);
         let scratch_key = SCRATCH_NAME.to_string();
@@ -11236,6 +11395,9 @@ mod tests {
         let (dir, _ext, mut s) = store_with_external_buffer();
         let ext_key = s.buffers.current().unwrap().to_string();
         assert!(!s.buffer_is_project_owned(&ext_key), "registry source: not owned");
+        // 06a: scratch no longer exists at boot — create it (the explicit
+        // affordance) before checking its ownership.
+        s.open_scratch();
         assert!(s.buffer_is_project_owned(SCRATCH_NAME), "scratch (no path): owned as today");
         // The notes file lives under the root: owned (the 005 decision —
         // notes keep their edit-mode semantics).
@@ -11540,7 +11702,8 @@ mod tests {
         project_with_files(dir.path());
         let store = store(dir.path());
         assert_eq!(store.project_display(), name);
-        assert_eq!(store.view_name_display(), "*scratch*");
+        // 06a: boot is the home view (no auto-created scratch).
+        assert_eq!(store.view_name_display(), "home");
     }
 
     #[test]
@@ -11735,7 +11898,7 @@ mod tests {
         let mut store = store(dir.path());
         store.open_path("src/main.rs");
         store.open_path("src/lib.rs");
-        assert_eq!(store.buffers.len(), 3); // + scratch
+        assert_eq!(store.buffers.len(), 2); // 06a: no scratch
 
         // C-x b: switch to src/lib.rs.
         store.key_event(key("C-x"));
@@ -11756,8 +11919,8 @@ mod tests {
         assert!(!store.picker_open());
         assert_eq!(store.view_name_display(), "src/lib.rs");
 
-        // C-x k: kill it; the killed buffer disappears and current
-        // falls back to *scratch*.
+        // C-x k: kill it; the killed buffer disappears. 06a: no scratch
+        // fallback — with main.rs still current the view stays on it.
         store.key_event(key("C-x"));
         store.key_event(key("k"));
         assert_eq!(store.picker_kind(), Some(PickerKind::KillBuffer));
@@ -11770,8 +11933,8 @@ mod tests {
             store.picker_select_next();
         }
         store.key_event(key("RET"));
-        assert_eq!(store.buffers.len(), 2); // scratch + main.rs
-        assert_eq!(store.view_name_display(), "*scratch*");
+        assert_eq!(store.buffers.len(), 1); // main.rs only (06a: no scratch)
+        assert_eq!(store.view_name_display(), "src/main.rs");
         assert!(store.message.contains("killed src/lib.rs"));
     }
 
@@ -11785,17 +11948,156 @@ mod tests {
         store.dispatch("list-buffers", None).unwrap();
         assert_eq!(store.top_view(), ViewId::BufferList);
         let rows = store.buffer_rows();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1, "06a: only the opened buffer, no scratch");
         assert!(rows.iter().any(|r| r.name == "src/main.rs" && r.current));
-        assert!(rows.iter().any(|r| r.name == "*scratch*" && !r.current));
+        assert!(!rows.iter().any(|r| r.name == "*scratch*"));
 
-        // q closes the view; RET on the scratch row switches to it.
+        // q closes the view back to the buffer view (main.rs replaced home
+        // when it was opened; the table is non-empty, so it renders as the
+        // buffer view).
         store.key_event(key("q"));
         assert_eq!(store.top_view(), ViewId::Buffer);
         store.dispatch("list-buffers", None).unwrap();
         store.key_event(key("RET")); // row 0 is the MRU buffer (main.rs)
         assert_eq!(store.top_view(), ViewId::Buffer);
         assert_eq!(store.view_name_display(), "src/main.rs");
+    }
+
+    // ── plan 004 issue 06a: empty buffer table + home view ─────────────
+
+    /// Boot pin: the table starts empty, `current` is `None`, and the main
+    /// view is home with a DERIVED header/body (project + "redline",
+    /// registry categories + live global bindings, no buffer-view keys).
+    #[test]
+    fn boot_starts_on_home_with_empty_buffer_table() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        let s = store(dir.path());
+        assert_eq!(s.top_view(), ViewId::Home);
+        assert_eq!(s.render_view(), ViewId::Home);
+        assert_eq!(s.view_name_display(), "home");
+        assert_eq!(s.buffers.len(), 0, "06a: no auto-created buffer at boot");
+        assert!(s.buffers.current().is_none());
+        assert!(
+            s.home_title().starts_with(&format!("redline · {name}")),
+            "{}",
+            s.home_title()
+        );
+        // The home body is derived: registry categories + live globals.
+        let rows = s.home_rows();
+        assert!(rows.iter().any(|r| r.is_header && r.label == "files"));
+        assert!(rows.iter().any(|r| r.is_header && r.label == "git"));
+        assert!(rows.iter().any(|r| !r.is_header && r.key_display == "C-x C-f"));
+        assert!(rows.iter().any(|r| !r.is_header && r.key_display == "C-x C-c"));
+        // View-local buffer keys are NOT on home (the view map is empty).
+        assert!(!rows.iter().any(|r| !r.is_header && r.key_display == "q"));
+    }
+
+    /// Anti-drift pin (06a): home's body must be GENERATED from the live
+    /// keymap × command registry — mutate the registry and the keymap in a
+    /// test and home's derived content must change. A hand-maintained
+    /// string list would not.
+    #[test]
+    fn home_rows_track_live_keymap_and_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        let before = s.home_rows();
+        // Rebind an existing global command to a new sequence: the new
+        // key row appears on home.
+        s.engine.global.bind(&[Key::alt_char('z')], "open-palette").unwrap();
+        let after_rebind = s.home_rows();
+        assert_ne!(before, after_rebind, "rebinding must change home's derived rows");
+        assert!(after_rebind.iter().any(|r| !r.is_header && r.key_display == "M-z"));
+        // Register a brand-new command + bind it: a new category appears.
+        s.registry.register(crate::app::command::Command::new(
+            "home-probe-command",
+            "probe docs",
+            "home-probe-category",
+            |_, _| {},
+        ));
+        s.engine
+            .global
+            .bind(&[Key::alt_char('y')], "home-probe-command")
+            .unwrap();
+        let after_register = s.home_rows();
+        assert_ne!(after_rebind, after_register, "registry mutation must change home");
+        assert!(after_register.iter().any(|r| r.is_header && r.label == "home-probe-category"));
+        assert!(after_register.iter().any(
+            |r| !r.is_header && r.key_display == "M-y" && r.label == "probe docs"
+        ));
+        // The `?` menu (same machinery, at the top path) tracks it too.
+        assert!(s
+            .menu_rows()
+            .iter()
+            .any(|r| r.is_header && r.label == "home-probe-category"));
+    }
+
+    /// 06a key contract on home: `?` opens the descendable menu; every
+    /// global entry point works FROM home and replaces home with the
+    /// opened view; the explicit scratch affordance still creates scratch.
+    #[test]
+    fn home_entry_points_replace_home_and_scratch_stays_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        // `?` opens the menu on home (and C-g closes it).
+        let mut s = store(dir.path());
+        s.key_event(key("?"));
+        assert!(s.menu_open());
+        s.key_event(key("C-g"));
+        assert!(!s.menu_open());
+
+        // C-x C-f landing (open_path) replaces home with the buffer view.
+        let mut s = store(dir.path());
+        s.open_path("src/main.rs");
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        assert_eq!(s.view_stack, vec![ViewId::Buffer]);
+        assert_eq!(s.view_name_display(), "src/main.rs");
+
+        // C-x g pushes magit on top of home; q returns to home.
+        let mut s = store(dir.path());
+        // A git repo so C-x g has something to show (open_magit_status
+        // reports and stays on home in a non-git dir).
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "-q", "-b", "main"])
+            .output();
+        s.key_event(key("C-x"));
+        s.key_event(key("g"));
+        assert_eq!(s.top_view(), ViewId::MagitStatus, "C-x g must open magit from home");
+        assert_eq!(s.view_stack, vec![ViewId::Home, ViewId::MagitStatus]);
+        s.key_event(key("q"));
+        assert_eq!(s.top_view(), ViewId::Home, "q on magit returns to home");
+
+        // The explicit affordance: open-scratch creates scratch on demand
+        // and replaces home.
+        let mut s = store(dir.path());
+        s.open_scratch();
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        assert_eq!(s.buffers.current(), Some(SCRATCH_NAME));
+        assert_eq!(s.view_name_display(), "*scratch*");
+    }
+
+    /// Killing the LAST buffer returns to home: empty table, no current,
+    /// and NO scratch is created by the kill (06a's "no accidental buffer
+    /// creation" audit path).
+    #[test]
+    fn kill_last_buffer_returns_to_home_without_creating_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/main.rs");
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        let key = s.buffers.current().unwrap().to_string();
+        s.kill_buffer(&key);
+        assert_eq!(s.buffers.len(), 0);
+        assert!(s.buffers.current().is_none());
+        assert!(s.buffers.get(SCRATCH_NAME).is_none(), "no scratch from the kill");
+        assert_eq!(s.top_view(), ViewId::Home);
+        assert_eq!(s.render_view(), ViewId::Home);
+        assert_eq!(s.view_name_display(), "home");
+        assert!(s.message.contains("killed"), "{:?}", s.message);
     }
 
     /// Issue 05h: `n`/`p` move the selection exactly as `C-n`/`C-p` (no
@@ -11809,13 +12111,13 @@ mod tests {
         let mut store = store(dir.path());
         store.open_path("src/main.rs");
         store.open_path("src/lib.rs");
-        store.open_path("src/main.rs"); // main.rs current; MRU: main, lib, scratch
+        store.open_path("src/main.rs"); // main.rs current; MRU: main, lib (06a)
 
         store.dispatch("list-buffers", None).unwrap();
         assert_eq!(store.top_view(), ViewId::BufferList);
         let rows = store.buffer_rows();
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src/main.rs", "src/lib.rs", "*scratch*"], "{names:?}");
+        assert_eq!(names, vec!["src/main.rs", "src/lib.rs"], "{names:?}");
         assert!(rows[0].current);
 
         // n/p move identically to C-n/C-p, with no unbound-key echo.
@@ -11837,19 +12139,25 @@ mod tests {
         assert!(!store.quit);
         let rows = store.buffer_rows();
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src/main.rs", "*scratch*"], "{names:?}");
+        assert_eq!(names, vec!["src/main.rs"], "{names:?}");
         assert!(store.message.contains("killed"), "{:?}", store.message);
-        assert_eq!(store.buffer_list_selected(), 1, "selection clamps to a valid row");
+        assert_eq!(store.buffer_list_selected(), 0, "selection clamps to a valid row");
 
-        // d on the last row clamps the selection to row 0.
+        // d on the last (current) buffer kills it: the table is empty, the
+        // selection clamps to row 0, and the list stays open (06a: no
+        // scratch is created by the kill).
         store.key_event(key("d"));
-        assert_eq!(store.buffer_rows().len(), 1);
+        assert_eq!(store.buffer_rows().len(), 0);
         assert_eq!(store.buffer_list_selected(), 0);
         assert_eq!(store.top_view(), ViewId::BufferList);
+        assert!(store.buffers.current().is_none());
+        assert!(!store.buffers.list().iter().any(|&(k, _)| k == SCRATCH_NAME));
 
-        // q still closes the list.
+        // q closes the list: the empty table normalizes the top back to
+        // home (close_view's re-normalization, 06a).
         store.key_event(key("q"));
-        assert_eq!(store.top_view(), ViewId::Buffer);
+        assert_eq!(store.top_view(), ViewId::Home);
+        assert_eq!(store.render_view(), ViewId::Home, "empty table renders home");
     }
 
     #[test]
@@ -11997,7 +12305,7 @@ mod tests {
         let mut store = store(dir.path());
         store.open_path("src/nope.rs");
         assert!(store.message.contains("cannot open src/nope.rs"));
-        assert_eq!(store.buffers.len(), 1); // still just scratch
+        assert_eq!(store.buffers.len(), 0); // 06a: the failed open creates no buffer
     }
 
     #[test]
@@ -12900,8 +13208,12 @@ mod tests {
     fn position_display_empty_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
-        let s = AppStore::at(dir.path(), base.path().to_path_buf());
-        // The scratch buffer has an empty rope: line_count()=1, scroll_top=0 → "Top".
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        // 06a: no current buffer at boot → no position display.
+        assert_eq!(s.file_view_position_display(), "");
+        // The explicit scratch buffer has an empty rope: line_count()=1,
+        // scroll_top=0 → "Top".
+        s.open_scratch();
         assert_eq!(s.file_view_position_display(), "Top");
     }
 
@@ -16572,6 +16884,7 @@ mod tests {
     fn menu_root_lists_buffer_leaves_and_prefixes() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
+        s.open_scratch(); // 06a: boot is home; the test asserts BUFFER-view leaves
         s.open_menu();
         let entries = s.menu_entries();
         // A single-key leaf: j → scroll-line-down (Buffer view).
@@ -17652,7 +17965,8 @@ mod tests {
     #[test]
     fn set_mark_keybinding_resolves() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
+        let mut store = store(dir.path());
+        store.open_scratch(); // 06a: boot is home; set-mark lives in the buffer view
         use crate::app::keymap::{Lookup, parse_sequence};
         // C-SPC resolves to set-mark. The terminal delivers C-SPC as
         // Char(' ') + CONTROL (NUL byte decoded by crossterm/iocraft).

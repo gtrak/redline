@@ -128,6 +128,7 @@ impl Component for PickerCanvas {
         if h > 2 {
             let count = format!("{} of {}", self.candidates.len(), self.total);
             let x = (w as i32).saturating_sub(count.len() as i32 + 1) as isize;
+            eprintln!("DEBUG-PICKER layout={:?} count={}", layout, count);
             canvas.set_text(x, h as isize - 1, &count, text_style(t.minibuffer.foreground, false, false));
         }
     }

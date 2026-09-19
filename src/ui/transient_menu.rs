@@ -160,7 +160,7 @@ fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextS
 /// (CJK) chars are 2 cells and the ellipsis reserves exactly one cell, so
 /// the result never exceeds `max` cells. `max == 0` yields an empty string;
 /// `max == 1` yields just `…`.
-fn truncate_ellipsis(s: &str, max: usize) -> String {
+pub(crate) fn truncate_ellipsis(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }

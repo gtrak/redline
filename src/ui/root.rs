@@ -13,6 +13,7 @@ use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewRow, PickerCan
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::file_view::FileView;
+use crate::ui::home_view::HomeView;
 use crate::ui::blame_view::BlameView;
 use crate::ui::commit_editor::CommitEditorView;
 use crate::ui::log_view::LogView;
@@ -94,6 +95,9 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
 fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
     let cell = |i: usize| (0u16, 1 + i as u16);
     let pos = match snap.view {
+        // 06a: home has no selectable row — the cursor stays where the
+        // frame park put it (the status line).
+        ViewId::Home => None,
         ViewId::BufferList => Some(cell(
             snap.buffer_list_selected.min(snap.buffer_rows.len().saturating_sub(1)),
         )),
@@ -205,6 +209,8 @@ struct Snapshot {
     pending: String,
     activity: String,
     message: String,
+    home_title: String,
+    home_rows: Vec<TransientMenuRow>,
     buffer_rows: Vec<BufferRow>,
     buffer_list_selected: usize,
     picker: bool,
@@ -311,6 +317,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // forcing an 80-wide root there would clip/garble the layout — leave the
     // width unset there (content-sized) so the static tests keep working.
     let (tw_raw, term_h_raw) = hooks.use_terminal_size();
+    eprintln!("DEBUG-ROOT tw_raw={} term_h_raw={}", tw_raw, term_h_raw);
     use iocraft::Size;
     let term_w: Size = if tw_raw > 0 {
         Size::Length(tw_raw as u32)
@@ -535,11 +542,13 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Snapshot {
             quit: s.quit,
             project: s.project_display().to_string(),
-            view: s.top_view(),
+            view: s.render_view(),
             view_name: s.view_name_display(),
             pending: s.pending_display(),
             activity: s.activity_display(),
             message: s.message.clone(),
+            home_title: s.home_title(),
+            home_rows: s.home_body_rows(),
             buffer_rows: s.buffer_rows(),
             buffer_list_selected: s.buffer_list_selected(),
             picker: s.picker_open(),
@@ -646,6 +655,14 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let main_view: Option<AnyElement<'static>> = match snap.view {
+        ViewId::Home => Some(element! {
+            HomeView(
+                title: snap.home_title.clone(),
+                rows: snap.home_rows.clone(),
+                help: "C-x C-c quit · ? menu".to_string(),
+            )
+        }
+        .into()),
         ViewId::Buffer => Some(element! {
             FileView(
                 title: snap.file_view_title.clone(),
@@ -931,6 +948,16 @@ mod tests {
         app.to_string()
     }
 
+    /// Static-render mirror of the PTY matrix terminal (80x24): the resize
+    /// handler sets `viewport_lines = height - 3 = 21`, so the static
+    /// fixture stores match it (the home body is bounded to this viewport,
+    /// exactly as live 24-row terminals are).
+    fn pty_store(dir: &std::path::Path) -> AppStore {
+        let mut s = store(dir);
+        s.set_viewport_lines(21);
+        s
+    }
+
     fn project_with_files(dir: &std::path::Path) {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
@@ -938,15 +965,18 @@ mod tests {
         std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
     }
 
-    /// The initial frame shows the buffer view (scratch), the status line
-    /// (project name + view name), and the ready-state minibuffer.
+    /// The initial frame shows the HOME view (plan 004 issue 06a: the
+    /// buffer table starts empty — no auto-created scratch), the status
+    /// line (project name + view name), and the ready-state minibuffer.
     #[test]
-    fn root_initial_frame_renders_buffer() {
+    fn root_initial_frame_renders_home() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
+        let store = pty_store(dir.path());
         let s = render_frame(store);
-        assert!(s.contains("*scratch*"), "{s:?}");
+        assert!(s.contains("redline"), "home header missing: {s:?}");
+        assert!(s.contains("C-x C-c quit"), "home help line missing: {s:?}");
         assert!(s.contains("ready"), "{s:?}");
+        assert!(!s.contains("*scratch*"), "no auto-created scratch at boot: {s:?}");
     }
 
     /// The status line shows the detected project name (not the old
@@ -956,7 +986,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         project_with_files(dir.path());
         let name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
-        let s = render_frame(store(dir.path()));
+        let s = render_frame(pty_store(dir.path()));
         assert!(s.contains(&format!("* {name} *")), "project name missing:\n{s}");
     }
 
@@ -1021,7 +1051,7 @@ mod tests {
     #[test]
     fn root_palette_renders_prompt_query_and_count() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = store(dir.path());
+        let mut store = pty_store(dir.path());
         store.key_event(crate::app::keymap::Key::alt_char('x'));
         store.key_event(crate::app::keymap::Key::char('q'));
         store.key_event(crate::app::keymap::Key::char('u'));
@@ -1039,7 +1069,7 @@ mod tests {
     fn root_find_file_renders_preview() {
         let dir = tempfile::tempdir().unwrap();
         project_with_files(dir.path());
-        let mut store = store(dir.path());
+        let mut store = pty_store(dir.path());
         store.open_find_file();
         // Select src/main.rs so its contents preview.
         store.key_event(crate::app::keymap::Key::char('m'));
@@ -1061,7 +1091,8 @@ mod tests {
         let s = render_frame(store);
         assert!(s.contains("*list-buffers*"), "view title missing:\n{s}");
         assert!(s.contains("*src/main.rs"), "current buffer row missing:\n{s}");
-        assert!(s.contains(" *scratch*"), "scratch row missing:\n{s}");
+        // 06a: no scratch row exists (the table never auto-created one).
+        assert!(!s.contains("*scratch*"), "no scratch row: \n{s}");
         assert!(s.contains("*  *list-buffers*"), "status line view name missing:\n{s}");
     }
 
@@ -1069,7 +1100,7 @@ mod tests {
     #[test]
     fn root_unknown_key_echoes_in_minibuffer() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = store(dir.path());
+        let mut store = pty_store(dir.path());
         store.key_event(crate::app::keymap::Key::char('z'));
         let s = render_frame(store);
         assert!(s.contains("unbound key: z"), "{s}");
@@ -1147,10 +1178,10 @@ mod tests {
     fn tick_bump_causes_render_to_read_fresh_state() {
         let dir = tempfile::tempdir().unwrap();
         project_with_files(dir.path());
-        // Initial state: scratch buffer, ready message.
-        let store1 = store(dir.path());
+        // Initial state: home view (06a: no auto-created scratch), ready message.
+        let store1 = pty_store(dir.path());
         let s1 = render_frame(store1);
-        assert!(s1.contains("*scratch*"), "initial frame should show scratch:\n{s1}");
+        assert!(s1.contains("redline"), "initial frame should show home:\n{s1}");
 
         // Mutate: open a file (simulates what C-x C-f + RET would do).
         let mut store2 = store(dir.path());
@@ -1233,6 +1264,8 @@ mod tests {
             resolving: String::new(),
             crate_indexing: String::new(),
             message: String::new(),
+            home_title: String::new(),
+            home_rows: Vec::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
             picker: false,
@@ -1372,6 +1405,8 @@ mod tests {
             resolving: String::new(),
             crate_indexing: String::new(),
             message: String::new(),
+            home_title: String::new(),
+            home_rows: Vec::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
             picker: false,
@@ -1486,6 +1521,8 @@ mod tests {
             resolving: String::new(),
             crate_indexing: String::new(),
             message: String::new(),
+            home_title: String::new(),
+            home_rows: Vec::new(),
             buffer_rows: Vec::new(),
             buffer_list_selected: 0,
             picker: false,

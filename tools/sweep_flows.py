@@ -128,10 +128,22 @@ def wait_for(app, pred, timeout=4.0):
 
 
 def flow_a1(app):
-    """U-A1 Cold start: *scratch* frame + status line + ready."""
+    """U-A1 Cold start (06a): HOME frame — project + "redline" header, the
+    derived command groups, the standard help line — + status line + ready.
+    `*scratch*` no longer exists at boot."""
     t = text(app)
-    ok = "*scratch*" in row0(app) and "ready" in t and "* redline_pyte_repo *  *scratch*" in t
-    record("U-A1", "(launch)", ok, f"title={row0(app)!r}, status present={'* redline_pyte_repo' in t}")
+    once = lambda tok: sum(1 for r in range(app.rows) if tok in app.row_text(r)) == 1
+    header = "redline" in row0(app) and "redline_pyte_repo" in row0(app)
+    groups = ("[buffers]" in t and "[files]" in t and "[git]" in t
+              and once("[buffers]") and once("[git]") and once("C-x g")
+              and "C-x C-f" in t and "C-x C-c" in t)
+    help_line = "C-x C-c quit" in t and "? menu" in t
+    ok = (header and groups and help_line and "ready" in t
+          and "* redline_pyte_repo *  home" in t and "*scratch*" not in t)
+    record("U-A1", "(launch)", ok,
+           f"header={header} groups={groups} help={help_line} "
+           f"home-status={'* redline_pyte_repo *  home' in t} "
+           f"no-scratch={'*scratch*' not in t} (row0={row0(app)!r})")
 
 
 def flow_b1(app):
@@ -190,11 +202,23 @@ def flow_b3(app):
 
 
 def flow_b4(app):
-    """U-B4 C-x C-b buffer list: *list-buffers*, *scratch* present."""
+    """U-B4 (06a) C-x C-b buffer list: `*list-buffers*` opens; at boot the
+    table is EMPTY (no scratch auto-creation), so the list shows no rows.
+    Opening a file first yields exactly that one buffer row."""
+    app.key("C-x C-f")
+    app.wait(0.8)
+    for ch in "main":
+        app.key(ch, settle=0.2)
+    app.key("RET")
+    app.wait(0.8)
     app.key("C-x C-b")
     app.wait(0.8)
-    ok = "*list-buffers*" in text(app) and "*scratch*" in text(app)
-    record("U-B4", "C-x C-b", ok, f"list-buffers={'*list-buffers*' in text(app)} scratch-row={'*scratch*' in text(app)}")
+    rows = _buffer_row_count(app)
+    list_open = "*list-buffers*" in text(app)
+    ok = list_open and rows == 1 and "*scratch*" not in text(app)
+    record("U-B4", "C-x C-f,main,RET; C-x C-b", ok,
+           f"list-buffers={list_open} rows={rows} (06a: no scratch row) "
+           f"scratch-absent={'*scratch*' not in text(app)}")
     app.key("q")
     app.wait(0.6)
 
@@ -360,10 +384,10 @@ def flow_h2(app):
     # Positive gate (loop-02): the cancel echo + back-in-buffer prove the
     # close actually rendered before the "Find file: gone" absence check.
     closed = wait_for(app, lambda: "cancel" in app.row_text(app.rows - 2)
-                       and "*scratch*" in row0(app), 4.0)
+                       and "redline" in row0(app), 4.0)
     picker_gone = "Find file:" not in text(app)
     echo = "cancel" in app.row_text(app.rows - 2)
-    back = "*scratch*" in row0(app)
+    back = "redline" in row0(app)
     record("U-H2 picker", "C-x C-f,C-g", closed and picker_open and picker_gone and echo and back,
            f"picker-opened={picker_open} closed-by-C-g={picker_gone} "
            f"cancel-echo={echo} back-to-buffer={back}")
@@ -395,7 +419,7 @@ def flow_h2(app):
                       and "I-search" not in app.row_text(app.rows - 2), 4.0)
     isearch_off = "I-search" not in app.row_text(app.rows - 2)
     echo3 = "cancel" in app.row_text(app.rows - 2)
-    view_kept = "*scratch*" in row0(app)
+    view_kept = "redline" in row0(app)
     record("U-H2 isearch", "C-s,C-g", exited and isearch_on and isearch_off and echo3 and view_kept,
            f"isearch-armed={isearch_on} exited-by-C-g={isearch_off} "
            f"cancel-echo={echo3} view-kept={view_kept}")
@@ -753,12 +777,22 @@ def flow_h3(app):
 
 
 def flow_qquit(app):
-    """Finding 5 (plan 001): bare `q` on the root buffer view must NOT quit."""
+    """06a: bare `q` on the home view is UNBOUND (no buffer to close) — an
+    "unbound key" echo, the app stays alive and the home frame is unchanged.
+    (Pre-06a this leg drove q on the root scratch buffer: a no-op
+    close-view. Home replaces that root state.)"""
+    before = [app.row_text(r) for r in range(app.rows)]
     app.key("q")
     app.wait(0.6)
-    alive = "scratch" in text(app) or "ready" in text(app)
-    ok = alive
-    record("q-quit", "q (root buffer)", ok, f"still-alive-after-bare-q={alive} (title={row0(app)!r})")
+    after = [app.row_text(r) for r in range(app.rows)]
+    # The content frame is unchanged; only the minibuffer echoes the echo.
+    content_same = before[:-2] == after[:-2]
+    echo = "unbound key: q" in app.row_text(app.rows - 2)
+    alive = "redline" in app.row_text(0)
+    ok = content_same and echo and alive
+    record("q-quit", "q (home view)", ok,
+           f"home-frame-unchanged={content_same} unbound-echo={echo} "
+           f"still-alive-after-bare-q={alive} (title={row0(app)!r})")
 
 
 def flow_notes(app):
@@ -806,12 +840,16 @@ def flow_j3(app):
     at 80x24 (ROWS, COLS) with per-flow frame/status assertions; this is the
     dedicated no-wrap check on top of that."""
     proj = "redline_pyte_repo"
-    buf_rows = rows_containing(app, proj)  # buffer view (scratch)
-    buf_ok = buf_rows == [app.rows - 1]
+    # 06a: on the home view the project name also appears in the header
+    # (row 0) — the no-wrap discriminator is the STATUS LINE being the only
+    # row carrying it in the status-line region, i.e. no spill onto the
+    # minibuffer row (rows-2).
+    buf_rows = rows_containing(app, proj)  # home header + status line
+    buf_ok = app.rows - 1 in buf_rows
     app.key("C-x g")
     app.wait(1.0)
     mag_rows = rows_containing(app, proj)  # magit status view
-    mag_ok = mag_rows == [app.rows - 1]
+    mag_ok = app.rows - 1 in mag_rows
     no_spill = proj not in app.row_text(app.rows - 2)
     ok = buf_ok and mag_ok and no_spill
     record("U-J3", "(80x24 buffer+magit)", ok,
@@ -1325,7 +1363,7 @@ def flow_buffer_list_np():
     and `q` still closes. Drives its own App."""
     app = App(REPO, rows=ROWS, cols=COLS)
     try:
-        # Two real buffers + *scratch* = 3 rows (MRU: lib current, main, scratch).
+        # Two real buffers = 2 rows (06a: MRU lib current, main; no scratch).
         app.key("C-x C-f")
         app.wait(0.8)
         for ch in "main":
@@ -1383,7 +1421,7 @@ def flow_buffer_list_np():
         app.wait(0.6)
         q_closed = "*list-buffers*" not in text(app)
 
-        ok = (list_open and footer_ok and count_before == 3
+        ok = (list_open and footer_ok and count_before == 2
               and n_moved and n_no_echo and p_back and p_no_echo
               and list_still_open and d_dropped and d_clamped and no_kill_echo
               and q_closed)

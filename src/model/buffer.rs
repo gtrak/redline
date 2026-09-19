@@ -184,21 +184,17 @@ pub struct BufferTable {
 }
 
 impl BufferTable {
-    /// A table holding only a fresh `*scratch*` buffer (current, editable).
+    /// An EMPTY table (plan 004 issue 06a): boot starts on the home view,
+    /// so no buffer exists yet and `current` is `None`. `*scratch*` is no
+    /// longer auto-created — the explicit `open-scratch` command (M-o /
+    /// C-x o / M-x) still inserts it on demand, and `SCRATCH_NAME` +
+    /// `insert_rope(None, …)` stay available for that.
     pub fn new() -> Self {
-        let mut t = Self {
+        Self {
             by_key: HashMap::new(),
             order: Vec::new(),
             current: None,
-        };
-        let key = t.insert_rope(
-            None,
-            Rope::new(),
-            SystemTime::UNIX_EPOCH,
-            true,
-        );
-        t.current = Some(key);
-        t
+        }
     }
 
     /// The key of a buffer: the scratch sentinel or its absolute path.
@@ -325,10 +321,22 @@ mod tests {
     }
 
     #[test]
-    fn new_table_has_current_scratch() {
+    fn new_table_starts_empty() {
+        // 06a: boot is the home view — no auto-created scratch, no current.
         let t = BufferTable::new();
-        assert_eq!(t.len(), 1);
-        assert_eq!(t.current(), Some(SCRATCH_NAME));
+        assert_eq!(t.len(), 0);
+        assert_eq!(t.current(), None);
+        assert!(t.current_buffer().is_none());
+    }
+
+    #[test]
+    fn insert_scratch_explicitly_still_works() {
+        // 06a affordance: the open-scratch path (insert with path None)
+        // still yields the *scratch* key, editable.
+        let mut t = BufferTable::new();
+        let k = t.insert(None, String::new());
+        assert_eq!(k, SCRATCH_NAME.to_string());
+        t.set_current(&k);
         let buf = t.current_buffer().unwrap();
         assert!(buf.path.is_none());
         assert!(buf.editable);
@@ -351,12 +359,12 @@ mod tests {
         let a = t.insert(key("/p/a.rs"), "a".into());
         let b = t.insert(key("/p/b.rs"), "b".into());
         let order: Vec<&str> = t.list().iter().map(|(k, _)| *k).collect();
-        assert_eq!(order, vec![b.as_str(), a.as_str(), SCRATCH_NAME]);
+        assert_eq!(order, vec![b.as_str(), a.as_str()]); // 06a: no scratch row
 
         t.set_current(&a);
         assert_eq!(t.current(), Some(a.as_str()));
         let order: Vec<&str> = t.list().iter().map(|(k, _)| *k).collect();
-        assert_eq!(order, vec![a.as_str(), b.as_str(), SCRATCH_NAME]);
+        assert_eq!(order, vec![a.as_str(), b.as_str()]); // 06a: no scratch row
     }
 
     #[test]
@@ -367,9 +375,9 @@ mod tests {
         assert!(t.kill(&a));
         assert!(t.get(&a).is_none());
         assert_eq!(t.current(), None);
-        assert_eq!(t.len(), 1);
+        assert_eq!(t.len(), 0, "06a: killing the only buffer leaves an empty table");
         assert!(!t.kill("/p/nope.rs"));
-        assert_eq!(t.len(), 1);
+        assert_eq!(t.len(), 0);
     }
 
     #[test]
@@ -387,7 +395,7 @@ mod tests {
         let mut t = BufferTable::new();
         let k = t.insert(key("/p/a.rs"), "old".into());
         t.insert(key("/p/a.rs"), "new".into());
-        assert_eq!(t.len(), 2, "scratch + one buffer");
+        assert_eq!(t.len(), 1, "06a: exactly the one inserted buffer");
         assert_eq!(t.get(&k).unwrap().line_text(0).as_deref(), Some("new"));
     }
 
@@ -397,7 +405,7 @@ mod tests {
         let a = t.insert(key("/p1/src/main.rs"), "one".into());
         let b = t.insert(key("/p2/src/main.rs"), "two".into());
         assert_ne!(a, b);
-        assert_eq!(t.len(), 3);
+        assert_eq!(t.len(), 2, "06a: two buffers, no scratch");
     }
 
     #[test]
@@ -542,7 +550,9 @@ mod tests {
         assert!(!t.get(&k).unwrap().is_locally_owned());
 
         // Scratch (no path) is locally owned regardless of the flag.
-        let scratch = t.get(SCRATCH_NAME).unwrap();
+        // 06a: scratch no longer exists at boot — insert it explicitly.
+        let scratch_key = t.insert(None, String::new());
+        let scratch = t.get(&scratch_key).unwrap();
         assert!(scratch.is_locally_owned());
     }
 
