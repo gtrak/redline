@@ -54,3 +54,8 @@ lands in the sibling file.
   golden must change for any reason, STOP and report), `docs/provider-
   matrix.md` (js relative row). NO provider changes, no other languages.
 - A parallel lane owns `src/app/flow_tests.rs` (loop-04) — do not edit it.
+
+## Post-merge follow-up (review P2s, queued)
+
+- P2-1: one probe line in `resolver_scope_js_relative_import_carries_sibling_path` pinning the `{ default as D }` → `["./m"]` entry-only emission (the one shape that deliberately drops the member).
+- P2-2: corpus hygiene note — `relative-import-whole-bail` anchors at the dotted call site (legacy.legacyPad), the bare `legacy` symbol has no live bare use (pre-existing fix-jsrel artifact).
