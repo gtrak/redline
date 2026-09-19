@@ -68,6 +68,27 @@ activate the already-unit-tested provider dotted paths.
 suites per `tools/gate.sh full`; every "works (live)" matrix cell cites a
 gate-battery leg; no cell mislabeled in either direction (reviewer-audited).
 
+## Post-archive completion (011-06/07/08 — the carry-forwards, in flight)
+
+- **07** PASS (`f13ece6`, merged `766ac9d`): walk sets for C (`c/h` — headers
+  are definition sources), C++ (all six map keys), Markdown (`md/markdown/
+  mdx` — atx only, the setext branch is dormant, pinned honestly);
+  JSON/TOML/YAML/Bash stay empty (011-04 judgment carried, canary pinned).
+  No C/C++/MD provider landing is app-reachable, so no PTY leg (reasoned
+  deviation). Review PASS, 2 doc P2s fixed.
+- **08 rust lane** PASS (`372f6a0`+fixes, merged `2049350`): 17-probe golden
+  corpus, all live via real cargo metadata, 5 byte-exact bail goldens;
+  observation pinned: path-shaped deep chains keep the second-segment rule
+  (follow-up decision).
+- **08 js lane** (in review): 18 probes; FOUND 3 REAL PROVIDER BUGS, pinned
+  as goldens (relative specifiers collapse to base package `.` with
+  empty-backtick messages; node_modules dir probed as a package; side-effect
+  imports mis-split) — fixes get their own issues; corpus observes.
+- **06** (in flight): language-aware symbol_at_point — legacy bail pins in
+  011-01/011-05 drives superseded (sanctioned fence amendment, worker
+  updating legs in place with the dispatch guarantee preserved).
+- Go corpus lane queued.
+
 ## Carry-forwards
 
 - Per-language path-token extraction at M-. (activates provider dotted
