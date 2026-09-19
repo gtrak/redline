@@ -1,0 +1,8 @@
+# 010 — NO-HINT bail, byte-for-byte: a bare symbol the app has no import
+# hint for. (The python provider never fabricates a module path.)
+symbol=spin
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=bare symbol `spin` has no module path; resolving it to a module needs scope info (tree-sitter) not yet provided by the app

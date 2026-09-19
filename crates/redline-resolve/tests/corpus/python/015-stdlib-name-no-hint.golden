@@ -1,0 +1,9 @@
+# 015 — stdlib names are NOT guessed: a bare stdlib function name (`join`)
+# with no hint still bails — the app never fabricates a module path for
+# prelude/stdlib names (pins the no-hint degradation for the stdlib case).
+symbol=join
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=bare symbol `join` has no module path; resolving it to a module needs scope info (tree-sitter) not yet provided by the app

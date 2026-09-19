@@ -1,0 +1,12 @@
+# 013 — dotted from-entry (`from gears import engine`, use site
+# `engine.torque` in main.py): the PATH-SHAPED symbol wins over any hint
+# (the python provider does not apply the 011-02 alias rewrite), so the
+# provider looks for a TOP-LEVEL module `engine` — which does not exist.
+# Offline mode (no network in the gate) refuses the fetch-on-demand and
+# bails byte-for-byte.
+symbol=engine.torque
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=module `engine` not found and offline mode refuses to pip install

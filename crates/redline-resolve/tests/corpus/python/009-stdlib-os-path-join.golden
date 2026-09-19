@@ -1,0 +1,14 @@
+# 009 — DOTTED stdlib chain whose intermediate module is FROZEN in
+# CPython 3.11+ (`os.path`: find_spec origin is 'frozen', so the provider
+# falls back to importing it and reading __file__ → posixpath.py on
+# POSIX; ntpath.py on Windows). Pinned live on python 3.14.4, Linux.
+symbol=os.path.join
+from_file=gears/render.py
+scope=[]
+root=project
+kind=resolved
+external=true
+path_base=stdlib
+file=posixpath.py
+source_root=.
+line=72

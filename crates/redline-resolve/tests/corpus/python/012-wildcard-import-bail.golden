@@ -1,0 +1,9 @@
+# 012 — wildcard import (`from gears import *` in main.py): the origin of a
+# star-imported name is opaque to the app, so `render` (defined in
+# gears/render.py) carries no scope hint and bails — the honest degradation.
+symbol=render
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=bare symbol `render` has no module path; resolving it to a module needs scope info (tree-sitter) not yet provided by the app

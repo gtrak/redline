@@ -1,0 +1,9 @@
+# 011 — plain `import gears.engine` NEVER hints a bare `engine`: the plain
+# import only exposes the dotted name, so a bare `engine` symbol carries no
+# scope hint and bails exactly like probe 010 (same message, this symbol).
+symbol=engine
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=bare symbol `engine` has no module path; resolving it to a module needs scope info (tree-sitter) not yet provided by the app

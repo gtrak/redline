@@ -1,0 +1,9 @@
+# 014 — module located (LIVE find_spec leg) but the item is not defined in
+# it: the content scan finds no def-shape line. The file path in the bail
+# is dynamic → {root} placeholder (corpus-project CWD).
+symbol=gears.engine.never_defined
+from_file=main.py
+scope=[]
+root=project
+kind=bail
+bail=item `never_defined` not found in module `gears.engine` (file: {root}/gears/engine.py)

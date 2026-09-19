@@ -1,0 +1,12 @@
+# 007 — ALIASED import (`from gears.engine import spin as rotate` in main.py):
+# the bare use site `rotate` carries the ORIGINAL import path as its scope
+# hint, so it lands on `spin` in engine.py (same file/line as probe 003's twin).
+symbol=rotate
+from_file=main.py
+scope=["gears","engine","spin"]
+root=project
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=6

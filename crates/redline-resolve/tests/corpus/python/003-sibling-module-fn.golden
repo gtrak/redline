@@ -1,0 +1,10 @@
+# 003 — function in a SIBLING module of the package (gears/engine.py).
+symbol=gears.engine.spin
+from_file=main.py
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=6

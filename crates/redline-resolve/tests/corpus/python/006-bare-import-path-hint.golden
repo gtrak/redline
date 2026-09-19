@@ -1,0 +1,12 @@
+# 006 — BARE symbol + app scope hint (the import declaration's full path,
+# item included — `gears.engine.torque`), normalized to the dotted form and
+# resolved through the SAME find_spec machinery as probe 003's twin.
+symbol=torque
+from_file=main.py
+scope=["gears","engine","torque"]
+root=project
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=11

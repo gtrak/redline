@@ -1,0 +1,11 @@
+# 005 — module-level constant (pins the `ITEM = value` def-shape,
+# distinct from def/class shapes).
+symbol=gears.engine.MAX_TORQUE
+from_file=main.py
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/gears/engine.py
+source_root=project
+line=3
