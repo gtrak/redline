@@ -23,7 +23,7 @@ bless never end green. Review `git diff` before committing a re-bless.
 ## Corpus layout
 
 ```
-project/                # probe root (`root=project` in every golden)
+project/                # probe root (`root=project` in every flat-layout golden)
   pyproject.toml        # project marker (not read by the provider)
   main.py               # the real USE SITES every probe references:
                         #   import gears.engine        (plain import)
@@ -34,7 +34,15 @@ project/                # probe root (`root=project` in every golden)
     __init__.py         # hello() :9, Gearbox :14 (re-exports + own items)
     engine.py           # MAX_TORQUE :3, spin :6, torque :11, Motor :18
     render.py           # stdlib use sites: json.dumps, os.path.join
+project_src/            # probe root (`root=project_src`, probe 016): the
+  pyproject.toml        #   SAME project in PEP 621 src/ layout — the package
+  src/                  #   lives under src/, so the CWD-based find_spec misses
+                        #   and the provider's src/-layout discovery re-probes
+                        #   with src/ on sys.path
 ```
+
+(The `project_src/src/` tree is a byte copy of `project/`'s `main.py` +
+`gears/` — same use sites, same line numbers.)
 
 ## Golden format
 
@@ -99,11 +107,19 @@ and line numbers are pinned.
    (`project/gears/engine.py:11`, the `torque` def), and the
    identity/mismatched/unhinted no-op cases stay pinned by the provider
    unit tests.
-2. **Workspace resolution is CWD-based**: the package must be importable
-   as a top-level name from the workspace root (flat layout). A `src/`
-   layout (`src/gears/`) would fail `find_spec` in the same offline-bail
-   shape — not probed here (would need the same follow-up decision),
-   noted for honesty.
+2. **Workspace resolution is CWD-based for the flat layout** — FIXED in
+   `c0ff45c3740d` (src/-layout discovery, plan 011 follow-up): the CWD
+   probe still needs the package importable as a top-level name from the
+   workspace root, and a `src/`-layout package (`src/gears/`) failed
+   `find_spec` in the offline-bail shape. The fix walks up from
+   `from_file`'s directory (bounded by the workspace root) for a
+   `pyproject.toml` (PEP 621); if the project carries a `src/` dir, the
+   provider re-probes `find_spec` with that dir on `sys.path` — the
+   sys.path entry is derived from a FOUND file on disk, not a guess (no
+   pyproject / no `src/` dir leaves the bail byte-for-byte untouched,
+   pinned by the provider unit tests). Probe 016 flipped from the
+   offline-refusal bail to the RESOLVED landing
+   (`project_src/src/gears/engine.py:6`).
 
 ## Determinism notes (011-08 review P2-2)
 
