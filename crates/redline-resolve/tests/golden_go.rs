@@ -455,7 +455,7 @@ fn go_manifest_and_goldens_consistent() {
     assert!(resolved > 0 && bails > 0, "corpus must pin both outcome shapes");
 
     // The modcache layout is exactly what the resolved probes assume —
-    // and the redis dir stays ABSENT (adding it flips probe 15 from the
+    // and the sessionstore dir stays ABSENT (adding it flips probe 15 from the
     // offline refusal to a landing: a deliberate golden diff, not a
     // silent one).
     let cache = corpus.join("modcache");

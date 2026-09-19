@@ -1,3 +1,3 @@
-module github.com/myorg/mylib
+module github.com/MyOrg/mylib
 
 go 1.20
