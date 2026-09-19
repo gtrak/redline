@@ -330,16 +330,54 @@ fn golden_path(probe: &Probe) -> PathBuf {
 }
 
 /// Compare (or, under `GOLDEN_BLESS=1`, write) one probe's golden.
+/// 011-08 js review P2-1: bless-mode bookkeeping — every test asserts at
+/// its end that a bless run STOPS (writes all goldens, then fails once),
+/// so an accidental GOLDEN_BLESS can never end green.
+static BLESSED_RUN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BLESSED_CHANGED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// End-of-test gate: a bless run writes EVERY golden first, then fails
+// exactly once per test (never per file — a per-file panic would abort
+// the loop and leave later goldens unwritten).
+fn assert_bless_stopped(test_name: &str) {
+    if !BLESSED_RUN.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let changed = BLESSED_CHANGED.load(std::sync::atomic::Ordering::SeqCst);
+    panic!(
+        "GOLDEN_BLESS run of {test_name} rewrote {changed} golden(s) — run          the suite again WITHOUT GOLDEN_BLESS to verify the new goldens pass"
+    );
+}
+
 fn check_golden(probe: &Probe, outcome: &Outcome, failures: &mut Vec<String>) {
     let rendered = render_golden(probe, outcome);
     let path = golden_path(probe);
     if std::env::var_os("GOLDEN_BLESS").is_some() {
+        // 011-08 js review P2-1: an accidentally-set GOLDEN_BLESS would
+        // otherwise make the whole suite green while REWRITING the
+        // goldens (a regression silently re-blessed). Make it impossible
+        // to miss: write to stderr, and fail when the new content
+        // actually DIFFERS from the checked-in golden (a no-op re-bless
+        // is the only silent case — re-review `git diff` before commit).
+        let changed = std::fs::read(&path)
+            .map(|old| old != rendered.as_bytes())
+            .unwrap_or(true);
         std::fs::create_dir_all(GOLDEN_DIR)
             .unwrap_or_else(|e| panic!("cannot create golden dir: {e}"));
         std::fs::write(&path, &rendered)
             .unwrap_or_else(|e| panic!("cannot bless {}: {e}", path.display()));
-        println!("blessed {}", path.display());
-        return;
+        eprintln!(
+            "GOLDEN_BLESS: {} {} — review `git diff` before committing; \
+             this run FAILS so the bless cannot slip through green",
+            if changed { "REWROTE" } else { "no change to" },
+            path.display()
+        );
+        if changed {
+            BLESSED_CHANGED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        BLESSED_RUN.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
@@ -401,6 +439,7 @@ fn golden_deterministic_probes() {
     assert!(!det.is_empty(), "no deterministic probes");
     let mut failures = Vec::new();
     run_probes(&det, &mut failures);
+    assert_bless_stopped("golden_deterministic_probes");
     assert!(
         failures.is_empty(),
         "{} deterministic probe(s) off their goldens:\n\n{}",
@@ -437,6 +476,7 @@ fn golden_live_probes() {
         check_golden(probe, &outcome, &mut failures);
         println!("probe `{}`: {}", probe.id, summarize(&outcome));
     }
+    assert_bless_stopped("golden_live_probes");
     assert!(
         failures.is_empty(),
         "{} live probe(s) off their goldens:\n\n{}",

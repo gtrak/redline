@@ -126,7 +126,7 @@ symbol = "legacy"
 scope = ["./legacy-util"]
 ws = "corpus"
 mode = "deterministic"
-note = "relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal)."
+note = "relative specifier (whole-module binding): the provider has no workspace-local path — the leading dot of `./legacy-util` leaves base package `.`; degradation pinned (offline refusal) — finding, not fixed in 011-08; candidate for a dedicated relative/absolute-specifier degradation."
 
 [[probe]]
 id = "relative-member-bail"
@@ -146,7 +146,7 @@ symbol = "legacyJoin"
 scope = ["/abs/legacy-util", "legacyJoin"]
 ws = "corpus"
 mode = "deterministic"
-note = "absolute path specifier: no first segment -> empty base package, same offline refusal."
+note = "absolute path specifier: no first segment -> empty base package, same offline refusal. Finding, not fixed in 011-08 — same candidate class."
 
 [[probe]]
 id = "side-effect-bail"
@@ -157,7 +157,7 @@ scope = []
 language = "javascript"
 ws = "corpus"
 mode = "deterministic"
-note = "side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned."
+note = "side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned, finding not fixed in 011-08."
 
 [[probe]]
 id = "no-package-json-bail"

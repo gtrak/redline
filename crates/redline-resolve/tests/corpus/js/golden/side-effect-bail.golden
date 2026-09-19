@@ -1,6 +1,6 @@
 # golden for probe `side-effect-bail`  (011-08 js lane)
 # anchor: src/utils.mjs:8   symbol: `styles.css`   scope: []   mode: deterministic
-# note: side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned.
+# note: side-effect import (`import './styles.css'`): the file-ish name the app can produce mis-splits on its dot into package `styles` — degradation pinned, finding not fixed in 011-08.
 kind: bail
 message: |
   package `styles` is not in node_modules and offline mode refuses to install it
