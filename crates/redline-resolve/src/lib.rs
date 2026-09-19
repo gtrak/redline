@@ -63,7 +63,7 @@ pub(crate) fn run_with_timeout(mut cmd: Command, timeout: Duration) -> anyhow::R
                         Err(e) => {
                             return Err(anyhow::anyhow!(
                                 "command timed out after {timeout:?} and reap failed: {e}"
-                            ))
+                            ));
                         }
                     }
                 }
@@ -136,6 +136,13 @@ pub struct SymbolContext {
     /// parse) — a provider MUST then degrade to its exact no-hint
     /// behavior (the byte-for-byte degradation contract).
     pub scope: Vec<String>,
+    /// The buffer's language (lowercase, e.g. `"python"` — matching the
+    /// providers' [`ToolingProvider::languages`] strings), or `None` when
+    /// the app does not know it. `None` preserves the pre-dispatch
+    /// behavior: every provider is tried in chain order. When set, only
+    /// providers whose `languages()` contains it are attempted (the
+    /// others are not probed and leave no trace entry).
+    pub language: Option<String>,
 }
 
 /// A bare symbol with a non-empty scope hint → the hint IS the full path
@@ -196,6 +203,16 @@ pub struct Resolver {
     providers: Vec<Box<dyn ToolingProvider>>,
 }
 
+/// The language-dispatch rule: an unset context language tries every
+/// provider (the pre-dispatch behavior); a set one is only handled by
+/// providers whose `languages()` contains it (lowercase string match).
+fn provider_handles_language(p: &dyn ToolingProvider, language: Option<&str>) -> bool {
+    match language {
+        Some(lang) => p.languages().contains(&lang),
+        None => true,
+    }
+}
+
 impl Resolver {
     /// An empty chain (no providers).
     pub fn new() -> Self {
@@ -235,9 +252,26 @@ impl Resolver {
     }
 
     /// As [`Resolver::resolve`], but also returns the attempt trace.
+    ///
+    /// Language dispatch: when `ctx.language` is set, providers whose
+    /// `languages()` do not contain it are NOT probed (they leave no
+    /// trace entry — the trace only records real attempts). An unset
+    /// language tries every provider in order, exactly as before.
     pub fn resolve_traced(&self, ctx: &SymbolContext) -> anyhow::Result<ResolveOutcome> {
+        let language = ctx.language.as_deref();
+        let eligible: Vec<&Box<dyn ToolingProvider>> = self
+            .providers
+            .iter()
+            .filter(|p| provider_handles_language(p.as_ref(), language))
+            .collect();
+        if let Some(lang) = language && eligible.is_empty() {
+            anyhow::bail!(
+                "no tooling provider handles language `{lang}` ({} provider(s) registered, none attempted)",
+                self.providers.len()
+            );
+        }
         let mut trace = ResolveTrace::default();
-        for provider in &self.providers {
+        for provider in &eligible {
             match provider.resolve(ctx) {
                 Ok(source) => {
                     trace.attempts.push(Attempt {
@@ -260,9 +294,8 @@ impl Resolver {
         anyhow::bail!(
             "no tooling provider could resolve symbol `{}` (tried {} provider(s): {})",
             ctx.symbol,
-            self.providers.len(),
-            self
-                .providers
+            eligible.len(),
+            eligible
                 .iter()
                 .map(|p| p.name())
                 .collect::<Vec<_>>()
@@ -315,12 +348,32 @@ mod tests {
         }
     }
 
+    /// A provider that records whether `resolve` was actually probed.
+    struct SpyProvider {
+        name: &'static str,
+        langs: &'static [&'static str],
+        probed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ToolingProvider for SpyProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn languages(&self) -> &'static [&'static str] {
+            self.langs
+        }
+        fn resolve(&self, _ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
+            self.probed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(hit(self.name))
+        }
+    }
+
     fn ctx() -> SymbolContext {
         SymbolContext {
             workspace_root: PathBuf::from("/tmp"),
             symbol: "crate::sym".to_string(),
             from_file: PathBuf::from("src/lib.rs"),
             scope: Vec::new(),
+            language: None,
         }
     }
 
@@ -404,5 +457,209 @@ mod tests {
     fn empty_chain_errors() {
         let r = Resolver::new();
         assert!(r.resolve_traced(&ctx()).is_err());
+    }
+
+    /// (011-01) The trace must contain NO attempt for a provider whose
+    /// `languages()` does not match the context language — the miss never
+    /// probes it (asserted via the probe spy, not just the trace).
+    #[test]
+    fn language_dispatch_only_matching_provider_attempted() {
+        let rust = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let python = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut r = Resolver::new();
+        r.add(SpyProvider {
+            name: "rust",
+            langs: &["rust"],
+            probed: rust.clone(),
+        });
+        r.add(SpyProvider {
+            name: "python",
+            langs: &["python"],
+            probed: python.clone(),
+        });
+
+        // A python context: only python is probed; the trace records it
+        // alone, and the rust provider was never attempted.
+        let mut c = ctx();
+        c.language = Some("python".to_string());
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/python.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert_eq!(out.trace.attempts[0].provider, "python");
+        assert!(python.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !rust.load(std::sync::atomic::Ordering::SeqCst),
+            "rust was probed"
+        );
+
+        // A rust context (fresh spies): the mirror image.
+        let rust2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let python2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut r = Resolver::new();
+        r.add(SpyProvider {
+            name: "rust",
+            langs: &["rust"],
+            probed: rust2.clone(),
+        });
+        r.add(SpyProvider {
+            name: "python",
+            langs: &["python"],
+            probed: python2.clone(),
+        });
+        let mut c = ctx();
+        c.language = Some("rust".to_string());
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/rust.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert_eq!(out.trace.attempts[0].provider, "rust");
+        assert!(rust2.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!python2.load(std::sync::atomic::Ordering::SeqCst), "python was probed");
+    }
+
+    /// (011-01) Regression pin: an UNSET language preserves today's
+    /// behavior — every provider is tried in chain order (first hit wins,
+    /// a miss falls through and lands in the trace).
+    #[test]
+    fn language_dispatch_unset_tries_all_in_order() {
+        let rust = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut r = Resolver::new();
+        r.add(SpyProvider {
+            name: "rust",
+            langs: &["rust"],
+            probed: rust.clone(),
+        });
+        r.add(MissProvider);
+        let c = ctx();
+        assert!(c.language.is_none());
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/rust.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert!(rust.load(std::sync::atomic::Ordering::SeqCst));
+
+        // And when the first provider misses, the second IS still probed
+        // in order (byte-for-byte the pre-dispatch walk).
+        let mut r = Resolver::new();
+        r.add(MissProvider);
+        r.add(StubProvider { name: "second" });
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/second.rs"));
+        assert_eq!(out.trace.attempts.len(), 2);
+        assert_eq!(out.trace.attempts[0].provider, "miss");
+        assert!(!out.trace.attempts[0].hit);
+    }
+
+    /// (011-01) No registered provider handles the context language → a
+    /// clear error names the language and probes NOTHING.
+    #[test]
+    fn language_dispatch_no_matching_provider_errors() {
+        let rust = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let python = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut r = Resolver::new();
+        r.add(SpyProvider {
+            name: "rust",
+            langs: &["rust"],
+            probed: rust.clone(),
+        });
+        r.add(SpyProvider {
+            name: "python",
+            langs: &["python"],
+            probed: python.clone(),
+        });
+        let mut c = ctx();
+        c.language = Some("go".to_string());
+        let err = r.resolve_traced(&c).unwrap_err().to_string();
+        assert!(err.contains("go"), "err: {err}");
+        assert!(
+            err.contains("no tooling provider handles language"),
+            "err: {err}"
+        );
+        assert!(!rust.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!python.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// (011-01) A provider whose `languages()` is EMPTY is skipped when a
+    /// language is set (it claims no language) but still tried for an
+    /// unset one (backward-compatible walk).
+    #[test]
+    fn language_dispatch_empty_languages_provider() {
+        struct NoLang;
+        impl ToolingProvider for NoLang {
+            fn name(&self) -> &'static str {
+                "nolang"
+            }
+            fn languages(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn resolve(&self, _ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
+                Ok(hit("nolang"))
+            }
+        }
+        // With a language set, the empty-languages provider is ineligible;
+        // the python-matching provider alone is attempted.
+        let mut r = Resolver::new();
+        r.add(NoLang);
+        r.add(StubProvider { name: "second" });
+        let mut c = ctx();
+        c.language = Some("stub".to_string());
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/second.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert_eq!(out.trace.attempts[0].provider, "second");
+
+        // With no language, the empty-languages provider IS still tried
+        // (and hits first, in chain order).
+        let mut c = ctx();
+        c.language = None;
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/nolang.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert_eq!(out.trace.attempts[0].provider, "nolang");
+    }
+
+    /// (011-01) A python context in a chain headed by the REAL
+    /// CargoProvider never probes cargo (no "no Cargo.toml" confusion):
+    /// the trace contains exactly one attempt — python's. A probed cargo
+    /// provider would have left its own miss entry first.
+    #[test]
+    fn python_context_never_reaches_cargo_provider() {
+        let mut r = Resolver::new();
+        r.add(CargoProvider::new());
+        r.add(SpyProvider {
+            name: "python",
+            langs: &["python"],
+            probed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let mut c = ctx(); // workspace_root /tmp: no Cargo.toml
+        c.language = Some("python".to_string());
+        let out = r.resolve_traced(&c).unwrap();
+        assert_eq!(out.source.file, PathBuf::from("/python.rs"));
+        assert_eq!(out.trace.attempts.len(), 1);
+        assert_eq!(out.trace.attempts[0].provider, "python");
+    }
+
+    /// (011-01) The all-miss error names only the ELIGIBLE providers.
+    #[test]
+    fn all_miss_error_names_eligible_providers() {
+        struct RustOnly;
+        impl ToolingProvider for RustOnly {
+            fn name(&self) -> &'static str {
+                "rustonly"
+            }
+            fn languages(&self) -> &'static [&'static str] {
+                &["rust"]
+            }
+            fn resolve(&self, _ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
+                anyhow::bail!("no crate")
+            }
+        }
+        let mut r = Resolver::new();
+        r.add(RustOnly);
+        r.add(MissProvider);
+        let mut c = ctx();
+        c.language = Some("rust".to_string());
+        let msg = r.resolve_traced(&c).unwrap_err().to_string();
+        assert!(msg.contains("rustonly"), "msg: {msg}");
+        assert!(!msg.contains("miss"), "ineligible provider named: {msg}");
+        assert!(msg.contains("tried 1 provider"), "msg: {msg}");
     }
 }

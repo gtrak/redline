@@ -531,6 +531,7 @@ mod tests {
             symbol: "mypkg.hello".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("__init__.py"));
@@ -549,6 +550,7 @@ mod tests {
             symbol: "json.dumps".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         // The file should exist and be in the stdlib (external).
@@ -571,6 +573,7 @@ mod tests {
             symbol: "os.path.join".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert!(result.file.exists());
@@ -595,6 +598,7 @@ mod tests {
             symbol: "Session".to_string(),
             from_file: PathBuf::from("main.py"),
             scope: Vec::new(),
+            language: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -625,6 +629,7 @@ mod tests {
             symbol: "hello".to_string(),
             from_file: PathBuf::from("main.py"),
             scope: vec!["mypkg".to_string(), "hello".to_string()],
+            language: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("__init__.py"));
@@ -644,6 +649,7 @@ mod tests {
             symbol: "join".to_string(),
             from_file: PathBuf::from("main.py"),
             scope: Vec::new(),
+            language: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -661,6 +667,7 @@ mod tests {
             symbol: "json.dumps".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -678,6 +685,7 @@ mod tests {
             symbol: "nonexistent_pkg_xyz.module_func".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -699,6 +707,7 @@ mod tests {
             symbol: "requests.get".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
+            language: None,
         };
         match provider.resolve(&ctx) {
             Ok(src) => {

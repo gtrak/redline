@@ -713,6 +713,7 @@ mod tests {
             symbol: "mylocal.hello".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
+            language: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -740,6 +741,7 @@ mod tests {
             symbol: "acme.doThing".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
+            language: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -763,6 +765,7 @@ mod tests {
             symbol: "acme.unknown".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
+            language: None,
         };
         let err = JsProvider::new().resolve(&ctx).unwrap_err();
         let msg = err.to_string();
@@ -782,6 +785,7 @@ mod tests {
             symbol: "left-pad.leftPad".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
+            language: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
         assert!(err.to_string().contains("offline"), "msg: {err}");
@@ -797,6 +801,7 @@ mod tests {
             symbol: "left-pad.leftPad".to_string(),
             from_file: PathBuf::from("index.js"),
             scope: Vec::new(),
+            language: None,
         };
         // Offline keeps this test network-free: the error is the offline
         // refusal, which still proves the walk-up + no-local-dep path.
@@ -826,6 +831,7 @@ mod tests {
             symbol: "doThing".to_string(),
             from_file: PathBuf::from("index.js"),
             scope: vec!["acme".to_string(), "doThing".to_string()],
+            language: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -846,6 +852,7 @@ mod tests {
             symbol: "doThing".to_string(),
             from_file: PathBuf::from("index.js"),
             scope: Vec::new(),
+            language: None,
         };
         let err = JsProvider::new().resolve(&ctx).unwrap_err();
         assert!(
@@ -869,6 +876,7 @@ mod tests {
             symbol: "left-pad.leftPad".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
+            language: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);

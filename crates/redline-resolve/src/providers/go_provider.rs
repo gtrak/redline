@@ -1135,6 +1135,7 @@ exclude (
             symbol: "app.Run".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1180,6 +1181,7 @@ exclude (
             symbol: "errors.New".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1219,6 +1221,7 @@ exclude (
             symbol: "lib.Helper".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1241,6 +1244,7 @@ exclude (
             symbol: "fmt.Println".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1262,6 +1266,7 @@ exclude (
             symbol: "Println".to_string(),
             from_file: PathBuf::from("main.go"),
             scope: Vec::new(),
+            language: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1306,6 +1311,7 @@ exclude (
             symbol: "New".to_string(),
             from_file: PathBuf::from("main.go"),
             scope: vec!["errors".to_string(), "New".to_string()],
+            language: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1327,6 +1333,7 @@ exclude (
             symbol: "gin.Router".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1362,6 +1369,7 @@ exclude (
             symbol: "errors.NotFound".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1458,6 +1466,7 @@ exclude (
             symbol: "errors.New".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
+            language: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();

@@ -16,7 +16,10 @@ use std::time::Duration;
 use nucleo_matcher::{
     Matcher, pattern::{CaseMatching, Normalization, Pattern},
 };
-use redline_resolve::{CargoProvider, ResolvedSource, Resolver, SymbolContext};
+use redline_resolve::{
+    CargoProvider, ResolvedSource, Resolver, SymbolContext,
+    providers::{go_provider::GoProvider, js_provider::JsProvider, python_provider::PythonProvider},
+};
 use ropey::Rope;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -7676,17 +7679,28 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // 007-03: the scope hint (use-declaration path for a bare symbol,
         // the enclosing item chain for a path-shaped one, empty otherwise).
         let scope = self.resolver_scope(symbol);
+        // 011-01: the buffer's language (the dispatch key — only providers
+        // whose `languages()` contain it are attempted; `None` for an
+        // unknown extension keeps the pre-dispatch in-order walk).
+        let language = self.resolution_language(from_file);
         tokio::task::spawn_blocking(move || {
-            // The provider chain (Rust first: cargo metadata → registry
-            // source dir, cargo fetch on demand). Adding more languages is a
-            // one-line `chain.add(…)` here.
+            // The provider chain. 011-01 registers the non-Rust providers
+            // and dispatches on the context language: a Python buffer can
+            // never reach the cargo provider (and vice versa), so the
+            // registration order among languages is only a tie-breaker.
+            // `None` language (unknown extension) still walks the whole
+            // chain, in this order.
             let mut chain = Resolver::new();
             chain.add(CargoProvider::new());
+            chain.add(JsProvider::new());
+            chain.add(PythonProvider::new());
+            chain.add(GoProvider::new());
             let ctx = SymbolContext {
                 workspace_root: root,
                 symbol: symbol_owned.clone(),
                 from_file: from,
                 scope,
+                language,
             };
             let (source, error) = match chain.resolve_traced(&ctx) {
                 Ok(outcome) => (Some(outcome.source), None),
@@ -7736,6 +7750,17 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             Some((text, g)) if *g == self.resolve_generation => text.clone(),
             _ => String::new(),
         }
+    }
+
+    /// (011-01) The `SymbolContext.language` dispatch key for `from_file`:
+    /// the grammar registry's lowercase language name ("rust", "python",
+    /// "javascript", "go", … — matching the providers' `languages()`
+    /// strings). `None` when the extension is unknown (`Plain`): the chain
+    /// then keeps the pre-dispatch behavior and walks every provider in
+    /// order (byte-for-byte today's behavior for unknown files).
+    fn resolution_language(&self, from_file: &str) -> Option<String> {
+        let lang = self.grammar_registry.language_for(from_file);
+        (lang != crate::syntax::registry::LanguageId::Plain).then(|| lang.name().to_string())
     }
 
     /// (007-03) The `SymbolContext.scope` hint for `symbol`, from the
@@ -13092,6 +13117,43 @@ mod tests {
         s.set_point(0, 0, 0);
         s.xref_find_definitions();
         assert_eq!(s.resolve_generation, 2, "enclosing hit: one supersede bump, no job");
+    }
+
+    /// (011-01) The context language follows the buffer's extension — the
+    /// lowercase registry name the providers' `languages()` expect. An
+    /// unknown extension stays `None` (the chain keeps the pre-dispatch
+    /// in-order walk for those).
+    #[test]
+    fn resolution_language_maps_buffer_extensions() {
+        let (s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        assert_eq!(s.resolution_language("main.py"), Some("python".into()));
+        assert_eq!(s.resolution_language("src/lib.js"), Some("javascript".into()));
+        assert_eq!(s.resolution_language("a.ts"), Some("typescript".into()));
+        assert_eq!(s.resolution_language("a.tsx"), Some("tsx".into()));
+        assert_eq!(s.resolution_language("main.go"), Some("go".into()));
+        // A Rust buffer still carries "rust" (the existing path, unchanged).
+        assert_eq!(s.resolution_language("src/main.rs"), Some("rust".into()));
+        // Unknown extension: no language, pre-dispatch behavior.
+        assert_eq!(s.resolution_language("notes.txt"), None);
+    }
+
+    /// (011-01) A workspace miss in a NON-RUST buffer fires the resolver
+    /// fall-through (the app wiring is language-agnostic; the provider
+    /// itself is selected by `SymbolContext.language` inside the chain).
+    /// Plain (no runtime) unit test: synchronous graceful miss.
+    #[test]
+    fn python_buffer_miss_fires_resolver_fallthrough() {
+        let (mut s, _dir) = store_with_index(&[
+            ("main.py", "import os\nx = os.path.join('a', 'b')\n"),
+        ]);
+        s.open_path("main.py");
+        s.start_symbol_resolution("os.path.join", "main.py");
+        assert_eq!(s.resolve_generation, 1, "the fall-through fired exactly once");
+        assert!(s.resolving_display().is_empty());
+        assert!(
+            s.message.contains("no provider resolution for `os.path.join`"),
+            "graceful miss message, got: {}", s.message
+        );
     }
 
     // ── 007-03: the resolver fall-through's scope hint ─────────────────
