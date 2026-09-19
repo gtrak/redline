@@ -92,7 +92,12 @@ def main():
     drive("transient-menu", ["C-x", "C-g", "?", "C-g"], setup=[], settle=0.6)
     drive("search", ["C-g", "C-g"], setup=["C-c p s s"], settle=0.6)
     drive("notes-edit", ["a", "b", "C-h", "C-g"], setup=["C-x n"], settle=0.5)
-    drive("tree", ["C-n", "C-p", "RET", "C-g"], setup=["M-x", "toggle-tree", "RET"],
+    # the tree over a BUFFER view: pre-06a this scenario booted on the
+    # scratch buffer, so open a file first (06a boots on the home view,
+    # whose keymap is intentionally empty — C-n/C-p there are unbound by
+    # design, and the tree-on-home leg lives in sweep.py "home -> file").
+    drive("tree", ["C-n", "C-p", "RET", "C-g"],
+          setup=["C-x C-f", "lib.rs", "RET", "M-x", "toggle-tree", "RET"],
           settle=0.6)
     drive("window-splits", ["C-x 2", "C-x o", "C-x o", "C-x 1", "C-x 0"],
           setup=["C-x C-f", "lib.rs", "RET"], settle=0.6)
