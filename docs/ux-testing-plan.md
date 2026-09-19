@@ -528,3 +528,85 @@ Two constraints, both learned the hard way:
 | 16 | loop-02 merged (`cf00d7f`): the 0.06 window is now the DEFAULT (escape hatch REDLINE_PTY_QUIET=0.2); root causes were NOT the window — U-BHN is the app's created_paths guard + debouncer coalescing the notes-file creation with a rapid append (fires at 0.2 under load too), fixed with a bounded second append; ann-delete was a late repaint overwriting the transient echo, fixed with wait_for + one idempotent re-arm. Discrimination proven (broke the banner-hint text and the no-annotation message: both flows FAIL). Stable 3x; pooled 0.06 = ~117s; serial 0.06 ~= 254s vs 415s at 0.2 (1.6x overall; sweep_flows 2.0x). New pool-lane artifact fixed: longer lane paths wrap the quit-save prompt at 80 cols — wrap-tolerant flat_text() matcher. |
 | 17 | **Pool-lane disk use**: `tools/gate.sh pooled` copies every `/tmp/redline_*` fixture into each lane, so the pool root (`REDLINE_POOL_ROOT`, default `/tmp/rl`) is ~27 MB per lane — **~105 MB for 4 lanes** (the 24 MB `redline_sweep_slow_repo` dominates). It is `/tmp`-ephemeral and never committed, but a 6-lane run grows to ~160 MB. `tools/pool.py clean` removes the whole root; `setup` is idempotent (rebuilds the lanes). | loop-01 (pooled sweep) | **DONE (loop-01)**: documented in the "Pooled parallel sweep" section above; lanes are disposable and cleaned with `pool.py clean`. Candidate to slim further: copy only the fixtures each lane's suite actually reads (the battery uses a subset of all `/tmp/redline_*`), or hardlink the large `sweep_slow_repo` instead of `cp -r`. |
 | 7 | Conflict **minibuffer message** at store.rs:4396 ("changed on disk — press g to reload") fires only in the locally-owned (editable) case where plain `g` self-inserts — repoint to the per-kind helper (M-x reload-buffer wording). Same family as backlog #3; found by the issue-03 review. | Issue-03 review (plan 003) | One-line src fix + message-text test. |
+
+## loop-03 — Demote the test pyramid (kept / converted ledger)
+
+**Shape (plan):** PTY → unit → fuzz. This iteration lands the PTY → unit
+demotion for `tools/sweep_flows.py`: 50 of its 65 driven flows moved to
+store-level unit twins in `src/app/flow_tests.rs` (driven through the same
+entry points the live app uses — `AppStore::key_event`,
+`apply_project_change`, the search bus — and asserting the same positive
+signals on state + `render_at_width(80)`), and the PTY file keeps only the
+thin tier: input encoding, repaint-race classes, process lifecycle, and
+one end-to-end smoke per drive family. Nothing is untested — the ledger
+below is the kept/converted map; "no judgment was relaxed" (a kept flow's
+PTY assertions are the live-app proof for what the twin pins at store
+level; a converted flow's twin asserts the same signals it did, at the
+level where they live).
+
+### Kept in the PTY tier (tools/sweep_flows.py — 15 records, was 65)
+
+| Kept flow | Why it needs a live app | Unit twin (state half) |
+|---|---|---|
+| U-A1 | boot/frame smoke: launch → home render (drive-family smoke) | — (smoke is its purpose) |
+| editable-keys | input encoding: multi-key sequences + self-insert through the REAL terminal encoder (C-x g dispatch vs self-insert) | `unit_flow_editable_keys` |
+| U-H2 search | in-flight cancel: C-g must land while a real rg walk over 6000 files is in flight (wall-clock race) | `unit_flow_h2_search` |
+| U-BHN | banner debounce: the hint only lands after the watcher cadence (repaint-race class) | `unit_flow_banner_hint` |
+| annotation suite (create/toggle/crossing/notes-editable/drift/orphan/delete/cu-scroll) | ann-delete's transient-echo / repaint race + the raw space-byte encoding through the PTY encoder | `unit_flow_ann_*` (8 twins) |
+| U-G6 | watcher SUSPENDED: a disk edit produces no reload — the gate is at the watcher source, which the store-level apply path deliberately bypasses | `unit_flow_g6` |
+| U-G1 | watcher delivery smoke: disk append → repaint + scroll anchor (one end-to-end watcher leg) | `unit_flow_g1` |
+| quit-prompt-y | quit lifecycle: prompt → y → on-disk write → exit 0 (process lifecycle) | `unit_flow_quit_prompt_*` (5 twins) |
+
+### Converted (PTY → unit; `src/app/flow_tests.rs`, 60 twins total)
+
+| PTY flow | Unit twin(s) |
+|---|---|
+| U-B1–B6 (recents/finder) | `unit_flow_b1..b6` (+ pre-existing `recent_files_*` store units) |
+| U-C1/C6 (windowing motion) | `unit_flow_c1`, `unit_flow_c6` |
+| U-E1–E3 (isearch) | `unit_flow_e1..e3` |
+| U-F1–F8 (magit) | `unit_flow_f1..f8` |
+| U-G2 (debounce storm) | `unit_flow_g2` |
+| U-G3 (local marker) | `unit_flow_g3` |
+| U-G5 (project switch) | `unit_flow_g5` |
+| U-H1 (mode hints) | `unit_flow_h1` |
+| H2 (home states) | `unit_flow_h2_*` |
+| U-H3 (isearch prefix) | `unit_flow_h3` |
+| q-quit | `unit_flow_qquit` |
+| notes (no false marker) | `unit_flow_notes_no_false_marker` |
+| palette | `unit_flow_palette_no_demo` |
+| graft | `unit_flow_graft` |
+| U-CDS / U-BLW / U-NSL | `unit_flow_cds` / `unit_flow_blw` / `unit_flow_nsl` |
+| buffer-list NP | `unit_flow_buffer_list_np` |
+| J3 (no-wrap) | `unit_flow_j3` (via `render_at_width(80)`) |
+| edit-mode legs (×4) | `unit_flow_edit_toggle/save/confirm/conflict` |
+| U-M1–M8 marks + cross-buffer | `unit_flow_mark_kill_yank`, `unit_flow_mark_exchange` (U-M6 cross-buffer leg is the kill-ring leg of the first twin; `quit_prompt_bang` is covered by the pre-existing `quit_prompt_bang_saves_all_remaining_then_quits`) |
+
+### Other suites — evaluated (contract item 3)
+
+| Suite | Verdict | Rationale |
+|---|---|---|
+| `tools/sweep.py` (transition overprint matrix) | **keep** (candidate for later) | Stale/mismatch row detection over live terminal pixels — terminal-tier by nature; the state halves (view stacks) are store-testable, a follow-up iteration could split it. |
+| `tools/drive_windowing.py` / `_panes.py` | **demote** (follow-up) | View-stack/scroll state = store level (the C1/C6/BLW/CDS twins prove the pattern); only the "cursor pixel on-screen" half is terminal. |
+| `tools/drive_xref.py` / `drive_external_notes.py` / `drive_external_crate.py` | **demote** (follow-up) | Resolution + landing are store-level (open_file/symbol-index APIs); the PTY legs duplicate unit coverage. |
+| `tools/probe_notes_dump.py` | **keep** | Process-lifecycle dump probe (exit behavior + dump file) — the thin tier's lifecycle family. |
+| `tools/ux_sweep.py` | **demote** (follow-up) | Keymap-derivation checks are pure store/keymap state. |
+| `tools/drive_all.py` / `drive_syntax_notes.py` | **keep** | Drive-family boot smoke + syntax-face plausibility (human-judgment color tier). |
+
+### Harness notes (loop-03)
+
+1. **Stale-binary trap (the gate-run lesson):** the pooled lanes test the
+   binary `tools/pool.py` builds ONCE from the checkout it was started in.
+   If a lane's worktree is checked out at another lane's commit, the pooled
+   gate silently validates the wrong code and reports green. Rule: run the
+   pool from the tree under test, and pin the binary explicitly
+   (`REDLINE_BIN=$(pwd)/target/debug/redline tools/gate.sh pooled`); the
+   lane checkouts must match that tree.
+2. **Width-bounded static render:** `render_at_width(store, 80)` (src/ui/root.rs)
+   pins the root View to a terminal width in static renders — without it the
+   root is content-sized and df95113's width pin is a no-op (the picker count
+   line renders off-screen). Regression pin:
+   `render_at_width_catches_offscreen_picker_count_line` — proven
+   discriminating (removing the df95113 width pins makes it FAIL).
+3. **Measurements (this box, 0.06 quiet):** sweep_flows 65 flows / ~87 s →
+   15 records / ~24 s; 60 unit twins run in ~2.5 s. Full battery and pooled
+   numbers in the run log below the commit that lands this.

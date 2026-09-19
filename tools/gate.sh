@@ -5,18 +5,27 @@
 #   tools/gate.sh fast      Rust-only: build + clippy + unit tests      (~30 s)
 #   tools/gate.sh smoke     fast + one PTY chain (drive_all)            (~90 s)
 #   tools/gate.sh full      everything at the fast 0.06 quiet
-#                           (PTY battery ~255 s, ~4.3 min wall; at the old
-#                           0.2 window the battery measured ~415 s on the
-#                           same suites — loop-02)
+#                           (PTY battery ~150 s after loop-03 demoted ~50 of
+#                           sweep_flows' 65 flows to unit twins — before:
+#                           ~255 s; at the old 0.2 window ~415 s, loop-02)
 #   tools/gate.sh full-fast redundant alias for `full` since loop-02
 #                           (the 0.06 window IS the default; kept for old scripts)
 #   tools/gate.sh equiv     A/B the quiet window (0.2 vs 0.06) across the
 #                           full battery — run once after changing the driver
 #   tools/gate.sh pooled    fast + the PTY battery POOLED across private
 #                           per-lane fixture copies (tools/pool.py): the
-#                           12-suite battery in ~117 s (lanes=4, 0.06 quiet)
-#                           vs full's ~255 s serial; same verdicts.
-#                           Full stays the sequential, always-works fallback.
+#                           12-suite battery in ~90 s (lanes=4, 0.06 quiet,
+#                           post-loop-03) vs full's ~150 s serial; same
+#                           verdicts. Full stays the sequential, always-
+#                           works fallback.
+#
+# Stale-binary trap (loop-03): the pooled lanes run the binary pool.py
+# builds ONCE from the CURRENT checkout — if you `git checkout` another
+# lane's tree without rebuilding, the lanes silently test the wrong code
+# and the pooled gate reports green. Pin the tree under test explicitly:
+# REDLINE_BIN=$(pwd)/target/debug/redline tools/gate.sh pooled (and the
+# lane checkouts must match it — pool.py rebuilds from the checkout it
+# was started in, so start the pool from the tree being tested).
 #
 # Latency knobs (see tools/pyte_driver.py):
 #   REDLINE_PTY_QUIET  read-quiet window; default 0.06 (fast, loop-02 — every
