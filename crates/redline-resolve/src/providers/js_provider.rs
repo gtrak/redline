@@ -29,7 +29,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// File extensions considered JavaScript/TypeScript sources.
 const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts"];
@@ -100,7 +100,13 @@ impl JsProvider {
     }
 
     fn resolve_js(&self, ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
-        let (pkg_spec, item) = split_symbol(&ctx.symbol);
+        // A BARE (dot-free) symbol with a scope hint (007-03: the app's
+        // import path) normalizes to `package.item` up front and then flows
+        // through the SAME node_modules / locate machinery as a
+        // path-shaped symbol. No hint keeps the bail, byte-for-byte.
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
+        let (pkg_spec, item) = split_symbol(symbol);
         // A bare (dot-free) symbol has no package path; resolving it to a
         // concrete package would require scope info (tree-sitter) not yet
         // provided by the app. Bail rather than guess an install name.
@@ -705,6 +711,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "mylocal.hello".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
@@ -731,6 +738,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "acme.doThing".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
@@ -753,6 +761,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "acme.unknown".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
         };
         let err = JsProvider::new().resolve(&ctx).unwrap_err();
@@ -771,6 +780,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "left-pad.leftPad".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
@@ -786,11 +796,62 @@ mod tests {
             workspace_root: ws.to_path_buf(),
             symbol: "left-pad.leftPad".to_string(),
             from_file: PathBuf::from("index.js"),
+            scope: Vec::new(),
         };
         // Offline keeps this test network-free: the error is the offline
         // refusal, which still proves the walk-up + no-local-dep path.
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    // ── 007-03: bare symbol + scope hint (import path) ────────────────────
+
+    /// Discriminating: a BARE symbol + the import-path scope resolves
+    /// through the SAME locate machinery as the path-shaped twin.
+    #[test]
+    fn bare_symbol_with_scope_resolves_through_locate_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws","version":"1.0.0"}"#).unwrap();
+        let dep = ws.join("node_modules").join("acme");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(dep.join("package.json"), r#"{"name":"acme","main":"lib/main.js"}"#).unwrap();
+        fs::create_dir_all(dep.join("lib")).unwrap();
+        fs::write(dep.join("lib/main.js"), "export function doThing() { return 2; }\n").unwrap();
+
+        // The bare symbol + import path (import { doThing } from "acme";).
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "doThing".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["acme".to_string(), "doThing".to_string()],
+        };
+        let src = JsProvider::new().resolve(&ctx).unwrap();
+        assert!(src.external);
+        assert_eq!(src.file, dep.join("lib/main.js"));
+        assert_eq!(src.line, Some(1));
+    }
+
+    /// Regression pin: an EMPTY scope still bails with the existing
+    /// message (no hint → today's behavior, byte-for-byte).
+    #[test]
+    fn bare_symbol_empty_scope_still_bails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "doThing".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: Vec::new(),
+        };
+        let err = JsProvider::new().resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("needs scope info"),
+            "err: {err}"
+        );
     }
 
     // ── live E2E: real tiny npm package (network) ──────────────────────────
@@ -806,6 +867,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "left-pad.leftPad".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();

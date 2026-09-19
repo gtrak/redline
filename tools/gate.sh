@@ -55,6 +55,7 @@ SHARED_SUITES=(
   drive_xref.py
   drive_external_notes.py
   drive_external_crate.py
+  drive_external_use.py
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.

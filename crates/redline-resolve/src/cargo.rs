@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{crate_from_symbol, run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{crate_from_symbol, run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// Timeout for `cargo metadata` (local, but can be slow on large workspaces).
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,19 +146,32 @@ impl CargoProvider {
             );
         }
 
-        // Split the use-path into (crate, item). A bare symbol has no crate
-        // path — it needs tree-sitter scope info the app supplies later.
-        let crate_name = crate_from_symbol(&ctx.symbol).ok_or_else(|| {
+        // Split the use-path into (crate, item). A BARE symbol with a
+        // scope hint (007-03: the app's use-declaration path) normalizes
+        // to `crate::item` UP FRONT so the rest of the flow is identical
+        // to a path-shaped symbol — the SAME locate_source_dir /
+        // locate_in_pkg machinery, no parallel path. No hint (empty
+        // scope) keeps today's bail, byte-for-byte.
+        let qualified = scope_qualified("::", &ctx.symbol, &ctx.scope);
+        let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
+        let crate_name = crate_from_symbol(symbol).ok_or_else(|| {
             anyhow::anyhow!("cannot parse a crate name from symbol `{}`", ctx.symbol)
         })?;
-        let segments: Vec<&str> = ctx.symbol.split("::").filter(|s| !s.is_empty()).collect();
+        let segments: Vec<&str> = symbol.split("::").filter(|s| !s.is_empty()).collect();
         if segments.len() < 2 {
             anyhow::bail!(
-                "bare symbol `{crate_name}` has no crate path; resolving it to a crate \
-                 needs scope info (tree-sitter) not yet provided by the app"
+                "bare symbol `{}` has no crate path; resolving it to a crate \
+                 needs scope info (tree-sitter) not yet provided by the app",
+                ctx.symbol
             );
         }
-        let item = segments[1];
+        // The hint's item is its LAST segment (`use serde::de::Deserialize`
+        // → `Deserialize`); a path-shaped symbol keeps the historical
+        // second-segment rule.
+        let item = match &qualified {
+            Some(_) => *segments.last().unwrap(),
+            None => segments[1],
+        };
 
         // metadata → package → crate root; fetch + re-locate if a registry
         // source is missing.
@@ -558,5 +571,130 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("lib.rs"), "pub struct Foo {}\n").unwrap();
         assert!(locate_item(tmp.path(), "NotThere").is_none());
+    }
+
+    // ── 007-03: bare symbol + scope hint (use-declaration path) ───────────
+
+    /// A cargo workspace (tempdir) with a synthetic path-dependency crate
+    /// `fakeserde` whose lib defines a `Deserialize` struct — a known, no-
+    /// network stand-in for a registry crate.
+    fn ws_with_fakeserde(tmp: &Path) -> PathBuf {
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        std::fs::write(
+            tmp.join("Cargo.toml"),
+            r#"[package]
+name = "wsapp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fakeserde = { path = "fakeserde" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("src/main.rs"), "fn main() { fakeserde::Deserialize; }\n").unwrap();
+        let dep = tmp.join("fakeserde");
+        std::fs::create_dir_all(dep.join("src")).unwrap();
+        std::fs::write(
+            dep.join("Cargo.toml"),
+            r#"[package]
+name = "fakeserde"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        std::fs::write(dep.join("src/lib.rs"), "pub struct Deserialize { x: u32 }\n").unwrap();
+        tmp.to_path_buf()
+    }
+
+    /// Discriminating: a BARE symbol + the use-path scope resolves through
+    /// the SAME locate_in_pkg machinery as a path-shaped symbol (the
+    /// path-shaped twin asserts the identical landing).
+    #[test]
+    fn bare_symbol_with_scope_resolves_through_locate_in_pkg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = ws_with_fakeserde(tmp.path());
+        let lib = tmp.path().join("fakeserde/src/lib.rs");
+
+        // The bare symbol + scope hint (use fakeserde::Deserialize;).
+        let ctx = SymbolContext {
+            workspace_root: ws.clone(),
+            symbol: "Deserialize".to_string(),
+            from_file: PathBuf::from("src/main.rs"),
+            scope: vec!["fakeserde".to_string(), "Deserialize".to_string()],
+        };
+        let src = CargoProvider::new().resolve(&ctx).unwrap();
+        assert_eq!(src.file, lib);
+        assert_eq!(src.line, Some(1));
+        // A path dependency lives inside the workspace root → internal.
+        assert!(!src.external);
+
+        // Same-machinery proof: the path-shaped symbol lands identically.
+        let ctx2 = SymbolContext {
+            workspace_root: ws.clone(),
+            symbol: "fakeserde::Deserialize".to_string(),
+            from_file: PathBuf::from("src/main.rs"),
+            scope: Vec::new(),
+        };
+        assert_eq!(CargoProvider::new().resolve(&ctx2).unwrap(), src);
+    }
+
+    /// An aliased import (`use fakeserde::Deserialize as D;`): the hint is
+    /// the ORIGINAL path — the item comes from the hint's last segment,
+    /// not the alias.
+    #[test]
+    fn bare_symbol_with_scope_alias_uses_original_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = ws_with_fakeserde(tmp.path());
+        let ctx = SymbolContext {
+            workspace_root: ws,
+            symbol: "D".to_string(),
+            from_file: PathBuf::from("src/main.rs"),
+            scope: vec!["fakeserde".to_string(), "Deserialize".to_string()],
+        };
+        let src = CargoProvider::new().resolve(&ctx).unwrap();
+        assert_eq!(
+            src.file,
+            tmp.path().join("fakeserde/src/lib.rs")
+        );
+        assert_eq!(src.line, Some(1));
+    }
+
+    /// Regression pin: an EMPTY scope still bails with the existing
+    /// message, byte-for-byte (no hint → today's behavior).
+    #[test]
+    fn bare_symbol_empty_scope_still_bails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = ws_with_fakeserde(tmp.path());
+        let ctx = SymbolContext {
+            workspace_root: ws,
+            symbol: "Deserialize".to_string(),
+            from_file: PathBuf::from("src/main.rs"),
+            scope: Vec::new(),
+        };
+        let err = CargoProvider::new().resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("bare symbol `Deserialize` has no crate path; resolving it to a crate \
+                           needs scope info (tree-sitter) not yet provided by the app"),
+            "err: {err}"
+        );
+    }
+
+    /// Std/prelude names are NOT guessed: a bare prelude symbol with no
+    /// hint must still bail, never resolve.
+    #[test]
+    fn prelude_name_without_hint_is_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = ws_with_fakeserde(tmp.path());
+        let ctx = SymbolContext {
+            workspace_root: ws,
+            symbol: "String".to_string(),
+            from_file: PathBuf::from("src/main.rs"),
+            scope: Vec::new(),
+        };
+        let err = CargoProvider::new().resolve(&ctx).unwrap_err();
+        assert!(err.to_string().contains("needs scope info"), "err: {err}");
     }
 }

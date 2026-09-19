@@ -125,11 +125,37 @@ pub struct SymbolContext {
     pub symbol: String,
     /// Path of the file the jump started from, workspace-relative.
     pub from_file: PathBuf,
+    /// The app's tree-sitter hint for a BARE (separator-free) symbol: the
+    /// FULL path the bare name resolves to — the `use` declaration that
+    /// brings it into scope, item included
+    /// (`use serde::Deserialize;` → `["serde", "Deserialize"]`; an aliased
+    /// `use serde::Deserialize as D;` yields the SAME value for bare `D`).
+    /// For a path-shaped symbol the app may pass the enclosing item chain
+    /// instead (carried, not consumed by the providers today). Empty when
+    /// the app has no hint (no such import, non-Rust buffer, failed
+    /// parse) — a provider MUST then degrade to its exact no-hint
+    /// behavior (the byte-for-byte degradation contract).
+    pub scope: Vec<String>,
+}
+
+/// A bare symbol with a non-empty scope hint → the hint IS the full path
+/// the symbol resolves to (a `use` declaration's original path, item
+/// included; the provider takes its item from the path's last segment).
+/// `None` when the symbol already carries the language's separator
+/// (path-shaped — its own path wins) or the scope is empty (no hint —
+/// the provider keeps its no-hint behavior byte-for-byte).
+pub(crate) fn scope_qualified(sep: &str, symbol: &str, scope: &[String]) -> Option<String> {
+    if !scope.is_empty() && !symbol.contains(sep) {
+        Some(scope.join(sep))
+    } else {
+        None
+    }
 }
 
 /// Guess the crate name from a use-path-shaped symbol
-/// (`tokio::spawn` → `tokio`; bare `Deserialize` → None: needs scope info
-/// the app's tree-sitter layer provides later).
+/// (`tokio::spawn` → `tokio`; a bare `Deserialize` → `Some("Deserialize")` —
+/// the single-segment result is rejected downstream until the app's
+/// scope hint (007-03) turns it into a real path).
 pub fn crate_from_symbol(symbol: &str) -> Option<&str> {
     let first = symbol.split("::").next()?;
     if first.is_empty() || !first.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -294,7 +320,35 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             symbol: "crate::sym".to_string(),
             from_file: PathBuf::from("src/lib.rs"),
+            scope: Vec::new(),
         }
+    }
+
+    #[test]
+    fn scope_qualified_bare_symbol_with_hint() {
+        assert_eq!(
+            scope_qualified("::", "Deserialize", &["serde".into(), "Deserialize".into()]),
+            Some("serde::Deserialize".to_string())
+        );
+        assert_eq!(
+            scope_qualified(".", "doThing", &["acme".into(), "doThing".into()]),
+            Some("acme.doThing".to_string())
+        );
+    }
+
+    #[test]
+    fn scope_qualified_no_hint_or_path_shaped() {
+        // Empty scope: no hint — the provider keeps its no-hint behavior.
+        assert_eq!(scope_qualified("::", "Deserialize", &[]), None);
+        // A path-shaped symbol already carries its own path.
+        assert_eq!(
+            scope_qualified(
+                "::",
+                "serde::Deserialize",
+                &["tokio".into(), "spawn".into()]
+            ),
+            None
+        );
     }
 
     #[test]

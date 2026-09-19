@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// Timeout for `go env` (fast local call).
 const GO_ENV_TIMEOUT: Duration = Duration::from_secs(30);
@@ -130,7 +130,14 @@ impl GoProvider {
 
         let go_mod = parse_go_mod(&go_mod_path)?;
 
-        let (package, item) = go_package_from_symbol(&ctx.symbol).ok_or_else(|| {
+        // A BARE symbol with a scope hint (007-03: the app's import
+        // context) normalizes to `package.Item` up front and flows
+        // through the SAME go.mod / module-cache machinery as a
+        // dot-qualified symbol. No hint keeps the bail, byte-for-byte.
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
+
+        let (package, item) = go_package_from_symbol(symbol).ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot parse a package name from symbol `{}`; \
                  Go uses dot qualification (e.g. `fmt.Println` → package `fmt`) \
@@ -1126,6 +1133,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws.clone(),
             symbol: "app.Run".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1170,6 +1178,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws,
             symbol: "errors.New".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1208,6 +1217,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws,
             symbol: "lib.Helper".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1229,6 +1239,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws,
             symbol: "fmt.Println".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1250,6 +1261,7 @@ exclude (
             workspace_root: ws,
             symbol: "Println".to_string(),
             from_file: PathBuf::from("main.go"),
+            scope: Vec::new(),
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1257,6 +1269,50 @@ exclude (
             err.to_string().contains("cannot parse a package name"),
             "err: {err}"
         );
+    }
+
+    // ── 007-03: bare symbol + scope hint (import context) ────────────────
+
+    /// Discriminating: a BARE symbol + the import-context scope resolves
+    /// through the SAME go.mod / module-cache machinery as the dot-
+    /// qualified twin (`resolve_external_package` pins that twin's
+    /// landing).
+    #[test]
+    fn bare_symbol_with_scope_resolves_external_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+
+        std::fs::write(
+            ws.join("go.mod"),
+            "module github.com/myorg/app\n\ngo 1.21\n\n\
+             require github.com/pkg/errors v0.9.1\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("go.sum"), "github.com/pkg/errors v0.9.1 h1:abc=\n").unwrap();
+        std::fs::write(ws.join("main.go"), "package main\nfunc main() {}\n").unwrap();
+
+        let mod_cache = ws.join("gomodcache");
+        let errors_dir = mod_cache.join("github.com/pkg/errors@v0.9.1");
+        std::fs::create_dir_all(&errors_dir).unwrap();
+        std::fs::write(
+            errors_dir.join("errors.go"),
+            "package errors\n\n// New is a simple error.\nfunc New(text string) error {\n\treturn nil\n}\n",
+        )
+        .unwrap();
+
+        let provider = GoProvider::new().with_mod_cache(mod_cache);
+        let ctx = SymbolContext {
+            workspace_root: ws,
+            symbol: "New".to_string(),
+            from_file: PathBuf::from("main.go"),
+            scope: vec!["errors".to_string(), "New".to_string()],
+        };
+
+        let result = provider.resolve(&ctx).unwrap();
+        assert!(result.external);
+        assert_eq!(result.source_root, errors_dir);
+        assert_eq!(result.file.file_name().unwrap(), "errors.go");
+        assert_eq!(result.line, Some(4));
     }
 
     #[test]
@@ -1269,6 +1325,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws,
             symbol: "gin.Router".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1303,6 +1360,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws,
             symbol: "errors.NotFound".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 
@@ -1398,6 +1456,7 @@ exclude (
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "errors.New".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
         };
 

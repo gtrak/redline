@@ -7650,6 +7650,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// `apply_resolve_event`). No-op-ish without a tokio runtime (plain unit
     /// tests): the indicator is cleared and a miss message reported, so the
     /// status line can never hang.
+    ///
+    /// 007-03: the `SymbolContext.scope` hint is populated from the current
+    /// buffer's tree-sitter layer (`resolver_scope`), so a BARE symbol
+    /// imported via `use` resolves instead of hitting the providers'
+    /// "needs scope info" bail; without a hint the context stays empty and
+    /// the providers behave exactly as before (byte-for-byte).
     pub fn start_symbol_resolution(&mut self, symbol: &str, from_file: &str) {
         let Some(project) = self.project.as_ref() else {
             self.minibuffer_message("no project");
@@ -7667,6 +7673,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
         let bus = self.resolve_bus.clone();
         let from = std::path::PathBuf::from(from_file);
+        // 007-03: the scope hint (use-declaration path for a bare symbol,
+        // the enclosing item chain for a path-shaped one, empty otherwise).
+        let scope = self.resolver_scope(symbol);
         tokio::task::spawn_blocking(move || {
             // The provider chain (Rust first: cargo metadata → registry
             // source dir, cargo fetch on demand). Adding more languages is a
@@ -7677,6 +7686,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 workspace_root: root,
                 symbol: symbol_owned.clone(),
                 from_file: from,
+                scope,
             };
             let (source, error) = match chain.resolve_traced(&ctx) {
                 Ok(outcome) => (Some(outcome.source), None),
@@ -7726,6 +7736,287 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             Some((text, g)) if *g == self.resolve_generation => text.clone(),
             _ => String::new(),
         }
+    }
+
+    /// (007-03) The `SymbolContext.scope` hint for `symbol`, from the
+    /// CURRENT buffer's tree-sitter layer (007-01's `scope_path_at` + a
+    /// bounded `use_declaration` walk):
+    /// - a BARE symbol (no `::`) with a `use` declaration that brings the
+    ///   name into scope → the import's FULL original path, item included
+    ///   (an aliased `use a::B as C` yields `["a","B"]` for bare `C`);
+    /// - a BARE symbol with no such import → EMPTY (the providers keep
+    ///   their exact no-hint behavior — std/prelude names are never
+    ///   guessed, byte-for-byte degradation);
+    /// - a path-shaped symbol → the enclosing item chain.
+    ///
+    /// Empty for a non-Rust buffer (007-01's layer is Rust-only), a missing
+    /// buffer/path, or a failed parse.
+    fn resolver_scope(&self, symbol: &str) -> Vec<String> {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return Vec::new();
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return Vec::new();
+        };
+        let Some(path) = buf.path.as_ref() else {
+            return Vec::new();
+        };
+        let p = self.file_point();
+        Self::resolver_scope_for(path, &buf.rope, p.line, p.col, symbol)
+    }
+
+    /// The scope hint for the buffer at `(line, col)` — the testable seam
+    /// behind [`resolver_scope`](Self::resolver_scope).
+    fn resolver_scope_for(
+        path: &Path,
+        rope: &Rope,
+        line: usize,
+        col: usize,
+        symbol: &str,
+    ) -> Vec<String> {
+        // 007-01's tree-sitter layer implements Rust only; every other
+        // language (and Plain) degrades to empty — the providers keep
+        // their no-hint behavior.
+        let lang = crate::syntax::registry::resolve_language(&path.display().to_string());
+        if lang != crate::syntax::registry::LanguageId::Rust {
+            return Vec::new();
+        }
+        let source = rope.to_string();
+        let Some(byte) = point_byte_offset(rope, line, col) else {
+            return Vec::new();
+        };
+        if !symbol.contains("::") {
+            // Bare: the `use` declaration is THE hint; without one the
+            // scope stays empty (never guess a std/prelude name).
+            return Self::use_path_for_symbol(&source, byte, symbol).unwrap_or_default();
+        }
+        // Path-shaped: carry the enclosing item chain (007-01).
+        crate::syntax::node::scope_path_at(lang, &source, byte)
+    }
+
+    /// (007-03) The FULL original path of the `use` declaration that brings
+    /// `symbol` into scope at `byte` (e.g. `use serde::Deserialize;` →
+    /// `["serde", "Deserialize"]`); an aliased import
+    /// (`use a::B as C`) yields the ORIGINAL path for the alias `C`.
+    ///
+    /// Bounded by design: Rust imports are module-scoped, so only the
+    /// `use_declaration` items of the source root (top level — the Rust
+    /// grammar's root node is `source_file`) or of `byte`'s
+    /// ANCESTOR `mod_item` chain are considered — a sibling or nested
+    /// module's imports never name `byte`'s scope. Innermost module first
+    /// (an inner import shadows an outer one); within a module, the LAST
+    /// matching declaration wins. Globs (`use a::*`), single-segment
+    /// imports (`use foo;` — same-crate modules), and `self`/`super`/
+    /// `crate`-prefixed paths never name an external item → `None`
+    /// (never guess).
+    fn use_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
+        let language = crate::syntax::queries::language_for(
+            crate::syntax::registry::LanguageId::Rust,
+        )?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        let tree = parser.parse(source.as_bytes(), None)?;
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return None;
+        }
+        // Innermost node containing `byte` (the same containment rule as
+        // 007-01's `innermost_at`).
+        let mut leaf = root;
+        loop {
+            let mut child = None;
+            for i in 0..leaf.child_count() {
+                if let Some(c) = leaf.child(i)
+                    && c.start_byte() <= byte
+                    && byte < c.end_byte()
+                {
+                    child = Some(c);
+                    break;
+                }
+            }
+            match child {
+                Some(c) => leaf = c,
+                None => break,
+            }
+        }
+        // Candidate modules: the source root (top level) + the enclosing
+        // `mod_item` ancestors, innermost first (nearest scope shadows).
+        let mut modules = Vec::new();
+        let mut anc = leaf.parent();
+        while let Some(a) = anc {
+            if a.kind() == "mod_item" || a.kind() == "source_file" {
+                modules.push(a);
+            }
+            anc = a.parent();
+        }
+        // The ancestor walk already yields innermost-first order.
+        for module in &modules {
+            // `mod_item` items live in its `body` block; the source root's
+            // are direct children.
+            let items = if module.kind() == "mod_item" {
+                module.child_by_field_name("body")?
+            } else {
+                *module
+            };
+            let mut hit: Option<Vec<String>> = None;
+            for i in 0..items.child_count() {
+                let child = items.child(i)?;
+                if child.kind() != "use_declaration" {
+                    continue;
+                }
+                if let Ok(text) = child.utf8_text(source.as_bytes())
+                    && let Some(path) = Self::use_decl_path(text, symbol)
+                {
+                    hit = Some(path); // last matching declaration wins
+                }
+            }
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    }
+
+    /// The original import path (segments, item included) of a
+    /// `use_declaration` TEXT that brings `symbol` into scope — or `None`
+    /// when no entry of the declaration names `symbol` (globs, module-only
+    /// imports, `self`/`super`/`crate` prefixes are never guessed).
+    fn use_decl_path(text: &str, symbol: &str) -> Option<Vec<String>> {
+        // `pub (vis) use <spec>;` — find the `use` KEYWORD (token-wise; a
+        // `pub(crate)` prefix never contains the token `use`).
+        let body = text.split(';').next()?.trim();
+        let mut pos = 0usize;
+        let mut found = false;
+        for tok in body.split(char::is_whitespace) {
+            if tok == "use" {
+                pos += 3;
+                found = true;
+                break;
+            }
+            pos += tok.len() + 1;
+        }
+        if !found || pos > body.len() || !body.is_char_boundary(pos) {
+            return None;
+        }
+        let rest = body[pos..].trim();
+        if rest.is_empty() {
+            return None;
+        }
+        // `prefix::{ ... }` / `prefix::Name [as Alias]`
+        match rest.find('{') {
+            Some(open) => {
+                let close = rest.rfind('}')?;
+                if close < open {
+                    return None;
+                }
+                let prefix_raw = rest[..open].trim();
+                let prefix = prefix_raw.strip_suffix("::").unwrap_or(prefix_raw).to_string();
+                Self::use_group_entries(&rest[open + 1..close], &prefix, symbol)
+            }
+            None => {
+                let (path_part, alias) = match rest.split_once(" as ") {
+                    Some((p, a)) => (p, Some(a.trim())),
+                    None => (rest, None),
+                };
+                let segments = Self::import_segments(path_part)?;
+                // Single-segment imports are same-crate modules (no
+                // external crate is named) — never guessed.
+                if segments.len() < 2 {
+                    return None;
+                }
+                let local = alias.unwrap_or(segments.last().unwrap());
+                (local == symbol).then_some(segments)
+            }
+        }
+    }
+
+    /// The import entries of a `use` group body (comma-separated, nested
+    /// `sub::{…}` groups recurse), matched against `symbol`.
+    fn use_group_entries(group: &str, prefix: &str, symbol: &str) -> Option<Vec<String>> {
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        let mut entries: Vec<&str> = Vec::new();
+        for (i, c) in group.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    entries.push(&group[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        entries.push(&group[start..]);
+        for entry in entries
+            .into_iter()
+            .map(|e| e.trim())
+            .filter(|e| !e.is_empty())
+        {
+            if let Some(nested) = entry.find('{') {
+                // `sub::{…}` — the group's own prefix joins in.
+                let sub = entry[..nested].trim();
+                let full = if prefix.is_empty() {
+                    sub.to_string()
+                } else {
+                    format!("{prefix}::{sub}")
+                };
+                if let Some(close) = entry.rfind('}')
+                    && let Some(p) =
+                        Self::use_group_entries(&entry[nested + 1..close], &full, symbol)
+                {
+                    return Some(p);
+                }
+                continue;
+            }
+            let (name_part, alias) = match entry.split_once(" as ") {
+                Some((p, a)) => (p.trim(), Some(a.trim())),
+                None => (entry, None),
+            };
+            // `*` (glob) cannot name a specific symbol.
+            if name_part == "*" {
+                continue;
+            }
+            let segs = Self::import_segments(name_part)?;
+            let full = if prefix.is_empty() {
+                segs
+            } else {
+                let mut v = Self::import_segments(prefix)?;
+                v.extend_from_slice(&segs);
+                v
+            };
+            // Same rule as the plain form: without an external prefix a
+            // single segment is a same-crate item (never guessed).
+            if full.len() < 2 {
+                continue;
+            }
+            let local = alias.unwrap_or(full.last().unwrap());
+            if local == symbol {
+                return Some(full);
+            }
+        }
+        None
+    }
+
+    /// Split a `::`-path on `::` into clean identifier segments; `None`
+    /// when a segment is empty or non-identifier (never guess).
+    fn import_segments(s: &str) -> Option<Vec<String>> {
+        let segs: Vec<&str> = s.split("::").collect();
+        if segs.is_empty() || segs.iter().any(|g| g.is_empty()) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(segs.len());
+        for g in segs {
+            if !g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            out.push(g.to_string());
+        }
+        // `self`/`super`/`crate` prefixes never name an external crate.
+        if matches!(out.first().map(String::as_str), Some("self" | "super" | "crate")) {
+            return None;
+        }
+        Some(out)
     }
 
     // ── external crate index cache (plan 006 issue 03) ───────────────
@@ -9699,6 +9990,17 @@ impl Picker {
         scored.sort_by_key(|item| std::cmp::Reverse(item.1));
         self.filtered = scored.into_iter().map(|(c, s)| (c.clone(), s)).collect();
     }
+}
+
+/// The point's BYTE offset into `rope` for the (007-01) tree-sitter
+/// surfaces, which key on raw-source byte offsets: the line's char start
+/// plus the point's (char-based) column, translated to bytes. `None` when
+/// either translation is out of range (the caller degrades to the empty
+/// scope hint).
+fn point_byte_offset(rope: &Rope, line: usize, col: usize) -> Option<usize> {
+    let char_off = rope.try_line_to_char(line).ok()?;
+    let char_off = char_off.saturating_add(col);
+    rope.try_char_to_byte(char_off).ok()
 }
 
 #[cfg(test)]
@@ -12784,6 +13086,125 @@ mod tests {
         assert_eq!(s.resolve_generation, 2, "enclosing hit: one supersede bump, no job");
     }
 
+    // ── 007-03: the resolver fall-through's scope hint ─────────────────
+
+    /// The fall-through context carries the `use` path for a bare symbol.
+    #[test]
+    fn resolver_scope_carries_use_path_for_bare_symbol() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "use serde::Deserialize;\nfn main() { let _d: Deserialize = D; }\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(1, 15, 15); // inside the BARE `Deserialize`
+        assert_eq!(
+            s.resolver_scope("Deserialize"),
+            vec!["serde".to_string(), "Deserialize".to_string()]
+        );
+    }
+
+    /// `use x as y` (alias): the context carries the ALIASED (original)
+    /// path, so `y` resolves to the original item.
+    #[test]
+    fn resolver_scope_alias_carries_original_path() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "use serde::Deserialize as D;\nfn main() { let _d: D = D::default(); }\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(1, 21, 21); // inside the first (bare) `D`
+        assert_eq!(
+            s.resolver_scope("D"),
+            vec!["serde".to_string(), "Deserialize".to_string()]
+        );
+    }
+
+    /// A bare symbol with NO `use` declaration in scope: the scope stays
+    /// EMPTY (the providers keep their byte-for-byte no-hint behavior —
+    /// std/prelude names are never guessed).
+    #[test]
+    fn resolver_scope_empty_without_use() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { let x = 9; }\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 18, 18); // inside `x` (a let binding, no import)
+        assert!(s.resolver_scope("x").is_empty());
+    }
+
+    /// A path-shaped symbol carries the ENCLOSING scope (007-01's
+    /// `scope_path_at`), not an import.
+    #[test]
+    fn resolver_scope_path_symbol_carries_enclosing_scope() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn main() { tokio::spawn(f); }\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 15, 15); // inside `tokio`
+        assert_eq!(s.resolver_scope("tokio::spawn"), vec!["main".to_string()]);
+    }
+
+    /// Group imports (`use serde::{…}`): the alias entry and the plain
+    /// entry both carry their original paths.
+    #[test]
+    fn resolver_scope_group_imports() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "use serde::{Deserialize as D, Serialize};\nfn main() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 26, 26); // inside the alias `D`
+        assert_eq!(
+            s.resolver_scope("D"),
+            vec!["serde".to_string(), "Deserialize".to_string()]
+        );
+        s.set_point(0, 32, 32); // inside `Serialize`
+        assert_eq!(
+            s.resolver_scope("Serialize"),
+            vec!["serde".to_string(), "Serialize".to_string()]
+        );
+    }
+
+    /// Innermost module wins: a `use` in the enclosing `mod` shadows the
+    /// top-level one (Rust's module scoping).
+    #[test]
+    fn resolver_scope_innermost_use_wins() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/main.rs",
+                "use a::Thing;\nmod inner {\n    use b::Thing;\n    fn f() {}\n}\n",
+            ),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(2, 12, 12); // inside `Thing` of `use b::Thing;`
+        assert_eq!(s.resolver_scope("Thing"), vec!["b".to_string(), "Thing".to_string()]);
+    }
+
+    /// Non-Rust buffers degrade to an empty scope (007-01's layer is
+    /// Rust-only; the providers keep their no-hint behavior).
+    #[test]
+    fn resolver_scope_non_rust_buffer_is_empty() {
+        let (mut s, _dir) = store_with_index(&[
+            ("main.py", "import json\nprint(json)\n"),
+        ]);
+        s.open_path("main.py");
+        s.set_point(0, 7, 7); // inside `json`
+        assert!(s.resolver_scope("json").is_empty());
+    }
+
+    /// `crate::`-prefixed imports never name an external crate: no hint
+    /// (the bare symbol keeps the providers' no-hint behavior). A plain
+    /// same-crate `use inner::Thing;` DOES carry its two-segment hint —
+    /// it is the user's own import path, not a guess; the provider then
+    /// bails honestly ("crate `inner` is not in the cargo graph") when no
+    /// package bears that name.
+    #[test]
+    fn resolver_scope_crate_prefix_is_not_guessed() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "use crate::Thing;\nfn main() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 9, 9); // inside `Thing` of `use crate::Thing;`
+        assert!(s.resolver_scope("Thing").is_empty(), "crate:: prefix never hints");
+    }
+
     #[tokio::test]
     async fn xref_resolver_hit_lands_read_only_jump() {
         // A resolve event with a resolved source (outside the project root,
@@ -12894,6 +13315,133 @@ mod tests {
             "provider chain named in the report: {}", s.message
         );
         assert!(s.resolving_display().is_empty());
+    }
+
+    #[tokio::test]
+    async fn xref_resolver_fallthrough_carries_use_scope_hint() {
+        // 007-03 end to end: a BARE symbol imported via `use` carries the
+        // use-path into the `SymbolContext`, so the cargo provider lands it
+        // in the (locally cached) serde registry source instead of the
+        // bare-symbol bail. Guard: the ambient `~/.cargo` must have a serde
+        // registry source (this dev box does; the resolver crate's own
+        // integration tests assume the same warm cache).
+        let registry_src = std::path::PathBuf::from(
+            std::env::var("CARGO_HOME")
+                .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default())),
+        )
+        .join("registry/src");
+        // Discover a CACHED plain `serde-<semver>` registry source (not
+        // serde_* / serde-untagged) and pin the dependency to that exact
+        // version so `cargo metadata` never needs a fresh index fetch.
+        let mut serde_dir: Option<std::path::PathBuf> = None;
+        let mut serde_version: Option<String> = None;
+        // The registry source dirs live under `registry/src/<index-hash>/`.
+        let index_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&registry_src)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        for index_dir in &index_dirs {
+            let Ok(entries) = std::fs::read_dir(index_dir) else { continue };
+            for entry in entries.flatten() {
+                let name = match entry.file_name().to_str() {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let Some(v) = name.strip_prefix("serde-") else {
+                    continue;
+                };
+                if !v.split('.').next().is_some_and(|c| c.chars().all(|c| c.is_ascii_digit())) {
+                    continue; // serde-untagged, …
+                }
+                if !entry.path().join("src").is_dir() {
+                    continue;
+                }
+                let better = match &serde_version {
+                    None => true,
+                    Some(cur) => {
+                        let key = |s: &str| {
+                            s.split('.')
+                                .map(|p| {
+                                    p.chars()
+                                        .take_while(|c| c.is_ascii_digit())
+                                        .collect::<String>()
+                                })
+                                .map(|p| p.parse::<u64>().unwrap_or(0))
+                                .collect::<Vec<_>>()
+                        };
+                        key(v) > key(cur)
+                    }
+                };
+                if better {
+                    serde_dir = Some(entry.path());
+                    serde_version = Some(v.to_string());
+                }
+            }
+            break; // one index-hash dir per CARGO_HOME
+        }
+        let Some(serde_dir) = serde_dir else { return; };
+        let serde_version = serde_version.expect("set with the dir");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"xscope\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\nserde = \"={serde_version}\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/main.rs"),
+            "use serde::Deserialize;\nfn main() {}\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = s.resolve_bus.subscribe();
+        s.open_path("src/main.rs");
+        s.set_point(0, 9, 9); // on `Deserialize` (bare, use-imported)
+        s.start_symbol_resolution("Deserialize", "src/main.rs");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), rx.changed())
+            .await
+            .expect("resolve event published within 120s");
+        let event = rx.borrow_and_update().clone();
+        let source = event
+            .source
+            .expect("the bare use-imported symbol resolves via the scope hint");
+        assert!(source.external, "the serde registry source is external");
+        assert!(
+            source.file.starts_with(&serde_dir),
+            "landed in the serde registry source: {:?}",
+            source.file
+        );
+        let file_name = source.file.to_string_lossy().into_owned();
+        assert!(
+            file_name.contains("serde-"),
+            "file in a serde-<version> dir: {file_name}"
+        );
+
+        // Degradation pin at the same seam: a BARE symbol with NO `use`
+        // keeps today's byte-for-byte "needs scope info" behavior — the
+        // provider never gets a hint, so the whole chain reports a miss
+        // naming the symbol (the bare bail fires before any cargo work).
+        s.start_symbol_resolution("plain_local_name", "src/main.rs");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), rx.changed())
+            .await
+            .expect("second resolve event published within 60s");
+        let event = rx.borrow_and_update().clone();
+        let err = event.error.expect("a miss (no use declares the name)");
+        assert!(
+            err.contains("no tooling provider could resolve symbol `plain_local_name`"),
+            "no hint → the chain's miss report: {err}"
+        );
+        assert!(
+            !err.contains("jumped"),
+            "a bare unimported symbol never resolves: {err}"
+        );
     }
 
     #[test]
@@ -17497,5 +18045,6 @@ mod tests {
         assert_eq!(s.annotation_count_display(), "2 notes");
     }
 }
+
 
 

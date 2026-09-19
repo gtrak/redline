@@ -25,6 +25,18 @@ fn ctx(root: &std::path::Path, symbol: &str) -> SymbolContext {
         workspace_root: root.to_path_buf(),
         symbol: symbol.to_string(),
         from_file: PathBuf::from("src/lib.rs"),
+        scope: Vec::new(),
+    }
+}
+
+/// As [`ctx`], but with a scope hint (007-03: the app's use-declaration
+/// path for a bare symbol).
+fn ctx_with_scope(root: &std::path::Path, symbol: &str, scope: &[&str]) -> SymbolContext {
+    SymbolContext {
+        workspace_root: root.to_path_buf(),
+        symbol: symbol.to_string(),
+        from_file: PathBuf::from("src/lib.rs"),
+        scope: scope.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -197,4 +209,22 @@ fn bare_symbol_needs_scope_info() {
         "error should say scope info is needed: {}",
         err
     );
+}
+
+/// 007-03: a BARE symbol + the scope hint (the `use` path) resolves a
+/// workspace member through the same machinery as `member::member_fn`
+/// (the path-shaped twin above pins that landing).
+#[test]
+fn bare_symbol_with_scope_resolves_workspace_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    make_local_ws(&tmp);
+    let home = tempfile::tempdir().unwrap();
+
+    let provider = CargoProvider::new().with_cargo_home(home.path());
+    let res = provider
+        .resolve(&ctx_with_scope(tmp.path(), "member_fn", &["member", "member_fn"]))
+        .expect("bare + scope should resolve");
+    assert!(!res.external, "a workspace member must be internal");
+    assert_eq!(res.file.file_name().unwrap(), "lib.rs");
+    assert_eq!(res.line, Some(2));
 }

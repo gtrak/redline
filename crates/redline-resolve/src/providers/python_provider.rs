@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{run_with_timeout, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{run_with_timeout, scope_qualified, ResolvedSource, SymbolContext, ToolingProvider};
 
 /// Timeout for the `find_spec` subprocess (should be fast).
 const FIND_SPEC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -131,9 +131,14 @@ impl PythonProvider {
             offline: self.offline,
         };
 
-        // Parse the symbol: split by `.` into (module_chain, item).
-        let segments: Vec<&str> = ctx
-            .symbol
+        // Parse the symbol: split by `.` into (module_chain, item). A BARE
+        // symbol with a scope hint (007-03: the app's import path)
+        // normalizes to `module.item` up front and flows through the SAME
+        // find_spec machinery as a dotted symbol. No hint keeps the bail,
+        // byte-for-byte.
+        let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope);
+        let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
+        let segments: Vec<&str> = symbol
             .split('.')
             .filter(|s| !s.is_empty())
             .collect();
@@ -524,6 +529,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "mypkg.hello".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         let result = provider.resolve(&ctx).unwrap();
@@ -541,6 +547,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "json.dumps".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         let result = provider.resolve(&ctx).unwrap();
@@ -562,6 +569,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "os.path.join".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         let result = provider.resolve(&ctx).unwrap();
@@ -586,6 +594,56 @@ mod tests {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "Session".to_string(),
             from_file: PathBuf::from("main.py"),
+            scope: Vec::new(),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("needs scope info"),
+            "err: {err}"
+        );
+    }
+
+    // ── 007-03: bare symbol + scope hint (import path) ──────────────────
+
+    /// Discriminating: a BARE symbol + the import-path scope resolves
+    /// through the SAME find_spec machinery as the dotted twin
+    /// (`resolve_workspace_package` pins that twin's landing).
+    #[test]
+    fn bare_symbol_with_scope_resolves_workspace_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("mypkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("__init__.py"),
+            "def hello():\n    return 'hi'\n\nVERSION = '1.0'\n",
+        )
+        .unwrap();
+
+        let provider = PythonProvider::new();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "hello".to_string(),
+            from_file: PathBuf::from("main.py"),
+            scope: vec!["mypkg".to_string(), "hello".to_string()],
+        };
+        let result = provider.resolve(&ctx).unwrap();
+        assert_eq!(result.file, pkg_dir.join("__init__.py"));
+        assert!(!result.external);
+        assert_eq!(result.line, Some(1));
+    }
+
+    /// Stdlib names are NOT guessed: a bare stdlib function name with no
+    /// hint still bails (the app never fabricates a module path for
+    /// prelude/built-in names).
+    #[test]
+    fn stdlib_name_without_hint_is_not_guessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = PythonProvider::new();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "join".to_string(),
+            from_file: PathBuf::from("main.py"),
+            scope: Vec::new(),
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -601,6 +659,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "json.dumps".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         let err = provider.resolve(&ctx).unwrap_err();
@@ -617,6 +676,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "nonexistent_pkg_xyz.module_func".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         let err = provider.resolve(&ctx).unwrap_err();
@@ -637,6 +697,7 @@ mod tests {
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "requests.get".to_string(),
+            scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
         };
         match provider.resolve(&ctx) {
