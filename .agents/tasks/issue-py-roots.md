@@ -45,3 +45,8 @@ documented, NOT probed. This issue decides and implements.
   notes — a flip here is the ACCEPTANCE), provider unit tests. NO
   js_provider/go_provider/cargo/store.rs changes. A parallel lane owns
   `docs/provider-matrix.md` — do not edit it.
+
+## Post-merge follow-up (review P2 hardening, queued)
+
+- P2-1: canonicalize `dir/src` before returning it and require `starts_with(canonicalize(workspace_root))` — a symlinked src → outside currently satisfies the marker (bounded: outside landings flag external=true; no leak).
+- P2-2: control-char path component hard-errors the re-probe subprocess (Rust `{:?}` emits `\u{…}`) — degrade to a miss instead of hard-erroring.
