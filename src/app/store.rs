@@ -7977,11 +7977,19 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             if name_part == "*" {
                 continue;
             }
-            let segs = Self::import_segments(name_part)?;
+            // A non-resolvable entry (`self`/`super`/`crate`-prefixed, or a
+            // single segment) must SKIP, not abort the whole group: in
+            // `use a::b::{self, c};` a bare `c` still has a valid hint.
+            // `?` here would discard the remaining entries (007-03 review P2).
+            let Some(segs) = Self::import_segments(name_part) else {
+                continue;
+            };
             let full = if prefix.is_empty() {
                 segs
             } else {
-                let mut v = Self::import_segments(prefix)?;
+                let Some(mut v) = Self::import_segments(prefix) else {
+                    continue;
+                };
                 v.extend_from_slice(&segs);
                 v
             };
@@ -13203,6 +13211,63 @@ mod tests {
         s.open_path("src/main.rs");
         s.set_point(0, 9, 9); // inside `Thing` of `use crate::Thing;`
         assert!(s.resolver_scope("Thing").is_empty(), "crate:: prefix never hints");
+    }
+
+    /// 007-03 review P2: the negative import shapes must all yield an EMPTY
+    /// hint (a miss, never a guessed crate). Pins glob, single-segment, and
+    /// the `self`/`super` prefixes.
+    #[test]
+    fn resolver_scope_negative_import_shapes_are_not_guessed() {
+        for (name, src, symbol) in [
+            (
+                "glob",
+                "use serde::*;\nfn main() { let _ = Deserialize; }\n",
+                "Deserialize",
+            ),
+            (
+                "single-segment",
+                "use serde;\nfn main() { let _ = serde; }\n",
+                "serde",
+            ),
+            (
+                "self-prefix",
+                "use self::Thing;\nfn main() { let _ = Thing; }\n",
+                "Thing",
+            ),
+            (
+                "super-prefix",
+                "mod m { use super::Thing; fn f() { let _ = Thing; } }\n",
+                "Thing",
+            ),
+        ] {
+            let (mut s, _dir) = store_with_index(&[("src/main.rs", src)]);
+            s.open_path("src/main.rs");
+            // Point at the USE in code (the last occurrence), not the import.
+            let at = src.rfind(symbol).expect("fixture symbol");
+            let line = src[..at].matches('\n').count();
+            let col = at - src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            s.set_point(line, col, col);
+            assert!(
+                s.resolver_scope(symbol).is_empty(),
+                "{name}: a non-resolvable import must never hint"
+            );
+        }
+    }
+
+    /// 007-03 review P2: a non-resolvable entry in a group must SKIP, not
+    /// abort the group — `use a::b::{self, c};` still resolves bare `c`.
+    #[test]
+    fn resolver_scope_group_skips_bad_entries() {
+        let src = "use serde::{self as s2, Deserialize};\nfn main() {}\n";
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", src)]);
+        s.open_path("src/main.rs");
+        let at = src.find("Deserialize").expect("fixture symbol");
+        s.set_point(0, at, at);
+        assert_eq!(
+            s.resolver_scope("Deserialize"),
+            vec!["serde".to_string(), "Deserialize".to_string()],
+            "a preceding bad group entry must not discard a later good one"
+        );
     }
 
     #[tokio::test]

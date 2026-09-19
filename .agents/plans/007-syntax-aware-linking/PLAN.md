@@ -1,6 +1,6 @@
 # 007 — Redline: syntax-aware linking (tree-sitter beyond highlighting)
 
-Status: in progress — 01+02 PASS; 03 spec ready; 04 unscheduled
+Status: in progress — 01+02+03 PASS; 04 unscheduled (perf only)
 Phases: 1 · Issues: 01–04
 Depends on: plan 005 (annotations) for 02; plan 006 (resolver chain) for 03
 Origin: user question 2026-09-18 — "could our linking benefit from
@@ -28,7 +28,16 @@ tree-sitter concepts?" — with the answer grounded in the existing tree
   Headline test proves survival of a 100-line insertion + reformat with the
   anchor text gone, and that `syntax: None` orphans (so the window alone
   fails). 543 tests; new `tools/drive_syntax_notes.py` 8/8 (PTY-driven).
-- **03** spec ready (`.agents/tasks/issue-007-03-impl.md`).
+- **03 PASS** (`c015366` + review fixes, reviewer verdict OK; no P1/P0):
+  `SymbolContext.scope: Vec<String>`; a BARE symbol imported via `use` now
+  resolves through the provider's EXISTING locate machinery (bare+hint and
+  the path-shaped twin resolve to an identical `ResolvedSource`). Bare with
+  no import → empty scope → the byte-for-byte old bail (std/prelude never
+  guessed); globs/single-segment/`self|super|crate` prefixes never hint.
+  Aliases carry the original path. New PTY `drive_external_use.py` 6/6:
+  bare `Deserialize` → serde-1.0.229/src/core/de/mod.rs:554. 656 workspace
+  tests. Review P2s fixed: group entries SKIP instead of aborting the group
+  (`use a::b::{self, c}` still hints `c`), plus negative-shape pins.
 - **04** (incremental parse reuse) unscheduled — perf only.
 
 ## Why
