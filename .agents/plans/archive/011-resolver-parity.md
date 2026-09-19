@@ -87,7 +87,20 @@ gate-battery leg; no cell mislabeled in either direction (reviewer-audited).
 - **06** PASS (`252522d`+`368339a`, merged): language-aware M-. path tokens activate the providers' dotted handling — Python/JS path-shaped cells now works (live) (`json.dumps`→stdlib, `fakelib.apply`→package source, `os.path.join`→posixpath). Review BLOCKING→fixed: the whole-path upgrade now requires EVERY dot-delimited segment to be a bare identifier (`a?.b`/`foo().bar`/`(*p).field` degraded to bare instead of feeding providers `a?`/`foo()`/`(*p)` as package names — unintended npm/pip shell-outs); 3 superseded legacy bail legs re-pinned as exact landings (sanctioned amendment). - **06** superseded original text: — legacy bail pins in
   011-01/011-05 drives superseded (sanctioned fence amendment, worker
   updating legs in place with the dispatch guarantee preserved).
-- Go corpus lane queued.
+- **08 go lane** PASS (`10a2ba6`+`0578d61`, merged): 17 probes, 100%
+  LAYOUT-BASED (honest: no go toolchain; hygiene test enforces the marker
+  per golden). Found: the go provider ALSO never applies
+  `scope_qualified_alias` — an aliased import with the correct hint bails
+  (probe 08 pins with the real hint, fix flips to errors Wrap wrap.go:5);
+  go.sum version-fallback leg unreachable (reported, unpinnable).
+  ISSUE 08 CLOSED — 67 goldens across 4 languages, 8 real degradations
+  pinned with fix-flip acceptance criteria.
+- **Fix issues queued (acceptance = golden flips)**: JS relative/side-effect
+  degradation (goldens 1-3), python+go `scope_qualified_alias` composition
+  (goldens 4+6), node_modules-dir-as-package corner, src/-layout python
+  roots, CWD-resolution, Markdown setext query (queries.rs), JSON/TOML/
+  YAML/Bash walk sets (open question).
+
 
 ## Carry-forwards
 
