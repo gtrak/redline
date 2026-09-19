@@ -80,9 +80,14 @@ run() {  # run <label> <cmd...>
   fi
 }
 
-cargo_build()  { cargo build; }
-cargo_lint()   { cargo clippy --all-targets -- -D warnings; }
-cargo_tests()  { cargo test --quiet; }
+# `--workspace` is REQUIRED: the workspace's default-members is the root
+# package only, so a bare `cargo test`/`cargo clippy` silently SKIPS the
+# entire `redline-resolve` crate (~92 tests + all its lints). Found
+# 2026-09-19 via 007-03 (the crate gained a public scope field while no gate
+# ever compiled its tests). Do not drop these flags.
+cargo_build()  { cargo build --workspace; }
+cargo_lint()   { cargo clippy --workspace --all-targets -- -D warnings; }
+cargo_tests()  { cargo test --workspace --quiet; }
 pty()          { timeout 900 python3 "tools/$1"; }
 pool_setup()   { python3 tools/pool.py setup "$1"; }
 pool_runall()  { timeout 900 python3 tools/pool.py runall --lanes "$1"; }
