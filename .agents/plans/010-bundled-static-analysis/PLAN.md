@@ -1,8 +1,12 @@
 # 010 — Redline: bundled static analysis (SPITBALL — no decisions made)
 
-Status: exploratory sketch. NO LSP (user ruled out 2026-09-18). No worker
-dispatched. Two candidate shapes below; the user is spitballing and may
-pick, blend, or drop this entirely.
+Status: **DECIDED 2026-09-20 — Shape A chosen (user: "continue" on the
+drained queue); Rung 1 dispatched.** NO LSP (user ruled out 2026-09-18).
+Two candidate shapes below; Shape A selected for the rung ladder's honest
+degradation (each rung degrades to None, no compiler dependency).
+Rung 2 (use-path + module-tree resolution) largely subsumed by plan 011's
+landed work (scope hints + per-language walks); Rung 3 (local binding
+types) queued behind Rung 1.
 Origin: user asked "are we getting type info from the compiler somehow?"
 (answer: no — everything today is syntactic + package layout). User then
 ruled out LSP but said bundling some static analysis "might make sense."
