@@ -3543,7 +3543,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.set_point_line(line);
         self.recenter_landing();
         self.ensure_highlight();
-        self.record_jump(&origin, "M-.");
+        self.record_jump(origin, "M-.");
         self.minibuffer_message(&format!("jumped to {display}:{}", line + 1));
     }
 
@@ -4163,19 +4163,17 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                             self.set_point_line(line - 1);
                             self.recenter_landing();
                             self.ensure_highlight();
-                            self.record_jump(&origin, "M-.");
+                            self.record_jump(origin, "M-.");
                             self.minibuffer_message(&format!("jumped to {file}:{line}"));
                         } else {
                             self.minibuffer_message(&format!("cannot open {file}"));
                         }
                     } else {
                         self.open_path(file);
-                        let key = self.buffers.current().map(String::from).unwrap_or_default();
                         self.set_point_line(line - 1);
                         self.recenter_landing();
                         self.ensure_highlight();
-                        let _ = key;
-                        self.record_jump(&origin, "M-.");
+                        self.record_jump(origin, "M-.");
                         self.minibuffer_message(&format!("jumped to {file}:{line}"));
                     }
                 }
@@ -4190,7 +4188,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                     self.set_point_line(line - 1);
                     self.recenter_landing();
                     self.ensure_highlight();
-                    self.record_jump(&origin, "M-i");
+                    self.record_jump(origin, "M-i");
                 }
             }
             // Issue 08: branch picker RET checks out; stash list RET pops.
@@ -7437,26 +7435,32 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     // ── symbol navigation (issue 05) ─────────────────────────────────
 
     /// Capture the current position as a `JumpEntry` (for use as the
-    /// origin or destination in `record_jump`).
-    fn current_jump_entry(&self) -> JumpEntry {
-        let key = self.buffers.current().map(String::from).unwrap_or_else(|| SCRATCH_NAME.to_string());
+    /// origin or destination in `record_jump`). None when no buffer is
+    /// current (06a: no scratch fallback — the home state has no buffer).
+    fn current_jump_entry(&self) -> Option<JumpEntry> {
+        let key = self.buffers.current().map(String::from)?;
         let line = self.point_line();
-        JumpEntry {
+        Some(JumpEntry {
             buffer_key: key,
             line,
             col: self.point_col(),
             label: String::new(),
-        }
+        })
     }
 
     /// Record a jump from the current position (captured as `origin` before
     /// navigation) to the new position (captured as `destination` after
     /// navigation). Truncates forward history.
-    fn record_jump(&mut self, origin: &JumpEntry, label: &str) {
-        let dest = self.current_jump_entry();
-        let mut dest = dest;
+    fn record_jump(&mut self, origin: Option<JumpEntry>, label: &str) {
+        // 06a review P1-3: with no current buffer (home state) there is no
+        // origin or destination to record — the old SCRATCH_NAME fallback
+        // created `*scratch*` origins on async resolver landings after the
+        // last buffer was killed (then `M-,` created the buffer).
+        let (Some(origin), Some(mut dest)) = (origin, self.current_jump_entry()) else {
+            return;
+        };
         dest.label = label.to_string();
-        self.jump_stack.record_jump(origin, &dest);
+        self.jump_stack.record_jump(&origin, &dest);
     }
 
     /// `M-,`: pop back to the prior position (line + column).
@@ -7491,10 +7495,14 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             }
             return;
         }
-        // If the buffer is not open, try to open it by key.
+        // If the buffer is not open, report it — no accidental buffer
+        // creation (06a review P1-1: the pre-06a fallback created `*scratch*`,
+        // reachable from home state via a dead jump entry).
         if self.buffers.get(&entry.buffer_key).is_none() {
-            // The buffer was killed or was never open: just scroll scratch.
-            self.open_scratch();
+            self.minibuffer_message(&format!(
+                "no buffer: {}",
+                self.buffer_display(&entry.buffer_key)
+            ));
             return;
         }
         self.buffers.set_current(&entry.buffer_key);
@@ -7737,7 +7745,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             self.set_point_line(def.symbol.line);
             self.recenter_landing();
             self.ensure_highlight();
-            self.record_jump(&origin, "M-.");
+            self.record_jump(origin, "M-.");
             self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
         } else {
             // Ambiguous: open the Xref picker (same-file candidates first).
@@ -9147,7 +9155,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                     self.set_point_line(line);
                     self.recenter_landing();
                     self.ensure_highlight();
-                    self.record_jump(&origin, "M-.");
+                    self.record_jump(origin, "M-.");
                     self.minibuffer_message(&format!(
                         "jumped to {file}:{}",
                         line + 1
@@ -9674,14 +9682,20 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         if self.top_view() == ViewId::Search {
             self.close_view();
         }
-        let dest = JumpEntry {
-            buffer_key: self.buffers.current().map(String::from).unwrap_or_default(),
-            line: line_no.saturating_sub(1),
-            col: hit.col.unwrap_or(0) as usize,
-            label: "search-RET".to_string(),
-        };
-        self.jump_stack.record_jump(&origin, &dest);
-        self.minibuffer_message(&format!("jumped to {file}:{line_no}"));
+        // 06a review P1-2: only record the destination jump when the open
+        // actually opened a buffer — a failed open leaves the home state,
+        // and a `""`-keyed entry would later create `*scratch*` via a dead
+        // jump entry (P1-1's class).
+        if let Some(key) = self.buffers.current().map(String::from) {
+            let dest = JumpEntry {
+                buffer_key: key,
+                line: line_no.saturating_sub(1),
+                col: hit.col.unwrap_or(0) as usize,
+                label: "search-RET".to_string(),
+            };
+            self.jump_stack.record_jump(&origin, &dest);
+            self.minibuffer_message(&format!("jumped to {file}:{line_no}"));
+        }
     }
 
     /// The visible window of results-view rows, pre-computed for the UI:
@@ -9922,11 +9936,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// `M-s o`: occurrences of `query` (a regex, smart case) in the
     /// current buffer — the pipeline scoped to the buffer's text.
     pub fn start_occur(&mut self, query: String) {
-        let key = self
-            .buffers
-            .current()
-            .map(String::from)
-            .unwrap_or_else(|| SCRATCH_NAME.to_string());
+        // 06a review P2: no scratch fallback — the home state has no buffer;
+        // the honest "no buffer" echo is the whole behavior.
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
         let Some(buf) = self.buffers.get(&key) else {
             self.minibuffer_message("no buffer");
             return;
@@ -12098,6 +12113,47 @@ mod tests {
         assert_eq!(s.render_view(), ViewId::Home);
         assert_eq!(s.view_name_display(), "home");
         assert!(s.message.contains("killed"), "{:?}", s.message);
+    }
+
+    /// 06a review P1 repro-mirror: a jump entry whose buffer no longer
+    /// exists must NOT create `*scratch*` on `M-,`/`C-i` — the honest
+    /// "no buffer" report leaves the view and the table unchanged
+    /// (the contract's no-accidental-buffer-creation invariant, both
+    /// directions of the stack).
+    #[test]
+    fn dead_jump_entry_reports_no_buffer_without_creating_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/main.rs");
+        let before = s.buffers.len();
+        // A dead entry: the buffer was killed (or never open) — simulate
+        // exactly what a failed search-RET / stale origin would record.
+        let dead = JumpEntry {
+            buffer_key: "/gone/gone.rs".to_string(),
+            line: 3,
+            col: 0,
+            label: "search-RET".to_string(),
+        };
+        s.jump_stack.record_jump(
+            &JumpEntry {
+                buffer_key: SEARCH_JUMP_KEY.to_string(),
+                line: 0,
+                col: 0,
+                label: "*search*".to_string(),
+            },
+            &dead,
+        );
+        // `M-,` returns to the ORIGIN (the search sentinel); the dead entry
+        // is the DESTINATION, reached with `C-i` (jump-forward) — the
+        // search-RET-then-C-i repro shape from the review.
+        s.jump_back();
+        assert_eq!(s.buffers.len(), before);
+        assert!(s.buffers.get(SCRATCH_NAME).is_none());
+        s.jump_forward();
+        assert_eq!(s.buffers.len(), before, "no buffer created by a dead entry");
+        assert!(s.buffers.get(SCRATCH_NAME).is_none());
+        assert!(s.message.contains("no buffer"), "{:?}", s.message);
     }
 
     /// Issue 05h: `n`/`p` move the selection exactly as `C-n`/`C-p` (no
