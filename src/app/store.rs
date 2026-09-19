@@ -8332,10 +8332,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    /// (011-02) The JS/TS scope hint: a bare symbol → the package path its
-    /// import binds it to; a path-shaped `ns.member` → the namespace
-    /// rewrite; a plain dotted path (`lodash.map`) → EMPTY (it carries its
-    /// own package — the provider's path wins, never treated as bare).
+    /// (011-02, relative extension in the 011-08 fix-jsrel P2-7
+    /// follow-up) The JS/TS scope hint: a bare symbol → the package path
+    /// (or the relative specifier) its import binds it to; a path-shaped
+    /// `ns.member` → the namespace rewrite; a plain dotted path
+    /// (`lodash.map`) → EMPTY (it carries its own package — the provider's
+    /// path wins, never treated as bare).
     fn js_ts_scope_for(
         lang: crate::syntax::registry::LanguageId,
         source: &str,
@@ -8392,9 +8394,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// - `const m = require("pkg")` → `["pkg"]` for bare `m` (the module
     ///   object names the entry).
     ///
-    /// Relative specifiers (`./…`, `../…`), absolute paths, and bare
-    /// side-effect imports (`import "pkg"`) bind nothing resolvable →
-    /// `None` (never guessed).
+    /// 011-08 follow-up (fix-jsrel P2-7): a relative specifier (`./…`,
+    /// `../…`) now CARRIES its hint (the JS provider resolves it against
+    /// the importing buffer's directory and lands in the sibling file,
+    /// workspace-local / `external = false`). Absolute paths and bare
+    /// side-effect imports (`import "pkg"`) still bind nothing the
+    /// provider can resolve → `None` (never guessed).
     fn js_ts_bare_import_path(root: tree_sitter::Node, source: &[u8], symbol: &str) -> Option<Vec<String>> {
         for i in 0..root.child_count() {
             let child = root.child(i)?;
@@ -8572,11 +8577,21 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
     }
 
-    /// A JS/TS string-literal module specifier naming an EXTERNAL package:
+    /// A JS/TS string-literal module specifier the hint may carry —
     /// quoted with `'`/`"` (a template literal or other shape is
-    /// unsupported), and not relative (`.`/`/`-prefixed — those resolve
-    /// within the project, never through node_modules). Scoped
-    /// (`@scope/name`) and subpath (`name/sub`) specs keep their `/`.
+    /// unsupported). Two shapes pass:
+    /// - a package path — scoped (`@scope/name`) and subpath (`name/sub`)
+    ///   specs keep their `/` (the 011-02 external-package hint, which
+    ///   resolves only through node_modules);
+    /// - a relative specifier (`./…` / `../…`) — the 011-08 fix-jsrel
+    ///   provider semantics: it resolves against the importing buffer's
+    ///   directory (exact file → JS-extension walk → directory entry)
+    ///   and lands workspace-locally (`external = false`), so the hint
+    ///   carries it, item included.
+    /// Absolute paths and any other `.`-leading shape (bare `.`/`..`) stay
+    /// out: the provider bails dedicated on absolute, and a bare `.`/`..`
+    /// never reaches its relative branch (it is not a `./`-prefixed spec)
+    /// → never a hint.
     fn js_ts_specifier(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
         let text = Self::node_text(node, source)?;
         let bytes = text.as_bytes();
@@ -8588,7 +8603,11 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             return None;
         }
         let spec = std::str::from_utf8(&bytes[1..bytes.len() - 1]).ok()?;
-        if spec.is_empty() || spec.starts_with('.') || spec.starts_with('/') {
+        let is_relative = spec.starts_with("./") || spec.starts_with("../");
+        if spec.is_empty()
+            || spec.starts_with('/')
+            || (spec.starts_with('.') && !is_relative)
+        {
             return None;
         }
         Some(spec.to_string())
@@ -15069,6 +15088,64 @@ mod tests {
         );
     }
 
+    /// 011-08 fix-jsrel P2-7 live leg: with the app now EMITTING the
+    /// relative hint, M-. on a relative use site lands in the SIBLING
+    /// file through the REAL provider chain: workspace-local
+    /// (`external = false`) and opened through `open_resolved_source`'s
+    /// project branch — an EDITABLE project buffer, never the read-only
+    /// external path. (The provider-side twin goldens are the js corpus'
+    /// `relative-*` probes.)
+    #[tokio::test]
+    async fn xref_relative_import_lands_in_sibling_file_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        // The project marker (project detection is marker-driven).
+        std::fs::write(dir.path().join("package.json"), "{}\n").unwrap();
+        let src = "import { legacyJoin } from \"./legacy-util\";\nfunction f() { legacyJoin(); }\n";
+        std::fs::write(dir.path().join("src/app.js"), src).unwrap();
+        std::fs::write(
+            dir.path().join("src/legacy-util.js"),
+            "function legacyJoin() {}\nmodule.exports = { legacyJoin };\n",
+        )
+        .unwrap();
+        let sibling = std::fs::canonicalize(dir.path().join("src/legacy-util.js")).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = s.resolve_bus.subscribe();
+        s.open_path("src/app.js");
+        let at = src.rfind("legacyJoin").expect("fixture");
+        let line = src[..at].matches('\n').count();
+        let col = at - src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        s.set_point(line, col, col);
+        s.start_symbol_resolution("legacyJoin", "src/app.js");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), rx.changed())
+            .await
+            .expect("resolve event published within 60s");
+        let event = rx.borrow_and_update().clone();
+        let source = event
+            .source
+            .as_ref()
+            .expect("the relative use site resolves (the app emits the hint)");
+        assert!(!source.external, "the sibling file is workspace-local (external = false)");
+        assert_eq!(source.file, sibling, "landed in the sibling file");
+        assert_eq!(
+            source.line,
+            Some(1),
+            "the member definition line (1-based)")
+        ;
+        s.apply_resolve_event(&event);
+        assert_eq!(
+            s.view_name_display(),
+            "src/legacy-util.js",
+            "the view is now the sibling file"
+        );
+        let cur: &str = s.buffers.current().expect("a current buffer");
+        assert!(
+            !s.external_buffers.contains(cur),
+            "the landed sibling is an EDITABLE project buffer (the project branch of open_resolved_source), never the read-only external one"
+        );
+    }
+
     #[test]
     fn xref_resolver_stale_generation_event_discarded() {
         // An event from a superseded request (or a previous project) must be
@@ -20349,27 +20426,37 @@ mod tests {
         );
     }
 
-    /// No-import / relative / absolute specifiers are NEVER guessed:
-    /// the hint stays empty (the provider keeps its exact no-hint bail).
+    /// No-import / absolute / bare-`.` / bare-`..` / side-effect
+    /// specifiers are NEVER guessed: the hint stays empty (the provider
+    /// keeps its exact no-hint / dedicated-bail behavior — the JS
+    /// provider bails dedicated on absolute specs, and a bare `.`/`..`
+    /// never reaches its relative branch). Relative (`./`/`../`) specs
+    /// LEFT this list in the fix-jsrel P2-7 follow-up: they hint now
+    /// (pinned in
+    /// `resolver_scope_js_relative_import_carries_sibling_path`).
     #[test]
-    fn resolver_scope_js_no_import_and_relative_are_not_guessed() {
+    fn resolver_scope_js_no_import_absolute_and_side_effect_are_not_guessed() {
         let cases = [
             ("no import", "function f() { doThing(); }\n"),
-            (
-                "relative",
-                "import { doThing } from \"./acme\";\ndoThing();\n",
-            ),
-            (
-                "relative parent",
-                "import { doThing } from \"../acme\";\ndoThing();\n",
-            ),
             (
                 "absolute path",
                 "import { doThing } from \"/opt/acme\";\ndoThing();\n",
             ),
             (
+                "bare dot (current dir)",
+                "import { doThing } from \".\";\ndoThing();\n",
+            ),
+            (
+                "bare dotdot (parent dir)",
+                "import { doThing } from \"..\";\ndoThing();\n",
+            ),
+            (
                 "side-effect only",
                 "import \"acme\";\ndoThing();\n",
+            ),
+            (
+                "relative side-effect (binds nothing)",
+                "import \"./acme\";\ndoThing();\n",
             ),
         ];
         for (name, src) in cases {
@@ -20383,6 +20470,81 @@ mod tests {
                 "{name}: no hint expected"
             );
         }
+    }
+
+    /// 011-08 follow-up (fix-jsrel P2-7): a relative specifier (`./…` /
+    /// `../…`) now CARRIES its hint — item included (the
+    /// `SymbolContext.scope` contract) — because the JS provider landed
+    /// it: it resolves against the importing buffer's directory and lands
+    /// in the sibling file, workspace-local (`external = false`). The
+    /// sibling's PRESENCE is what the provider checks (a dedicated bail
+    /// when the file is absent — the provider's corpus goldens); the
+    /// app-side hint is the import declaration itself, never a guess.
+    #[test]
+    fn resolver_scope_js_relative_import_carries_sibling_path() {
+        let src = "\
+            import { legacyJoin } from \"./legacy-util\";
+            import { joinTwo as legacyTwo } from \"../lib/legacy-util\";
+            import legacyDefault from \"./legacy-default.js\";
+            import * as legacyNs from \"./legacy-ns\";
+            const { cjsJoin } = require(\"./legacy-cjs\");
+            const legacyWhole = require(\"./legacy-whole\");
+            legacyJoin();
+            legacyTwo();
+            legacyDefault();
+            legacyNs.helper();
+            cjsJoin();
+            legacyWhole();
+            ";
+        let (mut s, _dir) = store_with_index(&[
+            ("src/index.js", src),
+            // The siblings really ARE present (the hint does not stat the
+            // disk — the provider does, and bails dedicated when absent).
+            ("src/legacy-util.js", "function legacyJoin() {}\n"),
+            ("lib/legacy-util.js", "function joinTwo() {}\n"),
+            ("src/legacy-default.js", "export default function legacyDefault() {}\n"),
+            ("src/legacy-ns.js", "export function helper() {}\n"),
+            ("src/legacy-cjs.js", "function cjsJoin() {}\nmodule.exports = { cjsJoin };\n"),
+            ("src/legacy-whole.js", "module.exports = {};\n"),
+        ]);
+        s.open_path("src/index.js");
+        let mut probe = |symbol: &str| {
+            let at = src.rfind(symbol).expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            s.resolver_scope(symbol)
+        };
+        // Named relative → the sibling's path, item included.
+        assert_eq!(
+            probe("legacyJoin"),
+            vec!["./legacy-util".to_string(), "legacyJoin".to_string()]
+        );
+        // `../` relative + alias → the ORIGINAL name.
+        assert_eq!(
+            probe("legacyTwo"),
+            vec!["../lib/legacy-util".to_string(), "joinTwo".to_string()]
+        );
+        // An extension-carrying relative spec stays verbatim (the provider
+        // lands the exact file — no walk).
+        assert_eq!(
+            probe("legacyDefault"),
+            vec!["./legacy-default.js".to_string(), "legacyDefault".to_string()]
+        );
+        // Whole-module CJS binding → the specifier alone (the entry).
+        assert_eq!(probe("legacyWhole"), vec!["./legacy-whole".to_string()]);
+        // CJS destructuring → the sibling's path, item included.
+        assert_eq!(
+            probe("cjsJoin"),
+            vec!["./legacy-cjs".to_string(), "cjsJoin".to_string()]
+        );
+        // Relative namespace import: bare `ns` names the entry…
+        assert_eq!(probe("legacyNs"), vec!["./legacy-ns".to_string()]);
+        // …and `ns.member` carries the entry + member (the provider's
+        // relative branch takes the member from the hint's last segment).
+        assert_eq!(
+            probe("legacyNs.helper"),
+            vec!["./legacy-ns".to_string(), "helper".to_string()]
+        );
     }
 
     /// JS subpath specifiers keep their `/` (the provider drops the

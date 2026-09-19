@@ -73,6 +73,21 @@ hand-rolled `node_modules/fakelib` — no install runs)
 - bare via import: works live (011-05 L-J2: `import { clamp }` →
   `util.js`). Named / default / alias / namespace / CJS-require shapes
   are unit-pinned in `store.rs` (`resolver_scope_js_*`).
+- relative import: **the app now EMITS the relative hint (011-08
+  fix-jsrel P2-7 follow-up)** — `./…` / `../…` specifiers carry into the
+  hint (item included for named / aliased / default / destructured
+  bindings; the specifier alone for whole-module and namespace
+  bindings), so M-. on a relative use site lands in the SIBLING file
+  through the provider's relative branch: workspace-local
+  (`external = false`), opened as an EDITABLE project buffer
+  (`open_resolved_source`'s project branch — unit-pinned live in
+  `store.rs`, `xref_relative_import_lands_in_sibling_file_editable`;
+  the hint shapes in `resolver_scope_js_relative_*`). Absolute and
+  side-effect shapes still hint nothing (the provider's dedicated
+  bails — `resolver_scope_js_no_import_absolute_and_side_effect_are_
+  not_guessed`). Provider-side landing goldens: the js corpus
+  (`relative-import-whole-bail`, `relative-member-bail`,
+  `live-relative-lands`).
 - in-library follow-up: works live (011-05 L-J3: inside the landed
   `index.js`, M-. on `clamp` jumps in-crate to crate-relative
   `util.js:1` through the freshly built js-tree index — pre-011-04 this
