@@ -83,3 +83,15 @@ and line numbers are pinned.
    layout (`src/gears/`) would fail `find_spec` in the same offline-bail
    shape — not probed here (would need the same follow-up decision),
    noted for honesty.
+
+## Determinism notes (011-08 review P2-2)
+
+- Probe 013's bail assumes the gate host has NO top-level `engine`
+  module installed in its python3; a host-installed `engine` would
+  change the outcome LOUDLY (golden flip), never silently.
+- Probe 009's `posixpath.py` landing goes through the frozen-stdib
+  `__file__` fallback (CPython 3.11+ freezes `os.path`; `find_spec`
+  origin is `frozen`, the provider imports and reads `__file__`). On
+  a pre-3.11 host the direct origin yields the same file, so the
+  branch itself is carried by the host version + the unit pin
+  `resolve_dotted_chain_fallback` (python_provider.rs).

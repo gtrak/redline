@@ -3,10 +3,17 @@
 # (the python provider does not apply the 011-02 alias rewrite), so the
 # provider looks for a TOP-LEVEL module `engine` — which does not exist.
 # Offline mode (no network in the gate) refuses the fetch-on-demand and
-# bails byte-for-byte.
+# bails byte-for-byte. 011-08 review P1: the scope hint IS present (the
+# app would send ["gears","engine","torque"] — original import path,
+# item included) and the provider ignores it; with an EMPTY scope this
+# probe could not demonstrate hint-ignoring, and the documented fix
+# (scope_qualified_alias, cf. js_provider.rs) returns None unconditionally
+# on an empty scope — it would land silently. With the hint present the
+# current bail is unchanged (traced), and the fix flips this golden to a
+# RESOLVED landing (project/gears/engine.py:11) — a conscious diff.
 symbol=engine.torque
 from_file=main.py
-scope=[]
+scope=["gears","engine","torque"]
 root=project
 kind=bail
 bail=module `engine` not found and offline mode refuses to pip install
