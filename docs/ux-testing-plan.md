@@ -632,3 +632,15 @@ binary bit the session twice).
 - sweep_flows reduced to a 15-record thin PTY tier: 15/15 in 23.7s (was 65/65 ~87s). Kept: input encoding, repaint races (ann-delete class, U-BHN), quit lifecycle, boot smoke, watcher smokes, in-flight search cancel.
 - Pooled battery: 70.5s (was ~117s; serial 0.2-era was 524s at session start). Reviewer: PASS, no verdict loss on any sampled twin.
 - Deferred follow-up (scheduled): demote drive_windowing/panes, drive_xref/external suites, ux_sweep — all state+text, still run in the battery.
+
+## Cross-lane PTY contention (2026-09-20, open)
+
+Two lanes running serial `gate.sh full` concurrently can bleed renders
+through the SHARED `/tmp/redline_pyte_repo` fixture (hint-rel saw another
+lane's content in mismatched renders; py-roots hit exit-3 refusals +
+backlog-#12 stray-file residue). The flock serializes suites, but two
+concurrent GATES each run their own suite sequence against the same
+fixtures — the quiet-window wait is the only documented mitigation.
+Gap: every battery (not just pooled) should use private per-lane
+fixtures (`REDLINE_POOL_ROOT`) or the fixture repos need per-lane copies
+at the driver level. Spec'd for the next harness lane.
