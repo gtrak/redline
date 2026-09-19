@@ -43,6 +43,10 @@ use redline_resolve::{SymbolContext, ToolingProvider};
 const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/go");
 
 /// One parsed probe: the spec AND the expected outcome.
+#[expect(
+    dead_code,
+    reason = "`bail` is parsed for spec symmetry with `resolved`, but bail assertions flow through the golden file, so the field is never read back"
+)]
 struct Probe {
     name: String,
     /// The leading `#` header lines, verbatim (preserved by bless).
@@ -60,6 +64,10 @@ struct Probe {
     bail: Option<String>,
 }
 
+#[expect(
+    dead_code,
+    reason = "the probe only reads `resolved`'s shape (Some/None counters); the field values are compared via the rendered golden"
+)]
 struct ExpectedResolved {
     external: bool,
     /// File relative to the corpus root.

@@ -154,7 +154,7 @@ const BASH_QUERY: &str = r#"
 
 const MARKDOWN_QUERY: &str = r#"
 (atx_heading (inline) @name) @item
-((setext_heading) @item (inline) @name)
+(setext_heading (paragraph (inline) @name)) @item
 "#;
 
 /// The definition query for a language; `None` for plain text (the
@@ -456,16 +456,19 @@ mod tests {
     // ── Markdown: headings outline ─────────────────────────────────────
     #[test]
     fn markdown_extracts_headings() {
-        let src = "# One\n\n## Two\n\ntext\n";
+        let src = "# One\n\n## Two\n\nSetext\n====\n\ntext\n";
         let syms = extract_symbols(LanguageId::Markdown, src);
-        let one = find(&syms, "One").expect("heading One");
+        let one = find(&syms, "One").expect("atx heading One");
         assert_eq!(one.kind, SymbolKind::Heading);
         assert_eq!(one.line, 0);
-        let two = find(&syms, "Two").expect("heading Two");
+        let two = find(&syms, "Two").expect("atx heading Two");
         assert_eq!(two.kind, SymbolKind::Heading);
         assert_eq!(two.line, 2);
-        // Exactly the two headings (no paragraph, no false positives).
-        assert_eq!(syms.len(), 2, "{syms:?}");
+        let setext = find(&syms, "Setext").expect("setext heading");
+        assert_eq!(setext.kind, SymbolKind::Heading);
+        assert_eq!(setext.line, 4);
+        // Exactly the three headings (no paragraph, no false positives).
+        assert_eq!(syms.len(), 3, "{syms:?}");
     }
 
     // ── JSON: keys ─────────────────────────────────────────────────────

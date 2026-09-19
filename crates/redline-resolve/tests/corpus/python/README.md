@@ -7,6 +7,19 @@ with every probe's expected outcome checked in as a `*.golden` file.
 change in the provider or the resolution seam shows up as a deliberate
 golden diff — never a silent regression.
 
+## Re-bless discipline (011-08 follow-up P2-1)
+
+`GOLDEN_BLESS=1 cargo test -p redline-resolve --test golden_python`
+re-blesses the corpus then FAILS the run (never ends green — an accidental
+bless cannot slip through); rerun without the env var to verify. The python
+goldens are HAND-AUTHORED (each file is both the probe spec and the
+expected outcome, pinned byte-for-byte), so a bless does NOT re-render
+them (unlike the re-derivable js/go goldens): it writes every golden back
+UNCHANGED — a no-op re-bless is a per-file "no change" — and a deliberate
+hand-edit round-trips byte-identically. A per-file panic would abort the
+loop mid-run; the end-of-test `assert_bless_stopped` makes an accidental
+bless never end green. Review `git diff` before committing a re-bless.
+
 ## Corpus layout
 
 ```

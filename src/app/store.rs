@@ -16027,13 +16027,13 @@ mod tests {
 
     /// 011-07 discriminating: a Markdown tree indexes through the full
     /// path. VERIFIED HONEST SCOPE (extracted, not assumed): the
-    /// definition query's atx branch captures headings (`# Alpha` →
-    /// symbol `Alpha`); its SETEXT branch is DORMANT — `Beta\n====` yields
-    /// zero symbols (pinned in `setext_only_file_indexes_nothing` below
-    /// as the absent index entry), so the M-. targets in a markdown
-    /// dependency are ATX HEADINGS only: no setext, no paragraphs,
-    /// no links. All three registry map keys (`md`, `markdown`, `mdx`)
-    /// are walked.
+    /// definition query captures both ATX headings (`# Alpha` → symbol
+    /// `Alpha`) and SETEXT headings (`Delta\n====` → symbol `Delta` — the
+    /// setext branch's node shape is `setext_heading → paragraph → inline`,
+    /// verified against the pinned tree-sitter-md 0.3.2 grammar). So the
+    /// M-. targets in a markdown dependency are all headings: no
+    /// paragraphs, no links. All three registry map keys (`md`,
+    /// `markdown`, `mdx`) are walked.
     #[tokio::test]
     async fn crate_index_builds_for_markdown_dependency_tree() {
         let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
@@ -16043,10 +16043,9 @@ mod tests {
         std::fs::write(p.join("README.md"), "# Alpha\n\njust a paragraph\n").unwrap();
         std::fs::write(p.join("docs/changelog.markdown"), "# Beta\n").unwrap();
         std::fs::write(p.join("docs/guide.mdx"), "# Gamma\n").unwrap();
-        // Setext heading: the query's second branch is dormant (0
-        // symbols extracted) — this file is walked but indexes nothing,
-        // which is the honest end state, not a defect here (queries.rs
-        // is 011-04 territory).
+        // Setext heading: the query's setext branch captures the heading
+        // text (011-07 follow-up: the branch was structurally unmatchable
+        // before and was fixed to `setext_heading → paragraph → inline`).
         std::fs::write(p.join("docs/setext.md"), "Delta\n====\n").unwrap();
         let mut rx = s.crate_index_bus.subscribe();
         s.start_crate_indexing(p, &p.join("README.md"));
@@ -16069,25 +16068,30 @@ mod tests {
         assert_eq!(idx.definition_count("Alpha"), 1, "atx heading extraction");
         assert_eq!(idx.definition_count("Beta"), 1, "atx heading extraction");
         assert_eq!(idx.definition_count("Gamma"), 1, "mdx atx heading extraction");
-        assert!(
-            !idx.has("docs/setext.md"),
-            "setext branch is dormant: 0 symbols -> no index entry"
+        assert!(idx.has("docs/setext.md"), "setext heading file indexed");
+        assert_eq!(
+            idx.definition_count("Delta"),
+            1,
+            "setext heading extraction (1 heading)"
         );
     }
 
-    /// 011-07: the dormant setext branch, pinned directly against the
+    /// 011-07 follow-up: the setext branch, pinned directly against the
     /// extractor (the e2e test above pins the same truth through the
     /// full walk -> build_index path; this is the minimal unit twin).
+    /// The pinned tree-sitter-md 0.3.2 shape is
+    /// `setext_heading -> paragraph -> inline`, so `Delta\n====` yields
+    /// exactly one Heading symbol named `Delta` (atx and setext both
+    /// extract; paragraphs and links do not).
     #[test]
-    fn setext_only_markdown_file_contributes_no_symbols() {
-        assert!(
-            crate::syntax::queries::extract_symbols(
-                LanguageId::Markdown,
-                "Delta\n====\n"
-            )
-            .is_empty(),
-            "the query's setext branch captures nothing (atx only)"
+    fn setext_markdown_file_contributes_heading_symbols() {
+        let syms = crate::syntax::queries::extract_symbols(
+            LanguageId::Markdown,
+            "Delta\n====\n",
         );
+        assert_eq!(syms.len(), 1, "exactly the setext heading: {syms:?}");
+        assert_eq!(syms[0].name, "Delta");
+        assert_eq!(syms[0].kind, crate::syntax::queries::SymbolKind::Heading);
     }
 
     /// 011-04: the walk is the OWNING language's, never a global "index

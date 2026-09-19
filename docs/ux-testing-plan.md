@@ -610,3 +610,14 @@ level where they live).
 3. **Measurements (this box, 0.06 quiet):** sweep_flows 65 flows / ~87 s →
    15 records / ~24 s; 60 unit twins run in ~2.5 s. Full battery and pooled
    numbers in the run log below the commit that lands this.
+
+
+## Merge gate discipline (2026-09-20)
+
+After EVERY merge: `cargo build` + `cargo test --workspace` +
+`cargo clippy --workspace --all-targets -- -D warnings` — test-only
+verification let a go-lane dead-code lint go red on main between merges
+(caught by the setext-fix lane's gate; fixed `b2eb424`). Always
+`cargo build` before a PTY battery (`pool.py` does not rebuild; a stale
+binary bit the session twice).
+

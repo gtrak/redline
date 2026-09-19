@@ -37,3 +37,16 @@ The golden suite runs `cargo metadata` only — it does NOT type-check the
 sample sources. A corpus edit that breaks compilation passes the gate
 silently; keep the samples compiling (out-of-band `cargo check` on a
 scratch copy when you edit them).
+
+## Re-bless discipline (011-08 follow-up P2-1)
+
+`GOLDEN_BLESS=1 cargo test -p redline-resolve --test golden_rust` re-blesses
+the corpus then FAILS the run (never ends green — an accidental bless cannot
+slip through); rerun without the env var to verify. The rust goldens are
+HAND-AUTHORED `*.golden` files (each is both the probe spec and the expected
+outcome, pinned byte-for-byte), so a bless does NOT re-render them (unlike the
+re-derivable js/go goldens): it writes every golden back UNCHANGED — a no-op
+re-bless is a per-file "no change" — and a deliberate hand-edit round-trips
+byte-identically. A per-file panic would abort the loop mid-run; the
+end-of-test `assert_bless_stopped` makes an accidental bless never end green.
+Review `git diff` before committing a re-bless.
