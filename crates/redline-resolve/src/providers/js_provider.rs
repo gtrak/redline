@@ -984,6 +984,46 @@ mod tests {
         assert_eq!(src.line, Some(1));
     }
 
+    /// 011-08 polish (js-polish P2-1, the bail half): a MALFORMED
+    /// intermediate package.json stops the walk — that level is a project
+    /// root whose dependency map cannot be read, so climbing past it to
+    /// the outer valid manifest would be a guess. (Contrast the MISSING
+    /// manifest, which is skipped: `local_path_dep_walks_past_packageless_dirs`.)
+    #[test]
+    fn local_path_dep_bails_on_malformed_intermediate_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path();
+        let ws = outer.join("ws");
+        let local = outer.join("packages").join("mylocal");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        fs::write(
+            local.join("package.json"),
+            r#"{"name":"mylocal","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(
+            local.join("index.js"),
+            "export function hello() { return 1; }\n",
+        )
+        .unwrap();
+        // A MALFORMED manifest at the workspace level…
+        fs::write(ws.join("package.json"), "{ this is not json").unwrap();
+        // …with a valid `file:` dep declared one level up: the walk BAILS
+        // at the malformed level, it does not climb past it.
+        fs::write(
+            outer.join("package.json"),
+            r#"{"name":"outer","dependencies":{"mylocal":"file:packages/mylocal"}}"#,
+        )
+        .unwrap();
+        assert_eq!(find_local_path_dep(&ws, "mylocal"), None);
+
+        // Control: the SAME layout with the intermediate manifest MISSING
+        // (not malformed) climbs and finds the outer dep.
+        fs::remove_file(ws.join("package.json")).unwrap();
+        assert_eq!(find_local_path_dep(&ws, "mylocal"), Some(local.clone()));
+    }
+
     // ── end-to-end: node_modules dep + item locate (no network) ────────────
 
     #[test]

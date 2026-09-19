@@ -20487,12 +20487,14 @@ mod tests {
             import { legacyJoin } from \"./legacy-util\";
             import { joinTwo as legacyTwo } from \"../lib/legacy-util\";
             import legacyDefault from \"./legacy-default.js\";
+            import { default as legacyDef2 } from \"./legacy-whole\";
             import * as legacyNs from \"./legacy-ns\";
             const { cjsJoin } = require(\"./legacy-cjs\");
             const legacyWhole = require(\"./legacy-whole\");
             legacyJoin();
             legacyTwo();
             legacyDefault();
+            legacyDef2();
             legacyNs.helper();
             cjsJoin();
             legacyWhole();
@@ -20531,6 +20533,9 @@ mod tests {
             probe("legacyDefault"),
             vec!["./legacy-default.js".to_string(), "legacyDefault".to_string()]
         );
+        // `{ default as D }` → entry-only (the one shape that deliberately
+        // drops the member — `default` names the entry itself).
+        assert_eq!(probe("legacyDef2"), vec!["./legacy-whole".to_string()]);
         // Whole-module CJS binding → the specifier alone (the entry).
         assert_eq!(probe("legacyWhole"), vec!["./legacy-whole".to_string()]);
         // CJS destructuring → the sibling's path, item included.

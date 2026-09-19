@@ -122,6 +122,19 @@ hand-rolled `node_modules/fakelib` — no install runs)
   unit-pinned in `store.rs` (`resolver_scope_python_*`); relative
   imports, wildcards, and prelude names (`print`) bail byte-for-byte
   (011-02 L2).
+- src/-layout workspace packages (011-08 py-roots): a PEP 621
+  `src/`-layout project (`pyproject.toml` + sources under `src/`) is not
+  importable from the CWD, so a CWD-based `find_spec` miss triggers
+  honest discovery: walk up from the buffer's directory (bounded by the
+  workspace root) for a `pyproject.toml`, and if the project carries a
+  `src/` dir, re-probe `find_spec` with that dir on `sys.path` — the
+  sys.path entry is derived from a FOUND file on disk, never a guess
+  (no pyproject / no `src/` dir leaves the bail byte-for-byte,
+  unit-pinned by `src_layout_without_pyproject_is_not_guessed`; the
+  returned `src/` is canonicalized and must stay under the workspace —
+  a symlinked-outside `src/` is a miss, not a discovery). Live-pinned
+  by corpus probe 016 (`016-src-layout-workspace-package`, root
+  `project_src` → `src/gears/engine.py:6`).
 - in-library follow-up: works live (`drive_issue_011_04` L3: inside
   `json/__init__.py`, M-. on `JSONDecoder` jumps to crate-relative
   `json/decoder.py` through the python-tree index; the `indexing crate`
@@ -136,12 +149,15 @@ hand-rolled `node_modules/fakelib` — no install runs)
 sandbox)
 
 - Every Go cell above is covered by `go_provider.rs`'s 41 unit tests
-  (which shell out through overridable binaries / injected module
-  caches, so they pass without a toolchain — incl. the 011-08 path-
+  (38 of them run without a toolchain — they shell out through
+  overridable binaries / injected module caches, so they pass here —
+  incl. the 011-08 path-
   shaped alias rewrite, `pe.Wrap` under `import pe "github.com/pkg/`
   `errors"`, pinned by
   `aliased_dot_qualified_use_rewrites_to_real_package` + its no-op
-  twins), the 011-02 Go import-walk
+  twins; the other 3 are `#[ignore]`d live legs requiring the go
+  toolchain, two of them + network: skipped, never silently passed),
+  the 011-02 Go import-walk
   unit pins (`resolver_scope_go_*`), and the 011-04 pure-tree-sitter Go
   walk/extraction tests. Since 011-06 the app-side token extraction is
   also unit-pinned (`symbol_at_point_dotted_path_extends_token_per_

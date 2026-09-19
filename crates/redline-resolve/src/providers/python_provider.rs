@@ -271,7 +271,14 @@ impl PythonProvider {
         // `{p:?}` is a Rust-quoted string literal, which is also a valid
         // Python string literal for the (path) values involved.
         let path_prefix = match extra_sys_path {
-            Some(p) => format!("import sys\nsys.path.insert(0, {p:?})\n"),
+            // A control-char path component would make Rust's `{:?}` emit
+            // `\u{…}` (invalid in a Python string literal) and hard-error
+            // the subprocess — pre-validate and degrade to a miss (the
+            // CWD-miss flow continues untouched).
+            Some(p) if python_literal_path(p) => {
+                format!("import sys\nsys.path.insert(0, {p:?})\n")
+            }
+            Some(_) => return Ok(None),
             None => String::new(),
         };
         let code = format!(
@@ -356,8 +363,12 @@ impl ToolingProvider for PythonProvider {
 /// project marker); if the project carries a `src/` dir (the src layout),
 /// that dir is the sys.path entry that makes the package importable.
 /// Returns `None` when no enclosing project with a `src/` layout is found —
-/// the caller then leaves the CWD miss untouched (no guessing).
+/// the caller then leaves the CWD miss untouched (no guessing). The
+/// returned `src/` dir is canonicalized and required to stay under the
+/// canonical workspace root (a symlinked `src/` pointing outside never
+/// satisfies the marker).
 fn src_layout_root(workspace_root: &Path, from_file: &Path) -> Option<PathBuf> {
+    let canonical_root = std::fs::canonicalize(workspace_root).ok()?;
     let file_path = workspace_root.join(from_file);
     // `from_file` is workspace-relative; a root-level file has no own dir,
     // so the walk starts at the workspace root itself.
@@ -368,13 +379,31 @@ fn src_layout_root(workspace_root: &Path, from_file: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
         if dir.join("pyproject.toml").is_file() && dir.join("src").is_dir() {
-            return Some(dir.join("src"));
+            // Canonicalize before returning: a symlinked `src/` resolving
+            // outside the workspace is not a workspace src layout.
+            let src = std::fs::canonicalize(dir.join("src")).ok()?;
+            if !src.starts_with(&canonical_root) {
+                return None;
+            }
+            return Some(src);
         }
         if dir == *workspace_root {
             return None;
         }
         dir = dir.parent()?.to_path_buf();
     }
+}
+
+/// Does `p` round-trip through Rust's `{:?}` quoting as a valid Python
+/// string literal? Rust's Debug quoting renders control chars (beyond the
+/// standard `\n`/`\t`/`\r`/quote/backslash escapes, which Python accepts)
+/// as `\u{…}` — a SyntaxError in a Python string literal, which would
+/// hard-error the re-probe subprocess. Non-UTF-8 paths cannot be checked
+/// at all → treated as unsafe.
+fn python_literal_path(p: &Path) -> bool {
+    p.to_str()
+        .map(|s| s.chars().all(|c| !c.escape_debug().to_string().contains("\\u{")))
+        .unwrap_or(false)
 }
 
 /// Determine the source root for an external (non-workspace) Python file.
@@ -899,22 +928,80 @@ mod tests {
         std::fs::write(root.join("pyproject.toml"), "").unwrap();
         assert_eq!(src_layout_root(root, Path::new("main.py")), None);
         assert_eq!(src_layout_root(root, Path::new("x/main.py")), None);
-        // src layout: the nearest enclosing pyproject + `src/` dir wins.
+        // src layout: the nearest enclosing pyproject + `src/` dir wins
+        // (returned canonicalized).
         std::fs::create_dir_all(root.join("src")).unwrap();
+        let src = std::fs::canonicalize(root.join("src")).unwrap();
         assert_eq!(
             src_layout_root(root, Path::new("src/main.py")),
-            Some(root.join("src"))
+            Some(src.clone())
         );
         // Walk-up: a nested from_file finds the root's project.
         std::fs::create_dir_all(root.join("src").join("deep")).unwrap();
-        assert_eq!(
-            src_layout_root(root, Path::new("src/deep/util.py")),
-            Some(root.join("src"))
-        );
+        assert_eq!(src_layout_root(root, Path::new("src/deep/util.py")), Some(src));
         // No pyproject at all → None (no guessing).
         let bare = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(bare.path().join("src")).unwrap();
         assert_eq!(src_layout_root(bare.path(), Path::new("src/main.py")), None);
+    }
+
+    // ── hardening pins (review P2) ─────────────────────────────────────────
+
+    /// A symlinked `src/` pointing OUTSIDE the workspace satisfies the
+    /// naive marker (a `pyproject.toml` + an existing `src/` dir) but must
+    /// not count as a workspace src layout: the canonicalized dir fails
+    /// the `starts_with(canonical workspace root)` check → miss.
+    #[cfg(unix)]
+    #[test]
+    fn src_layout_root_rejects_symlinked_outside_src() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("src")).unwrap();
+        assert_eq!(src_layout_root(root, Path::new("src/main.py")), None);
+    }
+
+    /// A control char in an ancestor component of the discovered `src/`
+    /// path must not hard-error the re-probe subprocess (Rust `{:?}`
+    /// emits `\u{…}`, invalid in a Python string literal) — it degrades
+    /// to the plain CWD-miss flow (the offline refusal, byte-for-byte).
+    #[test]
+    fn control_char_in_discovered_src_path_degrades_to_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A control char in the project-dir component: the discovered
+        // `src/` path carries it into the re-probe's sys.path line.
+        let proj = tmp.path().join("pr\x01oj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+
+        let provider = PythonProvider::new().offline();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "gears.torque".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("pr\x01oj/src/main.py"),
+            language: None,
+        };
+        // Graceful miss: the re-probe is skipped and the miss flows to
+        // the stdlib check + offline refusal (no SyntaxError hard-error
+        // from the python subprocess).
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("offline mode refuses"),
+            "err: {err}"
+        );
+    }
+
+    /// `python_literal_path` accepts paths whose Rust Debug quoting is a
+    /// valid Python string literal and rejects control-char components
+    /// (the `\u{…}` shapes Python's parser refuses).
+    #[test]
+    fn python_literal_path_rejects_unquotable_components() {
+        assert!(python_literal_path(Path::new("/tmp/proj/src")));
+        assert!(python_literal_path(Path::new("a\\b"))); // backslash round-trips
+        assert!(!python_literal_path(Path::new("a\x01b")));
+        assert!(!python_literal_path(Path::new("a\x7fb")));
     }
 
     // ── live E2E: resolve a real installed third-party module ───────────────
