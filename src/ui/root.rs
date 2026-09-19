@@ -317,11 +317,16 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // forcing an 80-wide root there would clip/garble the layout — leave the
     // width unset there (content-sized) so the static tests keep working.
     let (tw_raw, term_h_raw) = hooks.use_terminal_size();
+    // loop-03: the static render helper may pin the root to a terminal width
+    // (the live contract) instead of content-sized — see `render_at_width`.
+    let static_width = hooks.try_use_context::<StaticRenderWidth>().map(|w| w.0);
     use iocraft::Size;
     let term_w: Size = if tw_raw > 0 {
         Size::Length(tw_raw as u32)
+    } else if let Some(w) = static_width {
+        Size::Length(w as u32)
     } else {
-        Size::Auto // static render path: content-sized (no terminal width)
+        Size::Auto // plain static render path: content-sized (no terminal width)
     };
     let term_h: u32 = (term_h_raw as u32).max(24);
 
@@ -798,6 +803,41 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 }
 
+/// Static-render width pin (loop-03): provided by the `render_at_width`
+/// test helper. On the static render path there is no live terminal, so the
+/// root View would otherwise resolve content-wide (`Size::Auto`) — which is
+/// exactly why the df95113 width chain was invisible to static renders (an
+/// unbounded canvas hides off-screen content). Providing this context makes
+/// the root resolve at the given terminal width, so content-sized layers
+/// that escape the window render off-screen and their absence is catchable.
+#[derive(Clone, Copy)]
+pub struct StaticRenderWidth(pub u16);
+
+/// Test support (loop-03): a WIDTH-BOUNDED static render of the root frame.
+///
+/// iocraft's `to_string()` renders width-UNBOUNDED (`render(None)`), so a
+/// content-sized layer that escapes the terminal width renders off-screen
+/// yet invisibly (the pre-df95113 picker count-line class: the count line
+/// landed at col 109+ while an unbounded `contains` assertion still passed
+/// — that is why the 004-06a picker-canvas bug was invisible to the static
+/// suite). `render_at_width(store, 80)` pins BOTH the layout wrapper and the
+/// root View to 80 columns — the live-terminal contract of the PTY matrix
+/// (80x24) — so anything that would be off-screen there is clipped here too,
+/// and its ABSENCE from the 80-col text is catchable statically. This is
+/// the layout-correctness discriminator the below-PTY flow twins assert on.
+#[cfg(test)]
+pub fn render_at_width(store: AppStore, width: usize) -> String {
+    let mut app = element! {
+        ContextProvider(value: Context::owned(StaticRenderWidth(width as u16))) {
+            ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
+                Root
+            }
+        }
+    };
+    let canvas = app.render(Some(width));
+    canvas.get_text(0, 0, width, canvas.height())
+}
+
 #[derive(Default, Props)]
 struct MinibufferProps {
     pub message: String,
@@ -1050,6 +1090,69 @@ mod tests {
         );
         // The text is present on that single row (truncated, not wrapped away).
         assert!(canvas.get_text(0, 0, 80, 1).contains('r'));
+    }
+
+    /// loop-03 regression pin: the pre-df95113 off-screen count-line shape.
+    /// A NoWrap home body row wider than the 80-col terminal (the 118-col
+    /// content that drove the original failure) with the find-file picker
+    /// open. Pre-df95113 the overlay column resolved to the home content
+    /// width, so the picker's right-aligned 'N of M' count line landed past
+    /// col 80 and a width-80 render clipped it away entirely — this test
+    /// FAILS on that shape. (The width pin is in root.rs/home_view.rs;
+    /// the fixture only widens the content, it does not re-introduce the
+    /// bug.)
+    #[test]
+    fn render_at_width_catches_offscreen_picker_count_line() {
+        use crate::app::command::Command;
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = pty_store(dir.path());
+        // A home body row ~118 cols wide: `C-c p z` + 2 + 110-char docs.
+        // Category `0wide` sorts first so the row survives the viewport
+        // budget with the picker open (8 body rows: 21 - 1 - 12).
+        let wide_docs = "x".repeat(110);
+        let docs: &'static str = Box::leak(wide_docs.into_boxed_str());
+        store
+            .registry
+            .register(Command::new("wide-doc-cmd", docs, "0wide", |_s, _a| {}));
+        match store
+            .engine
+            .global
+            .bind(
+                &[
+                    crate::app::keymap::parse_key("C-c").unwrap(),
+                    crate::app::keymap::parse_key("p").unwrap(),
+                    crate::app::keymap::parse_key("z").unwrap(),
+                ],
+                "wide-doc-cmd",
+            ) {
+            Ok(()) => {}
+            Err(e) => panic!("bind the wide-doc command: {e}"),
+        }
+        store.open_find_file();
+
+        let frame = render_at_width(store, 80);
+        // The picker's count line ('N of M', right-aligned) must be ON the
+        // 80-col screen: a row matching the PTY count-line shape.
+        let count_line = frame
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                t.split_once(" of ")
+                    .map(|(n, m)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                        && !m.is_empty() && m.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                panic!("picker count line 'N of M' must be on-screen at width 80:\n{frame}")
+            });
+        // It sits right-aligned inside the window (the pre-fix shape had it
+        // at col 109+, i.e. clipped from the 80-col canvas entirely).
+        let last = count_line.trim_end().chars().count();
+        assert!(
+            last <= 80,
+            "count line extends past the 80-col window: col {last}: {count_line:?}"
+        );
     }
 
     /// M-x palette: the prompt + typed query, the surviving nucleo
