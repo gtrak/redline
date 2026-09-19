@@ -1,6 +1,8 @@
 # golden for probe `relative-member-bail`  (011-08 js lane)
 # anchor: src/legacy.cjs:11   symbol: `legacyJoin`   scope: ["./legacy-util", "legacyJoin"]   mode: deterministic
-# note: relative specifier with an item: the FIRST `.` splits at the leading dot — empty package, the whole specifier kept, item dropped — so it degrades exactly like the whole-binding shape (base package `.`).
-kind: bail
-message: |
-  package `.` is not in node_modules and offline mode refuses to install it
+# note: relative specifier with an item: lands in the SIBLING file and scans it for the MEMBER definition (`function legacyJoin`), external = false (fix-jsrel; the leading `.` used to leave the empty-package, base-`.` shape).
+kind: resolved
+external: false
+source_root: src
+file: legacy-util.js
+line: 10

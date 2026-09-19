@@ -18,6 +18,17 @@
 //! package `@testing-library/react`, item `render`; `lodash/get` → package
 //! `lodash/get`, no item.
 //!
+//! Path-shaped specifiers NEVER reach the split (011-08 follow-up, fix-jsrel):
+//! a relative import (`./x`, `../x`) resolves against the importing buffer's
+//! directory and lands in the sibling file when it exists (workspace-local,
+//! `external = false` — the same semantics as a `file:` dependency); an
+//! absolute path (`/x`) and a file-ish name (`styles.css`, a side-effect
+//! import) bail with a dedicated, informative message. Previously these
+//! shapes mangled through the split (leading dot → base package `.`, which
+//! probed `node_modules/.` as a package and funneled online into
+//! `npm install "."`; absolute → the empty base; `styles.css` → package
+//! `styles` + item `css`).
+//!
 //! Plain `node_modules` only — no yarn-PnP, no npm-workspaces resolution.
 //! Installs are always local (never `-g`/global).
 
@@ -33,6 +44,15 @@ use crate::{run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSo
 
 /// File extensions considered JavaScript/TypeScript sources.
 const JS_EXT: &[&str] = &["js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts"];
+
+/// File extensions that make a dotted name file-ish (a FILE NAME, not a
+/// `package.item` path): the JS/TS sources plus the static assets a
+/// side-effect import (`import './styles.css'`) can name.
+const JS_FILE_EXT: &[&str] = &[
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "mts", "cts", "css", "scss",
+    "sass", "less", "svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "woff",
+    "woff2", "ttf", "json", "html",
+];
 
 /// Timeout for `npm install` (network download).
 const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -74,6 +94,63 @@ impl JsProvider {
         self
     }
 
+    /// 011-08 follow-up (fix-jsrel): a relative import specifier resolves
+    /// against the importing buffer's directory — the file the import
+    /// names is workspace-local, so the landing is `external = false`
+    /// (the same semantics as a `file:` dependency). A multi-segment
+    /// hint's member is scanned for a definition in that file; a
+    /// whole-module binding lands with no line.
+    fn resolve_relative(
+        &self,
+        ctx: &SymbolContext,
+        spec: &str,
+        member: Option<&String>,
+    ) -> anyhow::Result<ResolvedSource> {
+        let ws = ctx
+            .workspace_root
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("cannot canonicalize {}: {e}", ctx.workspace_root.display()))?;
+        let file = resolve_relative_file(&ws, &ctx.from_file, spec).ok_or_else(|| {
+            anyhow::anyhow!(
+                "relative specifier `{spec}` cannot be resolved to a workspace file \
+                 (sought next to `{}`)",
+                ctx.from_file.display()
+            )
+        })?;
+        // Canonicalize BEFORE the workspace-prefix check: a lexically
+        // built path (carrying `..` segments) would make `starts_with`
+        // lie about containment.
+        let file = std::fs::canonicalize(&file)
+            .map_err(|e| anyhow::anyhow!("cannot canonicalize {}: {e}", file.display()))?;
+        if !file.starts_with(&ws) {
+            anyhow::bail!(
+                "relative specifier `{spec}` resolves outside the workspace ({}); \
+                 the JS provider stays workspace-local",
+                file.display()
+            );
+        }
+        let dir = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(ws);
+        let line = match member {
+            Some(m) => Some(scan_file_for_def(&file, m).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "member `{m}` not found in `{}` (imported via `{spec}`)",
+                    file.display()
+                )
+            })?),
+            None => None,
+        };
+        Ok(ResolvedSource {
+            file,
+            source_root: dir,
+            external: false,
+            line,
+        })
+    }
+
     /// Run a *local* `npm install <pkg> --no-audit --no-fund` in `install_root`.
     /// Never uses `-g` (no global installs).
     fn npm_install(&self, install_root: &Path, base_pkg: &str) -> anyhow::Result<()> {
@@ -112,6 +189,44 @@ impl JsProvider {
         let qualified = scope_qualified(".", &ctx.symbol, &ctx.scope)
             .or_else(|| scope_qualified_alias(".", &ctx.symbol, &ctx.scope));
         let symbol = qualified.as_deref().unwrap_or(&ctx.symbol);
+
+        // 011-08 follow-up (fix-jsrel): a path-shaped specifier is not a
+        // package path — a DEDICATED degradation fires BEFORE split_symbol /
+        // base_package_name can mangle it (leading dot → base package `.`;
+        // absolute → empty base; `styles.css` → package `styles` + item
+        // `css`). Relative specs land in the sibling file (a
+        // workspace-local, external = false resolution); absolute paths and
+        // file-ish names bail with an honest, informative message.
+        let is_relative = symbol.starts_with("./") || symbol.starts_with("../");
+        let is_absolute = !is_relative && symbol.starts_with('/');
+        if is_relative || is_absolute {
+            // The specifier the app handed over is scope[0] (the joined
+            // qualified path appends the member with a dot); with no hint
+            // the symbol IS the specifier. Guaranteed to carry the same
+            // path marker as `symbol` when a hint exists.
+            let spec = ctx
+                .scope
+                .first()
+                .map_or_else(|| symbol.to_string(), String::clone);
+            if is_relative {
+                // A multi-segment hint's last segment is the imported MEMBER
+                // (`import { legacyJoin } from "./legacy-util"`); a
+                // 1-segment hint is a whole-module binding (no member).
+                let member = (ctx.scope.len() >= 2).then(|| ctx.scope.last()).flatten();
+                return self.resolve_relative(ctx, &spec, member);
+            }
+            anyhow::bail!(
+                "absolute path specifier `{spec}` is not a package path; the JS \
+                 provider resolves package specs and workspace-relative files only"
+            );
+        }
+        if is_file_ish(symbol) {
+            anyhow::bail!(
+                "file-ish name `{symbol}` is not a package path (a side-effect \
+                 import binds no package); nothing to resolve"
+            );
+        }
+
         let (pkg_spec, item) = split_symbol(symbol);
         // 011-02 review P2-1: a bare (dot-free) symbol bails UNLESS a scope
         // hint names the package entry itself — `import * as ns from "pkg"`
@@ -152,6 +267,15 @@ impl JsProvider {
         let pkg_dir = match locate_in_node_modules(&ws, &base_pkg) {
             Some(dir) => dir,
             None => {
+                // A degenerate base (empty / `.` / `..`) is not a package
+                // name: never `npm install` it (the online relative-hint
+                // corner that used to funnel into `npm install "."`).
+                if base_pkg.is_empty() || base_pkg == "." || base_pkg == ".." {
+                    anyhow::bail!(
+                        "`{base_pkg}` is not a package name; it cannot be looked \
+                         up in node_modules or installed"
+                    );
+                }
                 if self.offline {
                     anyhow::bail!(
                         "package `{base_pkg}` is not in node_modules and offline mode \
@@ -239,6 +363,67 @@ fn base_package_name(pkg_spec: &str) -> String {
     }
 }
 
+/// A dotted tail that is a known file extension: `styles.css`, `logo.svg`,
+/// `data.json` — the file name a side-effect import (`import './x.css'`)
+/// leaves behind, not a `package.item` path. JS/TS extensions count too
+/// (`index.js`), since no package carries a file-extension member.
+fn is_file_ish(symbol: &str) -> bool {
+    let Some((_, ext)) = symbol.rsplit_once('.') else {
+        return false;
+    };
+    JS_FILE_EXT.contains(&ext)
+}
+
+/// The concrete file a relative specifier names, next to the importing
+/// buffer: the exact file, then the JS-extension walk, then a directory
+/// import (its package.json entry point, else `index.<ext>`). A dotted
+/// tail that is NOT a JS extension (a static asset, `./styles.css`) is the
+/// exact file only — no walk.
+fn resolve_relative_file(ws: &Path, from_file: &Path, spec: &str) -> Option<PathBuf> {
+    // The buffer's directory: from_file is workspace-relative in the probe
+    // harness and may be absolute in the app; a bare file name has no
+    // directory → the workspace root.
+    let buffer = if from_file.is_absolute() {
+        from_file.to_path_buf()
+    } else {
+        ws.join(from_file)
+    };
+    let dir = buffer
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ws.to_path_buf());
+    let target = dir.join(spec); // Path keeps the `./` / `../` segments
+    if target.is_file() {
+        return Some(target);
+    }
+    if target
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| !JS_EXT.contains(&ext))
+    {
+        return None; // a static asset: the exact file is the whole story
+    }
+    for ext in JS_EXT {
+        let cand = target.with_extension(ext);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    if target.is_dir() {
+        if let Some(entry) = resolve_entry_point(&target) {
+            return Some(entry);
+        }
+        for ext in JS_EXT {
+            let cand = target.join(format!("index.{ext}"));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
 // ── package location (node_modules / local path dep) ─────────────────────────
 
 /// All directories from `start` up to the filesystem root, self first.
@@ -256,7 +441,13 @@ fn ancestors_including_self(start: &Path) -> Vec<PathBuf> {
 }
 
 /// Nearest ancestor (including `start`) with a `node_modules/<base_pkg>`.
+/// The `node_modules` directory itself is never a package: the degenerate
+/// bases `.` / `..` (what a mangled relative specifier used to leave) must
+/// not probe `node_modules/.` as a package (011-08 follow-up, fix-jsrel).
 fn locate_in_node_modules(start: &Path, base_pkg: &str) -> Option<PathBuf> {
+    if base_pkg == "." || base_pkg == ".." {
+        return None;
+    }
     for dir in ancestors_including_self(start) {
         let candidate = dir.join("node_modules").join(base_pkg);
         if candidate.is_dir() {
@@ -421,7 +612,10 @@ fn resolve_entry_point(pkg_dir: &Path) -> Option<PathBuf> {
             return Some(idx);
         }
     }
-    Some(candidate)
+    // fix-jsrel review P2-2: naming a NON-EXISTENT entry file surfaced as
+    // `cannot canonicalize … (os error 2)` downstream instead of the
+    // dedicated "no entry point" bail. None is the honest answer.
+    None
 }
 
 /// Resolve the `exports` field (modern truth) to a relative entry path.
@@ -982,6 +1176,293 @@ mod tests {
     }
 
     // ── live E2E: real tiny npm package (network) ──────────────────────────
+
+    // ── 011-08 follow-up (fix-jsrel): path-shaped specifiers ──────────
+
+    /// A relative whole-module binding lands in the SIBLING file (the
+    /// workspace-local, external = false semantics of a `file:` dep);
+    /// the no-extension specifier resolves through the extension walk.
+    #[test]
+    fn relative_whole_module_lands_in_sibling_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(
+            ws.join("src/app.js"),
+            "const legacy = require('./legacy-util');\n",
+        )
+        .unwrap();
+        fs::write(
+            ws.join("src/legacy-util.js"),
+            "function legacyJoin(parts) { return parts.join(' | '); }\nmodule.exports = { legacyJoin };\n",
+        )
+        .unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "legacy".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./legacy-util".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external, "workspace-local landing");
+        assert_eq!(src.file, ws.join("src").join("legacy-util.js"));
+        assert_eq!(src.source_root, ws.join("src"));
+        assert_eq!(src.line, None, "whole-module binding lands with no line");
+    }
+
+    /// A relative specifier WITH a member (`import { legacyJoin } from
+    /// './legacy-util'`) lands in the sibling file AND scans it for the
+    /// member's definition line.
+    #[test]
+    fn relative_member_lands_with_definition_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(
+            ws.join("src/app.js"),
+            "const { legacyJoin } = require('./legacy-util');\n",
+        )
+        .unwrap();
+        fs::write(
+            ws.join("src/legacy-util.js"),
+            "function legacyJoin(parts) { return parts.join(' | '); }\n",
+        )
+        .unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "legacyJoin".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./legacy-util".to_string(), "legacyJoin".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("legacy-util.js"));
+        assert_eq!(src.line, Some(1));
+
+        // A member absent from the sibling file is an honest bail naming
+        // the member and the file.
+        let mut missing = ctx.clone();
+        missing.symbol = "legacyPad".to_string();
+        missing.scope = vec!["./legacy-util".to_string(), "legacyPad".to_string()];
+        let err = JsProvider::new().offline().resolve(&missing).unwrap_err().to_string();
+        assert!(err.contains("legacyPad"), "err: {err}");
+        assert!(err.contains("legacy-util.js"), "err: {err}");
+    }
+
+    /// A relative specifier that names NO file bails with a dedicated,
+    /// informative message (never the mangled base-package `.` refusal,
+    /// never node_modules).
+    #[test]
+    fn relative_missing_file_bails_dedicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join("src/app.js"), "const x = require('./nope');\n").unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "x".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./nope".to_string()],
+            language: None,
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(err.contains("relative specifier `./nope`"), "err: {err}");
+        assert!(err.contains("src/app.js"), "err: {err}");
+        assert!(!err.contains("node_modules"), "never the node_modules path: {err}");
+    }
+
+    /// A relative specifier naming a STATIC ASSET (`./styles.css`) lands in
+    /// the exact file — no extension walk, no directory form.
+    #[test]
+    fn relative_static_asset_lands_in_exact_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join("src/app.js"), "import './styles.css';\n").unwrap();
+        fs::write(ws.join("src/styles.css"), ".row { color: red; }\n").unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "styles".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./styles.css".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("styles.css"));
+        assert_eq!(src.line, None);
+    }
+
+    /// A relative DIRECTORY import resolves through that dir's
+    /// package.json entry point.
+    #[test]
+    fn relative_directory_import_lands_on_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::create_dir_all(ws.join("src").join("mod")).unwrap();
+        fs::write(
+            ws.join("src/mod/package.json"),
+            r#"{"name":"mod","main":"lib/index.js"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(ws.join("src").join("mod").join("lib")).unwrap();
+        fs::write(ws.join("src/mod/lib/index.js"), "export const x = 1;\n").unwrap();
+        fs::write(ws.join("src/app.js"), "import mod from './mod';\n").unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "mod".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./mod".to_string()],
+            language: None,
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("mod").join("lib").join("index.js"));
+    }
+
+    /// A relative specifier that escapes the workspace bails (the provider
+    /// stays workspace-local).
+    #[test]
+    fn relative_escape_outside_workspace_bails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(ws.join("src/app.js"), "const x = require('../../out');\n").unwrap();
+        fs::write(tmp.path().join("out.js"), "export const x = 1;\n").unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "x".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["../../out".to_string()],
+            language: None,
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(err.contains("outside the workspace"), "err: {err}");
+    }
+
+    /// An absolute path specifier bails with its own dedicated message
+    /// (never the empty-base-package refusal, never an npm install).
+    #[test]
+    fn absolute_specifier_bails_dedicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "legacyJoin".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["/abs/legacy-util".to_string(), "legacyJoin".to_string()],
+            language: None,
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(
+            err.contains("absolute path specifier `/abs/legacy-util`"),
+            "err: {err}"
+        );
+        assert!(!err.contains("offline"), "not the mangled refusal: {err}");
+    }
+
+    /// A file-ish symbol (a side-effect import's name) bails with its own
+    /// dedicated message — never the `styles`/`css` mis-split refusal.
+    #[test]
+    fn file_ish_symbol_bails_dedicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "styles.css".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: Vec::new(),
+            language: Some("javascript".to_string()),
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(err.contains("file-ish name `styles.css`"), "err: {err}");
+        assert!(!err.contains("package `styles`"), "not the mis-split: {err}");
+    }
+
+    /// The `node_modules` directory itself is never probed as a package:
+    /// `.` / `..` bases yield `None` even when `node_modules` is populated.
+    #[test]
+    fn locate_in_node_modules_refuses_dot_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        assert_eq!(locate_in_node_modules(tmp.path(), "."), None);
+        assert_eq!(locate_in_node_modules(tmp.path(), ".."), None);
+        // A real package still locates.
+        fs::create_dir_all(tmp.path().join("node_modules").join("acme")).unwrap();
+        assert_eq!(
+            locate_in_node_modules(tmp.path(), "acme"),
+            Some(tmp.path().join("node_modules").join("acme"))
+        );
+    }
+
+    /// fix-jsrel review P2-1: the extension-walk order is DETERMINISTIC —
+    /// `.js` wins over a same-named `.ts` (Node's LOAD_AS_FILE convention,
+    /// language-agnostic today; make the order a conscious artifact).
+    #[test]
+    fn relative_extension_walk_prefers_js_over_ts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("src")).unwrap();
+        fs::write(
+            ws.join("src/app.js"),
+            "import { go } from './mod';\n",
+        )
+        .unwrap();
+        fs::write(ws.join("src/mod.js"), "export function go() {}\n").unwrap();
+        fs::write(ws.join("src/mod.ts"), "export function go(): void {}\n").unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "./mod.go".to_string(),
+            from_file: PathBuf::from("src/app.js"),
+            scope: vec!["./mod".to_string(), "go".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let src = JsProvider::new().offline().resolve(&ctx).unwrap();
+        assert!(!src.external);
+        assert_eq!(src.file, ws.join("src").join("mod.js"), "the .js twin wins");
+    }
+
+    /// fix-jsrel review P2-3: the file-ish collision class is ACCEPTED —
+    /// a resolvable package whose member is extension-shaped (`pkg.json`)
+    /// bails with the dedicated file-ish message even though the landing
+    /// machinery could have found it. Documented tradeoff; pinned here so
+    /// narrowing the extension set later is a conscious diff.
+    #[test]
+    fn file_ish_member_of_resolvable_package_bails_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir_all(ws).unwrap();
+        fs::write(ws.join("package.json"), r#"{"name":"ws"}"#).unwrap();
+        let dep = ws.join("node_modules").join("somelib");
+        fs::create_dir_all(&dep).unwrap();
+        fs::write(dep.join("package.json"), r#"{"name":"somelib","main":"index.js"}"#).unwrap();
+        fs::write(dep.join("index.js"), "export const json = 1;\n").unwrap();
+        let ctx = SymbolContext {
+            workspace_root: ws.to_path_buf(),
+            symbol: "somelib.json".to_string(),
+            from_file: PathBuf::from("index.js"),
+            scope: vec!["somelib".to_string(), "json".to_string()],
+            language: Some("javascript".to_string()),
+        };
+        let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
+        assert!(
+            err.contains("file-ish name"),
+            "the accepted file-ish bail, got: {err}"
+        );
+    }
 
     #[test]
     #[ignore] // requires network (npm registry)

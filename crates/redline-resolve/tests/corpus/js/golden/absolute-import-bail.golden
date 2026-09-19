@@ -1,6 +1,6 @@
 # golden for probe `absolute-import-bail`  (011-08 js lane)
 # anchor: src/app.js:42   symbol: `legacyJoin`   scope: ["/abs/legacy-util", "legacyJoin"]   mode: deterministic
-# note: absolute path specifier: no first segment -> empty base package, same offline refusal. Finding, not fixed in 011-08 — same candidate class.
+# note: absolute path specifier: not a package path, not workspace-relative — the dedicated absolute-specifier bail (fix-jsrel; was the empty-base-package offline refusal with empty backticks).
 kind: bail
 message: |
-  package `` is not in node_modules and offline mode refuses to install it
+  absolute path specifier `/abs/legacy-util` is not a package path; the JS provider resolves package specs and workspace-relative files only
