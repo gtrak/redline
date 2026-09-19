@@ -98,7 +98,7 @@ and line numbers are pinned.
   former "host-installed top-level `engine` module" hazard no longer
   applies: `gears.engine` resolves via the CWD `sys.path` entry the
   probe root provides, ahead of any site-packages `engine`.
-- Probe 009's `posixpath.py` landing goes through the frozen-stdib
+- Probe 009's `posixpath.py` landing goes through the frozen-stdlib
   `__file__` fallback (CPython 3.11+ freezes `os.path`; `find_spec`
   origin is `frozen`, the provider imports and reads `__file__`). On
   a pre-3.11 host the direct origin yields the same file, so the
