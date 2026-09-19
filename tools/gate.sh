@@ -4,18 +4,26 @@
 #
 #   tools/gate.sh fast      Rust-only: build + clippy + unit tests      (~30 s)
 #   tools/gate.sh smoke     fast + one PTY chain (drive_all)            (~90 s)
-#   tools/gate.sh full      everything at the safe 0.2 quiet (~3 min)
-#   tools/gate.sh full-fast everything at 0.06 quiet (~2 min; see caveat)
-#   tools/gate.sh equiv     A/B the quiet window across the full battery
+#   tools/gate.sh full      everything at the fast 0.06 quiet
+#                           (PTY battery ~255 s, ~4.3 min wall; at the old
+#                           0.2 window the battery measured ~415 s on the
+#                           same suites — loop-02)
+#   tools/gate.sh full-fast redundant alias for `full` since loop-02
+#                           (the 0.06 window IS the default; kept for old scripts)
+#   tools/gate.sh equiv     A/B the quiet window (0.2 vs 0.06) across the
+#                           full battery — run once after changing the driver
 #   tools/gate.sh pooled    fast + the PTY battery POOLED across private
-#                           per-lane fixture copies (tools/pool.py) ~2.3 min
-#                           vs full's ~3 min serial; same verdicts.
+#                           per-lane fixture copies (tools/pool.py): the
+#                           12-suite battery in ~117 s (lanes=4, 0.06 quiet)
+#                           vs full's ~255 s serial; same verdicts.
 #                           Full stays the sequential, always-works fallback.
 #
 # Latency knobs (see tools/pyte_driver.py):
-#   REDLINE_PTY_QUIET  read-quiet window; default 0.2 = old behavior.
-#                      Set 0.06 in the fast loop (~2.9x on PTY suites,
-#                      verdict-verified equivalent — tools/gate.sh equiv).
+#   REDLINE_PTY_QUIET  read-quiet window; default 0.06 (fast, loop-02 — every
+#                      timing-sensitive sweep_flows assertion is now
+#                      positive-gated, and the battery is proven
+#                      verdict-identical at 0.06). Escape hatch: run at the
+#                      old safe window with REDLINE_PTY_QUIET=0.2.
 #   REDLINE_BIN        binary under test (default target/debug/redline).
 #   REDLINE_POOL_LANES lane count for the `pooled` tier (default 4; a 24-core
 #                      box measured well at 4-6 lanes).
@@ -26,19 +34,14 @@ set -u
 cd "$(dirname "$0")/.."
 
 TIER="${1:-full}"
-# Latency policy is PER TIER, because the saving is not free everywhere:
-#   - Rust-only tiers: irrelevant.
-#   - smoke (drive_all): safe at 0.06 (verified verdict-identical).
-#   - full: sweep_flows has fixed-sleep orderings that assume the app has
-#     settled; a short quiet window exposes two latent races (U-BHN banner
-#     debounce, ann-delete message) and gives 64/65 instead of 65/65. So
-#     `full` runs at the proven 0.2 default; use `full-fast` to opt into
-#     0.06 for everything and accept the known sweep_flows caveat.
-# An explicit REDLINE_PTY_QUIET from the caller always wins.
-case "$TIER" in
-  full|equiv|pooled) _default_quiet=0.2 ;;
-  *)          _default_quiet=0.06 ;;
-esac
+# Latency policy (loop-02): the FAST window is the default for every tier.
+# sweep_flows' former fixed-sleep orderings (U-BHN banner debounce, ann-delete
+# transient message, and the absence-style assertions the audit flagged) are
+# now positive-gated (wait_for on the render-completion signal), so a short
+# quiet window can no longer turn a missing repaint into a vacuous pass.
+# An explicit REDLINE_PTY_QUIET from the caller always wins (escape hatch,
+# e.g. REDLINE_PTY_QUIET=0.2 for the old conservative window).
+_default_quiet=0.06
 export REDLINE_PTY_QUIET="${REDLINE_PTY_QUIET:-$_default_quiet}"
 
 # Shared-fixture suites: MUST run one at a time (the driver's flock enforces
@@ -116,10 +119,10 @@ case "$TIER" in
     done
     ;;
   full-fast)
-    # Accelerated full battery: same suites, 0.06 quiet. Known to drop
-    # sweep_flows to 64/65 (timing-sensitive flows, NOT regressions — the
-    # old driver on the same binary gives 65/65). Use for the inner loop;
-    # gate releases on `full`.
+    # Redundant since loop-02: the 0.06 window is now the DEFAULT for every
+    # tier (sweep_flows' timing-sensitive flows are positive-gated; the
+    # battery is proven verdict-identical at 0.06). Kept as a no-op alias
+    # so older scripts keep working.
     REDLINE_PTY_QUIET=0.06 bash "$0" full || fail=1
     ;;
   pooled)
@@ -127,10 +130,12 @@ case "$TIER" in
     # per-lane fixture copies (tools/pool.py). Each concurrently-running
     # suite gets its own fixtures + a per-lane XDG_CACHE_HOME, so the
     # driver's abspath-keyed flock never serializes them. Same verdicts as
-    # serial `full`, ~2.3 min instead of ~3 min. Lanes are exclusive (one
-    # suite per lane); the quiet window stays the safe 0.2. `full` remains
-    # the sequential, always-works fallback (pool lanes live under REDLINE_POOL_ROOT
-    # [default /tmp/rl]; `tools/pool.py clean` removes them).
+    # serial `full`: measured ~117 s vs ~255 s serial (lanes=4, 0.06 quiet,
+    # loop-02). Lanes are exclusive (one suite per lane). `full` remains the
+    # sequential, always-works fallback (pool lanes live under REDLINE_POOL_ROOT
+    # [default /tmp/rl]; `tools/pool.py clean` removes them). Note: a MANUAL
+    # `pool.py runall` without REDLINE_PTY_QUIET in the environment falls back
+    # to pool.py's own conservative 0.2 default; this tier exports 0.06.
     LANES="${REDLINE_POOL_LANES:-4}"
     run "build"  cargo_build
     run "clippy" cargo_lint
