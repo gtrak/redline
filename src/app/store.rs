@@ -20630,3 +20630,10 @@ mod tests {
 
 
 }
+
+// loop-03: the below-PTY unit twins of tools/sweep_flows.py (their own
+// file, hung off this module so the AppStore's private fields are visible;
+// the ledger lives in docs/ux-testing-plan.md).
+#[cfg(test)]
+#[path = "flow_tests.rs"]
+mod flow_tests;

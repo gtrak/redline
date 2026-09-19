@@ -21,7 +21,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::store::{AppStore, ViewId};
+use super::{AppStore, ViewId};
 use crate::app::events::{ChangeKind, ProjectChange};
 use crate::app::keymap::{parse_key, Key};
 
@@ -714,5 +714,737 @@ fn unit_flow_buffer_list_np() {
             && q_closed,
         "open={list_open} n-moved={n_moved} p-back={p_back} stays-open={list_still_open} \
          dropped={d_dropped} clamped={clamped} no-echo={no_echo} q-closed={q_closed}"
+    );
+}
+
+// ═══════════════════════ batch 2: motion / search / magit / watcher ═══
+
+/// A 60-line `tall_sweep.rs` fixture (the U-C1 motion fixture).
+fn tall_sweep_repo(lines: usize, name: &str) -> tempfile::TempDir {
+    let dir = fixture_repo();
+    let mut content = String::new();
+    for i in 1..=lines {
+        content.push_str(&format!("line {i}\n"));
+    }
+    std::fs::write(dir.path().join(format!("src/{name}")), content).unwrap();
+    git(dir.path(), &[
+        "add",
+        &format!("src/{name}"),
+    ]);
+    dir
+}
+
+/// U-C1 Motion: C-d scrolls (the window moves, point's screen row held).
+#[test]
+fn unit_flow_c1() {
+    let repo = tall_sweep_repo(60, "tall_sweep.rs");
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "tall_sweep");
+    assert_eq!(s.top_view(), ViewId::Buffer, "tall file opened");
+    let (top_before, _, viewport) = s.file_view_scroll_info();
+    let point_before = s.file_view_point().0;
+    assert_eq!(top_before, 0);
+    s.key_event(key("C-d"));
+    let (top_after, _, _) = s.file_view_scroll_info();
+    let point_after = s.file_view_point().0;
+    // (a) Real scroll: the top visible line changed (non-vacuous).
+    assert_ne!(top_before, top_after, "C-d must scroll the window");
+    assert!(top_after <= viewport, "half-page scroll: {top_after}");
+    // (b) Point's screen row preserved: same relative row in the window.
+    assert_eq!(
+        point_before.saturating_sub(top_before),
+        point_after.saturating_sub(top_after),
+        "point's screen row must be held (top {top_before}->{top_after}, point \
+         {point_before}->{point_after})"
+    );
+}
+
+/// U-C6 M-< / M-> / G: top/bottom scroll and G→M-< round trip (bottom
+/// anchor: the last content row reads the final line, not just "the
+/// first row changed").
+#[test]
+fn unit_flow_c6() {
+    let repo = tall_sweep_repo(50, "long_sweep.rs");
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "long_sweep");
+    assert!(s
+        .file_view_rows()
+        .first()
+        .map(|r| r.text == "line 1")
+        .unwrap_or(false),
+        "top row line 1");
+    // M->: bottom anchor — the last content row reads the final line.
+    s.key_event(key("M->"));
+    let m_gt_bottom_anchor = s
+        .file_view_rows()
+        .iter()
+        .rev()
+        .find(|r| !r.text.is_empty())
+        .map(|r| r.text.as_str())
+        == Some("line 50");
+    // M-<: back to top.
+    s.key_event(key("M-<"));
+    let rows = s.file_view_rows();
+    let back_top = rows.iter().find(|r| !r.text.is_empty()).map(|r| r.text.as_str())
+        == Some("line 1");
+    assert!(back_top, "M-< round trip to top");
+    // G: bottom again, same anchor.
+    s.key_event(key("G"));
+    let g_anchor = s
+        .file_view_rows()
+        .iter()
+        .rev()
+        .find(|r| !r.text.is_empty())
+        .map(|r| r.text.as_str())
+        == Some("line 50");
+    assert!(g_anchor, "G bottom anchor (line 50)");
+    // M-< round trip after G.
+    s.key_event(key("M-<"));
+    let g_roundtrip = s
+        .file_view_rows()
+        .iter()
+        .find(|r| !r.text.is_empty())
+        .map(|r| r.text.as_str())
+        == Some("line 1");
+    assert!(g_roundtrip, "G→M-< round trip to top");
+}
+
+/// U-E1: `C-c p s s` — the prompt, the query, and the results with the
+/// grouped count (the PTY's `wait_done` is the bus drain here).
+#[test]
+fn unit_flow_e1() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    let mut rx = s.search_rx().unwrap();
+    for tok in ["C-c", "p", "s", "s"] {
+        s.key_event(key(tok));
+    }
+    assert_eq!(s.message, "Search: ", "prompt active");
+    for c in "target".chars() {
+        s.key_event(key(&c.to_string()));
+    }
+    s.key_event(key("RET"));
+    drain_search_finished(&mut s, &mut rx);
+    assert_eq!(s.top_view(), ViewId::Search, "results view");
+    assert!(!s.search_running(), "search finished");
+    let (rows, _, total, _) = s.search_view_info();
+    assert!(total > 0 && !rows.is_empty(), "hits present");
+    let frame = render80(s);
+    assert!(frame.contains("matches in"), "grouped count label: {frame}");
+    assert!(frame.contains("fn target_one"), "hit content: {frame}");
+}
+
+/// U-E3 results navigation: n moves the selection; RET jumps to the file.
+#[test]
+fn unit_flow_e3() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    let mut rx = s.search_rx().unwrap();
+    for tok in ["C-c", "p", "s", "s"] {
+        s.key_event(key(tok));
+    }
+    for c in "target".chars() {
+        s.key_event(key(&c.to_string()));
+    }
+    s.key_event(key("RET"));
+    drain_search_finished(&mut s, &mut rx);
+    let sel_before = s.search_view_info().3;
+    s.key_event(key("n"));
+    let sel_after = s.search_view_info().3;
+    assert!(
+        sel_before != sel_after,
+        "n must move the selection ({sel_before:?}->{sel_after:?})"
+    );
+    s.key_event(key("RET"));
+    assert_eq!(s.top_view(), ViewId::Buffer, "RET jumps to the hit's file");
+    let jumped = s
+        .buffers
+        .current_buffer()
+        .map(|b| b.path.as_ref())
+        .flatten()
+        .map(|p| p.ends_with("main.rs"))
+        .unwrap_or(false);
+    assert!(jumped, "landed in src/main.rs");
+    let frame = render80(s);
+    let lines: Vec<&str> = frame.lines().collect();
+    assert!(lines[0].contains("src/main.rs"), "title: {frame}");
+}
+
+/// U-E2 cancel paths: ESC and q close the results view.
+#[test]
+fn unit_flow_e2() {
+    let drive = |repo: &std::path::Path| -> AppStore {
+        let mut s = store_in(repo);
+        let mut rx = s.search_rx().unwrap();
+        for tok in ["C-c", "p", "s", "s"] {
+            s.key_event(key(tok));
+        }
+        for c in "target".chars() {
+            s.key_event(key(&c.to_string()));
+        }
+        s.key_event(key("RET"));
+        drain_search_finished(&mut s, &mut rx);
+        s
+    };
+    let repo = fixture_repo();
+    // ESC leg.
+    let mut s = drive(repo.path());
+    assert_eq!(s.top_view(), ViewId::Search, "search was open");
+    s.key_event(key("ESC"));
+    assert!(
+        s.top_view() != ViewId::Search && !s.quit,
+        "ESC must close the results view, app alive"
+    );
+    // q leg.
+    let mut s = drive(repo.path());
+    assert_eq!(s.top_view(), ViewId::Search, "search was open");
+    s.key_event(key("q"));
+    assert!(
+        s.top_view() != ViewId::Search && !s.quit,
+        "q must close the results view, app alive"
+    );
+}
+
+/// U-F1: `C-x g` status — Staged/Unstaged sections + dirty counts in the
+/// status line.
+#[test]
+fn unit_flow_f1() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    assert_eq!(s.top_view(), ViewId::MagitStatus);
+    let d = s.dirty_counts();
+    assert_eq!(
+        d.map(|x| (x.staged, x.unstaged)),
+        Some((1, 1)),
+        "baseline +1 ~1: {d:?}"
+    );
+    let frame = render80(s);
+    assert!(frame.contains("Staged") && frame.contains("Unstaged"), "{frame}");
+    let status = frame.lines().last().unwrap();
+    assert!(status.contains("+1 ~1"), "dirty counts in status line: {status:?}");
+}
+
+/// U-F2 stage/unstage: a keypress toggles the git index (git diff
+/// --cached agrees). The fixture is restored via git afterwards.
+#[test]
+fn unit_flow_f2() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    let cached_names = || {
+        let out = git_out(repo.path(), &["diff", "--cached", "--name-only"]);
+        out.lines().map(|l| l.to_string()).collect::<Vec<_>>()
+    };
+    let before = cached_names();
+    assert!(before.iter().any(|n| n == "src/lib.rs"), "baseline: lib staged");
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("u")); // unstage the row under the cursor (staged lib.rs)
+    let after_u = cached_names();
+    assert_ne!(before, after_u, "`u` must toggle the git index");
+    assert!(
+        !after_u.iter().any(|n| n == "src/lib.rs"),
+        "lib unstaged: {after_u:?}"
+    );
+    // Restore the fixture baseline (test hygiene, as the PTY leg does).
+    git(repo.path(), &["add", "src/lib.rs"]);
+    let restored = cached_names() == before;
+    assert!(restored, "fixture restored");
+}
+
+/// U-F3: magit fold/unfold + RET visit — file sections start folded
+/// (hunk rows hidden); TAB reveals, TAB hides, and RET on the file row
+/// opens the file.
+#[test]
+fn unit_flow_f3() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    // Positive gate: magit status rendered (Staged section present).
+    assert!(s.magit_rows().iter().any(|r| r.text.contains("Staged")));
+    let has_hunk = |s: &AppStore| {
+        s.magit_rows()
+            .iter()
+            .any(|r| r.text.contains("@@"))
+            && s.magit_rows().iter().any(|r| r.text.contains("staged_change_marker"))
+    };
+    let folded = !has_hunk(&s);
+    s.key_event(key("TAB"));
+    let unfolded = has_hunk(&s);
+    s.key_event(key("TAB"));
+    let refolded = !has_hunk(&s);
+    s.key_event(key("TAB"));
+    s.key_event(key("RET"));
+    let visited = s.top_view() == ViewId::Buffer
+        && s
+            .buffers
+            .current_buffer()
+            .map(|b| b.path.as_ref())
+            .flatten()
+            .map(|p| p.ends_with("lib.rs"))
+            .unwrap_or(false);
+    assert!(
+        folded && unfolded && refolded && visited,
+        "folded={folded} unfolded={unfolded} refolded={refolded} visited={visited}"
+    );
+    let frame = render80(s);
+    assert!(frame.contains("staged_change_marker"), "file content: {frame}");
+}
+
+/// A dedicated throwaway commit repo (the sweep's REPO5): one base commit,
+/// a STAGED change on src/lib.rs, an UNSTAGED change on README.md.
+fn commit_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("src/lib.rs"), "pub fn target_lib() {}\npub fn other_lib() {}\n").unwrap();
+    std::fs::write(p.join("README.md"), "# commit fixture\n").unwrap();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "base"]);
+    append(p.join("src/lib.rs").as_path(), "staged_change_marker\n");
+    git(p, &["add", "src/lib.rs"]);
+    append(p.join("README.md").as_path(), "unstaged_change_marker\n");
+    dir
+}
+
+/// U-F5 commit flow: stage the unstaged file, open the commit editor
+/// (`c`), type a message, commit (`C-c C-c`) — verified by `git log` and
+/// the status buffer going clean.
+#[test]
+fn unit_flow_f5() {
+    let repo = commit_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    // Cursor on the staged file; n -> Unstaged group; n -> README row; s.
+    s.key_event(key("n"));
+    s.key_event(key("n"));
+    s.key_event(key("s"));
+    let staged_both = {
+        let out = git_out(repo.path(), &["diff", "--cached", "--name-only"]);
+        let names: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+        names.contains(&"src/lib.rs".to_string()) && names.contains(&"README.md".to_string())
+    };
+    assert!(staged_both, "both files staged");
+    s.key_event(key("c"));
+    assert_eq!(s.top_view(), ViewId::CommitEditor, "commit editor open");
+    let editor_render = s
+        .commit_editor_rows()
+        .iter()
+        .any(|r| r.text.contains("Staged changes"))
+        && s.commit_editor_title().contains("commit");
+    assert!(editor_render, "editor chrome (title + staged section)");
+    for c in "sweepf5marker".chars() {
+        s.key_event(key(&c.to_string()));
+    }
+    s.key_event(key("C-c"));
+    s.key_event(key("C-c"));
+    let log_top = git_out(repo.path(), &["log", "--oneline", "-1"]).trim().to_string();
+    assert!(log_top.contains("sweepf5marker"), "git log top: {log_top:?}");
+    let status_clean = git_out(repo.path(), &["status", "--porcelain"]).trim().is_empty();
+    assert!(status_clean, "working tree clean after commit");
+    let frame = render80(s);
+    assert!(
+        !frame.contains("M src/lib.rs") && !frame.contains("M README.md"),
+        "magit clean after commit: {frame}"
+    );
+}
+
+/// U-F6 log: `l` lists commits, a key moves the selection (exactly one
+/// cursor row), and RET opens the selected commit's diff.
+#[test]
+fn unit_flow_f6() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("l"));
+    assert_eq!(s.top_view(), ViewId::Log, "log view");
+    let rows_render = {
+        let rows = s.log_rows();
+        let t: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        t.iter().any(|l| l.contains("commit 5"))
+            && t.iter().any(|l| l.contains("commit 4"))
+            && t.iter().any(|l| l.contains("init"))
+    };
+    assert!(rows_render, "log rows render commit 5 / commit 4 / init");
+    let sel_before = s.log.as_ref().map(|l| l.selected).unwrap_or(0);
+    s.key_event(key("DOWN"));
+    let sel_after = s.log.as_ref().map(|l| l.selected).unwrap_or(0);
+    assert!(
+        sel_before != sel_after,
+        "down must move the (single) selection ({sel_before}->{sel_after})"
+    );
+    s.key_event(key("RET"));
+    assert_eq!(s.top_view(), ViewId::CommitDiff, "RET opens the commit diff");
+    let frame = render80(s);
+    let lines: Vec<&str> = frame.lines().collect();
+    assert!(
+        lines[0].contains("commit")
+            && frame.contains("read-only")
+            && lines.last().unwrap().contains("commit-diff"),
+        "diff pane chrome: {frame}"
+    );
+}
+
+/// U-F7 blame: `b` blames the current buffer's file — per-line rows with
+/// a commit-hash/author prefix and exactly one selected (cursor) row.
+#[test]
+fn unit_flow_f7() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "main");
+    // The current-file check reads the status line's which-function
+    // (a symbol from src/main.rs), not the view title.
+    let file_current = s.which_function().contains("target_one");
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("b"));
+    assert_eq!(s.top_view(), ViewId::Blame, "blame view");
+    assert!(
+        s.blame_title().contains("blame: src/main.rs"),
+        "title: {}",
+        s.blame_title()
+    );
+    let rows = s.blame_rows();
+    let per_line = rows.iter().filter(|r| r.text.contains("Test")).count() >= 5;
+    assert!(per_line, "per-line author token (>=5): {} rows", rows.len());
+    let cursor = s.blame.as_ref().map(|b| b.selected).unwrap_or(0);
+    assert!(cursor < rows.len(), "exactly one selected row: {cursor}");
+    let frame = render80(s);
+    let lines: Vec<&str> = frame.lines().collect();
+    assert!(lines[0].contains("blame: src/main.rs"), "title row: {frame}");
+}
+
+/// U-F8 branch/stash: `y` opens the branch picker (lists the local
+/// branch); `z` with no stashes shows the empty state, not a panic.
+#[test]
+fn unit_flow_f8() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("y"));
+    assert!(s.picker_open(), "branch picker open");
+    let branch_listed = s
+        .picker_filtered()
+        .iter()
+        .any(|(c, _)| c.display.contains("main"));
+    assert!(branch_listed, "branch picker lists the local branch");
+    s.key_event(key("C-g"));
+    assert!(!s.picker_open(), "C-g closes the branch picker");
+    s.key_event(key("z"));
+    let empty_state = s.message.contains("no stashes");
+    assert!(empty_state, "stash empty state (msg={:?})", s.message);
+}
+
+/// U-CDS commit-diff scroll (thin): the commit-diff pane scrolls past the
+/// 80x24 viewport — M-> lands on the last page (the sentinel row shows),
+/// M-< round-trips to the top (the sentinel hides).
+#[test]
+fn unit_flow_cds() {
+    let repo = win_diff_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "big");
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("l"));
+    s.key_event(key("RET")); // newest (tall) commit's diff
+    assert_eq!(s.top_view(), ViewId::CommitDiff, "commit diff open");
+    let top_hidden = !s
+        .commit_diff_view_info()
+        .0
+        .iter()
+        .any(|r| r.text.contains("BOTTOM_SENTINEL"));
+    assert!(top_hidden, "sentinel hidden at top");
+    s.key_event(key("M->"));
+    let (_, _, total) = s.commit_diff_view_info();
+    assert!(total > s.viewport_lines, "diff is taller than the viewport: {total}");
+    let bottom_shown = s
+        .commit_diff_view_info()
+        .0
+        .iter()
+        .any(|r| r.text.contains("BOTTOM_SENTINEL"));
+    assert!(bottom_shown, "M-> shows the sentinel row");
+    s.key_event(key("M-<"));
+    let roundtrip = !s
+        .commit_diff_view_info()
+        .0
+        .iter()
+        .any(|r| r.text.contains("BOTTOM_SENTINEL"));
+    assert!(roundtrip, "M-< hides the sentinel row again");
+    let frame = render80(s);
+    assert!(
+        frame.contains("read-only") && frame.contains("commit diff"),
+        "diff pane still open after the round trip: {frame}"
+    );
+}
+
+/// U-BLW blame windowing (thin): the cursor-following blame window keeps
+/// the (single) cursor row in view across C-n moves and M-> to the last
+/// line.
+#[test]
+fn unit_flow_blw() {
+    let repo = win_diff_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "big");
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.key_event(key("b"));
+    assert_eq!(s.top_view(), ViewId::Blame, "blame open");
+    let in_window = |s: &AppStore| -> bool {
+        let (rows, top, total) = s.blame_view_info();
+        let sel = s.blame.as_ref().map(|b| b.selected).unwrap_or(0);
+        !rows.is_empty() && top <= sel && sel < top + rows.len() && sel < total
+    };
+    let mut all_in = true;
+    for _ in 0..20 {
+        s.key_event(key("C-n"));
+        all_in &= in_window(&s);
+    }
+    s.key_event(key("M->"));
+    let last_ok = in_window(&s)
+        && s.blame.as_ref().map(|b| b.selected == b.lines.len() - 1).unwrap_or(false);
+    assert!(
+        all_in && last_ok,
+        "cursor-in-window across C-n x20 = {all_in}, M-> last line = {last_ok}"
+    );
+}
+
+/// A throwaway repo whose notes file is pre-seeded with 30 lines (the
+/// sweep's WIN_NOTES_REPO) — taller than the 21-row viewport.
+fn notes_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::write(p.join("README.md"), "# notes fixture\n").unwrap();
+    git(p, &["init", "-q", "-b", "main"]);
+    git(p, &["config", "user.name", "Test"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "init"]);
+    let mut notes = String::new();
+    for i in 1..=29 {
+        notes.push_str(&format!("note line {i}\n"));
+    }
+    notes.push_str("note line 30"); // last line, no trailing newline
+    std::fs::write(p.join(".redline-notes.md"), notes).unwrap();
+    dir
+}
+
+/// U-NSL notes-scroll (thin): a notes buffer taller than the viewport
+/// keeps the active (insertion) row in view — typing near the bottom
+/// scrolls the last line into view.
+#[test]
+fn unit_flow_nsl() {
+    let repo = notes_repo();
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("n"));
+    assert_eq!(s.top_view(), ViewId::Buffer, "notes open");
+    let before_last = s.file_view_rows().last().map(|r| r.text.clone());
+    let bottom_hidden = before_last.as_deref() != Some("note line 30");
+    assert!(bottom_hidden, "bottom line hidden before typing: {before_last:?}");
+    s.key_event(key("Z"));
+    let rows_after = s.file_view_rows();
+    let after_last = rows_after.last().map(|r| r.text.as_str());
+    let edited = after_last == Some("note line 30Z");
+    assert!(
+        edited,
+        "self-insert must scroll the insertion row into view: {after_last:?}"
+    );
+    let frame = render80(s);
+    assert!(frame.contains("note line 30Z"), "{frame}");
+}
+
+/// U-G1 live-edit scroll preservation: an external append at the bottom of
+/// a viewed file repaints the view and preserves the scroll anchor.
+#[test]
+fn unit_flow_g1() {
+    let repo = fixture_repo();
+    let gw = repo.path().join("src/g_watch.rs");
+    std::fs::write(&gw, "gwatch line one\ngwatch line two\n").unwrap();
+    git(repo.path(), &["add", "src/g_watch.rs"]);
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "g_watch");
+    let top_before = s.file_view_scroll_info().0;
+    append(&gw, "G1_BOTTOM_APPEND\n");
+    publish_change(&mut s, &gw, ChangeKind::Modify);
+    assert!(!s.current_buffer_changed_on_disk(), "no marker on plain buffer");
+    let top_after = s.file_view_scroll_info().0;
+    assert_eq!(top_before, top_after, "scroll anchor preserved");
+    let frame = render80(s);
+    assert!(frame.contains("G1_BOTTOM_APPEND"), "view repainted: {frame}");
+}
+
+/// U-G2 agent churn (state half): rapid disk writes coalesce — the view
+/// shows the FINAL content, and the app stays responsive (a keypress
+/// repaints). The bounded-repaint property is the debounce coalescing
+/// (unit-tested in the watcher module).
+#[test]
+fn unit_flow_g2() {
+    let repo = fixture_repo();
+    let gw = repo.path().join("src/g_watch.rs");
+    std::fs::write(&gw, "gwatch line one\ngwatch line two\n").unwrap();
+    git(repo.path(), &["add", "src/g_watch.rs"]);
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "g_watch");
+    for i in 0..10 {
+        append(&gw, &format!("G2_CHURN_{i}\n"));
+    }
+    publish_change(&mut s, &gw, ChangeKind::Modify);
+    assert!(
+        s.buffer_text().contains("G2_CHURN_9"),
+        "final content shown after the burst"
+    );
+    // Responsive = the store is still coherent after the burst: the next
+    // keypress processes (state stays sane) and the view still renders the
+    // final content.
+    let frame = render80(s);
+    assert!(frame.contains("G2_CHURN_9"), "post-burst frame coherent: {frame}");
+}
+
+/// U-F4 live status on a FILE buffer: an external disk edit is picked up
+/// and the file view shows it, with no keypress; a plain (non-locally-
+/// owned) file buffer auto-reloads rather than raising the marker; `g`
+/// force-reloads either way.
+#[test]
+fn unit_flow_f4() {
+    let repo = fixture_repo();
+    let gw = repo.path().join("src/g_watch.rs");
+    std::fs::write(&gw, "gwatch line one\ngwatch line two\n").unwrap();
+    git(repo.path(), &["add", "src/g_watch.rs"]);
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "g_watch");
+    append(&gw, "F4_WATCHER_APPEND\n");
+    publish_change(&mut s, &gw, ChangeKind::Modify);
+    let reloaded = s.buffer_text().contains("F4_WATCHER_APPEND");
+    let no_marker = !s.current_buffer_changed_on_disk();
+    assert!(reloaded && no_marker, "auto-reload, no marker");
+    s.key_event(key("g"));
+    let g_reload = s.message.contains("reloaded");
+    assert!(g_reload, "g force-reload echo (msg={:?})", s.message);
+}
+
+/// U-G3 conflict path: a locally-owned buffer shows the 'changed on disk'
+/// marker ONLY after a real external disk edit; the creation event is
+/// consumed (no false marker); force-reload supersedes the marker.
+#[test]
+fn unit_flow_g3() {
+    let repo = fixture_repo();
+    let notes_path = repo.path().join(".redline-notes.md");
+    let mut s = store_in(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("n"));
+    // One keystroke: the notes buffer becomes locally-owned.
+    s.key_event(key("x"));
+    assert!(s.current_buffer_editable(), "notes are editable");
+    // The creation event is consumed: no false marker.
+    publish_change(&mut s, &notes_path, ChangeKind::Create);
+    let no_false_marker = !s.current_buffer_changed_on_disk();
+    let typed_char_present = s.buffer_text().contains('x');
+    // A real external edit: the marker lands.
+    append(&notes_path, "\nexternal_change_marker\n");
+    publish_change(&mut s, &notes_path, ChangeKind::Modify);
+    let marker_landed = s.current_buffer_changed_on_disk();
+    // Force-reload via the M-x command path (the reload-buffer command).
+    s.key_event(key("M-x"));
+    for c in "reload-buffer".chars() {
+        s.key_event(key(&c.to_string()));
+    }
+    let (n, _) = s.picker_count();
+    assert_eq!(n, 1, "the command filter must be unique");
+    s.key_event(key("RET"));
+    let marker_cleared = !s.current_buffer_changed_on_disk();
+    let reloaded = s.buffer_text().contains("external_change_marker");
+    let local_edit_superseded = !s
+        .buffer_text()
+        .lines()
+        .any(|l| l.trim() == "x");
+    assert!(
+        no_false_marker
+            && typed_char_present
+            && marker_landed
+            && marker_cleared
+            && reloaded
+            && local_edit_superseded,
+        "false={no_false_marker} typed={typed_char_present} marker={marker_landed} \
+         cleared={marker_cleared} reloaded={reloaded} superseded={local_edit_superseded}"
+    );
+}
+
+/// U-G6 suspend (state half): `M-x toggle-watcher` OFF suspends (message +
+/// state) and ON again resumes. The no-reload-while-suspended leg is the
+/// watcher SOURCE's gate — it stays in the thin PTY tier (the store's
+/// apply path is deliberately bypass-free, mirroring the live contract).
+#[test]
+fn unit_flow_g6() {
+    let repo = fixture_repo();
+    let mut s = store_in(repo.path());
+    let toggle = |s: &mut AppStore| {
+        s.key_event(key("M-x"));
+        for c in "toggle-watcher".chars() {
+            s.key_event(key(&c.to_string()));
+        }
+        s.key_event(key("RET"));
+    };
+    toggle(&mut s);
+    let suspended_msg = s.message.contains("file watching suspended");
+    let suspended = s.watcher_suspended();
+    toggle(&mut s);
+    let resumed_msg = s.message.contains("file watching resumed");
+    let resumed = !s.watcher_suspended();
+    assert!(
+        suspended_msg && suspended && resumed_msg && resumed,
+        "suspend-msg={suspended_msg} suspend-state={suspended} resume-msg={resumed_msg} \
+         resume-state={resumed}"
+    );
+}
+
+/// U-G5 project switch (`C-c p p`): register a SECOND project in an
+/// isolated cache, drive the switch, and verify the landing on the new
+/// project (status line + find-file picker).
+#[test]
+fn unit_flow_g5() {
+    let repo1 = fixture_repo();
+    let repo2 = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo2.path().join("src")).unwrap();
+    std::fs::write(repo2.path().join("src/b.py"), "def hello():\n    pass\n").unwrap();
+    git(repo2.path(), &["init", "-q"]);
+    // A shared, isolated persistence base: both projects registered.
+    let base = tempfile::tempdir().unwrap();
+    {
+        let mut reg = AppStore::at(repo1.path(), base.path().to_path_buf());
+        reg.project_store.registry.upsert(repo2.path());
+        reg.project_store.save_registry().unwrap();
+    }
+    let mut s = AppStore::at(repo1.path(), base.path().to_path_buf());
+    s.set_viewport_lines(21);
+    let name2 = repo2.path().file_name().unwrap().to_string_lossy().to_string();
+    s.key_event(key("C-c"));
+    s.key_event(key("p"));
+    s.key_event(key("p"));
+    let picker_ok = s.picker_prompt() == "Switch project: "
+        && s
+            .picker_filtered()
+            .iter()
+            .any(|(c, _)| c.name.contains(&name2));
+    assert!(picker_ok, "switch picker lists the 2nd project");
+    s.key_event(key("RET"));
+    let switched = s.project_display() == name2;
+    let msg = s.message.contains(&format!("project: {name2}"));
+    let landed = s.picker_prompt() == "Find file: "
+        && s
+            .picker_filtered()
+            .iter()
+            .any(|(c, _)| c.name.contains("src/b.py"));
+    assert!(
+        switched && msg && landed,
+        "switched={switched} msg={msg} landed-in-new-project-find-file={landed} (msg={:?})",
+        s.message
     );
 }

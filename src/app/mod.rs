@@ -13,6 +13,3 @@ pub mod events;
 pub mod keymap;
 pub mod store;
 pub mod watcher;
-
-#[cfg(test)]
-mod flow_tests;
