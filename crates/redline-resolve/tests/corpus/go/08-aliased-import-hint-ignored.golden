@@ -1,0 +1,18 @@
+# 08 — ALIASED import with the REAL hint, current behavior (FINDING):
+# `import pe "github.com/pkg/errors"` (internal/audit/audit.go) with the
+# handoff hint mapping the alias to its real path (["errors","Wrap"]).
+# The go provider never applies the 011-02 alias rewrite
+# (js_provider does: scope_qualified(...).or_else(scope_qualified_alias
+# (...))), so the alias itself is taken as the package name and bails.
+# If the provider gains the alias leg, this golden flips to a resolved
+# landing into modcache/github.com/pkg/errors@v0.9.1/wrap.go — a
+# deliberate diff. NOTE (python-lane P2 lesson): scope carries the REAL
+# hint — with an empty scope this probe bails identically and pins
+# nothing.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=pe.Wrap
+from_file=internal/audit/audit.go
+scope=["errors","Wrap"]
+root=project
+kind=bail
+bail=package `pe` is not a required module in go.mod (workspace {root})

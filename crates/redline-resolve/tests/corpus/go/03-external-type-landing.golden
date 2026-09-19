@@ -1,0 +1,12 @@
+# 03 — TYPE landing: `mylib.Codec` (contextual anchor: the corpus use of
+# the type flows from the NewCodec() call in cmd/gearserv/main.go).
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=mylib.Codec
+from_file=cmd/gearserv/main.go
+scope=[]
+root=project
+kind=resolved
+external=true
+file=modcache/github.com/!my!org/mylib@v1.2.3/codec.go
+source_root=modcache/github.com/!my!org/mylib@v1.2.3
+line=10

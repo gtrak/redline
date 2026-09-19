@@ -1,0 +1,14 @@
+# 04 — DOT import, bare use WITH hint: `BuildVersion` bare in
+# pkg/report/report.go; scope carries the dot-imported package path +
+# item, as the app's tree-sitter hand-off would. bare+hint normalizes to
+# `auxversion.BuildVersion` (007-03) and lands externally.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=BuildVersion
+from_file=pkg/report/report.go
+scope=["auxversion","BuildVersion"]
+root=project
+kind=resolved
+external=true
+file=modcache/github.com/redlinecorp/auxversion@v0.4.0/version.go
+source_root=modcache/github.com/redlinecorp/auxversion@v0.4.0
+line=9

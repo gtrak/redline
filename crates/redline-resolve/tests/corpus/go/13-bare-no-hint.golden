@@ -1,0 +1,10 @@
+# 13 — BARE no-hint: `New` used bare via the dot import in
+# pkg/note/note.go, with an EMPTY scope (the handoff could not pin the
+# import context). The byte-for-byte no-hint bail.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=New
+from_file=pkg/note/note.go
+scope=[]
+root=project
+kind=bail
+bail=cannot parse a package name from symbol `New`; Go uses dot qualification (e.g. `fmt.Println` → package `fmt`) and a bare symbol needs import context (tree-sitter) not yet provided

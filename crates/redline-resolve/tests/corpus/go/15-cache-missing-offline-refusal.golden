@@ -1,0 +1,15 @@
+# 15 — MISSING module-cache dir + OFFLINE refusal: `sessionstore.Dial`
+# — github.com/redlinecorp/sessionstore IS required in go.mod (v0.2.0)
+# but its modcache dir is intentionally ABSENT from the layout. The
+# .offline() provider refuses the fetch leg byte-for-byte; a live
+# toolchain would instead `go mod download` and land (out of scope for
+# this layout-based corpus). (The module path is deliberately NOT
+# /vN-suffixed: a last-segment-matching name is required to reach the
+# cache leg past the module lookup — see probe 11's /vN corner.)
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=sessionstore.Dial
+from_file=internal/cache/cache.go
+scope=[]
+root=project
+kind=bail
+bail=module `github.com/redlinecorp/sessionstore` cache dir {cache}/github.com/redlinecorp/sessionstore@v0.2.0 is missing and offline mode refuses to fetch

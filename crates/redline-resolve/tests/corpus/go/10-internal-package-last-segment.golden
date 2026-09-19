@@ -1,0 +1,12 @@
+# 10 — WORKSPACE-INTERNAL import corner: `util.Validate` from internal/
+# util. The provider's last-segment rule treats only the module's OWN
+# final segment (`gearserv`) as workspace-local, so an intra-module use
+# of a sibling package bails as an unrequired module. Pins the
+# documented last-segment limitation.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=util.Validate
+from_file=cmd/gearserv/main.go
+scope=[]
+root=project
+kind=bail
+bail=package `util` is not a required module in go.mod (workspace {root})

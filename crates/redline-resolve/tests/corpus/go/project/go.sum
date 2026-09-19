@@ -1,0 +1,12 @@
+github.com/golang-jwt/jwt/v5 v5.2.1 h1:7VkiZ32mXs2FmDVsDPdLV1F+GSKCTrI6bA93lNUn9kk=
+github.com/golang-jwt/jwt/v5 v5.2.1/go.mod h1:piZ0t0yRhrvEV56C5Itjui/Orin92XOyQeJzqLUM7MI=
+github.com/MyOrg/mylib v1.2.3 h1:Qw3x9yZ0mBcDeFgH1jK2lM3nO4pQ5rS6tU7vW8xY9zA=
+github.com/MyOrg/mylib v1.2.3/go.mod h1:aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpQrRsStTuUvV=
+github.com/old/lib v0.0.0 h1:zZyYxXwWvVuUtTsSrRqQpPoOnNmMlLkKiIjJhHgGfFeEdDb=
+github.com/old/lib v0.0.0/go.mod h1:cC1dD2eE3fF4gG5hH6iI7jJ8kK9lL0mM1nN2oO3pP4qQ=
+github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy754Qn1HuqxCGH6XYuYbfQkvFq50=
+github.com/pkg/errors v0.9.1/go.mod h1:08xUySS14x8j9qrOKcMiQFM7jRRI3DoRnmRG2dmznKk=
+github.com/redlinecorp/sessionstore v0.2.0 h1:Ss1tTt2uUu3vVv4wWw5xXx6yYy7zZz8aAa9bBb0cCc=
+github.com/redlinecorp/sessionstore v0.2.0/go.mod h1:Dd1eEe2fFf3gGg4hHh5iIi6jJj7kKk8lLl9mMm0nNn=
+github.com/redlinecorp/auxversion v0.4.0 h1:Uu1vVv2wWw3xXx4yYy5zZz6aAa7bBb8cCc9dDd0eEe=
+github.com/redlinecorp/auxversion v0.4.0/go.mod h1:Ff1gGg2hHh3iIi4jJj5kKk6lLl7mMm8nNn9oOo0pPp=

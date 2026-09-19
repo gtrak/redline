@@ -1,0 +1,12 @@
+# 14 — AMBIGUOUS dot import: bare `Version` in pkg/report/report.go where
+# two candidates sit at file scope (dot-imported auxversion.Version vs
+# the package-level report.Version in stamp.go). The handoff emits NO
+# hint for the ambiguous name → the no-hint bail family of probe 13,
+# this symbol. (The disambiguated twin is probe 05.)
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=Version
+from_file=pkg/report/report.go
+scope=[]
+root=project
+kind=bail
+bail=cannot parse a package name from symbol `Version`; Go uses dot qualification (e.g. `fmt.Println` → package `fmt`) and a bare symbol needs import context (tree-sitter) not yet provided

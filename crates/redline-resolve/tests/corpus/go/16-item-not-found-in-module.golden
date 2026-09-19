@@ -1,0 +1,10 @@
+# 16 — MODULE present, ITEM absent: `errors.NotDefined` — the cache dir
+# exists but no definition-shaped line names `NotDefined`. (Contextual
+# anchor: app.go, where the pkg/errors use sites live.)
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=errors.NotDefined
+from_file=app.go
+scope=[]
+root=project
+kind=bail
+bail=module `github.com/pkg/errors` at {cache}/github.com/pkg/errors@v0.9.1 has no definition of `NotDefined`

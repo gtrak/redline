@@ -1,0 +1,9 @@
+# 17 — NOT A GO MODULE: probe root not_a_module/ has no go.mod → the
+# first-line bail, before any symbol parsing.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=fmt.Println
+from_file=scratch.go
+scope=[]
+root=not_a_module
+kind=bail
+bail=no go.mod under workspace root {root}; not a Go module project

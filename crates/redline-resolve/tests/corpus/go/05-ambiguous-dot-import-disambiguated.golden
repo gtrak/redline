@@ -1,0 +1,14 @@
+# 05 — The DISAMBIGUATED twin of probe 14: the same bare `Version` use
+# site, but the handoff pinned the source package (non-empty scope) →
+# resolves into auxversion. If the handoff cannot disambiguate, probe
+# 14's no-hint bail applies instead.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=Version
+from_file=pkg/report/report.go
+scope=["auxversion","Version"]
+root=project
+kind=resolved
+external=true
+file=modcache/github.com/redlinecorp/auxversion@v0.4.0/version.go
+source_root=modcache/github.com/redlinecorp/auxversion@v0.4.0
+line=6

@@ -1,0 +1,11 @@
+# 09 — STDLIB corner: `fmt.Println` (plain `import "fmt"` in main.go). The
+# module-cache provider has no GOROOT/stdlib leg: std packages are not
+# go.mod requires, so a qualified stdlib use bails like any unknown
+# package.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=fmt.Println
+from_file=cmd/gearserv/main.go
+scope=[]
+root=project
+kind=bail
+bail=package `fmt` is not a required module in go.mod (workspace {root})

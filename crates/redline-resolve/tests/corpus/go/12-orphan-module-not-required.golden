@@ -1,0 +1,10 @@
+# 12 — MODULE-NOT-IN-go.mod: `gin.New` from experimental/metrics.go,
+# whose import (github.com/gin-gonic/gin) is deliberately absent from
+# the require block. The canonical not-a-required-module bail.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=gin.New
+from_file=experimental/metrics.go
+scope=[]
+root=project
+kind=bail
+bail=package `gin` is not a required module in go.mod (workspace {root})

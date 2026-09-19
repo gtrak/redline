@@ -1,0 +1,11 @@
+# 11 — /vN major-version suffix corner: `jwt.Parse` from
+# github.com/golang-jwt/jwt/v5 (REQUIRED in go.mod, but its last path
+# segment is `v5`, not `jwt`) → the last-segment package→module mapping
+# misses. Pins the probe-10 limitation for /vN modules.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=jwt.Parse
+from_file=cmd/gearserv/tokens.go
+scope=[]
+root=project
+kind=bail
+bail=package `jwt` is not a required module in go.mod (workspace {root})

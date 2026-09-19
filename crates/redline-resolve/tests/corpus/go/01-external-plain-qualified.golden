@@ -1,0 +1,13 @@
+# 01 — PLAIN import + qualified use (`errors.New` in app.go): the baseline
+# external module-cache landing, resolved via the plain package name
+# (the last module path segment).
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=errors.New
+from_file=app.go
+scope=[]
+root=project
+kind=resolved
+external=true
+file=modcache/github.com/pkg/errors@v0.9.1/errors.go
+source_root=modcache/github.com/pkg/errors@v0.9.1
+line=8

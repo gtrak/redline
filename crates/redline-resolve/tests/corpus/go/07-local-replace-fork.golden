@@ -1,0 +1,13 @@
+# 07 — LOCAL-PATH replace: `lib.MintToken` with go.mod
+# `replace github.com/old/lib => ./forks/lib` — the fork wins,
+# external=false, source_root = the replaced path.
+# LAYOUT-BASED: modcache/ is a checked-in directory layout — no go toolchain was run to produce this outcome.
+symbol=lib.MintToken
+from_file=cmd/gearserv/main.go
+scope=[]
+root=project
+kind=resolved
+external=false
+file=project/forks/lib/lib.go
+source_root=project/forks/lib
+line=7
