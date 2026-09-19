@@ -59,7 +59,7 @@ GO: the `go` toolchain is ABSENT in this sandbox. The contract says the go
   fake fixture. So: when `go` is missing the drive prints a big banner,
   builds NO go fixture (there is nothing to run), records a SKIP check,
   and exits 0. Go resolution stays unit-covered only (go_provider.rs's
-  ~70 live-shelling unit tests + the 011-04 pure-tree-sitter walk tests).
+  39 live-shelling unit tests + the 011-04 pure-tree-sitter walk tests).
 
 The drive owns /tmp/redline_011_05_repo under the shared PTY-flock scheme
 (Never the shared /tmp/redline_pyte_repo) and removes the tree on exit.
@@ -379,7 +379,17 @@ def main():
         shutil.rmtree(REPO, ignore_errors=True)  # the whole drive-owned tree
 
     failed = [c for c in CHECKS if not c[1]]
-    print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} legs passed")
+    passed = len(CHECKS) - len(failed)
+    skips = [c for c in CHECKS if "SKIPPED" in c[0]]
+    live = len(CHECKS) - len(failed) - len(skips)
+    if skips:
+        print(
+            f"\n{live}/{len(CHECKS)} live legs passed; "
+            f"{len(skips)} recorded skip(s): "
+            + ", ".join(c[0] for c in skips)
+        )
+    else:
+        print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} legs passed")
     sys.exit(1 if failed else 0)
 
 
