@@ -126,6 +126,8 @@ Battery 1 found one functional bug and a set of cheap parity adopts.
 - [04 — quit save-prompt](04-quit-save-prompt.md)
 - [05 — cursor visibility on real terminals](05-cursor-visibility.md)
 - [06 — discovery home](06-discovery-home.md)
+- [06a — empty buffer table + HOME view](06a-empty-table-home.md)
+- [06b — remove scratch affordances](06b-remove-scratch.md)
 - [07 — recenter after a jump](07-jump-recenter.md)
 
 When complete, archive per plan-process.
