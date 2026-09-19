@@ -42,8 +42,8 @@ use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, Ind
 use crate::search::occur;
 use crate::search::references;
 use crate::search::rg::{self, Hit, SearchBus, SearchConfig, SearchEvent};
-use crate::syntax::cache::{CacheKey, HighlightCache};
-use crate::syntax::highlight::{self, HighlightResult};
+use crate::syntax::cache::{CacheKey, HighlightCache, TreeKey};
+use crate::syntax::highlight::{self, HighlightResult, RetainedTree};
 use crate::syntax::registry::{GrammarRegistry, LanguageId};
 use crate::theme::Theme;
 
@@ -2016,11 +2016,17 @@ impl AppStore {
             .get(&key)
             .map(|b| b.rope.len_chars())
             .unwrap_or(0);
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(pos, text);
             // A local edit: the buffer now differs from disk (the
             // light-editing flag, plan decision #6).
             buf.locally_modified = true;
+            // Plan 007 issue 04: record the edit on the retained parse
+            // tree so the next ensure_highlight reparses incrementally.
+            if let Some(old_rope) = old_rope {
+                self.retain_rope_edit(&key, &old_rope, pos, pos, text);
+            }
             // Invalidate the highlight cache for this buffer (text changed).
             self.invalidate_highlight_for_key(&key);
             // Keep the insertion row (the new end of the buffer) inside the
@@ -2073,6 +2079,30 @@ impl AppStore {
         if self.highlight_cache.get(&cache_key).is_some() {
             self.highlight_cache.clear();
         }
+    }
+
+    /// Record a rope edit on the buffer's retained parse tree (plan 007
+    /// issue 04) so the next `ensure_highlight` can reparse incrementally.
+    /// `old_rope` is the PRE-edit rope (the char positions refer to it).
+    /// No-op when the buffer has no retained tree (plain text, big file,
+    /// non-reuse language, or never highlighted yet) — those keep the
+    /// full-parse path.
+    fn retain_rope_edit(
+        &mut self,
+        key: &str,
+        old_rope: &Rope,
+        char_start: usize,
+        char_end: usize,
+        new_text: &str,
+    ) {
+        let Some(buf) = self.buffers.get(key) else { return };
+        if buf.is_big() || buf.path.is_none() {
+            return;
+        }
+        let edit =
+            highlight::rope_edit_to_input_edit(old_rope, char_start, char_end, new_text);
+        self.highlight_cache
+            .retain_apply_edit(&TreeKey::new(key, buf.mtime), &edit);
     }
 
     /// Switch to (creating if needed) the `*scratch*` buffer.
@@ -3041,9 +3071,13 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         if len == 0 {
             return;
         }
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove((len - 1)..len);
             buf.locally_modified = true;
+            if let Some(old_rope) = old_rope {
+                self.retain_rope_edit(&key, &old_rope, len - 1, len, "");
+            }
             self.invalidate_highlight_for_key(&key);
         }
         // plan 005 issue 02: a notes-buffer edit marks the notes document
@@ -3176,7 +3210,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             }
         };
         let key = self.buffers.current().map(String::from).unwrap_or_default();
-        let (editable, text, char_start, char_end) = {
+        let (editable, text, char_start, char_end, old_rope) = {
             let Some(buf) = self.buffers.get(&key) else {
                 self.minibuffer_message("no buffer");
                 return;
@@ -3185,7 +3219,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             let char_start = buf.rope.byte_to_char(range.0);
             let char_end = buf.rope.byte_to_char(range.1);
             let text = buf.rope.slice(char_start..char_end).to_string();
-            (buf.editable, text, char_start, char_end)
+            (buf.editable, text, char_start, char_end, buf.rope.clone())
         };
         // Save to the kill ring (always, regardless of editable).
         self.kill_ring.push(text.clone());
@@ -3196,6 +3230,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 buf.locally_modified = true;
                 buf.mark = None;
             }
+            self.retain_rope_edit(&key, &old_rope, char_start, char_end, "");
             self.invalidate_highlight_for_key(&key);
             // Adjust scroll to keep the view sane after the text removal.
             let total = self
@@ -3286,11 +3321,15 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             let buf = self.buffers.get(&key).unwrap();
             buf.rope.byte_to_char(point_byte)
         };
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(point_char, &text);
             buf.locally_modified = true;
             // Clear the mark (the text insertion shifts byte offsets).
             buf.mark = None;
+        }
+        if let Some(old_rope) = old_rope {
+            self.retain_rope_edit(&key, &old_rope, point_char, point_char, &text);
         }
         self.invalidate_highlight_for_key(&key);
         // Set the yank-pop state (char offsets for ropey edit APIs).
@@ -3345,11 +3384,15 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 .map(|b| b.rope.len_chars())
                 .unwrap_or(0),
         );
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(yank_pos..end);
             buf.rope.insert(yank_pos, &text);
             buf.locally_modified = true;
             buf.mark = None;
+        }
+        if let Some(old_rope) = old_rope {
+            self.retain_rope_edit(&key, &old_rope, yank_pos, end, &text);
         }
         self.invalidate_highlight_for_key(&key);
         self.yank_len = Some(text.chars().count());
@@ -5283,6 +5326,15 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// when the buffer is plain text, big, or already cached for the
     /// current (path, mtime, theme). Used by reloads so a re-read buffer is
     /// re-highlighted immediately (cache invalidation by mtime).
+    ///
+    /// Plan 007 issue 04: for reuse-capable languages the reparse is
+    /// incremental when a retained parse tree exists for this (buffer,
+    /// mtime) — the edit paths recorded their `InputEdit`s on it and the
+    /// parser gets the old tree as a hint. Fallbacks to the full parse:
+    /// no retained tree, the retained tree carries a parse error (stale
+    /// or mid-typing baseline), or the incremental parse itself errors.
+    /// A disk reload changes the mtime, so its stale tree never matches
+    /// the `TreeKey` and the buffer parses from scratch.
     fn ensure_highlight_for_key(&mut self, key: &str) {
         let (path, mtime, big) = {
             let Some(buf) = self.buffers.get(key) else { return };
@@ -5294,7 +5346,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
         let path_str = path.to_string_lossy().into_owned();
         let lang = self.grammar_registry.language_for(&path_str);
-        if lang == crate::syntax::registry::LanguageId::Plain {
+        if lang == LanguageId::Plain {
             return;
         }
         let cache_key = CacheKey::new(&path, mtime, self.theme.name());
@@ -5311,7 +5363,30 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             Some(c) => c,
             None => return,
         };
-        match highlight::highlight(&rope, config, lang) {
+        let result = if highlight::supports_reuse(lang) {
+            let tree_key = TreeKey::new(key, mtime);
+            let incremental = self
+                .highlight_cache
+                .retain_tree(&tree_key)
+                .and_then(|retained| highlight::highlight_with_tree(&rope, lang, retained));
+            match incremental {
+                Some(r) => r,
+                None => highlight::highlight_reusable(&rope, lang)
+                    .map(|(result, tree)| {
+                        // Retain the freshly parsed tree as the next
+                        // incremental baseline.
+                        self.highlight_cache
+                            .retain_insert(tree_key, RetainedTree::new(tree));
+                        result
+                    }),
+            }
+        } else {
+            // JS/TS/TSX: local-variable tracking lives in the
+            // tree-sitter-highlight Highlighter, which does not expose
+            // its parse tree — keep the full-parse path for them.
+            highlight::highlight(&rope, config, lang)
+        };
+        match result {
             Ok(result) => {
                 self.highlight_cache.insert(cache_key, result);
             }
@@ -16192,6 +16267,95 @@ mod tests {
         store.switch_project_root(&root2_str);
         // Tree rows must be cleared (not stale from project 1).
         assert!(store.tree_rows().is_empty(), "tree rows must be empty after project switch");
+    }
+
+    // ── plan 007 issue 04: incremental parse retention ────────────
+
+    /// The notes edit path records its `InputEdit` on the retained parse
+    /// tree and the rebuild stays byte-identical to a full parse.
+    #[test]
+    fn notes_edit_keeps_incremental_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        let mut store = store(root);
+        store.open_notes();
+        let key = store.buffers.current().unwrap().to_string();
+        let mtime = store.buffers.get(&key).unwrap().mtime;
+        let tree_key = TreeKey::new(&key, mtime);
+        // First highlight: full parse + retained tree.
+        store.ensure_highlight();
+        assert!(
+            store.highlight_cache.retain_contains(&tree_key),
+            "markdown notes buffer must retain a parse tree after highlighting"
+        );
+        // Type a line: the edit is recorded on the retained tree and the
+        // cache entry is invalidated (rebuilt on the next ensure).
+        for c in "hi\n".chars() {
+            store.notes_insert_char(c);
+        }
+        store.ensure_highlight();
+        assert!(
+            store.highlight_cache.retain_contains(&tree_key),
+            "retained tree must survive the edit (same buffer, same mtime)"
+        );
+        // The rebuilt result must be byte-identical to a from-scratch
+        // parse of the same content (the correctness bar).
+        let (rope, path, lang) = {
+            let buf = store.buffers.get(&key).unwrap();
+            let path_str = buf.path.as_ref().unwrap().to_string_lossy().into_owned();
+            (
+                buf.rope.clone(),
+                buf.path.clone().unwrap(),
+                store.grammar_registry.language_for(&path_str),
+            )
+        };
+        assert_eq!(lang, LanguageId::Markdown);
+        let from_scratch = highlight::highlight_reusable(&rope, lang).unwrap().0;
+        let cache_key = CacheKey::new(&path, mtime, store.theme.name());
+        assert_eq!(
+            store.highlight_cache.get(&cache_key),
+            Some(&from_scratch),
+            "incrementally rebuilt highlight must be byte-identical to a full parse"
+        );
+    }
+
+    /// A disk reload gives the buffer a new mtime: the retained tree's
+    /// (buffer, mtime) key no longer matches, so the rebuild is a full
+    /// parse — the stale-tree fallback.
+    #[test]
+    fn reload_breaks_the_retained_tree_epoch() {
+        let mut store = store_with_project();
+        open_ann_file(&mut store, "notes.md", "# t\n");
+        let key = store.buffers.current().unwrap().to_string();
+        store.buffers.get_mut(&key).unwrap().editable = true;
+        for c in "x\n".chars() {
+            store.notes_insert_char(c);
+        }
+        store.ensure_highlight();
+        let mtime1 = store.buffers.get(&key).unwrap().mtime;
+        assert!(
+            store.highlight_cache.retain_contains(&TreeKey::new(&key, mtime1)),
+            "edited buffer must have a retained tree"
+        );
+        // Simulate `reload_buffer`: new content from disk, new mtime.
+        let new_mtime =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000);
+        {
+            let buf = store.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str("# t\nreloaded\n");
+            buf.mtime = new_mtime;
+            buf.locally_modified = false;
+        }
+        assert!(
+            !store.highlight_cache.retain_contains(&TreeKey::new(&key, new_mtime)),
+            "a reloaded buffer must not find its stale retained tree"
+        );
+        store.ensure_highlight();
+        assert!(
+            store.highlight_cache.retain_contains(&TreeKey::new(&key, new_mtime)),
+            "the rebuilt full parse must be retained under the new epoch"
+        );
     }
 
     #[test]
