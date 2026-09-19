@@ -3,6 +3,12 @@
 //! types/structs/enums/traits/interfaces, constants, macros — plus the
 //! definition item's extent (for which-function / imenu nesting).
 //!
+//! 010-01 adds the Rust-only per-file tables (struct fields, impl methods
+//! with their impl kind — plan 010 Shape A rung 1) on the SAME parse
+//! (`extract_all`); the M-. self-receiver consumption in `app/store.rs`
+//! queries them synchronously, and the bare-symbol consumers keep using
+//! `extract_symbols` (the tables discarded).
+//!
 //! All tree-sitter churn lives here (plan layering rule): the grammar
 //! crates, the `Language`, and the query strings are touched only in
 //! this module + `registry.rs`. `nav/` and the app layer consume the
@@ -69,6 +75,64 @@ pub struct Symbol {
     pub end_byte: usize,
 }
 
+// ── 010-01: Rust association + struct field tables (rung 1) ─────────────
+// Per-file tables built in the SAME pass as the symbols (same tree, zero
+// extra parse cost) — the data the M-. self-receiver consumption queries
+// synchronously. A struct field's location and an impl method's location
+// (with the impl's kind: inherent or the implemented trait's path).
+
+/// One struct field: its name and the line the `field_declaration` starts on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructField {
+    pub field: String,
+    /// 0-based line of the field declaration.
+    pub line: usize,
+}
+
+/// How an impl block associates a method with its type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImplKind {
+    /// `impl Type { … }` (no trait).
+    Inherent,
+    /// `impl Trait for Type { … }`: the trait's full path text
+    /// (e.g. `std::fmt::Display`).
+    Trait(String),
+}
+
+/// One method of an impl block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImplMethod {
+    pub method: String,
+    /// 0-based line where the method's `fn` starts.
+    pub line: usize,
+    /// 0-based line where the `impl` block starts (the find-implementations
+    /// table key — Rung 4's read-only view).
+    pub impl_line: usize,
+    pub kind: ImplKind,
+}
+
+/// The per-file Rust tables: `fields` is struct name → its fields, `impls`
+/// is the impl's self-type BASE name → its methods (a generic self type
+/// `Foo<T>` is keyed by `Foo`; a non-identifier self type contributes
+/// nothing — honest degradation).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RustTables {
+    pub fields: HashMap<String, Vec<StructField>>,
+    pub impls: HashMap<String, Vec<ImplMethod>>,
+}
+
+/// 010-01 accumulator for one `impl_item` while the table query runs (keyed
+/// by the impl node's start byte, which dedupes the double pattern match of
+/// a trait impl): its self-type base name, the trait path (if any), the
+/// impl's start line, and the methods seen so far as `(name, line)`.
+#[derive(Default)]
+struct ImplAcc {
+    base: String,
+    trait_name: Option<String>,
+    impl_line: usize,
+    methods: Vec<(String, usize)>,
+}
+
 // ── per-language definition queries ─────────────────────────────────────
 // Each pattern captures `@name` (the identifier) and `@item` (the whole
 // definition node, for its extent). Node names / field names were verified
@@ -84,6 +148,27 @@ const RUST_QUERY: &str = r#"
 (const_item name: (identifier) @name) @item
 (static_item name: (identifier) @name) @item
 (macro_definition name: (identifier) @name) @item
+"#;
+
+// 010-01 (plan 010 Shape A, rung 1): the RUST-ONLY association + struct
+// field tables. Node shapes verified against the pinned tree-sitter-rust
+// 0.23.3 NODE_TYPES (throwaway S-expr probe, issue 010-01): an `impl_item`
+// names its self type in the `type` field and its implemented trait in a
+// SEPARATE `trait` field (a field match can't be made optional in a query,
+// so the trait impl and the inherent impl are two patterns — a trait impl
+// matches both, the extraction dedupes per impl node); methods are
+// `function_item`s under `body: (declaration_list …)`, struct fields are
+// `field_declaration`s under `body: (field_declaration_list …)`. The table
+// query runs on the SAME tree as `RUST_QUERY` (zero extra parse cost).
+const RUST_TABLES_QUERY: &str = r#"
+(impl_item
+  trait: (_) @impl_trait
+  type: (_) @impl_type
+  body: (declaration_list (function_item name: (identifier) @impl_method))) @impl_item
+(impl_item
+  type: (_) @impl_type
+  body: (declaration_list (function_item name: (identifier) @impl_method))) @impl_item
+(struct_item name: (type_identifier) @struct_name body: (field_declaration_list (field_declaration name: (field_identifier) @struct_field)))
 "#;
 
 const TYPESCRIPT_QUERY: &str = r#"
@@ -209,6 +294,10 @@ thread_local! {
 struct ThreadLocal {
     parser: Parser,
     queries: HashMap<LanguageId, Option<Query>>,
+    /// The Rust-only table query (impl association + struct fields, 010-01);
+    /// built on first Rust extraction (None until then, never for other
+    /// languages).
+    rust_tables: Option<Query>,
 }
 
 impl ThreadLocal {
@@ -216,32 +305,35 @@ impl ThreadLocal {
         Self {
             parser: Parser::new(),
             queries: HashMap::new(),
+            rust_tables: None,
         }
     }
 }
 
-/// Extract the definition symbols in `source` for `lang`. Plain text and
-/// an unparseable source yield an empty list. Runs on the calling thread
-/// (a rayon worker during indexing); the parser and query cache are
-/// thread-local so they are cheap to reuse.
-pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
+/// Extract the definition symbols AND, for Rust, the 010-01 per-file
+/// tables (struct fields + impl methods) from `source`. One parse serves
+/// both (the table query runs on the same tree — zero extra parse cost).
+/// Plain text and an unparseable source yield the empty result. Runs on
+/// the calling thread (a rayon worker during indexing); the parser and
+/// query caches are thread-local so they are cheap to reuse.
+pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) {
     let query_str = match query_for(lang) {
         Some(q) => q,
-        None => return Vec::new(),
+        None => return (Vec::new(), RustTables::default()),
     };
     let language = match language_for(lang) {
         Some(l) => l,
-        None => return Vec::new(),
+        None => return (Vec::new(), RustTables::default()),
     };
 
     TL.with(|tl| {
         let mut tl = tl.borrow_mut();
         if tl.parser.set_language(&language).is_err() {
-            return Vec::new();
+            return (Vec::new(), RustTables::default());
         }
         let tree = match tl.parser.parse(source, None) {
             Some(t) => t,
-            None => return Vec::new(),
+            None => return (Vec::new(), RustTables::default()),
         };
 
         // Build (and cache) the query for this language. `Query` is not
@@ -253,7 +345,7 @@ pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
             .or_insert_with(|| Query::new(&language, query_str).ok());
         let query = match cached.as_ref() {
             Some(q) => q,
-            None => return Vec::new(),
+            None => return (Vec::new(), RustTables::default()),
         };
 
         let bytes = source.as_bytes();
@@ -298,8 +390,184 @@ pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
         }
         // Deterministic order: by line, then byte, then name.
         out.sort_by(|a, b| (a.line, a.start_byte, &a.name).cmp(&(b.line, b.start_byte, &b.name)));
-        out
+
+        // 010-01: the Rust tables — the second query on the SAME tree (the
+        // non-Rust languages contribute no tables).
+        let tables = if lang == LanguageId::Rust {
+            if tl.rust_tables.is_none() {
+                tl.rust_tables = Query::new(&language, RUST_TABLES_QUERY).ok();
+            }
+            match tl.rust_tables.as_ref() {
+                Some(q) => extract_rust_tables(q, tree.root_node(), bytes),
+                None => RustTables::default(),
+            }
+        } else {
+            RustTables::default()
+        };
+
+        (out, tables)
     })
+}
+
+/// Extract the definition symbols in `source` for `lang` (the tables
+/// discarded — call sites that only need the outline, pre-010-01). One
+/// parse; identical result to before 010-01. Production indexing goes
+/// through [`extract_all`] (symbols + tables in one pass); this is the
+/// stable symbols-only seam the test suites pin against.
+#[allow(dead_code)] // production uses `extract_all`; tests exercise this seam
+pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
+    extract_all(lang, source).0
+}
+
+/// Run `RUST_TABLES_QUERY` over an already-parsed Rust tree (010-01):
+/// the per-file struct field + impl method tables. A trait impl matches
+/// BOTH table patterns, so impl entries are deduped per impl node (its
+/// start byte); a method is recorded once per impl block. The self type
+/// is keyed by its BASE name: a bare `type_identifier` as-is, a
+/// `generic_type` (`Foo<T>`) by its type child — any other self-type shape
+/// contributes nothing (honest degradation, never a guess).
+fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> RustTables {
+    // The capture for `name` in this match (`None` when the pattern lacks
+    // it — the two impl patterns differ exactly in `impl_trait`).
+    fn cap<'t>(
+        query: &Query,
+        m: &tree_sitter::QueryMatch<'t, '_>,
+        name: &str,
+    ) -> Option<tree_sitter::Node<'t>> {
+        query
+            .capture_index_for_name(name)
+            .and_then(|i| m.captures.iter().find(|c| c.index == i))
+            .map(|c| c.node)
+    }
+    let mut fields: HashMap<String, Vec<StructField>> = HashMap::new();
+    let mut impls: HashMap<usize, ImplAcc> = HashMap::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, bytes);
+    while let Some(m) = matches.next() {
+        let item = cap(query, m, "impl_item");
+        if let Some(item) = item {
+            // The impl's self type (the `type` field); only a bare
+            // identifier or `Foo<T>` contributes — anything else skips the
+            // impl (honest degradation, never a guess).
+            let type_node = cap(query, m, "impl_type").filter(|n| {
+                matches!(n.kind(), "type_identifier" | "generic_type")
+            });
+            let Some(type_node) = type_node else { continue };
+            let base = if type_node.kind() == "generic_type" {
+                match type_node.child_by_field_name("type") {
+                    Some(t) => match t.utf8_text(bytes).ok() {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    },
+                    None => continue,
+                }
+            } else {
+                match type_node.utf8_text(bytes).ok() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                }
+            };
+            let trait_name = cap(query, m, "impl_trait")
+                .and_then(|n| n.utf8_text(bytes).ok())
+                .map(ToOwned::to_owned);
+            let Some(method_node) = cap(query, m, "impl_method") else { continue };
+            let Some(method) = method_node.utf8_text(bytes).ok() else { continue };
+            let method = method.to_string();
+            let method_line = method_node.start_position().row;
+            let impl_line = item.start_position().row;
+            let entry = impls.entry(item.start_byte()).or_insert_with(|| {
+                ImplAcc {
+                    base: base.clone(),
+                    trait_name: trait_name.clone(),
+                    impl_line,
+                    methods: Vec::new(),
+                }
+            });
+            if !entry.methods.iter().any(|(n, _)| n == &method) {
+                entry.methods.push((method, method_line));
+            }
+            continue;
+        }
+        // The struct-field pattern.
+        let Some(struct_node) = cap(query, m, "struct_name") else { continue };
+        let Some(field_node) = cap(query, m, "struct_field") else { continue };
+        let Some(s) = struct_node.utf8_text(bytes).ok() else { continue };
+        let Some(f) = field_node.utf8_text(bytes).ok() else { continue };
+        fields.entry(s.to_string()).or_default().push(StructField {
+            field: f.to_string(),
+            line: field_node.start_position().row,
+        });
+    }
+    let mut impls_out: HashMap<String, Vec<ImplMethod>> = HashMap::new();
+    for acc in impls.into_values() {
+        let kind = match acc.trait_name {
+            Some(t) => ImplKind::Trait(t),
+            None => ImplKind::Inherent,
+        };
+        impls_out
+            .entry(acc.base)
+            .or_default()
+            .extend(acc.methods.into_iter().map(|(method, line)| ImplMethod {
+                method,
+                line,
+                impl_line: acc.impl_line,
+                kind: kind.clone(),
+            }));
+    }
+    for v in fields.values_mut() {
+        v.sort_by(|a, b| (a.line, &a.field).cmp(&(b.line, &b.field)));
+    }
+    for v in impls_out.values_mut() {
+        v.sort_by(|a, b| (a.line, &a.method).cmp(&(b.line, &b.method)));
+    }
+    RustTables { fields, impls: impls_out }
+}
+
+/// (010-01) The PLAIN self type of the innermost `impl_item` containing
+/// `byte` — only when that self type is a bare `type_identifier`:
+/// `impl Foo` / `impl std::fmt::Display for Foo` → `"Foo"`.
+///
+/// The M-. self-receiver consumption's lexical seam: "which impl am I
+/// lexically inside". `None` — never a guess — when the point is outside
+/// every impl block, the self type is generic (`impl<T> Foo<T>`),
+/// path-shaped, or missing, the source is not Rust-shaped (parse miss),
+/// or `byte` falls outside the root. One parse (the same one-parse
+/// discipline as 007-01's `scope_path_at`).
+pub fn rust_self_type_at(source: &str, byte: usize) -> Option<String> {
+    let language = language_for(LanguageId::Rust)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source.as_bytes(), None)?;
+    let root = tree.root_node();
+    if !(root.start_byte() <= byte && byte < root.end_byte()) {
+        return None;
+    }
+    // Innermost impl_item containing `byte`: smallest span wins (nested
+    // impls inside a method body are legal Rust and shadow the outer one).
+    let mut best: Option<(usize, tree_sitter::Node)> = None;
+    fn visit<'a>(
+        node: tree_sitter::Node<'a>,
+        byte: usize,
+        best: &mut Option<(usize, tree_sitter::Node<'a>)>,
+    ) {
+        if node.kind() == "impl_item" && node.start_byte() <= byte && byte < node.end_byte() {
+            let span = node.end_byte() - node.start_byte();
+            if best.as_ref().is_none_or(|(b, _)| span < *b) {
+                *best = Some((span, node));
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                visit(child, byte, best);
+            }
+        }
+    }
+    visit(root, byte, &mut best);
+    let (_, impl_node) = best?;
+    let type_node = impl_node.child_by_field_name("type")?;
+    (type_node.kind() == "type_identifier")
+        .then(|| type_node.utf8_text(source.as_bytes()).ok())?
+        .map(|s| s.to_string())
 }
 
 /// Map a definition node's tree-sitter `kind()` string to a `SymbolKind`
@@ -363,6 +631,135 @@ mod tests {
 
     fn find<'a>(syms: &'a [Symbol], name: &str) -> Option<&'a Symbol> {
         syms.iter().find(|s| s.name == name)
+    }
+
+    // ── 010-01: Rust tables (struct fields + impl methods) ──────────
+    /// 010-01 (discriminating): the per-file tables come out of the same
+    /// pass — fields keyed by struct, methods keyed by the impl's self
+    /// type base name with their impl kind; a trait impl's double pattern
+    /// match dedupes (each method recorded once), the generic impl keys by
+    /// its base name, a nested mod impl joins the same type's list.
+    #[test]
+    fn rust_tables_extract_struct_fields_and_impls() {
+        let src = "struct Foo { a: i32, pub b: String }\n\
+                   struct Generic<T> { x: T }\n\
+                   impl Foo {\n\
+                   \x20   fn m(&self) { let _ = self.a; }\n\
+                   \x20   const C: i32 = 1;\n\
+                   }\n\
+                   impl std::fmt::Display for Foo {\n\
+                   \x20   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n\
+                   }\n\
+                   impl<T> Generic<T> {\n\
+                   \x20   fn g(&self) { let _ = self.x; }\n\
+                   }\n\
+                   mod nested {\n\
+                   \x20   impl Foo {\n\
+                   \x20       fn extra(&self) {}\n\
+                   \x20   }\n\
+                   }\n";
+        let (_syms, tables) = extract_all(LanguageId::Rust, src);
+        // Fields: the visibility modifier is ignored, lines are the
+        // field_declaration's own line.
+        assert_eq!(
+            tables.fields.get("Foo"),
+            Some(&vec![
+                StructField { field: "a".into(), line: 0 },
+                StructField { field: "b".into(), line: 0 },
+            ]),
+            "Foo's fields: {:?}",
+            tables.fields
+        );
+        assert_eq!(
+            tables.fields.get("Generic"),
+            Some(&vec![StructField { field: "x".into(), line: 1 }]),
+        );
+        assert_eq!(tables.fields.len(), 2, "exactly the two structs");
+        // Impl methods: inherent + trait (the trait's FULL path) + the
+        // nested mod impl's method, deduped across the double pattern
+        // match, sorted by line.
+        let foo = tables.impls.get("Foo").expect("impls[Foo]");
+        assert_eq!(foo.len(), 3, "three Foo methods, no duplicates: {foo:?}");
+        assert_eq!(foo[0], ImplMethod { method: "m".into(), line: 3, impl_line: 2, kind: ImplKind::Inherent });
+        assert_eq!(
+            foo[1],
+            ImplMethod {
+                method: "fmt".into(),
+                line: 7,
+                impl_line: 6,
+                kind: ImplKind::Trait("std::fmt::Display".into()),
+            }
+        );
+        assert_eq!(
+            foo[2],
+            ImplMethod { method: "extra".into(), line: 14, impl_line: 13, kind: ImplKind::Inherent }
+        );
+        // The generic self type `Generic<T>` keys by its base name.
+        let generic = tables.impls.get("Generic").expect("impls[Generic]");
+        assert_eq!(
+            generic,
+            &[ImplMethod { method: "g".into(), line: 10, impl_line: 9, kind: ImplKind::Inherent }]
+        );
+        assert_eq!(tables.impls.len(), 2);
+        // The symbol pass is byte-for-byte the pre-010-01 outline (the
+        // tables are a sidecar — no outline churn).
+        let names: Vec<String> = extract_symbols(LanguageId::Rust, src)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["Foo", "Generic", "m", "C", "fmt", "g", "nested", "extra"]
+                .map(|s| s.to_string())
+                .to_vec()
+        );
+    }
+
+    /// 010-01 (degradation): non-Rust languages contribute no tables (the
+    /// second query is Rust-only), plain text none at all.
+    #[test]
+    fn rust_tables_non_rust_and_plain_are_empty() {
+        let py = "class A:\n    def m(self):\n        pass\n";
+        let (_syms, tables) = extract_all(LanguageId::Python, py);
+        assert!(tables.fields.is_empty() && tables.impls.is_empty(), "{tables:?}");
+        let (_syms, tables) = extract_all(LanguageId::Plain, "struct Foo {}");
+        assert!(tables.fields.is_empty() && tables.impls.is_empty());
+    }
+
+    /// 010-01 (discriminating): the M-. self-receiver's lexical seam — the
+    /// innermost impl's self type, only for a PLAIN `type_identifier`.
+    #[test]
+    fn rust_self_type_at_innermost_and_plain_only() {
+        let src = "struct A { f: i32 }\n\
+                   struct B { g: i32 }\n\
+                   impl A {\n\
+                   \x20   fn outer(&self) { impl B { fn inner(&self) { let _ = self.g; } } }\n\
+                   }\n\
+                   impl std::fmt::Display for A {\n\
+                   \x20   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n\
+                   }\n\
+                   struct W<T> { w: T }\n\
+                   impl<T> W<T> {\n\
+                   \x20   fn wg(&self) { let _ = self.w; }\n\
+                   }\n";
+        let bytes = src.as_bytes();
+        // The `self.g` of the NESTED impl B (line 3): the innermost impl
+        // shadows the outer one.
+        let at = |needle: &str| -> usize {
+            src.find(needle).expect("needle in source")
+        };
+        assert_eq!(rust_self_type_at(src, at("self.g")), Some("B".into()), "nested impl B wins");
+        // The trait impl's self type is the `type` field (`A`), not the trait.
+        assert_eq!(rust_self_type_at(src, at("fn fmt")), Some("A".into()));
+        // The GENERIC self type degrades: no plain identifier.
+        assert_eq!(rust_self_type_at(src, at("self.w")), None, "generic impl: never a guess");
+        // Outside every impl.
+        assert_eq!(rust_self_type_at(src, at("struct A")), None);
+        // Byte outside the root (past EOF).
+        assert_eq!(rust_self_type_at(src, src.len() + 8), None);
+        // Unparseable source (binary garbage): None.
+        assert_eq!(rust_self_type_at("\u{ff}\u{fe}impl??", 0), None);
+        let _ = bytes;
     }
 
     // ── Rust: fn + method + struct + const ────────────────────────────

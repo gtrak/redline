@@ -16,15 +16,24 @@ which.
   path token is the WHOLE dotted path when the point sits inside the
   language's path container (`json.dumps`, `ns.member`, `pkg.Fn` —
   011-03's `node_at` whole-path machinery, one parse), so the providers'
-  dotted handling is reachable from M-.. Rust keeps `::` byte-for-byte
-  (a Rust `.` field access still stays bare — fields are not in the
-  index), and a parse failure / unsupported shape degrades to the
-  exact pre-011-06 bare extraction (never a guess; a whole-path upgrade
+  dotted handling is reachable from M-.. Rust keeps `::` byte-for-byte,
+  with ONE `.` exception (010-01, plan 010 Shape A rung 1): the `self.`
+  receiver — `self.<member>` inside an `impl` resolves against the
+  lexically enclosing impl's self type BEFORE the name-keyed index lookup
+  (field → the struct's field line; method → the impl method's line;
+  same-file first, then the index's cross-file locations). Every other
+  Rust `.` access stays bare (fields of arbitrary receivers are not in
+  the index), and a generic impl (`impl<T> Foo<T>`) / no enclosing impl /
+  unknown member degrades to the exact pre-010-01 bare behavior (never a guess; a whole-path upgrade
   additionally requires EVERY dot-delimited segment to be a bare
   identifier — wrong-container shapes like `a?.b`, `foo().bar`, `(*p).field`
   degrade to the bare token rather than feeding a non-path token to a
   provider). The cells record what M-. does at a qualified use site, per
   language.
+  (The `self.` exception is a resolution pre-step, not a provider
+  matter: it consumes the 010-01 per-file Rust tables — struct fields +
+  impl methods, built in the same index pass as the outlines — and is
+  recorded in the Rust section below, not in the provider cells.)
 - **bare via import** — M-. on a bare identifier that an import statement
   in the current buffer binds (the 011-02 scope hints).
 - **in-library follow-up** — after a landing, M-. on a symbol defined in
@@ -48,6 +57,28 @@ which.
 
 ### Rust
 
+- self-receiver resolution (010-01, plan 010 Shape A rung 1): M-. on
+  `self.<member>` inside `impl Foo` resolves `<member>` against `Foo` —
+  a struct field lands on its `field_declaration` line (same file first,
+  then the index's cross-file locations — in-project AND the per-crate
+  indexes of external landings, one code path); an impl method lands on
+  its `fn` line. The per-file tables (struct fields, impl methods with
+  their impl kind — inherent vs the trait's full path) build in the SAME
+  rayon index pass as the symbol outlines (the tables query runs on the
+  same tree — zero extra parse cost; `queries::extract_all`), so a
+  reparse refreshes both. Honest degradation everywhere: a generic self
+  type (`impl<T> Foo<T>`), a path/qualified self type, a missing
+  enclosing impl, a member the tables don't record, a macro-built impl,
+  a deref chain, or a non-Rust buffer → the exact pre-010-01 behavior
+  (bare member → index / enclosing-symbol / resolver fall-through) —
+  never a guess. The self type is resolved LEXICALLY (innermost
+  enclosing `impl_item`), so no expression typing is involved. find-
+  implementations (who impls `Trait`?) is Rung 4's read-only view of the
+  same table — the `ImplKind::Trait` + impl line are already stored; the
+  picker command itself is deferred (out of this issue's scope fence).
+  Unit-pinned in `store.rs` (`xref_self_*` — same-file field, cross-file
+  field, method, ambiguous member picker, generic-impl + no-impl
+  degradation) and `queries.rs` / `nav/index.rs` (the tables themselves).
 - path-shaped: `drive_external_crate` L1 — `ropey::Rope` lands in the
   cargo registry source. Live in the gate battery.
 - bare via import: `drive_external_use` L1 — `use serde::Deserialize;`

@@ -7717,7 +7717,12 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     ///    it sits inside a `::`-path (`tokio::spawn`), the full path token is
     ///    kept for the tooling-resolver fall-through and the workspace index —
     ///    which is name-keyed — is tried with BOTH the last segment and the
-    ///    full path.
+    ///    full path. A Rust `self.<member>` carries the receiver (`self.
+    ///    <member>`, 010-01): before the name-keyed index is tried, the
+    ///    member resolves via the LEXICALLY ENCLOSING impl's type (field →
+    ///    the struct's field line; method → the impl method's line), and an
+    ///    empty self-resolution degrades to the bare `<member>` lookup below
+    ///    (byte-for-byte; generics / no-impl / unknown member never guess).
     /// 2. Same-file definitions are first-class (the old cross-file filter made
     ///    the normal struct+impl-in-one-file case unjumpable): candidates are
     ///    ordered same-file-first, then (file, line, name). Exactly one → jump
@@ -7790,6 +7795,25 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let defs: Option<Vec<crate::nav::index::Location>> = at
             .as_ref()
             .and_then(|(ident, path_token)| {
+                // 010-01 (plan 010 Shape A, rung 1): the Rust self-receiver
+                // pre-step — `self.<member>` resolves via the LEXICALLY
+                // ENCLOSING impl's type (field → the struct's field line,
+                // method → the impl method's line), same-file first. An
+                // empty result degrades to today's bare-`<member>` index
+                // lookup below (byte-for-byte; never a guess).
+                if lang == LanguageId::Rust
+                    && let Some(member) = path_token.strip_prefix("self.")
+                    && !member.is_empty()
+                {
+                    let source = buf.rope.to_string();
+                    if let Some(byte) = point_byte_offset(&buf.rope, line, self.point_col()) {
+                        let cands =
+                            Self::self_receiver_candidates(&self.index, &rel, &source, byte, member);
+                        if !cands.is_empty() {
+                            return Some(cands);
+                        }
+                    }
+                }
                 Self::xref_definition_candidates(&self.index, ident, path_token, &rel)
             });
         let defs = defs.unwrap_or_default();
@@ -7890,6 +7914,82 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         });
         all.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
         (!all.is_empty()).then_some(all)
+    }
+
+    /// (010-01, plan 010 Shape A rung 1) The M-. self-receiver candidates:
+    /// `self.<member>` resolves via the LEXICALLY ENCLOSING impl's self
+    /// type ("which impl am I lexically inside" — no expression typing):
+    /// - a FIELD → the struct's `field_declaration` line, from the index's
+    ///   cross-file field locations (the same file comes out first after
+    ///   the ordering below);
+    /// - a METHOD → the impl method's line from the SAME FILE's impl table
+    ///   (an impl block is lexically one file — its methods are never
+    ///   cross-file, so only `rel`'s tables are consulted);
+    /// - both are gathered when a name is both a field and a method (the
+    ///   picker lets the user choose — never guessed away).
+    ///
+    /// `Vec::new()` (the caller degrades to today's bare-`<member>`
+    /// behavior) whenever: the enclosing impl can't be found, its self
+    /// type isn't a PLAIN identifier (generics — `impl<T> Foo<T>` —
+    /// degrade; never a guess), or no field/method named `<member>` is
+    /// recorded for that type. Pure over the index (testable in isolation,
+    /// shared by the project and the external crate paths).
+    fn self_receiver_candidates(
+        index: &SymbolIndex,
+        rel: &str,
+        source: &str,
+        byte: usize,
+        member: &str,
+    ) -> Vec<crate::nav::index::Location> {
+        let Some(type_name) = crate::syntax::queries::rust_self_type_at(source, byte) else {
+            return Vec::new();
+        };
+        let mk = |file: String, kind: crate::syntax::queries::SymbolKind, line: usize| {
+            crate::nav::index::Location {
+                file,
+                symbol: crate::nav::index::Symbol {
+                    name: member.to_string(),
+                    kind,
+                    line,
+                    end_line: line,
+                    start_byte: 0,
+                    end_byte: 0,
+                },
+            }
+        };
+        let mut out: Vec<crate::nav::index::Location> = Vec::new();
+        // Fields: the struct's `field_declaration` lines, all files (the
+        // same file orders first below).
+        for (file, line) in index.field_locations(&type_name, member) {
+            out.push(mk(
+                file,
+                crate::syntax::queries::SymbolKind::Constant,
+                line,
+            ));
+        }
+        // Methods: the same file's impl tables only (lexical — an impl's
+        // methods all live in its own file).
+        if let Some(tables) = index.tables(rel)
+            && let Some(methods) = tables.impls.get(&type_name)
+        {
+            for m in methods.iter().filter(|m| m.method == member) {
+                out.push(mk(
+                    rel.to_string(),
+                    crate::syntax::queries::SymbolKind::Function,
+                    m.line,
+                ));
+            }
+        }
+        if out.is_empty() {
+            return out;
+        }
+        out.sort_by(|a, b| {
+            (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                (a.file.as_str(), a.symbol.line, &a.symbol.name).cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+            })
+        });
+        out.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+        out
     }
 
     /// (M., selection rule 4) Start the tooling-resolver fall-through OFF the
@@ -9261,7 +9361,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
         let at = Self::symbol_at_point(lang, &line_text, self.point_col());
         let Some((root, outcome)) =
-            self.crate_xref_outcome(path, line, at.as_ref())
+            self.crate_xref_outcome(key, path, line, lang, at.as_ref())
         else {
             // No crate index for this root yet (build in flight, refused,
             // or no runtime): the miss behaves as the project's — the
@@ -9333,8 +9433,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// index yet.
     fn crate_xref_outcome(
         &mut self,
+        key: &str,
         path: &Path,
         line: usize,
+        lang: LanguageId,
         at: Option<&(String, String)>,
     ) -> Option<(PathBuf, ExternalXrefOutcome)> {
         let (root, arc) = self.crate_index_arc_for_path(path)?;
@@ -9345,6 +9447,23 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // project path).
         let defs = at
             .and_then(|(ident, token)| {
+                // 010-01: the Rust self-receiver pre-step (the SAME seam as
+                // the project path — external crates are Rust in practice,
+                // and the behavior is uniform by construction).
+                if lang == LanguageId::Rust
+                    && let Some(member) = token.strip_prefix("self.")
+                    && !member.is_empty()
+                    && let Some(buf) = self.buffers.get(key)
+                {
+                    let source = buf.rope.to_string();
+                    if let Some(byte) = point_byte_offset(&buf.rope, line, self.point_col()) {
+                        let cands =
+                            Self::self_receiver_candidates(&idx, &rel, &source, byte, member);
+                        if !cands.is_empty() {
+                            return Some(cands);
+                        }
+                    }
+                }
                 Self::xref_definition_candidates(&idx, ident, token, &rel)
             })
             .unwrap_or_default();
@@ -9397,13 +9516,18 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// the path token it belongs to (plan 006 issue 02, selection rule 1).
     /// Returns `(identifier, path_token)` — e.g. the cursor inside
     /// `tokio::spawn` → `("spawn", "tokio::spawn")`; on a Rust `obj.name`
-    /// → `("name", "name")`. A cursor parked just AFTER the name (before
+    /// → `("name", "name")`; on a Rust `self.name` →
+    /// `("name", "self.name")` (010-01 — the `self.` receiver is carried so
+    /// the M-. self-resolution pre-step sees it; every other `.` receiver
+    /// stays bare). A cursor parked just AFTER the name (before
     /// `(`, `.`, or whitespace — the usual call-site spot) counts. `None`
     /// when the point is not on (or immediately after) an identifier run.
     ///
     /// 011-06: the PATH TOKEN is language-aware. Rust's `::` shape is the
-    /// char-scan below, byte-for-byte unchanged (a Rust `.` field access
-    /// still stays bare — fields are not in the index). In a non-Rust
+    /// char-scan below, byte-for-byte unchanged; a Rust `.` field access
+    /// stays bare EXCEPT the `self.` receiver (010-01 — `self.name` →
+    /// `self.name`, which the M-. self-resolution pre-step consumes; the
+    /// other receivers' fields are not in the index). In a non-Rust
     /// buffer, when the point sits inside the language's dotted path
     /// container, the path token becomes the WHOLE dotted path
     /// (`json.dumps`, `ns.member`, `pkg.Fn`) so the providers' already-
@@ -9491,6 +9615,25 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             }
         }
         let path_token: String = chars[pstart..pend].iter().collect();
+        // 010-01: the Rust self-receiver — when the identifier run is the
+        // member of `self.` (the run is preceded by `.self`, exactly), the
+        // path token carries the receiver (`self.bar`), so the M-.
+        // self-resolution pre-step (in `xref_find_definitions`) sees it.
+        // Every other Rust `.` access stays bare (byte-for-byte — fields
+        // of arbitrary receivers are still not resolvable); a prefix like
+        // `myself.` must NOT match (the 4-char window must be exactly
+        // `self`, not preceded by an identifier char).
+        let path_token = if lang == LanguageId::Rust
+            && pstart == start
+            && start >= 5
+            && chars[start - 1] == '.'
+            && chars[start - 5..start - 1] == ['s', 'e', 'l', 'f']
+            && (start < 6 || !is_ident(chars[start - 6]))
+        {
+            format!("self.{}", identifier)
+        } else {
+            path_token
+        };
         // 011-06: non-Rust — upgrade the path token to the whole dotted
         // path when the point sits inside the language's path container.
         // `node_at` takes a byte offset: the identifier run's last char
@@ -14227,6 +14370,206 @@ mod tests {
         assert!(!s.picker_open(), "unique trait: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "jumped to `pub trait Tr` (msg: {})", s.message);
+    }
+
+    // ── 010-01: M-. self-receiver resolution (Shape A rung 1) ──────────
+
+    /// 010-01 (discriminating): the extraction carries the `self.` receiver
+    /// for Rust `self.<member>` — pre-010-01 it stayed bare (fields are not
+    /// in the index). `myself.` / arbitrary receivers stay byte-for-byte.
+    #[test]
+    fn symbol_at_point_rust_self_access_carries_the_receiver() {
+        let line = "    let v = self.a;";
+        // `a` at col 17, and parked right after it (col 18).
+        assert_eq!(
+            satp(LanguageId::Rust, line, 17),
+            Some(("a".into(), "self.a".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Rust, line, 18),
+            Some(("a".into(), "self.a".into()))
+        );
+        // Call-shaped: the same token on `self.method()`.
+        let call = "        let _ = self.method();";
+        // `method` starts at col 21; cursor on the `e` at col 22.
+        assert_eq!(
+            satp(LanguageId::Rust, call, 22),
+            Some(("method".into(), "self.method".into()))
+        );
+        // `myself.`: the 4-char window must be EXACTLY `self` — stays bare.
+        let selfy = "let v = myself.a;";
+        assert_eq!(
+            satp(LanguageId::Rust, selfy, 15),
+            Some(("a".into(), "a".into())),
+            "myself.a stays bare"
+        );
+        // An arbitrary receiver stays bare (byte-for-byte the pre-010-01
+        // extraction — `obj.a` was never resolvable and still isn't).
+        assert_eq!(
+            satp(LanguageId::Rust, "let v = obj.a;", 12),
+            Some(("a".into(), "a".into()))
+        );
+        // Non-Rust `self.x` is NOT the Rust self shape — the 011-06
+        // language-aware path container handling stands (Python attribute
+        // already extended; the Rust branch never fires). `x` is at col 9.
+        assert_eq!(
+            satp(LanguageId::Python, "y = self.x", 9),
+            Some(("x".into(), "self.x".into()))
+        );
+    }
+
+    /// 010-01 (discriminating): `self.a` inside `impl Foo` jumps to the
+    /// struct field's line. `a` is NOT in the symbol index (field
+    /// declarations are not outline symbols) — pre-010-01 this degraded to
+    /// the enclosing-symbol fallback (the enclosing `fn`), so this outcome
+    /// only exists because of the table pre-step.
+    #[test]
+    fn xref_self_field_jumps_to_struct_field_line() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub a: i32 }\nimpl Foo {\n    pub fn use_it(&self) { let _ = self.a; }\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 2: "    pub fn use_it(&self) { let _ = self.a; }" — `a`
+        // starts at col 40.
+        s.set_point(2, 40, 40);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "jumped to the field declaration (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-01 (discriminating): the field lives in ANOTHER file of the
+    /// project — the index's cross-file field locations carry it (the
+    /// same-file-first ordering then lands in `src/model.rs`).
+    #[test]
+    fn xref_self_field_resolves_cross_file() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/model.rs", "pub struct Point { pub x: i32, pub y: i32 }\n"),
+            (
+                "src/main.rs",
+                "use crate::model::Point;\nimpl Point {\n    fn coords(&self) { let _ = self.x; }\n}\n",
+            ),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 2: "    fn coords(&self) { let _ = self.x; }" — `x` starts
+        // at col 36.
+        s.set_point(2, 36, 36);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique cross-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/model.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "jumped to `x` in model.rs (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-01: `self.method()` inside `impl Foo` jumps to the impl method
+    /// (its line, from the same-file impl table).
+    #[test]
+    fn xref_self_method_call_jumps_to_impl_method() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub a: i32 }\nimpl Foo {\n    pub fn method(&self) -> i32 { self.a + 1 }\n    pub fn use_it(&self) { let _ = self.method(); }\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    pub fn use_it(&self) { let _ = self.method(); }" —
+        // `method` starts at col 40.
+        s.set_point(3, 40, 40);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file method: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            2,
+            "jumped to `fn method` (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-01: a name that is BOTH a field and a method of the enclosing
+    /// type → the picker (same-file-first, never guessed away).
+    #[test]
+    fn xref_self_ambiguous_member_opens_picker() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub extra: i32 }\nimpl Foo {\n    fn extra(&self) {}\n    fn use_it(&self) { self.extra(); }\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    fn use_it(&self) { self.extra(); }" — `extra`
+        // starts at col 28.
+        s.set_point(3, 28, 28);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "field + method: picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 2, "two candidates: {filtered:?}");
+        // Same-file, line-ordered: the field (line 0) before the method
+        // (line 2).
+        assert!(
+            filtered[0].0.name.starts_with("src/lib.rs:1"),
+            "field candidate first: {}",
+            filtered[0].0.name
+        );
+        assert!(
+            filtered[1].0.name.starts_with("src/lib.rs:3"),
+            "method candidate second: {}",
+            filtered[1].0.name
+        );
+    }
+
+    /// 010-01 (pin): honest degradation — `self.a` inside a GENERIC impl
+    /// (`impl<T> Foo<T>`) never resolves through the tables: the self type
+    /// is not a plain identifier, so the exact pre-010-01 behavior stands
+    /// (bare `a` → no index hit → the enclosing symbol takes over).
+    #[test]
+    fn xref_self_in_generic_impl_degrades_to_today() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub a: i32 }\nimpl<T> Foo<T> {\n    fn f(&self) { let _ = self.a; }\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 2: "    fn f(&self) { let _ = self.a; }" — `a` starts at
+        // col 31.
+        s.set_point(2, 31, 31);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "degraded: no picker");
+        // The enclosing-symbol fallback landed on `f` itself (its only
+        // indexed definition) — today's behavior, byte-for-byte.
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            2,
+            "enclosing `f` took over (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-01 (pin): `self.a` with NO enclosing impl (top-level / outside
+    /// every impl block) degrades to the exact pre-010-01 behavior — and a
+    /// non-Rust buffer is never touched by the pre-step at all.
+    #[test]
+    fn xref_self_without_enclosing_impl_degrades_to_today() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub a: i32 }\nfn free() { let _ = self; }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 1: "fn free() { let _ = self; }" — no member after `self`
+        // (the token is `self`, not `self.<member>`): the pre-step never
+        // fires; `self` has no definition → the enclosing `free` takes
+        // over (today's behavior).
+        s.set_point(1, 24, 24);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 1, "enclosing `free` (msg: {})", s.message);
     }
 
     #[test]

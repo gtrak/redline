@@ -4,6 +4,12 @@
 //! watcher events (only changed files reparse — a full rebuild happens only
 //! on project switch or a manual command).
 //!
+//! 010-01 (plan 010 Shape A, rung 1): the same pass also carries the Rust
+//! per-file tables (struct fields, impl methods with their impl kind —
+//! `RustTables`), stored per file plus a name-keyed field map for the
+//! cross-file self-receiver field lookup the M-. consumption queries
+//! synchronously.
+//!
 //! Layering (plan): `nav/` is plain Rust — tree-sitter + rayon + tokio are
 //! allowed; there is no iocraft. The indexer never holds a lock the UI needs:
 //! the heavy parse runs on background threads and hands its result back to the
@@ -19,7 +25,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use tokio::sync::watch;
 
-use crate::syntax::queries::extract_symbols;
+use crate::syntax::queries::{extract_all, RustTables};
 use crate::syntax::registry::resolve_language;
 // Re-exported so the public index/xref API can name the symbol type.
 pub use crate::syntax::queries::Symbol;
@@ -47,6 +53,13 @@ pub struct SymbolIndex {
     by_name: HashMap<String, HashMap<String, Vec<Symbol>>>,
     /// Total symbol count across all files.
     total: usize,
+    /// 010-01: per-file Rust tables (Rust files with impls/structs only),
+    /// built in the same pass as the outlines (same tree — zero extra parse
+    /// cost). Same-file self-receiver method/field lookup.
+    rust_tables: HashMap<String, RustTables>,
+    /// 010-01: name-keyed struct fields for the CROSS-file self-receiver
+    /// field lookup: struct name → field name → (file → [lines]).
+    rust_fields: HashMap<String, HashMap<String, HashMap<String, Vec<usize>>>>,
 }
 
 impl SymbolIndex {
@@ -63,6 +76,30 @@ impl SymbolIndex {
     /// The outline (symbols) for a project-relative file.
     pub fn outline(&self, path: &str) -> &[Symbol] {
         self.files.get(path).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// (010-01) The per-file Rust tables (struct fields + impl methods);
+    /// `None` for files without tables (non-Rust, or no impls/structs).
+    /// The same-file seam of the M-. self-receiver consumption.
+    pub fn tables(&self, path: &str) -> Option<&RustTables> {
+        self.rust_tables.get(path)
+    }
+
+    /// (010-01) Every location of struct `struct_name`'s field `field`
+    /// (all files, same file included), in deterministic (file, line) order
+    /// — the cross-file self-receiver field lookup; the caller orders the
+    /// same-file hit first.
+    pub fn field_locations(&self, struct_name: &str, field: &str) -> Vec<(String, usize)> {
+        let Some(per_file) = self.rust_fields.get(struct_name).and_then(|m| m.get(field)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, usize)> = per_file
+            .iter()
+            .flat_map(|(file, lines)| lines.iter().map(move |&l| (file.clone(), l)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out.dedup();
+        out
     }
 
     /// Total symbol count across all indexed files.
@@ -159,6 +196,61 @@ impl SymbolIndex {
         true
     }
 
+    /// (010-01) Replace a file's Rust tables, keeping the name-keyed field
+    /// map consistent (the same discipline as `set_file`). Empty tables
+    /// store no entry. Returns `true` when the stored tables actually
+    /// changed.
+    pub fn set_file_tables(&mut self, path: &str, tables: RustTables) -> bool {
+        let empty = tables.fields.is_empty() && tables.impls.is_empty();
+        let old = self.rust_tables.remove(path);
+        // Drop this file's contributions from the field map first.
+        if let Some(old_tables) = &old {
+            for (struct_name, fields) in &old_tables.fields {
+                if let Some(by_field) = self.rust_fields.get_mut(struct_name) {
+                    for f in fields {
+                        if let Some(file_map) = by_field.get_mut(&f.field) {
+                            if let Some(lines) = file_map.get_mut(path) {
+                                lines.retain(|l| l != &f.line);
+                            }
+                            file_map.remove(path);
+                            if file_map.is_empty() {
+                                by_field.remove(&f.field);
+                            }
+                        }
+                    }
+                    if by_field.is_empty() {
+                        self.rust_fields.remove(struct_name);
+                    }
+                }
+            }
+        }
+        if empty {
+            return old.is_some();
+        }
+        let same = old.as_ref() == Some(&tables);
+        if same {
+            // Restore the unchanged entry and bail.
+            self.rust_tables.insert(path.to_string(), tables);
+            return false;
+        }
+        for (struct_name, fields) in &tables.fields {
+            let by_field = self
+                .rust_fields
+                .entry(struct_name.clone())
+                .or_default();
+            for f in fields {
+                by_field
+                    .entry(f.field.clone())
+                    .or_default()
+                    .entry(path.to_string())
+                    .or_default()
+                    .push(f.line);
+            }
+        }
+        self.rust_tables.insert(path.to_string(), tables);
+        true
+    }
+
     /// Remove a file's outline (its symbols) from the index. Returns `true`
     /// when the file had entries.
     pub fn remove_file(&mut self, path: &str) -> bool {
@@ -174,6 +266,26 @@ impl SymbolIndex {
             }
         }
         self.total = self.total.saturating_sub(old.len());
+        // 010-01: the file's Rust tables (a file with tables always has an
+        // outline — every struct/impl contributes a symbol — so this never
+        // orphans entries, but the cleanup keeps the invariant explicit).
+        if let Some(old_tables) = self.rust_tables.remove(path) {
+            for (struct_name, fields) in &old_tables.fields {
+                if let Some(by_field) = self.rust_fields.get_mut(struct_name) {
+                    for f in fields {
+                        if let Some(file_map) = by_field.get_mut(&f.field) {
+                            file_map.remove(path);
+                            if file_map.is_empty() {
+                                by_field.remove(&f.field);
+                            }
+                        }
+                    }
+                    if by_field.is_empty() {
+                        self.rust_fields.remove(struct_name);
+                    }
+                }
+            }
+        }
         true
     }
 }
@@ -257,17 +369,18 @@ impl IndexProgress {
     }
 }
 
-/// Parse one project file and extract its definition symbols. Plain text and
-/// unreadable files yield an empty list.
+/// Parse one project file and extract its definition symbols AND Rust
+/// tables (010-01 — one parse, same tree). Plain text and unreadable files
+/// yield the empty result.
 #[allow(dead_code)] // used by the background index thread (future wiring)
-pub fn extract_file(root: &Path, rel: &str) -> Vec<Symbol> {
+pub fn extract_file(root: &Path, rel: &str) -> (Vec<Symbol>, RustTables) {
     let abs = root.join(rel);
     let text = match std::fs::read_to_string(&abs) {
         Ok(t) => t,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), RustTables::default()),
     };
     let lang = resolve_language(rel);
-    extract_symbols(lang, &text)
+    extract_all(lang, &text)
 }
 
 /// Build a full index for `root` over the (project-relative) `files` list
@@ -277,24 +390,26 @@ pub fn extract_file(root: &Path, rel: &str) -> Vec<Symbol> {
 #[allow(dead_code)] // used by the background index thread (future wiring)
 pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgress>) -> SymbolIndex {
     // Rayon fan-in: parse every file in parallel. Each worker owns its own
-    // thread-local parser (see `queries::extract_symbols`); `progress` is
+    // thread-local parser (see `queries::extract_all`); `progress` is
     // shared and cheap to bump from any worker.
-    let entries: Vec<(String, Vec<Symbol>)> = files
+    let entries: Vec<(String, Vec<Symbol>, RustTables)> = files
         .par_iter()
         .map(|rel| {
-            let syms = extract_file(root, rel);
+            let (syms, tables) = extract_file(root, rel);
             if let Some(p) = progress {
                 p.note_file_done();
             }
-            (rel.clone(), syms)
+            (rel.clone(), syms, tables)
         })
         .collect();
 
     let mut index = SymbolIndex::new();
-    for (rel, syms) in entries {
+    for (rel, syms, tables) in entries {
         if !syms.is_empty() {
             index.set_file(&rel, syms);
         }
+        // 010-01: the Rust tables ride the same pass (same tree).
+        index.set_file_tables(&rel, tables);
     }
     index
 }
@@ -314,8 +429,10 @@ pub fn refresh_in_place(root: &Path, changed: &[PathBuf], index: &mut SymbolInde
         match std::fs::read_to_string(abs) {
             Ok(text) => {
                 let lang = resolve_language(&rel);
-                let syms = extract_symbols(lang, &text);
+                let (syms, tables) = extract_all(lang, &text);
                 index.set_file(&rel, syms);
+                // 010-01: the Rust tables ride the same reparse (same tree).
+                index.set_file_tables(&rel, tables);
             }
             // Deleted / unreadable: drop its outline (no-op if absent).
             Err(_) => {
@@ -520,7 +637,7 @@ mod tests {
         // mod > fn; a cursor inside the function body resolves to the fn,
         // and a cursor inside the mod but outside the fn resolves to the mod.
         let src = "mod outer {\n    fn f() {\n        g()\n    }\n}\n";
-        let syms = extract_symbols(crate::syntax::registry::LanguageId::Rust, src);
+        let syms = extract_all(crate::syntax::registry::LanguageId::Rust, src).0;
         // mod outer: line 0..4 ; fn f: line 1..3
         let f_line = 2; // "g()"
         let enc = enclosing_symbol(&syms, f_line).expect("enclosing at line 2");
@@ -550,7 +667,7 @@ mod tests {
         // Two same-named functions in different mods of one file:
         // `by_name` must keep both (not last-wins).
         let src = "mod a { pub fn target() {} }\nmod b { pub fn target() {} }\n";
-        let syms = extract_symbols(crate::syntax::registry::LanguageId::Rust, src);
+        let syms = extract_all(crate::syntax::registry::LanguageId::Rust, src).0;
         // Two `target` functions + two `mod` items = 4 symbols total.
         let targets: Vec<_> = syms.iter().filter(|s| s.name == "target").collect();
         assert_eq!(targets.len(), 2, "two `target` definitions: {syms:?}");
@@ -562,6 +679,85 @@ mod tests {
         assert_eq!(idx.definition_count("target"), 1, "one file defines `target`");
         // They have different line numbers.
         assert_ne!(defs[0].symbol.line, defs[1].symbol.line);
+    }
+
+    // ── 010-01: Rust tables in the index (same pass, cross-file lookup) ──
+
+    #[test]
+    fn rust_tables_carry_with_the_index_and_support_cross_file_field_lookup() {
+        let dir = make_project();
+        let root = dir.path();
+        // A struct in one file, an impl of it in another — the exact
+        // cross-file shape the M-. self-receiver field lookup resolves.
+        std::fs::write(
+            root.join("src/point.rs"),
+            "pub struct Point { pub x: i32, pub y: i32 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/ops.rs"),
+            "use crate::point::Point;\nimpl Point {\n    pub fn x(&self) -> i32 { self.x }\n}\n",
+        )
+        .unwrap();
+        let files = rel_files(root);
+        let index = build_index(root, &files, None);
+
+        // Same-file seam: ops.rs's impl table (inherent, method line 2,
+        // impl line 1).
+        let ops = index.tables("src/ops.rs").expect("ops.rs has tables");
+        assert_eq!(
+            ops.impls.get("Point"),
+            Some(&vec![crate::syntax::queries::ImplMethod {
+                method: "x".into(),
+                line: 2,
+                impl_line: 1,
+                kind: crate::syntax::queries::ImplKind::Inherent,
+            }]),
+            "ops.rs impl table: {ops:?}"
+        );
+        // point.rs's own struct fields (same file, zero impls there).
+        let point = index.tables("src/point.rs").expect("point.rs has tables");
+        assert!(point.impls.is_empty(), "point.rs has no impls");
+        assert_eq!(
+            point.fields.get("Point"),
+            Some(&vec![
+                crate::syntax::queries::StructField { field: "x".into(), line: 0 },
+                crate::syntax::queries::StructField { field: "y".into(), line: 0 },
+            ])
+        );
+        // Cross-file seam: the field `x` of struct `Point` lives in point.rs
+        // even though the lookup would be issued from ops.rs's impl.
+        assert_eq!(
+            index.field_locations("Point", "x"),
+            vec![("src/point.rs".into(), 0usize)],
+            "cross-file field location"
+        );
+        assert!(index.field_locations("Point", "missing").is_empty());
+        assert!(index.field_locations("Other", "x").is_empty());
+    }
+
+    #[test]
+    fn rust_tables_refresh_and_remove_with_the_file() {
+        let dir = make_project();
+        let root = dir.path();
+        std::fs::write(root.join("src/point.rs"), "pub struct Point { pub x: i32 }\n").unwrap();
+        let files = rel_files(root);
+        let mut index = build_index(root, &files, None);
+        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
+
+        // Change the struct: `x` becomes `xx` — the stale location must
+        // disappear, the new one appear (the field map stays consistent).
+        std::fs::write(root.join("src/point.rs"), "pub struct Point { pub xx: i32 }\n").unwrap();
+        let path = root.join("src/point.rs");
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        assert!(index.field_locations("Point", "x").is_empty(), "stale field dropped");
+        assert_eq!(index.field_locations("Point", "xx"), vec![("src/point.rs".into(), 0)]);
+
+        // Delete the file: its tables leave the index with the outline.
+        std::fs::remove_file(&path).unwrap();
+        refresh_in_place(root, &[path], &mut index);
+        assert!(index.tables("src/point.rs").is_none());
+        assert!(index.field_locations("Point", "xx").is_empty());
     }
 }
 
