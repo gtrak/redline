@@ -7,7 +7,9 @@
 //! with their impl kind — plan 010 Shape A rung 1) on the SAME parse
 //! (`extract_all`); the M-. self-receiver consumption in `app/store.rs`
 //! queries them synchronously, and the bare-symbol consumers keep using
-//! `extract_symbols` (the tables discarded).
+//! `extract_symbols` (the tables discarded). 010-03 (rung 3) extends the
+//! same tables with the per-file local binding map (written-down types
+//! only) consumed by the M-. local-binding pre-step.
 //!
 //! All tree-sitter churn lives here (plan layering rule): the grammar
 //! crates, the `Language`, and the query strings are touched only in
@@ -99,6 +101,29 @@ pub enum ImplKind {
     Trait(String),
 }
 
+/// (010-03, plan 010 Shape A rung 3) One local binding's WRITTEN-DOWN
+/// type: a `let x: Type` annotation (only a bare `type_identifier`
+/// annotation contributes — generic, path-shaped, and non-struct types
+/// degrade) or a `let x = Type { … }` struct-literal RHS. `let mut x: T`
+/// records the same binding as `let x: T`. Never inferred — an
+/// unannotated binding contributes nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBinding {
+    /// The (start_byte, end_byte) of the binding's innermost enclosing
+    /// `block` scope in the indexed source (probe-verified: a fn body IS
+    /// a `block` node, as are closure / loop / arm / nested-block bodies).
+    pub scope: (usize, usize),
+    /// The binding name.
+    pub binding: String,
+    /// The written-down type name (a bare identifier).
+    pub type_name: String,
+    /// 0-based line of the `let`.
+    pub line: usize,
+    /// The `let`'s start byte (shadowing: within one scope, the last
+    /// `let` before the use site wins).
+    pub let_byte: usize,
+}
+
 /// One method of an impl block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplMethod {
@@ -114,11 +139,14 @@ pub struct ImplMethod {
 /// The per-file Rust tables: `fields` is struct name → its fields, `impls`
 /// is the impl's self-type BASE name → its methods (a generic self type
 /// `Foo<T>` is keyed by `Foo`; a non-identifier self type contributes
-/// nothing — honest degradation).
+/// nothing — honest degradation); `bindings` (010-03) is the file's local
+/// binding map — written-down types keyed by the binding's innermost
+/// enclosing `block` scope, sorted by (scope, let byte, name, type).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RustTables {
     pub fields: HashMap<String, Vec<StructField>>,
     pub impls: HashMap<String, Vec<ImplMethod>>,
+    pub bindings: Vec<LocalBinding>,
 }
 
 /// 010-01 accumulator for one `impl_item` while the table query runs (keyed
@@ -169,6 +197,22 @@ const RUST_TABLES_QUERY: &str = r#"
   type: (_) @impl_type
   body: (declaration_list (function_item name: (identifier) @impl_method))) @impl_item
 (struct_item name: (type_identifier) @struct_name body: (field_declaration_list (field_declaration name: (field_identifier) @struct_field)))
+;  010-03 (plan 010 Shape A, rung 3): local binding types — written-down
+;  types ONLY (never inferred). Node shapes verified against the pinned
+;  tree-sitter-rust 0.23.3 NODE_TYPES (throwaway S-expr probe, issue
+;  010-03): a `let_declaration` names its binding in the `pattern` field
+;  (NOT `name`), its annotation in the `type` field, and a struct-literal
+;  RHS is `value: (struct_expression name: (type_identifier) …)` — the
+;  literal's type lives in the struct_expression's `name` field. Only a
+;  bare `type_identifier` contributes on either side: `let mut x: T` adds
+;  an anonymous `mutable_specifier` child (the captures are unaffected),
+;  while `Vec<i32>` (`generic_type`), `std::path::PathBuf`
+;  (`scoped_type_identifier`), `&T { … }` (a `reference_expression`),
+;  and `T::<u8> { … }` (`generic_type_with_turbofish`) all miss
+;  deliberately. A `let` inside a macro invocation's token tree never
+;  parses as a `let_declaration`, so macros contribute nothing.
+(let_declaration pattern: (identifier) @bnd_name type: (type_identifier) @bnd_type) @bnd_let
+(let_declaration pattern: (identifier) @bnd_name value: (struct_expression name: (type_identifier) @bnd_lit)) @bnd_let
 "#;
 
 const TYPESCRIPT_QUERY: &str = r#"
@@ -420,12 +464,15 @@ pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
 }
 
 /// Run `RUST_TABLES_QUERY` over an already-parsed Rust tree (010-01):
-/// the per-file struct field + impl method tables. A trait impl matches
+/// the per-file struct field + impl method tables, and (010-03) the local
+/// binding map. A trait impl matches
 /// BOTH table patterns, so impl entries are deduped per impl node (its
 /// start byte); a method is recorded once per impl block. The self type
 /// is keyed by its BASE name: a bare `type_identifier` as-is, a
 /// `generic_type` (`Foo<T>`) by its type child — any other self-type shape
-/// contributes nothing (honest degradation, never a guess).
+/// contributes nothing (honest degradation, never a guess). A `let`
+/// matching BOTH 010-03 patterns (`let x: T = T { … }`) is deduped per
+/// `let` (the annotation pattern is listed first, so the annotation wins).
 fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> RustTables {
     // The capture for `name` in this match (`None` when the pattern lacks
     // it — the two impl patterns differ exactly in `impl_trait`).
@@ -441,9 +488,47 @@ fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> 
     }
     let mut fields: HashMap<String, Vec<StructField>> = HashMap::new();
     let mut impls: HashMap<usize, ImplAcc> = HashMap::new();
+    let mut bindings: Vec<LocalBinding> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, bytes);
     while let Some(m) = matches.next() {
+        // The 010-03 local-binding patterns (annotation or struct
+        // literal) — captured by the shared `bnd_let` capture.
+        if let Some(let_node) = cap(query, m, "bnd_let") {
+            let Some(name_node) = cap(query, m, "bnd_name") else { continue };
+            // The annotation pattern is listed first, so on the double
+            // match the annotation's type wins the dedupe.
+            let Some(type_node) = cap(query, m, "bnd_type")
+                .or_else(|| cap(query, m, "bnd_lit"))
+            else { continue };
+            let Some(binding) = name_node.utf8_text(bytes).ok() else { continue };
+            let Some(type_name) = type_node.utf8_text(bytes).ok() else { continue };
+            // Dedupe per `let` (the double pattern match).
+            if bindings.iter().any(|b| b.let_byte == let_node.start_byte()) {
+                continue;
+            }
+            // The innermost enclosing `block` scope (a fn body is a
+            // `block` too); a `let` with no block ancestor contributes
+            // nothing (honest degradation).
+            let mut scope = None;
+            let mut ancestor = let_node.parent();
+            while let Some(p) = ancestor {
+                if p.kind() == "block" {
+                    scope = Some((p.start_byte(), p.end_byte()));
+                    break;
+                }
+                ancestor = p.parent();
+            }
+            let Some(scope) = scope else { continue };
+            bindings.push(LocalBinding {
+                scope,
+                binding: binding.to_string(),
+                type_name: type_name.to_string(),
+                line: let_node.start_position().row,
+                let_byte: let_node.start_byte(),
+            });
+            continue;
+        }
         let item = cap(query, m, "impl_item");
         if let Some(item) = item {
             // The impl's self type (the `type` field); only a bare
@@ -520,7 +605,10 @@ fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> 
     for v in impls_out.values_mut() {
         v.sort_by(|a, b| (a.line, &a.method).cmp(&(b.line, &b.method)));
     }
-    RustTables { fields, impls: impls_out }
+    bindings.sort_by(|a, b| {
+        (a.scope, a.let_byte, &a.binding, &a.type_name).cmp(&(b.scope, b.let_byte, &b.binding, &b.type_name))
+    });
+    RustTables { fields, impls: impls_out, bindings }
 }
 
 /// (010-01) The PLAIN self type of the innermost `impl_item` containing
@@ -568,6 +656,91 @@ pub fn rust_self_type_at(source: &str, byte: usize) -> Option<String> {
     (type_node.kind() == "type_identifier")
         .then(|| type_node.utf8_text(source.as_bytes()).ok())?
         .map(|s| s.to_string())
+}
+
+/// (010-03, plan 010 Shape A rung 3) The WRITTEN-DOWN type name of the
+/// local binding `name` at `byte` in `source`, per this file's binding
+/// table `tables` (the M-. local-binding consumption's lexical seam):
+/// the enclosing `block` scope chain (innermost first — probe-verified:
+/// a fn body IS a `block`, as are closure / loop / arm / nested-block
+/// bodies) is consulted innermost-first and the FIRST scope holding a
+/// binding `name` whose `let` precedes the use wins — innermost binding
+/// wins (a shadow); within a scope the LAST `let` before the use wins.
+///
+/// `None` — never inferred — when no scope records the binding, the
+/// source is not Rust-shaped (parse miss), `byte` falls outside the
+/// root, or the node at the use is not the use itself (an
+/// `identifier` / `field_identifier` — `x.field` / `x.method()`), which
+/// keeps a use inside a string literal from ever resolving. One parse
+/// (the same one-parse discipline as 007-01's `scope_path_at` and
+/// 010-01's `rust_self_type_at`).
+pub fn rust_binding_type_at(
+    tables: &RustTables,
+    source: &str,
+    byte: usize,
+    name: &str,
+) -> Option<String> {
+    if tables.bindings.is_empty() {
+        return None;
+    }
+    let language = language_for(LanguageId::Rust)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source.as_bytes(), None)?;
+    let root = tree.root_node();
+    if !(root.start_byte() <= byte && byte < root.end_byte()) {
+        return None;
+    }
+    // The deepest node containing `byte`; its kind must be the use
+    // itself (an `identifier` — `x.method()` — or a `field_identifier`
+    // — `x.field`).
+    let mut node = root;
+    loop {
+        let mut next = None;
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i)
+                && c.start_byte() <= byte
+                && byte < c.end_byte()
+            {
+                next = Some(c);
+                break;
+            }
+        }
+        match next {
+            Some(c) => node = c,
+            None => break,
+        }
+    }
+    if !matches!(node.kind(), "identifier" | "field_identifier") {
+        return None;
+    }
+    // The scope chain: every enclosing `block`, innermost first.
+    let mut chain: Vec<(usize, usize)> = Vec::new();
+    let mut ancestor = node.parent();
+    while let Some(p) = ancestor {
+        if p.kind() == "block" {
+            chain.push((p.start_byte(), p.end_byte()));
+        }
+        ancestor = p.parent();
+    }
+    for scope in &chain {
+        // The last recorded `let` in this scope that precedes the use
+        // (a later `let` in the same scope is a not-yet-active shadow →
+        // fall through to the outer scopes).
+        let mut best: Option<&LocalBinding> = None;
+        for b in &tables.bindings {
+            if b.scope == *scope && b.binding == name && b.let_byte <= byte {
+                match best {
+                    Some(cur) if cur.let_byte >= b.let_byte => {}
+                    _ => best = Some(b),
+                }
+            }
+        }
+        if let Some(b) = best {
+            return Some(b.type_name.clone());
+        }
+    }
+    None
 }
 
 /// Map a definition node's tree-sitter `kind()` string to a `SymbolKind`
@@ -716,14 +889,20 @@ mod tests {
     }
 
     /// 010-01 (degradation): non-Rust languages contribute no tables (the
-    /// second query is Rust-only), plain text none at all.
+    /// second query is Rust-only), plain text none at all. 010-03: the
+    /// binding map is Rust-only in the same pass.
     #[test]
     fn rust_tables_non_rust_and_plain_are_empty() {
         let py = "class A:\n    def m(self):\n        pass\n";
         let (_syms, tables) = extract_all(LanguageId::Python, py);
-        assert!(tables.fields.is_empty() && tables.impls.is_empty(), "{tables:?}");
+        assert!(
+            tables.fields.is_empty() && tables.impls.is_empty() && tables.bindings.is_empty(),
+            "{tables:?}"
+        );
         let (_syms, tables) = extract_all(LanguageId::Plain, "struct Foo {}");
-        assert!(tables.fields.is_empty() && tables.impls.is_empty());
+        assert!(
+            tables.fields.is_empty() && tables.impls.is_empty() && tables.bindings.is_empty()
+        );
     }
 
     /// 010-01 (discriminating): the M-. self-receiver's lexical seam — the
@@ -760,6 +939,130 @@ mod tests {
         // Unparseable source (binary garbage): None.
         assert_eq!(rust_self_type_at("\u{ff}\u{fe}impl??", 0), None);
         let _ = bytes;
+    }
+
+    // ── 010-03: local binding types (rung 3) ──────────────────────────
+    /// 010-03 (discriminating): the per-file local binding map comes out
+    /// of the SAME pass — written-down types only: the `let x: Type`
+    /// annotation (bare `type_identifier` only) and the
+    /// `let x = Type { … }` struct literal; `let mut` records the same
+    /// binding; the double pattern match (`let x: Pt = Pt { a: 1 }`) is
+    /// deduped (the annotation wins); generics, path-shaped types, and
+    /// unannotated lets contribute nothing. Scope key: the innermost
+    /// enclosing `block` — the nested block gets a DIFFERENT key than
+    /// the fn body, and the symbol outline is byte-for-byte unchanged
+    /// (the bindings are a sidecar).
+    #[test]
+    fn rust_tables_extract_local_bindings() {
+        let src = "struct Pt { pub a: i32 }\n\
+                   struct Other { pub q: i32 }\n\
+                   fn f() {\n\
+                   \x20   let x: Pt = Pt { a: 1 };\n\
+                   \x20   let mut m: Pt;\n\
+                   \x20   let plain = 5;\n\
+                   \x20   let gen: Vec<i32>;\n\
+                   \x20   let pathed: std::path::PathBuf;\n\
+                   \x20   {\n\
+                   \x20       let x: Other;\n\
+                   \x20       let y = Other { q: 1 };\n\
+                   \x20   }\n\
+                   \x20   let late: Other;\n\
+                   }\n";
+        let (_syms, tables) = extract_all(LanguageId::Rust, src);
+        // Exactly five written-down bindings: x:Pt (annotation + literal
+        // deduped to one), mut m:Pt, the nested block's x:Other + y:Other,
+        // and late:Other. plain / gen / pathed contribute nothing.
+        assert_eq!(tables.bindings.len(), 5, "{:?}", tables.bindings);
+        let get = |binding: &str, type_name: &str| -> &LocalBinding {
+            tables.bindings
+                .iter()
+                .find(|b| b.binding == binding && b.type_name == type_name)
+                .unwrap_or_else(|| panic!("missing {binding}:{type_name}: {:?}", tables.bindings))
+        };
+        // The annotation + literal double match recorded ONCE, by the
+        // annotation.
+        let x_pt = get("x", "Pt");
+        assert_eq!(x_pt.line, 3);
+        // `let mut m: Pt` is the same as `let m: Pt`.
+        assert_eq!(get("m", "Pt").line, 4);
+        let x_other = get("x", "Other");
+        let y_other = get("y", "Other"); // the struct literal's type
+        let late = get("late", "Other");
+        assert_eq!((x_other.line, y_other.line, late.line), (9, 10, 12));
+        // Scope key: the innermost enclosing `block`. The fn-body lets
+        // share ONE scope; the nested block's lets share ANOTHER, inside
+        // the first (the nested block shadows the fn body's scope).
+        let fn_scope = x_pt.scope;
+        let inner = x_other.scope;
+        assert_eq!(get("m", "Pt").scope, fn_scope, "mut m shares the fn-body scope");
+        assert_eq!(late.scope, fn_scope, "late shares the fn-body scope");
+        assert_eq!(y_other.scope, inner, "y shares the nested block's scope");
+        assert!(
+            inner.0 > fn_scope.0 && inner.1 < fn_scope.1,
+            "nested block scope ({inner:?}) is strictly inside the fn body scope ({fn_scope:?})"
+        );
+        // Source order within a scope: x before m before late.
+        assert!(x_pt.let_byte < get("m", "Pt").let_byte && get("m", "Pt").let_byte < late.let_byte);
+        // The symbol pass is byte-for-byte the pre-010-03 outline (the
+        // bindings are a sidecar — no outline churn).
+        let names: Vec<String> = extract_symbols(LanguageId::Rust, src)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["Pt", "Other", "f"].map(|s| s.to_string()).to_vec());
+    }
+
+    /// 010-03 (discriminating + shadow pin): the written-down type at a
+    /// use site — the innermost scope wins (a shadow), within a scope
+    /// the LAST `let` before the use wins, an inner block sees the outer
+    /// binding only while it records no yet-active binding of its own,
+    /// and nothing is ever inferred (unparseable / out-of-root / in a
+    /// string literal → `None`).
+    #[test]
+    fn rust_binding_type_at_scopes_and_shadow() {
+        let src = "fn f() {\n\
+                   \x20   let x: A;\n\
+                   \x20   let _o = x.f;\n\
+                   \x20   {\n\
+                   \x20       let _i2 = x.f;\n\
+                   \x20       let x: B;\n\
+                   \x20       let _i = x.f;\n\
+                   \x20   }\n\
+                   \x20   let x: C;\n\
+                   \x20   let _c = x.f;\n\
+                   }\n";
+        let (_syms, tables) = extract_all(LanguageId::Rust, src);
+        assert_eq!(tables.bindings.len(), 3, "{:?}", tables.bindings);
+        // `x`'s byte offset after each `let <marker> = ` prefix.
+        let at = |marker: &str, pad: usize| -> usize {
+            src.find(marker).expect("marker in source") + pad
+        };
+        // Outer use, before any shadow: `A`.
+        assert_eq!(rust_binding_type_at(&tables, src, at("let _o = x.f", 9), "x"), Some("A".into()));
+        // Inner use BEFORE the inner shadow: the inner scope records no
+        // yet-active binding → the outer `A` (never the inner `B`).
+        assert_eq!(rust_binding_type_at(&tables, src, at("let _i2 = x.f", 10), "x"), Some("A".into()));
+        // Inner use AFTER the inner shadow: innermost binding wins → `B`
+        // (the shadow pin).
+        assert_eq!(rust_binding_type_at(&tables, src, at("let _i = x.f", 9), "x"), Some("B".into()));
+        // Same-scope shadow after the block: the last `let` before the
+        // use wins → `C`.
+        assert_eq!(rust_binding_type_at(&tables, src, at("let _c = x.f", 9), "x"), Some("C".into()));
+        // A different binding name in the same scopes: nothing.
+        assert_eq!(rust_binding_type_at(&tables, src, at("let _o = x.f", 9), "y"), None);
+        // Empty table: never a parse, never a guess.
+        assert_eq!(rust_binding_type_at(&RustTables::default(), src, at("let _o = x.f", 9), "x"), None);
+        // Non-Rust source (parse miss): None.
+        assert_eq!(rust_binding_type_at(&tables, "def f():\n    x = 1\n", 20, "x"), None);
+        // Byte outside the root (past EOF): None.
+        assert_eq!(rust_binding_type_at(&tables, src, src.len() + 8, "x"), None);
+        // A use inside a string literal is not a use (the node at the
+        // byte is not an identifier / field_identifier): None.
+        let str_src = "fn f() {\n    let x: A;\n    let s = \"x.f\";\n}\n";
+        let (_syms, str_tables) = extract_all(LanguageId::Rust, str_src);
+        assert_eq!(str_tables.bindings.len(), 1);
+        let at_str = str_src.find("\"x.f\"").unwrap() + 2;
+        assert_eq!(rust_binding_type_at(&str_tables, str_src, at_str, "x"), None, "string-literal use: never resolves");
     }
 
     // ── Rust: fn + method + struct + const ────────────────────────────
