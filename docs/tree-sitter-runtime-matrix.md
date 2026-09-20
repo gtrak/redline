@@ -113,7 +113,7 @@ per grammar, not absorbed.
 ## Bump verdict table (evidence gathered during the provider outage, orchestrator)
 
 The provider outage interrupted the lane mid-table; the evidence below was
-measured directly in this worktree at `7505583` (5 committed bumps + the
+measured directly in this worktree at `7505583` (6 committed bumps + the
 yaml WIP lock state). **Zero drift observed across every bump.**
 
 | Grammar | Was | Now | Verdict | Evidence |

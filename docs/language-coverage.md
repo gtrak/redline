@@ -13,7 +13,11 @@ Yaml, Bash, Markdown, Java, CSharp, Ruby, Scheme, Clojure, Plain.
 13/14 sit inside the 0.25.10 window 13..=15; the full compatibility
 matrix lives in `docs/tree-sitter-runtime-matrix.md`). Clojure is the
 first 0.25-generation landing (its crate hard-requires `tree-sitter
-^0.25.6` — the bump that unblocked it).
+^0.25.6` — the bump that unblocked it). Addendum (grammar-bumps lane):
+the "UNCHANGED" clause above is stale — nine of those pins moved to
+their 0.25-generation releases (rust 0.24.2, javascript/python/go
+0.25.0, c 0.24.2, bash 0.25.1, yaml 0.7.2, c-sharp 0.23.5, md 0.5.1 —
+ABI 15); verdict table in `docs/tree-sitter-runtime-matrix.md`.
 
 ## Verification method (same standard the matrix reviews used)
 

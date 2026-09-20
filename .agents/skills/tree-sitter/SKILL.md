@@ -29,20 +29,20 @@ the surfaces redline uses — do not trust even-older-version memory.
 | tree-sitter | =0.25.10 | runtime; ABI check at `set_language`; window **13..=15** |
 | tree-sitter-highlight | =0.25.10 | requires tree-sitter ^0.25.10 (tracks the runtime 1:1) |
 | tree-sitter-language | 0.1.8 (lock) | `LanguageFn` — ABI bridge; shared by runtime + all grammars |
-| tree-sitter-rust | 0.23.3 | ABI 14; 0.24.1/0.24.2 are the 0.25-gen follow-up lane (dev req ^0.25) |
-| tree-sitter-javascript | 0.23.1 | ABI 14; 0.25.0 is the 0.25-gen follow-up lane (dev req ^0.25.8) |
+| tree-sitter-rust | =0.24.2 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
+| tree-sitter-javascript | =0.25.0 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
 | tree-sitter-typescript | 0.23.2 | ABI 14; both TS and TSX grammars (0.23.2 is newest) |
-| tree-sitter-python | 0.23.6 | ABI 14; 0.25.0 is the follow-up lane |
-| tree-sitter-go | 0.23.4 | ABI 14; 0.25.0 is the follow-up lane |
-| tree-sitter-c | 0.23.4 | ABI 14; 0.24.0–0.24.2 are the follow-up lane |
+| tree-sitter-python | =0.25.0 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
+| tree-sitter-go | =0.25.0 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
+| tree-sitter-c | =0.24.2 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
 | tree-sitter-cpp | 0.23.4 | ABI 14; 0.23.4 is newest |
-| tree-sitter-bash | 0.23.3 | ABI 14; 0.25.0/0.25.1 are the follow-up lane |
+| tree-sitter-bash | =0.25.1 | ABI 15; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
 | tree-sitter-json | 0.24.8 | ABI 14; 0.24.8 is newest |
-| tree-sitter-yaml | =0.7.0 | ABI 14; 0.7.1+ are 0.25-gen (dev req ^0.25.4) — follow-up lane |
-| tree-sitter-md | 0.3.2 | ABI 13/14; 0.5.1 is ABI 15 (in-window), 0.5.2+ want ^0.26 — follow-up lane |
+| tree-sitter-yaml | =0.7.2 | ABI 14; 0.25-gen bump (grammar-bumps lane) — do NOT bump further |
+| tree-sitter-md | =0.5.1 | ABI 15; 0.25-gen bump (grammar-bumps lane) — 0.5.2+ want ^0.26, NOT bumped |
 | tree-sitter-toml-ng | 0.7.0 | maintained TOML (^0.24-era); original `tree-sitter-toml` stuck at ^0.20; 0.7.0 is newest |
 | tree-sitter-java | =0.23.5 | ABI 14 (new-languages lane); 0.23.5 is newest |
-| tree-sitter-c-sharp | =0.23.1 | ABI 14; exports NO highlight constants → vendored (below); 0.23.5 is the follow-up lane |
+| tree-sitter-c-sharp | =0.23.5 | ABI 15; 0.25-gen bump (grammar-bumps lane); no usable highlight constant (export is feature-gated) → vendored (below) |
 | tree-sitter-ruby | =0.23.1 | ABI 14; 0.23.1 is newest |
 | tree-sitter-scheme | =0.24.7 | ABI 14; flat S-expression grammar; 0.24.7 is newest |
 | tree-sitter-clojure | =0.1.0 | **the only grammar with a NORMAL `tree-sitter` req: ^0.25.6** — the hard dep that made the 0.24.7 → 0.25.10 bump necessary; 0.1.0 is its only release; exports no highlight constants → vendored (below) |
@@ -56,17 +56,21 @@ grammar).
   produces silent `set_language` errors. The guard
   `all_grammars_set_language_succeeds` (registry.rs) runs `set_language`
   over ALL 19 `LanguageId`s and pins this.
-- **The dev-dependency finding (why the bump forced zero grammar moves):** in
+- **The dev-dependency finding (why the runtime bump alone forced zero grammar moves):** in
   every pinned grammar crate EXCEPT clojure, the `tree-sitter` (RUNTIME)
   requirement is a **dev-dependency**. Cargo does not resolve dev-deps when a
   crate is consumed as a dependency, so those reqs impose **NO resolution
   constraint** on which runtime redline links. What constrains a grammar at
   load time is ONLY the runtime's **ABI window**: `set_language` succeeds iff
   `MIN_COMPATIBLE_LANGUAGE_VERSION ≤ grammar ABI ≤ LANGUAGE_VERSION` — for
-  0.25.10 that window is **13..=15**, and every pinned grammar is ABI 13 or
-  14, so all 18 non-Plain grammars load unchanged. Full evidence (per-crate
+  0.25.10 that window is **13..=15**, and every pinned grammar is ABI 13–15,
+  so all 18 non-Plain grammars load. Full evidence (per-crate
   normal vs dev reqs, ABIs, registry-index source) lives in
-  `docs/tree-sitter-runtime-matrix.md`.
+  `docs/tree-sitter-runtime-matrix.md`. The nine 0.25-generation releases
+  (rust 0.24.2, javascript/python/go 0.25.0, c 0.24.2, bash 0.25.1, yaml
+  0.7.2, c-sharp 0.23.5, md 0.5.1) were then TAKEN in the grammar-bumps
+  lane — optional moves, each gated on a full workspace evidence run
+  (verdict table in the same doc).
 - **Clojure is the exception:** `tree-sitter-clojure =0.1.0` declares
   `tree-sitter ^0.25.6` as a NORMAL dependency — a real resolution constraint
   (under the old 0.24.7 pin it did not even resolve: cargo `links` conflict).
@@ -206,20 +210,20 @@ crates:
 
 | Crate (pin) | Language constant(s) | Highlight query | Also exports |
 |---|---|---|---|
-| tree-sitter-rust (0.23.3) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `TAGS_QUERY` |
-| tree-sitter-javascript (0.23.1) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `INJECTIONS_QUERY`, `LOCALS_QUERY`, `JSX_HIGHLIGHT_QUERY`, `TAGS_QUERY` |
+| tree-sitter-rust (0.24.2) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `TAGS_QUERY` |
+| tree-sitter-javascript (0.25.0) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `INJECTIONS_QUERY`, `LOCALS_QUERY`, `JSX_HIGHLIGHT_QUERY`, `TAGS_QUERY` |
 | tree-sitter-typescript (0.23.2) | `LANGUAGE_TYPESCRIPT`, `LANGUAGE_TSX` | `HIGHLIGHTS_QUERY` (TS only) | `LOCALS_QUERY`, `TAGS_QUERY`, `TYPESCRIPT_NODE_TYPES`, `TSX_NODE_TYPES` |
-| tree-sitter-python (0.23.6) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
-| tree-sitter-go (0.23.4) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
-| tree-sitter-c (0.23.4) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `TAGS_QUERY` |
+| tree-sitter-python (0.25.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
+| tree-sitter-go (0.25.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
+| tree-sitter-c (0.24.2) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `TAGS_QUERY` |
 | tree-sitter-cpp (0.23.4) | `LANGUAGE` | `HIGHLIGHT_QUERY` | `TAGS_QUERY` |
-| tree-sitter-bash (0.23.3) | `LANGUAGE` | `HIGHLIGHT_QUERY` | — (no TAGS_QUERY) |
+| tree-sitter-bash (0.25.1) | `LANGUAGE` | `HIGHLIGHT_QUERY` | — (no TAGS_QUERY) |
 | tree-sitter-json (0.24.8) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
-| tree-sitter-yaml (=0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
-| tree-sitter-md (0.3.2) | `LANGUAGE` (block) + `INLINE_LANGUAGE` | `HIGHLIGHT_QUERY_BLOCK` / `HIGHLIGHT_QUERY_INLINE` | `INJECTION_QUERY_BLOCK`, `INJECTION_QUERY_INLINE`, `NODE_TYPES_BLOCK`, `NODE_TYPES_INLINE`, `MarkdownParser`, `MarkdownTree`, `MarkdownCursor` |
+| tree-sitter-yaml (=0.7.2) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
+| tree-sitter-md (0.5.1) | `LANGUAGE` (block) + `INLINE_LANGUAGE` | `HIGHLIGHT_QUERY_BLOCK` / `HIGHLIGHT_QUERY_INLINE` | `INJECTION_QUERY_BLOCK`, `INJECTION_QUERY_INLINE`, `NODE_TYPES_BLOCK`, `NODE_TYPES_INLINE`, `MarkdownParser`, `MarkdownTree`, `MarkdownCursor` |
 | tree-sitter-toml-ng (0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
 | tree-sitter-java (=0.23.5) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
-| tree-sitter-c-sharp (=0.23.1) | `LANGUAGE` | **NONE — vendored** (see below) | — (the crate's query constants are commented out in `bindings/rust/lib.rs`) |
+| tree-sitter-c-sharp (=0.23.5) | `LANGUAGE` | **NONE usable — vendored** (see below) | — (the crate's query exports are feature-gated behind `with_highlights_query` et al., which redline does not enable) |
 | tree-sitter-ruby (=0.23.1) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `LOCALS_QUERY`, `TAGS_QUERY` |
 | tree-sitter-scheme (=0.24.7) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `LOCALS_QUERY`, `TAGS_QUERY` (registry uses only `HIGHLIGHTS_QUERY`, passes `""` for the rest) |
 | tree-sitter-clojure (=0.1.0) | `LANGUAGE` | **NONE — vendored** (see below) | — (exports only `LANGUAGE` + `NODE_TYPES`) |
@@ -231,9 +235,9 @@ crates:
 
 ## Vendored highlight queries (the C# + Clojure pattern)
 
-Two pinned crates ship a highlights file but export NO Rust constant for it:
-`tree-sitter-c-sharp` 0.23.1 (its `HIGHLIGHTS_QUERY` et al. are
-**commented out** in the crate's `bindings/rust/lib.rs`) and
+Two pinned crates ship a highlights file but export NO usable Rust constant for it:
+`tree-sitter-c-sharp` 0.23.5 (its `HIGHLIGHTS_QUERY` is **feature-gated**
+behind `with_highlights_query`, which redline does not enable) and
 `tree-sitter-clojure` 0.1.0 (exports only `LANGUAGE` + `NODE_TYPES`). For
 these, redline vendors the query:
 
@@ -287,7 +291,7 @@ Maps to plan 001 issues 03/04/05:
   cancellation, or no language set.
 - **Highlight constant naming**: `HIGHLIGHT_QUERY` (js/c/cpp/bash) vs
   `HIGHLIGHTS_QUERY` (rust/ts/python/go/json/yaml/toml-ng/java/ruby/scheme). c-sharp
-  and clojure export NO highlight constant at all — vendored (above). Don't guess.
+  and clojure export NO usable highlight constant — vendored (above). Don't guess.
 - **`Highlighter::highlight` takes `&[u8]`**, not `&str`.
 - The tree-sitter-highlight crate-level doc example (uses `tree_sitter_javascript::language()`, older crate versions)
   is stale — don't copy it verbatim. tree-sitter-c's doc prose also mentions a `language()` fn its item list does not expose.
@@ -297,6 +301,7 @@ Maps to plan 001 issues 03/04/05:
   (cargo pulls a second runtime) — remember the dev-dependency finding: only a NORMAL
   runtime req (clojure is the only one today) constrains resolution; an in-window
   ABI does not. Keep the `=` pins (yaml, md, java, c-sharp, ruby, scheme, clojure)
-  and re-check the registry-index metadata before any bump; the 0.25-gen follow-up
-  releases (js 0.25.0, c-sharp 0.23.5, …) are recorded — deliberately not taken —
-  in `docs/tree-sitter-runtime-matrix.md`.
+  and re-check the registry-index metadata before any bump; the 0.25-gen
+  follow-up releases (js 0.25.0, c-sharp 0.23.5, …) were TAKEN in the
+  grammar-bumps lane — each bump's evidence is in the verdict table at
+  `docs/tree-sitter-runtime-matrix.md`.
