@@ -203,15 +203,24 @@ impl SymbolIndex {
     pub fn set_file_tables(&mut self, path: &str, tables: RustTables) -> bool {
         let empty = tables.fields.is_empty() && tables.impls.is_empty();
         let old = self.rust_tables.remove(path);
-        // Drop this file's contributions from the field map first.
+        // 010-01 review P1: the unchanged-content shortcut MUST run before
+        // any field-map removal — the removal is unconditional below, so a
+        // no-op refresh (touch / linter rewrite / editor no-save) would
+        // otherwise silently drop the file's field contributions and
+        // `self.<field>` M-. resolution would degrade until the next real
+        // change (mirrors set_file's order, index.rs:165).
+        let same = old.as_ref() == Some(&tables);
+        if same && !empty {
+            // Restore the unchanged entry and bail.
+            self.rust_tables.insert(path.to_string(), tables);
+            return false;
+        }
+        // Drop this file's contributions from the field map.
         if let Some(old_tables) = &old {
             for (struct_name, fields) in &old_tables.fields {
                 if let Some(by_field) = self.rust_fields.get_mut(struct_name) {
                     for f in fields {
                         if let Some(file_map) = by_field.get_mut(&f.field) {
-                            if let Some(lines) = file_map.get_mut(path) {
-                                lines.retain(|l| l != &f.line);
-                            }
                             file_map.remove(path);
                             if file_map.is_empty() {
                                 by_field.remove(&f.field);
@@ -226,12 +235,6 @@ impl SymbolIndex {
         }
         if empty {
             return old.is_some();
-        }
-        let same = old.as_ref() == Some(&tables);
-        if same {
-            // Restore the unchanged entry and bail.
-            self.rust_tables.insert(path.to_string(), tables);
-            return false;
         }
         for (struct_name, fields) in &tables.fields {
             let by_field = self
@@ -737,6 +740,38 @@ mod tests {
     }
 
     #[test]
+    /// 010-01 review P1 regression: an UNCHANGED-content refresh (touch,
+    /// linter rewrite, editor no-save) must keep the file's field-map
+    /// contributions — `set_file_tables`' same-check now runs BEFORE the
+    /// field-map removal (it previously stripped them and returned early,
+    /// silently degrading `self.<field>` M-. until the next real change).
+    #[test]
+    fn rust_tables_same_content_refresh_keeps_field_locations() {
+        let dir = make_project();
+        let root = dir.path();
+        std::fs::write(root.join("src/point.rs"), "pub struct Point { pub x: i32 }\n").unwrap();
+        let files = rel_files(root);
+        let mut index = build_index(root, &files, None);
+        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
+
+        // Reparse the UNCHANGED file through the refresh path.
+        let path = root.join("src/point.rs");
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        assert_eq!(
+            index.field_locations("Point", "x"),
+            vec![("src/point.rs".into(), 0)],
+            "a same-content refresh must not strip the field map"
+        );
+        // And the tables entry survives for method resolution.
+        assert!(index.tables("src/point.rs").is_some());
+        // A real content change right after still works (the map was not
+        // double-removed or corrupted by the shortcut).
+        std::fs::write(&path, "pub struct Point { pub x: i32, pub y: i32 }\n").unwrap();
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
+        assert_eq!(index.field_locations("Point", "y"), vec![("src/point.rs".into(), 0)]);
+    }
+
     fn rust_tables_refresh_and_remove_with_the_file() {
         let dir = make_project();
         let root = dir.path();
