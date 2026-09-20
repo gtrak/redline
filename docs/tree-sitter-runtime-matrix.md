@@ -84,7 +84,7 @@ One runtime in the lock (the ABI-pinning rule, 001/007 lesson):
 (and, after the Clojure landing, `tree-sitter-clojure` + its build
 deps) — no second runtime, no fork.
 
-## Recorded optional follow-up: 0.25-gen grammar releases (deliberately NOT taken)
+## Recorded optional follow-up: 0.25-gen grammar releases (RESOLVED by the grammar-bumps lane)
 
 The "0.25-gen release exists?" column above records, per pinned grammar,
 the newer releases that exist: rust 0.24.1 / 0.24.2, javascript 0.25.0,
@@ -97,6 +97,9 @@ evidence + review (per-grammar drift decision), not a behavior-neutral
 runtime change. Recorded here (with the Classification note above) so it
 is not re-filed as an oversight — if a lane wants one, it is its own
 task with per-grammar drift gates, not a ride-along on a runtime bump.
+That lane is the 0.25-generation grammar-bump lane; its per-grammar
+verdict table (the outcome of every candidate below) is at the bottom
+of this file.
 
 ## Behavioral neutrality claim
 
@@ -106,3 +109,81 @@ byte-identical to the 0.24.7 tree — the only new code path is the
 0.25.10 runtime itself. The full workspace test suite +
 `tools/gate.sh full` battery is run to confirm; any drift is reported
 per grammar, not absorbed.
+
+## Bump verdict table (evidence gathered during the provider outage, orchestrator)
+
+The provider outage interrupted the lane mid-table; the evidence below was
+measured directly in this worktree at `7505583` (5 committed bumps + the
+yaml WIP lock state). **Zero drift observed across every bump.**
+
+| Grammar | Was | Now | Verdict | Evidence |
+|---|---|---|---|---|
+| tree-sitter-rust | 0.23.3 | 0.24.2 | bumped — no drift | full gate below |
+| tree-sitter-javascript | 0.23.1 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-python | 0.23.6 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-go | 0.23.4 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-c | 0.23.4 | 0.24.2 | bumped — no drift | full gate below |
+| tree-sitter-bash | 0.23.3 | 0.25.1 | bumped — no drift | full gate below |
+| tree-sitter-yaml | 0.7.0 | 0.7.2 | bumped — no drift | full gate below |
+| tree-sitter-c-sharp | 0.23.1 | 0.23.5 | bumped — no drift (vendored highlights re-copied + re-pinned) | per-bump suite below; final gate below |
+| tree-sitter-md | 0.3.2 | 0.5.1 | bumped — no drift (the recorded known-bad straggler is now verified GOOD) | per-bump suite below; final gate below |
+| tree-sitter-cpp | 0.23.4 | 0.23.4 | not bumped — no newer release (0.23.4 is the newest in the index) | index cache |
+| tree-sitter-java | 0.23.5 | 0.23.5 | not bumped — no newer release | index cache |
+| tree-sitter-ruby | 0.23.1 | 0.23.1 | not bumped — no newer release | index cache |
+| tree-sitter-scheme | 0.24.7 | 0.24.7 | not bumped — no newer release (0.24.7-1 is a pre-release) | index cache |
+| tree-sitter-json | 0.24.8 | 0.24.8 | not bumped — no newer release | index cache |
+| tree-sitter-toml-ng | 0.7.0 | 0.7.0 | not bumped — no newer release | index cache |
+| tree-sitter-typescript | 0.23.2 | 0.23.2 | not bumped — no newer release | index cache |
+| runtime | 0.25.10 | 0.25.10 | unchanged (the bump lane's base) | — |
+
+Measured gate at this state: `cargo test --workspace` **959 passed / 0
+failed** (incl. the highlight byte-identity suite and every corpus golden
+driver), `cargo clippy --workspace --all-targets -- -D warnings` clean,
+`tools/pool.py runall` **12/12 suites, 87 s**. No golden flipped; no
+extraction/highlight test changed.
+
+### The resumed candidates (c-sharp, md) — measured per-bump on the new pins
+
+Each of the two remaining candidates was bumped one at a time (exact pin)
+and re-measured with the same standard — the full `cargo test --workspace`
+suite (959 tests: extraction, highlight byte-identity, node predicates,
+corpus goldens, and the `all_grammars_set_language_succeeds` ABI guard):
+
+- **tree-sitter-c-sharp 0.23.1 → 0.23.5** — suite green (959 / 0 failed);
+  lock moved exactly one entry. The 0.23.5 crate's `queries/highlights.scm`
+  differs from the 0.23.1 vendored copy by exactly one line: the `..`
+  range operator joins the `@operator` list. Per the C#/Clojure vendored
+  pattern the new file was re-copied VERBATIM to
+  `third_party/tree-sitter-c-sharp-0.23.5/highlights.scm` (sha256
+  `ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f`,
+  byte-verified) and `C_SHARP_HIGHLIGHTS` re-pinned (doc comment +
+  `include_str!`, `src/syntax/queries.rs`); the stale 0.23.1 copy was
+  removed and the `language-coverage.md` CSharp row path updated. No C#
+  extraction/predicate/golden flipped — no fixture exercises `..`, so the
+  query content change is latent (a highlight-face gain, not observed
+drift).
+- **tree-sitter-md 0.3.2 → 0.5.1** — the 011-resolver-parity note recorded
+  0.5.1 as a known-bad straggler. Re-verified honestly: its `tree-sitter
+  ^0.24` NORMAL dependency is OPTIONAL and feature-gated (registry-index
+  metadata — same shape as 0.3.2's optional `^0.23`), and with the feature
+  disabled it pulls nothing into the lock: the lock keeps exactly ONE
+  `tree-sitter` runtime (=0.25.10), so the historical second-runtime /
+  links failure mode does not reproduce. The 0.5.1 grammar ABI is inside
+  the 13..=15 window (guard test green) and the full suite is green on
+  the new pin (959 / 0 failed): md extraction, highlight byte-identity
+  (block + inline), node predicates, and the markdown goldens unchanged.
+  Verdict: the straggler status is stale — 0.5.1 is GOOD. 0.5.2+ (normal
+  `^0.26`) remain outside the ABI window and are NOT bumped.
+
+### Final gate (tip of the lane, all 9 bumped grammars in place)
+
+`cargo test --workspace` green, `cargo clippy --workspace --all-targets
+-- -D warnings` clean, and `tools/gate.sh full` **OK (full)** — build +
+clippy + test + all 18 PTY/Python battery stages (sweep, drive_all, windowing,
+cursor stream, xref, externals, 011 legs, sweep_flows) passing. (The
+lane's first `gate.sh full` attempt FAILED at `check_cursor_stream` +
+`sweep_flows` purely on cross-lane PTY-fixture contention — a concurrent
+jumpback-lane `gate.sh full` held the shared fixture, which the driver's
+flock surfaced as "busy" refusals; with the lanes clear the identical gate
+passes end-to-end. No grammar-related failure at any point.) No golden
+flipped across the whole lane; no extraction/highlight test changed.

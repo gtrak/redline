@@ -349,14 +349,16 @@ const CLOJURE_QUERY: &str = r#"
 "#;
 
 /// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
-/// 0.23.1's `queries/highlights.scm` (the crate ships the file but does
+/// 0.23.5's `queries/highlights.scm` (the crate ships the file but does
 /// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
 /// out in `bindings/rust/lib.rs`). Copy lives in
-/// `third_party/tree-sitter-c-sharp-0.23.1/highlights.scm` (checksum-
-/// verified at vendor time); keep it in lockstep with the pinned crate
-/// version — do not edit or re-flow.
+/// `third_party/tree-sitter-c-sharp-0.23.5/highlights.scm` (sha256 at
+/// vendor time: ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f;
+/// the 0.23.5 copy adds the `..` range operator to the operator list —
+/// the only content change vs the 0.23.1 copy); keep it in lockstep with
+/// the pinned crate version — do not edit or re-flow.
 pub const C_SHARP_HIGHLIGHTS: &str =
-    include_str!("../../third_party/tree-sitter-c-sharp-0.23.1/highlights.scm");
+    include_str!("../../third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
 
 /// The Clojure highlight query — vendored VERBATIM from
 /// `tree-sitter-clojure` 0.1.0's `grammar-src/queries/highlights.scm`

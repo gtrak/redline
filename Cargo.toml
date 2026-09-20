@@ -52,17 +52,17 @@ streaming-iterator = "=0.1.9"
 # DO NOT casually bump them: the 0.25-generation releases (e.g.
 # javascript 0.25.0, c-sharp 0.23.5) would change the grammar binary and
 # therefore the parses — a separate per-grammar drift decision.
-tree-sitter-rust = "0.23.3"       # ABI 14 — loads on both 0.24.7 and 0.25.10 (verified by test); 0.24.0's grammar ABI is 15, 0.24.1+/0.24.2 are the 0.25-gen follow-up lane
-tree-sitter-javascript = "0.23.1"
+tree-sitter-rust = "=0.24.2"      # 0.25-gen bump (grammar-bumps lane): ABI in-window, full workspace evidence clean (docs/tree-sitter-runtime-matrix.md verdict table); do NOT bump further
+tree-sitter-javascript = "=0.25.0"  # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-typescript = "0.23.2"  # provides both TS and TSX grammars
-tree-sitter-python = "0.23.6"
-tree-sitter-go = "0.23.4"
-tree-sitter-c = "0.23.4"
+tree-sitter-python = "=0.25.0"  # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
+tree-sitter-go = "=0.25.0"  # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
+tree-sitter-c = "=0.24.2"      # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-cpp = "0.23.4"
-tree-sitter-bash = "0.23.3"
+tree-sitter-bash = "=0.25.1"    # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-json = "0.24.8"
-tree-sitter-yaml = "=0.7.0"        # 0.7.1+ are 0.25-gen (dev req ^0.25.4) — follow-up lane
-tree-sitter-md = "0.3.2"          # ABI 13/14 — verified by test; 0.5.1 (ABI 15) / 0.5.2+ (^0.26) are the follow-up lane
+tree-sitter-yaml = "=0.7.2"     # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
+tree-sitter-md = "=0.5.1"        # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further (0.5.2+ want ^0.26)
 tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar; the original
                                    # `tree-sitter-toml` is stuck at ^0.20
 # New-languages lane (Java / C# / Ruby / Scheme): exact `=` pins on
@@ -70,7 +70,7 @@ tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar; the original
 # pinned 0.25.10 runtime (the ABI-pinning rule, 001/007 lesson). The
 # c-sharp 0.23.5 (0.25-gen) release exists — a follow-up lane, do not bump.
 tree-sitter-java = "=0.23.5"
-tree-sitter-c-sharp = "=0.23.1"
+tree-sitter-c-sharp = "=0.23.5"    # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-ruby = "=0.23.1"
 tree-sitter-scheme = "=0.24.7"
 
