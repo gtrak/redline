@@ -28,6 +28,7 @@ pub enum LanguageId {
     Bash,
     Markdown,
     Java,
+    CSharp,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -51,6 +52,7 @@ impl LanguageId {
             Self::Bash => "bash",
             Self::Markdown => "markdown",
             Self::Java => "java",
+            Self::CSharp => "csharp",
             Self::Plain => "plain",
         }
     }
@@ -71,6 +73,7 @@ impl LanguageId {
         Self::Bash,
         Self::Markdown,
         Self::Java,
+        Self::CSharp,
     ];
 }
 
@@ -123,6 +126,8 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("mdx", LanguageId::Markdown);
     // Java
     m.insert("java", LanguageId::Java);
+    // C#
+    m.insert("cs", LanguageId::CSharp);
     m
 }
 
@@ -282,6 +287,17 @@ impl GrammarRegistry {
                     "",
                     "",
                 ),
+                LanguageId::CSharp => Self::build_config(
+                    Language::from(tree_sitter_c_sharp::LANGUAGE),
+                    "csharp",
+                    // The pinned crate ships `queries/highlights.scm` but
+                    // does not export a `HIGHLIGHTS_QUERY` constant, so the
+                    // query is vendored verbatim (checksum-pinned at copy
+                    // time) and `include_str!`ed from `queries.rs`.
+                    crate::syntax::queries::C_SHARP_HIGHLIGHTS,
+                    "",
+                    "",
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -342,6 +358,7 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
         LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
         LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
+        LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
         LanguageId::Plain => return None,
     })
 }
@@ -367,6 +384,7 @@ mod tests {
         assert_eq!(reg.language_for("foo.sh"), LanguageId::Bash);
         assert_eq!(reg.language_for("foo.md"), LanguageId::Markdown);
         assert_eq!(reg.language_for("Foo.java"), LanguageId::Java);
+        assert_eq!(reg.language_for("Foo.cs"), LanguageId::CSharp);
     }
 
     #[test]

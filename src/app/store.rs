@@ -9292,6 +9292,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             LanguageId::Cpp => &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
             LanguageId::Markdown => &["md", "markdown", "mdx"],
             LanguageId::Java => &["java"],
+            LanguageId::CSharp => &["cs"],
             _ => &[],
         }
     }

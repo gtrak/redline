@@ -97,7 +97,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
         | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
-        => {}
+        | LanguageId::CSharp => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -271,6 +271,19 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
         // so `a.b.c` comes back whole as one node, same rule as the Rust
         // `::` path.
         LanguageId::Toml => parent_kind == Some("dotted_key") && node.is_named(),
+        // C# dotted paths (probe-verified against the pinned
+        // tree-sitter-c-sharp 0.23.1): `o.P` / `a.b.c` nest
+        // `member_access_expression`s (named `expression` + `name`
+        // children), and `N.Inner` / `A.B` nest `qualified_name`s
+        // (named `qualifier` + `name` children; the qualifier may itself
+        // be a `qualified_name`). Any NAMED child of either container is
+        // a path part — same rule as the JS `member_expression`.
+        LanguageId::CSharp => {
+            matches!(
+                parent_kind,
+                Some("member_access_expression") | Some("qualified_name")
+            ) && node.is_named()
+        }
         // Java dotted paths (probe-verified against the pinned
         // tree-sitter-java 0.23.5): `com.example.Foo` nests
         // `scoped_identifier`/`scoped_type_identifier` around `.` tokens
@@ -432,6 +445,19 @@ fn is_java_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// C# identifier-ish node kinds (verified against the pinned
+/// tree-sitter-c-sharp 0.23.1 `NODE_TYPES`): `identifier` (this grammar
+/// has no `type_identifier` — type names are plain `identifier`s),
+/// `predefined_type` (`int`, `string`, … — C's `primitive_type` analog),
+/// `member_access_expression` (the whole `a.b.c` chain), and
+/// `qualified_name` (the whole `N.Inner` / `A.B` name path).
+fn is_csharp_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier" | "predefined_type" | "member_access_expression" | "qualified_name"
+    )
+}
+
 // Markdown has NO identifier-ish node kind (probed against the pinned
 // tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
@@ -458,6 +484,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Toml => is_toml_identifier_kind(kind),
         LanguageId::Json => is_json_identifier_kind(kind),
         LanguageId::Java => is_java_identifier_kind(kind),
+        LanguageId::CSharp => is_csharp_identifier_kind(kind),
         _ => false,
     }
 }
@@ -524,6 +551,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Json => json_scope_path(leaf, source),
         LanguageId::Markdown => markdown_scope_path(leaf, source),
         LanguageId::Java => java_scope_path(leaf, source),
+        LanguageId::CSharp => csharp_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -800,6 +828,37 @@ fn java_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
             "class_declaration"
                 | "interface_declaration"
                 | "enum_declaration"
+                | "method_declaration"
+        ) && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C# enclosing-scope walk (new-languages lane): `namespace_
+/// declaration` (name child in the `name` field — a `qualified_name`
+/// such as `Foo.Bar`, its text as written), `class_declaration`,
+/// `interface_declaration`, `struct_declaration`, `enum_declaration`,
+/// `record_declaration`, and `method_declaration` (name field),
+/// outermost → innermost. Local blocks and lambdas are intentionally
+/// not scope items — keep it simple and honest.
+fn csharp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if matches!(
+            node.kind(),
+            "namespace_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "enum_declaration"
+                | "record_declaration"
                 | "method_declaration"
         ) && let Some(name_node) = node.child_by_field_name("name")
             && let Ok(text) = name_node.utf8_text(source)
@@ -1903,6 +1962,45 @@ mod tests {
         assert_eq!(
             scope_path_at(LanguageId::Java, src2, at2),
             vec![String::from("A")]
+        );
+    }
+
+    // ── C# (new-languages lane) ──────────────────────────────────────
+    /// `o.P` / `a.b.c` come back whole as one `member_access_expression`
+    /// (the dotted-path rule, probe-verified against the pinned
+    /// tree-sitter-c-sharp 0.23.1).
+    #[test]
+    fn csharp_member_path_comes_back_whole() {
+        let src = "class A { void F() { int v = o.P; } }\n";
+        let at = src.find("o.P").expect("fixture") + 1;
+        let info = node_at(LanguageId::CSharp, src, at).expect("node at `.P`");
+        assert_eq!(info.text, "o.P");
+        assert_eq!(info.kind, "member_access_expression");
+    }
+
+    /// `N.Inner` in a namespace header comes back whole as one
+    /// `qualified_name`.
+    #[test]
+    fn csharp_qualified_name_comes_back_whole() {
+        let src = "namespace N.Inner { class A { } }\n";
+        let at = src.find("N.Inner").expect("fixture") + 2;
+        let info = node_at(LanguageId::CSharp, src, at)
+            .expect("node at `Inner`");
+        assert_eq!(info.text, "N.Inner");
+        assert_eq!(info.kind, "qualified_name");
+    }
+
+    #[test]
+    fn csharp_scope_chain_namespace_class_method() {
+        let src = "namespace N { class A { void F() { o.P; } } }\n";
+        let at = src.find("o.P").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::CSharp, src, at),
+            vec![
+                String::from("N"),
+                String::from("A"),
+                String::from("F")
+            ]
         );
     }
 }

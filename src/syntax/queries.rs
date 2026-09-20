@@ -309,6 +309,37 @@ const JAVA_QUERY: &str = r#"
 (constructor_declaration name: (identifier) @name) @item
 "#;
 
+// New-languages lane: C#. Node shapes verified against the pinned
+// tree-sitter-c-sharp 0.23.1 NODE_TYPES + S-expr probe. The namespace
+// name may be a `qualified_name` (`Foo.Bar`), a `generic_name`, or a
+// plain `identifier` (probe-verified field types), so it is captured
+// with `(_)`. Enum members, local variables, and events are
+// deliberately out of the outline (honest minimal classes/methods/
+// properties set). `this.X` parse errors in this grammar version
+// (probe-verified) — do not build fixtures around it.
+const C_SHARP_QUERY: &str = r#"
+(namespace_declaration name: (_) @name) @item
+(class_declaration name: (identifier) @name) @item
+(interface_declaration name: (identifier) @name) @item
+(enum_declaration name: (identifier) @name) @item
+(struct_declaration name: (identifier) @name) @item
+(record_declaration name: (identifier) @name) @item
+(property_declaration name: (identifier) @name) @item
+(method_declaration name: (identifier) @name) @item
+(constructor_declaration name: (identifier) @name) @item
+(delegate_declaration name: (identifier) @name) @item
+"#;
+
+/// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
+/// 0.23.1's `queries/highlights.scm` (the crate ships the file but does
+/// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
+/// out in `bindings/rust/lib.rs`). Copy lives in
+/// `third_party/tree-sitter-c-sharp-0.23.1/highlights.scm` (checksum-
+/// verified at vendor time); keep it in lockstep with the pinned crate
+/// version — do not edit or re-flow.
+pub const C_SHARP_HIGHLIGHTS: &str =
+    include_str!("../../third_party/tree-sitter-c-sharp-0.23.1/highlights.scm");
+
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
@@ -327,6 +358,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Bash => Some(BASH_QUERY),
         LanguageId::Markdown => Some(MARKDOWN_QUERY),
         LanguageId::Java => Some(JAVA_QUERY),
+        LanguageId::CSharp => Some(C_SHARP_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -348,6 +380,7 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::Bash => Language::from(tree_sitter_bash::LANGUAGE),
         LanguageId::Markdown => Language::from(tree_sitter_md::LANGUAGE),
         LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
+        LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -790,7 +823,11 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "type_spec"
         | "type_declaration"
         | "enum_declaration"
-        | "mod_item" => SymbolKind::Type,
+        | "mod_item"
+        | "namespace_declaration"
+        | "struct_declaration"
+        | "record_declaration"
+        | "delegate_declaration" => SymbolKind::Type,
         "const_item"
         | "const_spec"
         | "variable_declarator"
@@ -799,6 +836,7 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "static_item"
         | "static_initializer"
         | "constant"
+        | "property_declaration"
         | "enumerator" => SymbolKind::Constant,
         "macro_definition" | "preproc_def" => SymbolKind::Macro,
         "atx_heading" | "setext_heading" | "heading" => SymbolKind::Heading,
@@ -1334,6 +1372,48 @@ mod tests {
         // Exactly the eight named definitions — the field `C` and the enum
         // constant `RED` are NOT in the outline.
         assert_eq!(syms.len(), 8, "outline: {syms:?}");
+    }
+
+    // ── C# (new-languages lane) ──────────────────────────────────────
+    /// Namespaces (qualified), classes, properties, methods,
+    /// constructors, enums, and records land with their kinds; enum
+    /// members and local variables stay out (honest minimal outline).
+    #[test]
+    fn csharp_extracts_class_and_method() {
+        let src = "namespace Foo {\n\
+                   \x20   public class Bar {\n\
+                   \x20       public int P { get; set; }\n\
+                   \x20       public int GetP() => P;\n\
+                   \x20       Bar() {}\n\
+                   \x20   }\n\
+                   \x20   enum E { A, B }\n\
+                   \x20   record Pt(int X);\n\
+                   }\n";
+        let syms = extract_symbols(LanguageId::CSharp, src);
+        let foo = find(&syms, "Foo").expect("namespace Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let bar = syms
+            .iter()
+            .find(|s| s.name == "Bar" && s.kind == SymbolKind::Type)
+            .expect("class Bar");
+        assert_eq!(bar.line, 1);
+        // Two `Bar` entries: the class (Type) and the constructor (Method).
+        let ctor = syms
+            .iter()
+            .find(|s| s.name == "Bar" && s.kind == SymbolKind::Method)
+            .expect("constructor Bar");
+        assert_eq!(ctor.line, 4);
+        let p = find(&syms, "P").expect("property P");
+        assert_eq!(p.kind, SymbolKind::Constant);
+        let getp = find(&syms, "GetP").expect("method GetP");
+        assert_eq!(getp.kind, SymbolKind::Method);
+        let e = find(&syms, "E").expect("enum E");
+        assert_eq!(e.kind, SymbolKind::Type);
+        let pt = find(&syms, "Pt").expect("record Pt");
+        assert_eq!(pt.kind, SymbolKind::Type);
+        // Exactly the seven named definitions — the enum members `A` /
+        // `B` are NOT in the outline.
+        assert_eq!(syms.len(), 7, "outline: {syms:?}");
     }
 
     // ── Documented empty fallback: plain text ──────────────────────────
