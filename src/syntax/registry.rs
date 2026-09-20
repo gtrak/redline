@@ -27,6 +27,10 @@ pub enum LanguageId {
     Yaml,
     Bash,
     Markdown,
+    Java,
+    CSharp,
+    Ruby,
+    Scheme,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -49,6 +53,10 @@ impl LanguageId {
             Self::Yaml => "yaml",
             Self::Bash => "bash",
             Self::Markdown => "markdown",
+            Self::Java => "java",
+            Self::CSharp => "csharp",
+            Self::Ruby => "ruby",
+            Self::Scheme => "scheme",
             Self::Plain => "plain",
         }
     }
@@ -68,6 +76,10 @@ impl LanguageId {
         Self::Yaml,
         Self::Bash,
         Self::Markdown,
+        Self::Java,
+        Self::CSharp,
+        Self::Ruby,
+        Self::Scheme,
     ];
 }
 
@@ -118,6 +130,18 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("md", LanguageId::Markdown);
     m.insert("markdown", LanguageId::Markdown);
     m.insert("mdx", LanguageId::Markdown);
+    // Java
+    m.insert("java", LanguageId::Java);
+    // C#
+    m.insert("cs", LanguageId::CSharp);
+    // Ruby
+    m.insert("rb", LanguageId::Ruby);
+    // Scheme (the lisp-family landing — see docs/language-coverage.md
+    // gap 8 for the family choice rationale)
+    m.insert("scm", LanguageId::Scheme);
+    m.insert("ss", LanguageId::Scheme);
+    m.insert("sls", LanguageId::Scheme);
+    m.insert("sld", LanguageId::Scheme);
     m
 }
 
@@ -270,6 +294,38 @@ impl GrammarRegistry {
                     tree_sitter_md::INJECTION_QUERY_BLOCK,
                     "",
                 ),
+                LanguageId::Java => Self::build_config(
+                    Language::from(tree_sitter_java::LANGUAGE),
+                    "java",
+                    tree_sitter_java::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                LanguageId::CSharp => Self::build_config(
+                    Language::from(tree_sitter_c_sharp::LANGUAGE),
+                    "csharp",
+                    // The pinned crate ships `queries/highlights.scm` but
+                    // does not export a `HIGHLIGHTS_QUERY` constant, so the
+                    // query is vendored verbatim (checksum-pinned at copy
+                    // time) and `include_str!`ed from `queries.rs`.
+                    crate::syntax::queries::C_SHARP_HIGHLIGHTS,
+                    "",
+                    "",
+                ),
+                LanguageId::Ruby => Self::build_config(
+                    Language::from(tree_sitter_ruby::LANGUAGE),
+                    "ruby",
+                    tree_sitter_ruby::HIGHLIGHTS_QUERY,
+                    "",
+                    tree_sitter_ruby::LOCALS_QUERY,
+                ),
+                LanguageId::Scheme => Self::build_config(
+                    Language::from(tree_sitter_scheme::LANGUAGE),
+                    "scheme",
+                    tree_sitter_scheme::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -329,6 +385,10 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
         LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
         LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
+        LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
+        LanguageId::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        LanguageId::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
         LanguageId::Plain => return None,
     })
 }
@@ -338,7 +398,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext_map_covers_all_11_languages() {
+    fn ext_map_covers_all_18_languages() {
         let reg = GrammarRegistry::build();
         assert_eq!(reg.language_for("foo.rs"), LanguageId::Rust);
         assert_eq!(reg.language_for("foo.ts"), LanguageId::TypeScript);
@@ -353,6 +413,11 @@ mod tests {
         assert_eq!(reg.language_for("foo.yaml"), LanguageId::Yaml);
         assert_eq!(reg.language_for("foo.sh"), LanguageId::Bash);
         assert_eq!(reg.language_for("foo.md"), LanguageId::Markdown);
+        assert_eq!(reg.language_for("Foo.java"), LanguageId::Java);
+        assert_eq!(reg.language_for("Foo.cs"), LanguageId::CSharp);
+        assert_eq!(reg.language_for("foo.rb"), LanguageId::Ruby);
+        assert_eq!(reg.language_for("foo.scm"), LanguageId::Scheme);
+        assert_eq!(reg.language_for("foo.sld"), LanguageId::Scheme);
     }
 
     #[test]
@@ -373,6 +438,25 @@ mod tests {
             );
         }
         assert!(reg.config(LanguageId::Plain).is_none());
+    }
+
+    /// ABI-pinning guard (001/007 lesson): every registry language's
+    /// grammar must `set_language` against the SINGLE pinned
+    /// tree-sitter 0.24.7 runtime. A grammar built against a newer ABI
+    /// (e.g. the known-bad stragglers `tree-sitter-md` 0.5.1 /
+    /// `tree-sitter-rust` 0.24.0, grammar ABI 15 > runtime max 14) would
+    /// otherwise silently fall back to plain text at render time.
+    #[test]
+    fn all_grammars_set_language_succeeds() {
+        let mut parser = tree_sitter::Parser::new();
+        for id in LanguageId::ALL {
+            let lang =
+                crate::syntax::queries::language_for(*id).expect("grammar for {id:?}");
+            assert!(
+                parser.set_language(&lang).is_ok(),
+                "{id:?}: grammar ABI incompatible with the pinned runtime"
+            );
+        }
     }
 
     #[test]

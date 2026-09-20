@@ -293,6 +293,108 @@ const MARKDOWN_QUERY: &str = r#"
 (setext_heading (paragraph (inline) @name)) @item
 "#;
 
+// New-languages lane: Java. Node shapes verified against the pinned
+// tree-sitter-java 0.23.5 NODE_TYPES + S-expr probe: class /
+// interface / enum / method / constructor all carry a `name` field.
+// The grammar version does not parse standalone record declarations
+// (probe-verified parse error), so records are not captured — fields
+// are deliberately not in the outline either (a `static final` filter
+// is not expressible in the query; honest minimal classes/methods
+// outline).
+const JAVA_QUERY: &str = r#"
+(class_declaration name: (identifier) @name) @item
+(interface_declaration name: (identifier) @name) @item
+(enum_declaration name: (identifier) @name) @item
+(method_declaration name: (identifier) @name) @item
+(constructor_declaration name: (identifier) @name) @item
+"#;
+
+// New-languages lane: C#. Node shapes verified against the pinned
+// tree-sitter-c-sharp 0.23.1 NODE_TYPES + S-expr probe. The namespace
+// name may be a `qualified_name` (`Foo.Bar`), a `generic_name`, or a
+// plain `identifier` (probe-verified field types), so it is captured
+// with `(_)`. Enum members, local variables, and events are
+// deliberately out of the outline (honest minimal classes/methods/
+// properties set). `this.X` parse errors in this grammar version
+// (probe-verified) — do not build fixtures around it.
+const C_SHARP_QUERY: &str = r#"
+(namespace_declaration name: (_) @name) @item
+(class_declaration name: (identifier) @name) @item
+(interface_declaration name: (identifier) @name) @item
+(enum_declaration name: (identifier) @name) @item
+(struct_declaration name: (identifier) @name) @item
+(record_declaration name: (identifier) @name) @item
+(property_declaration name: (identifier) @name) @item
+(method_declaration name: (identifier) @name) @item
+(constructor_declaration name: (identifier) @name) @item
+(delegate_declaration name: (identifier) @name) @item
+"#;
+
+/// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
+/// 0.23.1's `queries/highlights.scm` (the crate ships the file but does
+/// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
+/// out in `bindings/rust/lib.rs`). Copy lives in
+/// `third_party/tree-sitter-c-sharp-0.23.1/highlights.scm` (checksum-
+/// verified at vendor time); keep it in lockstep with the pinned crate
+/// version — do not edit or re-flow.
+pub const C_SHARP_HIGHLIGHTS: &str =
+    include_str!("../../third_party/tree-sitter-c-sharp-0.23.1/highlights.scm");
+
+// New-languages lane: Ruby. Node shapes verified against the pinned
+// tree-sitter-ruby 0.23.1 NODE_TYPES + S-expr probe: `module` /
+// `class` name their `constant` in the `name` field; `def` is a
+// `method` (a `def self.helper` is a `singleton_method`); a top-level
+// `CONST = …` is an `assignment` whose `left` is a `constant` (an
+// `@x = …` instance-variable assignment does NOT match — its `left`
+// is an `instance_variable`). Local variables and methods with
+// default/blocked bodies stay out (honest minimal outline).
+const RUBY_QUERY: &str = r#"
+(module name: (constant) @name) @item
+(class name: (constant) @name) @item
+(method name: (identifier) @name) @item
+(singleton_method name: (identifier) @name) @item
+(assignment left: (constant) @name) @item
+"#;
+
+// New-languages lane: Scheme (the lisp-family landing). The pinned
+// tree-sitter-scheme 0.24.7 is a FLAT S-expression grammar (probe-
+// verified: the only node kinds are program/list/symbol/number/
+// string/character/vector/comment/quote/…) — there is no `defun` /
+// `define_library` node. LITERAL content matches on the `symbol` kind
+// are rejected at query compile time (probe-verified: `QueryError
+// NodeType` on `(symbol "define")`), so the query captures every
+// first-child-anchored `(list HEAD …)` candidate instead — the `.`
+// anchors are load-bearing (probe-verified: WITHOUT them, the engine
+// binds `@head`/`@name` to ANY children of the list, producing
+// spurious candidates like `name=core` for `(define-library (foo
+// core) …)`). `extract_all` keeps only the true define forms
+// (`scheme_kind` gates on `(pattern_index, head)`). Application forms
+// (`map name=lambda`, …), `export`, `set!`, and record accessors are
+// captured as candidates and then rejected (their head is not a define
+// form) — the honest minimal outline.
+const SCHEME_QUERY: &str = r#"
+(list . (symbol) @head . (list . (symbol) @name)) @item
+(list . (symbol) @head . (symbol) @name) @item
+"#;
+
+/// The symbol category of a SCHEME match — keyed by the query pattern's
+/// SOURCE ORDER (`QueryMatch::pattern_index`) AND the captured head
+/// symbol's text (the flat S-expression grammar gives every definition
+/// the same node kind — `list` — and its `symbol` kind refuses literal
+/// content matches, so the gating happens here, not in the query).
+/// `None` = the captured candidate is not a define form (rejected by
+/// the extraction loop).
+fn scheme_kind(pattern_index: usize, head: &str) -> Option<SymbolKind> {
+    match (head, pattern_index) {
+        ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
+        ("define", 1) => Some(SymbolKind::Constant), // (define x …)
+        ("define-library", 0) => Some(SymbolKind::Type), // (define-library (name .) …)
+        ("define-record-type", 1) => Some(SymbolKind::Type), // (define-record-type name …)
+        ("define-macro", 0) => Some(SymbolKind::Macro), // (define-macro (m .) …)
+        _ => None,
+    }
+}
+
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
@@ -310,6 +412,10 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Yaml => Some(YAML_QUERY),
         LanguageId::Bash => Some(BASH_QUERY),
         LanguageId::Markdown => Some(MARKDOWN_QUERY),
+        LanguageId::Java => Some(JAVA_QUERY),
+        LanguageId::CSharp => Some(C_SHARP_QUERY),
+        LanguageId::Ruby => Some(RUBY_QUERY),
+        LanguageId::Scheme => Some(SCHEME_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -330,6 +436,10 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::Yaml => Language::from(tree_sitter_yaml::LANGUAGE),
         LanguageId::Bash => Language::from(tree_sitter_bash::LANGUAGE),
         LanguageId::Markdown => Language::from(tree_sitter_md::LANGUAGE),
+        LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
+        LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
+        LanguageId::Ruby => Language::from(tree_sitter_ruby::LANGUAGE),
+        LanguageId::Scheme => Language::from(tree_sitter_scheme::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -402,6 +512,13 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         let bytes = source.as_bytes();
         let name_idx = query.capture_index_for_name("name");
         let item_idx = query.capture_index_for_name("item");
+        // Scheme (the flat S-expression grammar): the head-symbol capture
+        // the define-form gate reads (see `scheme_kind`).
+        let head_idx = if lang == LanguageId::Scheme {
+            query.capture_index_for_name("head")
+        } else {
+            None
+        };
         let mut out = Vec::new();
         let mut cursor = QueryCursor::new();
         // `matches()` yields one item per definition (with all its captures);
@@ -430,9 +547,39 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
             let kind_node = item_node.or(name_node).unwrap();
             let name_node = name_node.unwrap_or(kind_node);
             let extent_node = item_node.unwrap_or(name_node);
+            // Scheme gate (see `scheme_kind`): the query captures every
+            // `(list HEAD …)` candidate; only the true define forms
+            // survive. Rejected candidates contribute no symbol.
+            let scheme_reject = if lang == LanguageId::Scheme {
+                let head = head_idx
+                    .and_then(|i| m.captures.iter().find(|c| c.index == i))
+                    .and_then(|c| c.node.utf8_text(bytes).ok())
+                    .map(str::to_string);
+                head.as_deref().and_then(|h| scheme_kind(m.pattern_index, h)).is_none()
+            } else {
+                false
+            };
+            if scheme_reject {
+                continue;
+            }
+
             out.push(Symbol {
                 name,
-                kind: kind_of(kind_node.kind()),
+                kind: if lang == LanguageId::Scheme {
+                    // The flat S-expression grammar: the (pattern, head)
+                    // pair carries the category (see `scheme_kind`).
+                    scheme_kind(m.pattern_index,
+                        head_idx
+                            .and_then(|i| m.captures.iter().find(|c| c.index == i))
+                            .and_then(|c| c.node.utf8_text(bytes).ok())
+                            .map(str::to_string)
+                            .as_deref()
+                            .unwrap_or("")
+                    )
+                    .unwrap_or(SymbolKind::Function)
+                } else {
+                    kind_of(kind_node.kind())
+                },
                 line: name_node.start_position().row,
                 end_line: extent_node.end_position().row,
                 start_byte: name_node.start_byte(),
@@ -756,7 +903,10 @@ pub fn rust_binding_type_at(
 fn kind_of(kind: &str) -> SymbolKind {
     match kind {
         "function_item" | "function_definition" | "function_declaration" => SymbolKind::Function,
-        "method_signature" | "method_definition" | "method_declaration" => SymbolKind::Method,
+        "method_signature" | "method_definition" | "method_declaration"
+        | "constructor_declaration" | "method" | "singleton_method" => {
+            SymbolKind::Method
+        }
         "struct_item"
         | "enum_item"
         | "trait_item"
@@ -770,7 +920,13 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "abstract_class_member_definition"
         | "type_spec"
         | "type_declaration"
-        | "mod_item" => SymbolKind::Type,
+        | "enum_declaration"
+        | "mod_item"
+        | "namespace_declaration"
+        | "record_declaration"
+        | "delegate_declaration"
+        | "module"
+        | "class" => SymbolKind::Type,
         "const_item"
         | "const_spec"
         | "variable_declarator"
@@ -779,6 +935,8 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "static_item"
         | "static_initializer"
         | "constant"
+        | "property_declaration"
+        | "assignment"
         | "enumerator" => SymbolKind::Constant,
         "macro_definition" | "preproc_def" => SymbolKind::Macro,
         "atx_heading" | "setext_heading" | "heading" => SymbolKind::Heading,
@@ -1277,6 +1435,160 @@ mod tests {
         assert_eq!(g.line, 2);
     }
 
+
+    // ── Java (new-languages lane) ─────────────────────────────────────
+    /// Classes / interfaces / enums / methods / constructors land with
+    /// their kinds; fields are deliberately out of the outline (a
+    /// `static final` filter is not expressible in the query) and the
+    /// grammar version does not parse standalone record declarations
+    /// (probe-verified) — the honest minimal outline.
+    #[test]
+    fn java_extracts_class_and_method() {
+        let src = "public class Foo {\n\
+                   \x20   static final int C = 1;\n\
+                   \x20   public int getX() { return 1; }\n\
+                   \x20   Foo() {}\n\
+                   \x20   public interface Bar { void doIt(); }\n\
+                   \x20   enum Color { RED }\n\
+                   }\n\
+                   class Outer { void main() {} }\n";
+        let syms = extract_symbols(LanguageId::Java, src);
+        let foo = find(&syms, "Foo").expect("class Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        // Two `Foo` entries: the class (Type) and the constructor (Method).
+        let ctor = syms
+            .iter()
+            .find(|s| s.name == "Foo" && s.kind == SymbolKind::Method)
+            .expect("constructor Foo");
+        assert_eq!(ctor.line, 3);
+        let getx = find(&syms, "getX").expect("method getX");
+        assert_eq!(getx.kind, SymbolKind::Method);
+        let bar = find(&syms, "Bar").expect("interface Bar");
+        assert_eq!(bar.kind, SymbolKind::Type);
+        let color = find(&syms, "Color").expect("enum Color");
+        assert_eq!(color.kind, SymbolKind::Type);
+        let main = find(&syms, "main").expect("method main");
+        assert_eq!(main.kind, SymbolKind::Method);
+        // Exactly the eight named definitions — the field `C` and the enum
+        // constant `RED` are NOT in the outline.
+        assert_eq!(syms.len(), 8, "outline: {syms:?}");
+    }
+
+    // ── C# (new-languages lane) ──────────────────────────────────────
+    /// Namespaces (qualified), classes, properties, methods,
+    /// constructors, enums, and records land with their kinds; enum
+    /// members and local variables stay out (honest minimal outline).
+    #[test]
+    fn csharp_extracts_class_and_method() {
+        let src = "namespace Foo {\n\
+                   \x20   public class Bar {\n\
+                   \x20       public int P { get; set; }\n\
+                   \x20       public int GetP() => P;\n\
+                   \x20       Bar() {}\n\
+                   \x20   }\n\
+                   \x20   enum E { A, B }\n\
+                   \x20   record Pt(int X);\n\
+                   }\n";
+        let syms = extract_symbols(LanguageId::CSharp, src);
+        let foo = find(&syms, "Foo").expect("namespace Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let bar = syms
+            .iter()
+            .find(|s| s.name == "Bar" && s.kind == SymbolKind::Type)
+            .expect("class Bar");
+        assert_eq!(bar.line, 1);
+        // Two `Bar` entries: the class (Type) and the constructor (Method).
+        let ctor = syms
+            .iter()
+            .find(|s| s.name == "Bar" && s.kind == SymbolKind::Method)
+            .expect("constructor Bar");
+        assert_eq!(ctor.line, 4);
+        let p = find(&syms, "P").expect("property P");
+        assert_eq!(p.kind, SymbolKind::Constant);
+        let getp = find(&syms, "GetP").expect("method GetP");
+        assert_eq!(getp.kind, SymbolKind::Method);
+        let e = find(&syms, "E").expect("enum E");
+        assert_eq!(e.kind, SymbolKind::Type);
+        let pt = find(&syms, "Pt").expect("record Pt");
+        assert_eq!(pt.kind, SymbolKind::Type);
+        // Exactly the seven named definitions — the enum members `A` /
+        // `B` are NOT in the outline.
+        assert_eq!(syms.len(), 7, "outline: {syms:?}");
+    }
+
+    // ── Ruby (new-languages lane) ────────────────────────────────────
+    /// Modules / classes / defs / singleton defs / top-level constants
+    /// land with their kinds; local variables, instance-variable
+    /// assignments, and class names referenced as superclasses stay
+    /// out (honest minimal outline).
+    #[test]
+    fn ruby_extracts_module_class_method() {
+        let src = "module Foo\n\
+                   \x20  class Bar < Baz\n\
+                   \x20    CONST = 1\n\
+                   \x20    def initialize(x)\n\
+                   \x20      @x = x\n\
+                   \x20    end\n\
+                   \x20    def self.helper\n\
+                   \x20      42\n\
+                   \x20    end\n\
+                   \x20  end\n\
+                   \x20  def top\n\
+                   \x20    Foo::Bar.new(1)\n\
+                   \x20  end\n\
+                   end\n";
+        let syms = extract_symbols(LanguageId::Ruby, src);
+        let foo = find(&syms, "Foo").expect("module Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let bar = find(&syms, "Bar").expect("class Bar");
+        assert_eq!(bar.kind, SymbolKind::Type);
+        let const_c = find(&syms, "CONST").expect("top-level constant");
+        assert_eq!(const_c.kind, SymbolKind::Constant);
+        let init = find(&syms, "initialize").expect("def initialize");
+        assert_eq!(init.kind, SymbolKind::Method);
+        let helper = find(&syms, "helper").expect("def self.helper");
+        assert_eq!(helper.kind, SymbolKind::Method);
+        let top = find(&syms, "top").expect("def top");
+        assert_eq!(top.kind, SymbolKind::Method);
+        // Exactly the six named definitions — the superclass `Baz`, the
+        // local `x`, and the `@x` assignment are NOT in the outline.
+        assert_eq!(syms.len(), 6, "outline: {syms:?}");
+    }
+
+    // ── Scheme (new-languages lane) ──────────────────────────────────
+    /// The five define forms land with their pattern-index-derived kinds;
+    /// `export` / `set!` / record accessors stay out (honest minimal
+    /// outline for the flat S-expression grammar).
+    #[test]
+    fn scheme_extracts_define_and_library() {
+        let src = "(define (add! x y) (+ x y))\n\
+                  (define x 10)\n\
+                  (define-library (foo core)\n\
+                  \x20 (export add!)\n\
+                  \x20 (define (inner a) a))\n\
+                  (define-record-type point\n\
+                  \x20 (make-point x y)\n\
+                  \x20 point?\n\
+                  \x20 (x point-x))\n\
+                  (define-macro (my-if c a b) a)\n";
+        let syms = extract_symbols(LanguageId::Scheme, src);
+        let add = find(&syms, "add!").expect("define (add! …)");
+        assert_eq!(add.kind, SymbolKind::Function);
+        let x = find(&syms, "x").expect("define x");
+        assert_eq!(x.kind, SymbolKind::Constant);
+        let foo = find(&syms, "foo").expect("define-library (foo core)");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let inner = find(&syms, "inner").expect("nested define");
+        assert_eq!(inner.kind, SymbolKind::Function);
+        let point = find(&syms, "point").expect("define-record-type");
+        assert_eq!(point.kind, SymbolKind::Type);
+        let myif = find(&syms, "my-if").expect("define-macro");
+        assert_eq!(myif.kind, SymbolKind::Macro);
+        // Exactly the six named definitions — the `export add!` form,
+        // the record constructor, and the accessors are NOT in the
+        // outline.
+        assert_eq!(syms.len(), 6, "outline: {syms:?}");
+    }
 
     // ── Documented empty fallback: plain text ──────────────────────────
     #[test]

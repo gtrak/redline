@@ -46,11 +46,11 @@ pub struct NodeInfo {
 /// identifier-ish, so it yields `None`).
 ///
 /// Rust, JavaScript, TypeScript/TSX, Python, Go, C, C++, Bash, TOML,
-/// JSON, and Markdown are implemented (each independently degraded —
-/// see the per-language notes in this module); every other `LanguageId`
-/// (currently Yaml — intentionally unadopted for node-at, and `Plain`)
-/// returns `None` (the plan's "Rust first, graceful degradation"
-/// decision — callers degrade to today's behavior).
+/// JSON, Markdown, and Java are implemented (each independently
+/// degraded — see the per-language notes in this module); every other
+/// `LanguageId` (currently Yaml — intentionally unadopted for node-at,
+/// and `Plain`) returns `None` (the plan's "Rust first, graceful
+/// degradation" decision — callers degrade to today's behavior).
 pub fn node_at(lang: LanguageId, source: &str, byte: usize) -> Option<NodeInfo> {
     let tree = parse_source(lang, source)?;
     let leaf = innermost_at(tree.root_node(), byte)?;
@@ -87,16 +87,17 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 }
 
 /// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
-/// Go, C, C++, Bash, TOML, JSON, and Markdown are implemented; every
-/// other `LanguageId` (Yaml — intentionally unadopted for node-at, and
-/// `Plain`) degrades to `None`. Future languages slot in here without
+/// Go, C, C++, Bash, TOML, JSON, Markdown, and Java are implemented;
+/// every other `LanguageId` (Yaml — intentionally unadopted for node-at,
+/// and `Plain`) degrades to `None`. Future languages slot in here without
 /// restructuring the public surface.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
-        | LanguageId::Json | LanguageId::Markdown => {}
+        | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
+        | LanguageId::CSharp | LanguageId::Ruby | LanguageId::Scheme => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -162,14 +163,24 @@ fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
 /// Whether `node` may count as an identifier at its position: true for
 /// every language except JSON, where the `string` kind is both the key
 /// kind and the value-string kind — only a `pair`'s `key` field is
-/// identifier-ish (a value string is data, not a navigable name).
+/// identifier-ish (a value string is data, not a navigable name) — and
+/// RUBY, where a `call` is identifier-ish only in member-access shape
+/// (a `call` with a `receiver` field and NO `arguments` field — `a.b`
+/// parses as a receiver-carrying argumentless call, while a bare call
+/// with arguments, `puts x`, must not become a path; probe-verified
+/// against the pinned tree-sitter-ruby 0.23.1: a bare `foo` with no
+/// arguments parses as a plain `identifier`, not a `call`).
 fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
-    if lang != LanguageId::Json {
-        return true;
+    match lang {
+        LanguageId::Ruby if node.kind() == "call" => {
+            node.child_by_field_name("receiver").is_some()
+                && node.child_by_field_name("arguments").is_none()
+        }
+        LanguageId::Json => node.parent().is_some_and(|p| {
+            p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
+        }),
+        _ => true,
     }
-    node.parent().is_some_and(|p| {
-        p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
-    })
 }
 
 /// Whether `node` is a part of a larger dotted path rather than a complete
@@ -270,6 +281,69 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
         // so `a.b.c` comes back whole as one node, same rule as the Rust
         // `::` path.
         LanguageId::Toml => parent_kind == Some("dotted_key") && node.is_named(),
+        // C# dotted paths (probe-verified against the pinned
+        // tree-sitter-c-sharp 0.23.1): `o.P` / `a.b.c` nest
+        // `member_access_expression`s (named `expression` + `name`
+        // children), and `N.Inner` / `A.B` nest `qualified_name`s
+        // (named `qualifier` + `name` children; the qualifier may itself
+        // be a `qualified_name`). Any NAMED child of either container is
+        // a path part — same rule as the JS `member_expression`.
+        LanguageId::CSharp => {
+            matches!(
+                parent_kind,
+                Some("member_access_expression") | Some("qualified_name")
+            ) && node.is_named()
+        }
+        // Ruby dotted paths (probe-verified against the pinned
+        // tree-sitter-ruby 0.23.1): `a.b.c` nests `call`s (named
+        // `receiver` + `method` children — a `call`'s receiver may
+        // itself be a `call`, an `identifier`, or a `scope_resolution`),
+        // and `Foo::Bar` nests `scope_resolution`s (named `scope` +
+        // `name` children, both `constant`s; the scope may itself be a
+        // `scope_resolution`). Any NAMED child of either container is a
+        // path part — same rule as the JS `member_expression` — EXCEPT a
+        // `call`'s children count only while the `call` is a genuine path
+        // container (a `receiver` field AND no `arguments` field, the same
+        // gate as `in_identifier_position`): otherwise the `method` child
+        // of an argument-carrying call (`puts` in `puts 1`) would be
+        // swallowed as a segment and resolve to nothing.
+        LanguageId::Ruby => match parent_kind {
+            Some("scope_resolution") => node.is_named(),
+            Some("call") => node.is_named()
+                && node.parent().is_some_and(|p| {
+                    p.child_by_field_name("receiver").is_some()
+                        && p.child_by_field_name("arguments").is_none()
+                }),
+            _ => false,
+        }
+        // Java dotted paths (probe-verified against the pinned
+        // tree-sitter-java 0.23.5): `com.example.Foo` nests
+        // `scoped_identifier`/`scoped_type_identifier` around `.` tokens
+        // (exactly the Rust `::` shape, dot-delimited), and `A.c` /
+        // `o.x` is a `field_access` (named `object` + `field` children;
+        // `a.b.c` nests `field_access`es in the `object` field).
+        // `method_invocation` is deliberately NOT a path container —
+        // `o.m(…)` carries arguments; the bare `m` identifier comes back
+        // instead (the honest degradation, same as JS/TS calls).
+        LanguageId::Java => {
+            matches!(
+                parent_kind,
+                Some("scoped_identifier")
+                    | Some("scoped_type_identifier")
+                    | Some("field_access")
+            ) && (
+                node.kind() == "."
+                    || (node.is_named()
+                        && matches!(
+                            node.kind(),
+                            "identifier"
+                                | "type_identifier"
+                                | "scoped_identifier"
+                                | "scoped_type_identifier"
+                                | "field_access"
+                        ))
+            )
+        }
         _ => false,
     }
 }
@@ -385,6 +459,64 @@ fn is_json_identifier_kind(kind: &str) -> bool {
     kind == "string"
 }
 
+/// Java identifier-ish node kinds (verified against the pinned
+/// tree-sitter-java 0.23.5 `NODE_TYPES`): `identifier` (values),
+/// `type_identifier` (type names), `scoped_identifier` / `scoped_type_
+/// identifier` (the whole `a.b.c` path in value / type position), and
+/// `field_access` (the whole `o.x` member access). There is no
+/// `field_identifier` kind in this grammar — the accessed member is a
+/// plain `identifier` in the `field` field.
+fn is_java_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "type_identifier"
+            | "scoped_identifier"
+            | "scoped_type_identifier"
+            | "field_access"
+    )
+}
+
+/// C# identifier-ish node kinds (verified against the pinned
+/// tree-sitter-c-sharp 0.23.1 `NODE_TYPES`): `identifier` (this grammar
+/// has no `type_identifier` — type names are plain `identifier`s),
+/// `predefined_type` (`int`, `string`, … — C's `primitive_type` analog),
+/// `member_access_expression` (the whole `a.b.c` chain), and
+/// `qualified_name` (the whole `N.Inner` / `A.B` name path).
+fn is_csharp_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier" | "predefined_type" | "member_access_expression" | "qualified_name"
+    )
+}
+
+/// Ruby identifier-ish node kinds (verified against the pinned
+/// tree-sitter-ruby 0.23.1 `NODE_TYPES`): `constant` (type / class
+/// names, bare or in a `scope_resolution` chain), `identifier` (method
+/// names, local variables, bare calls), `instance_variable` (`@x`),
+/// `call` (the whole `a.b` member chain — position-gated by
+/// `in_identifier_position`), and
+/// `scope_resolution` (the whole `Foo::Bar` path).
+fn is_ruby_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "constant" | "identifier" | "instance_variable" | "call" | "scope_resolution"
+    )
+}
+
+/// Scheme identifier-ish node kinds (verified against the pinned
+/// tree-sitter-scheme 0.24.7 `NODE_TYPES`): `symbol` — the flat
+/// S-expression grammar's ONLY name kind. There is no path-shaped
+/// construct in the grammar (Lisp has no dotted paths; module paths
+/// like `(foo core)` are `list`s, not path containers), so
+/// `is_path_segment` has no Scheme arm (its default returns `false`) —
+/// the honest N/A, pinned by `scheme_has_no_path_or_scope`. `node_at`
+/// resolves any symbol to itself; `scope_path_at` stays `[]` (no named
+/// definition containers exist to walk — the same honest N/A).
+fn is_scheme_identifier_kind(kind: &str) -> bool {
+    kind == "symbol"
+}
+
 // Markdown has NO identifier-ish node kind (probed against the pinned
 // tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
@@ -410,6 +542,10 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Bash => is_bash_identifier_kind(kind),
         LanguageId::Toml => is_toml_identifier_kind(kind),
         LanguageId::Json => is_json_identifier_kind(kind),
+        LanguageId::Java => is_java_identifier_kind(kind),
+        LanguageId::CSharp => is_csharp_identifier_kind(kind),
+        LanguageId::Ruby => is_ruby_identifier_kind(kind),
+        LanguageId::Scheme => is_scheme_identifier_kind(kind),
         _ => false,
     }
 }
@@ -475,6 +611,9 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Toml => toml_scope_path(leaf, source),
         LanguageId::Json => json_scope_path(leaf, source),
         LanguageId::Markdown => markdown_scope_path(leaf, source),
+        LanguageId::Java => java_scope_path(leaf, source),
+        LanguageId::CSharp => csharp_scope_path(leaf, source),
+        LanguageId::Ruby => ruby_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -729,6 +868,87 @@ fn markdown_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
             {
                 names.push(raw.trim_end_matches('\n').to_string());
             }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Java enclosing-scope walk (new-languages lane): `class_declaration`,
+/// `interface_declaration`, `enum_declaration`, and `method_declaration`
+/// (name child in the `name` field), outermost → innermost. Packages,
+/// anonymous classes, and blocks are intentionally not scope items —
+/// keep it simple and honest; an empty vec is the valid answer for
+/// top-level code.
+fn java_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if matches!(
+            node.kind(),
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "method_declaration"
+        ) && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C# enclosing-scope walk (new-languages lane): `namespace_
+/// declaration` (name child in the `name` field — a `qualified_name`
+/// such as `Foo.Bar`, its text as written), `class_declaration`,
+/// `interface_declaration`, `struct_declaration`, `enum_declaration`,
+/// `record_declaration`, and `method_declaration` (name field),
+/// outermost → innermost. Local blocks and lambdas are intentionally
+/// not scope items — keep it simple and honest.
+fn csharp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if matches!(
+            node.kind(),
+            "namespace_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "method_declaration"
+        ) && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Ruby enclosing-scope walk (new-languages lane): `module` and
+/// `class` (name child in the `name` field — a `constant`) plus
+/// `method` and `singleton_method` (name field), outermost → innermost.
+/// Blocks / case arms / begin-end are intentionally not scope items —
+/// keep it simple and honest.
+fn ruby_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if matches!(
+            node.kind(),
+            "module" | "class" | "method" | "singleton_method"
+        ) && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
         }
         cur = node.parent();
     }
@@ -1771,6 +1991,185 @@ mod tests {
             scope_path_at(LanguageId::Rust, src, if_at),
             vec![String::from("Foo"), String::from("bar")]
         );
+    }
+
+    // ── Java (new-languages lane) ─────────────────────────────────
+    /// `A.c` / `o.x` come back whole as one `field_access` node (the
+    /// dotted-path rule, probe-verified against tree-sitter-java 0.23.5).
+    #[test]
+    fn java_member_path_comes_back_whole() {
+        let src = "class A { static int c; void f() { int x = A.c; } }\n";
+        let at = src.find("A.c").expect("fixture") + 1;
+        let info = node_at(LanguageId::Java, src, at).expect("node at `A.c`");
+        assert_eq!(info.text, "A.c");
+        assert_eq!(info.kind, "field_access");
+        // The same node comes back from either segment.
+        let info2 = node_at(LanguageId::Java, src, at - 1).expect("node at `A`");
+        assert_eq!(info2.text, "A.c");
+        let info3 = node_at(LanguageId::Java, src, at + 1).expect("node at `c`");
+        assert_eq!(info3.text, "A.c");
+    }
+
+    /// `com.example.Foo` in type position comes back whole as one
+    /// `scoped_type_identifier` (the Rust `::`-path shape, dot-delimited).
+    #[test]
+    fn java_scoped_type_path_comes_back_whole() {
+        let src = "class B { void f() { com.example.Foo o = null; } }\n";
+        let at = src.find("com.example.Foo").expect("fixture") + 4;
+        let info = node_at(LanguageId::Java, src, at).expect("node at `example`");
+        assert_eq!(info.text, "com.example.Foo");
+        assert_eq!(info.kind, "scoped_type_identifier");
+    }
+
+    /// `o.m(…)` is NOT a path container: node_at on the bare `m` returns
+    /// the plain identifier (the honest degradation — the invocation
+    /// carries arguments and is not a dotted path).
+    #[test]
+    fn java_method_invocation_stays_bare() {
+        let src = "class A { void f() { o.m(1); } }\n";
+        let at = src.find("o.m(").expect("fixture") + 2;
+        let info = node_at(LanguageId::Java, src, at).expect("node at `m`");
+        assert_eq!(info.text, "m");
+        assert_eq!(info.kind, "identifier");
+    }
+
+    #[test]
+    fn java_scope_chain_class_and_method() {
+        let src = "class A { void f() { A.c; } }\n";
+        let at = src.find("A.c").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Java, src, at),
+            vec![String::from("A"), String::from("f")]
+        );
+        // Inside a class body but outside any method: only the class.
+        let src2 = "class A { int c; }\n";
+        let at2 = src2.find("c;").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Java, src2, at2),
+            vec![String::from("A")]
+        );
+    }
+
+    // ── C# (new-languages lane) ──────────────────────────────────────
+    /// `o.P` / `a.b.c` come back whole as one `member_access_expression`
+    /// (the dotted-path rule, probe-verified against the pinned
+    /// tree-sitter-c-sharp 0.23.1).
+    #[test]
+    fn csharp_member_path_comes_back_whole() {
+        let src = "class A { void F() { int v = o.P; } }\n";
+        let at = src.find("o.P").expect("fixture") + 1;
+        let info = node_at(LanguageId::CSharp, src, at).expect("node at `.P`");
+        assert_eq!(info.text, "o.P");
+        assert_eq!(info.kind, "member_access_expression");
+    }
+
+    /// `N.Inner` in a namespace header comes back whole as one
+    /// `qualified_name`.
+    #[test]
+    fn csharp_qualified_name_comes_back_whole() {
+        let src = "namespace N.Inner { class A { } }\n";
+        let at = src.find("N.Inner").expect("fixture") + 2;
+        let info = node_at(LanguageId::CSharp, src, at)
+            .expect("node at `Inner`");
+        assert_eq!(info.text, "N.Inner");
+        assert_eq!(info.kind, "qualified_name");
+    }
+
+    #[test]
+    fn csharp_scope_chain_namespace_class_method() {
+        let src = "namespace N { class A { void F() { o.P; } } }\n";
+        let at = src.find("o.P").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::CSharp, src, at),
+            vec![
+                String::from("N"),
+                String::from("A"),
+                String::from("F")
+            ]
+        );
+    }
+
+    // ── Ruby (new-languages lane) ────────────────────────────────────
+    /// `obj.name` comes back whole as one argumentless `call` (the
+    /// member-access shape), from either segment.
+    #[test]
+    fn ruby_method_chain_comes_back_whole() {
+        let src = "def show(obj)\n  puts obj.name\nend\n";
+        let at = src.find("obj.name").expect("fixture");
+        for off in 0..=5 {
+            let info =
+                node_at(LanguageId::Ruby, src, at + off).expect("node in `obj.name`");
+            assert_eq!(info.text, "obj.name", "offset {off}");
+            assert_eq!(info.kind, "call");
+        }
+    }
+
+    /// `Foo::Bar` comes back as part of the whole chain: `Foo::Bar.new`
+    /// is one argumentless `call` whose receiver is the `scope_
+    /// resolution` — the whole chain comes back as one node (the JS
+    /// whole-`A.B.C` rule), from either segment.
+    #[test]
+    fn ruby_scope_resolution_comes_back_whole() {
+        let src = "module Foo\n  def f\n    Foo::Bar.new\n  end\nend\n";
+        let at = src.find("Foo::Bar").expect("fixture") + 4;
+        let info = node_at(LanguageId::Ruby, src, at).expect("node at `Bar`");
+        assert_eq!(info.text, "Foo::Bar.new");
+        assert_eq!(info.kind, "call");
+    }
+
+    /// A bare call WITH arguments is not a path: `puts 1` resolves on
+    /// the plain `puts` identifier (the honest degradation — the
+    /// argumentless-receiver rule, probe-verified).
+    #[test]
+    fn ruby_bare_call_stays_bare() {
+        let src = "def f\n  puts 1\nend\n";
+        let at = src.find("puts").expect("fixture") + 1;
+        let info = node_at(LanguageId::Ruby, src, at).expect("node at `uts`");
+        assert_eq!(info.text, "puts");
+        assert_eq!(info.kind, "identifier");
+        // `a.b(1).c` keeps its argumentless outer chain whole, but the
+        // inner `b(1)` call (with arguments) does not contribute.
+        let src2 = "def g\n  a.b(1).c\nend\n";
+        let at2 = src2.find("a.b").expect("fixture");
+        let info2 = node_at(LanguageId::Ruby, src2, at2 + 7).expect("node at `c`");
+        assert_eq!(info2.text, "a.b(1).c");
+        assert_eq!(info2.kind, "call");
+    }
+
+    #[test]
+    fn ruby_scope_chain_module_class_method() {
+        let src = "module M\n  class C\n    def m\n      o.p\n    end\n  end\nend\n";
+        let at = src.find("o.p").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Ruby, src, at),
+            vec![String::from("M"), String::from("C"), String::from("m")]
+        );
+    }
+
+    // ── Scheme (new-languages lane) ──────────────────────────────────
+    /// A symbol resolves to itself (the flat grammar's only name kind).
+    #[test]
+    fn scheme_symbol_resolves_bare() {
+        let src = "(define (add! x y) (+ x y))\n";
+        let at = src.find("add!").expect("fixture") + 1;
+        let info = node_at(LanguageId::Scheme, src, at).expect("node at `dd!`");
+        assert_eq!(info.text, "add!");
+        assert_eq!(info.kind, "symbol");
+    }
+
+    /// Scheme has NO path-shaped construct and NO named definition
+    /// containers: a symbol inside a `define-library` body resolves as
+    /// itself (no container walk), and the scope path stays `[]` even
+    /// nested in a library body (the honest N/A, probe-verified against
+    /// the flat tree-sitter-scheme 0.24.7 node set).
+    #[test]
+    fn scheme_has_no_path_or_scope() {
+        let src = "(define-library (foo core)\n  (define (inner a) a))\n";
+        let at = src.find("inner").expect("fixture") + 1;
+        let info = node_at(LanguageId::Scheme, src, at).expect("node at `inner`");
+        assert_eq!(info.text, "inner");
+        assert_eq!(info.kind, "symbol");
+        assert!(scope_path_at(LanguageId::Scheme, src, at).is_empty());
     }
 }
 
