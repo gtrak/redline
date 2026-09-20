@@ -45,10 +45,12 @@ pub struct NodeInfo {
 /// normal containment check (a keyword at a file start is not
 /// identifier-ish, so it yields `None`).
 ///
-/// Rust, JavaScript, TypeScript/TSX, Python, and Go are implemented;
-/// every other `LanguageId` (including `Plain`) returns `None` (the
-/// plan's "Rust first, graceful degradation" decision — callers degrade
-/// to today's behavior).
+/// Rust, JavaScript, TypeScript/TSX, Python, Go, C, C++, Bash, TOML,
+/// JSON, and Markdown are implemented (each independently degraded —
+/// see the per-language notes in this module); every other `LanguageId`
+/// (currently Yaml — intentionally unadopted for node-at, and `Plain`)
+/// returns `None` (the plan's "Rust first, graceful degradation"
+/// decision — callers degrade to today's behavior).
 pub fn node_at(lang: LanguageId, source: &str, byte: usize) -> Option<NodeInfo> {
     let tree = parse_source(lang, source)?;
     let leaf = innermost_at(tree.root_node(), byte)?;
@@ -85,15 +87,16 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 }
 
 /// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
-/// and Go are implemented; every other `LanguageId` (including `Plain`)
-/// degrades to `None`. Future languages slot in here without
+/// Go, C, C++, Bash, TOML, JSON, and Markdown are implemented; every
+/// other `LanguageId` (Yaml — intentionally unadopted for node-at, and
+/// `Plain`) degrades to `None`. Future languages slot in here without
 /// restructuring the public surface.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
-        | LanguageId::Json => {}
+        | LanguageId::Json | LanguageId::Markdown => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -381,6 +384,17 @@ fn is_json_identifier_kind(kind: &str) -> bool {
     kind == "string"
 }
 
+/// Markdown has NO identifier-ish node kind (probed against the pinned
+/// tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
+/// `inline` node, and `inline` spans whole paragraphs and code spans
+/// alike — treating it identifier-ish would make `node_at` resolve on
+/// arbitrary prose). There is also no path-shaped construct. So
+/// `is_identifier_kind` returns `false` for `Markdown` (its default arm)
+/// and `node_at` stays `None` — the honest N/A, pinned by
+/// `markdown_heading_text_is_not_identifier_ish`. What IS meaningful is
+/// the outline: `markdown_scope_path` reports the enclosing heading
+/// chain (the block tree nests `section` nodes by heading level).
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -459,6 +473,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Bash => bash_scope_path(leaf, source),
         LanguageId::Toml => toml_scope_path(leaf, source),
         LanguageId::Json => json_scope_path(leaf, source),
+        LanguageId::Markdown => markdown_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -690,6 +705,36 @@ fn json_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
     names
 }
 
+/// The Markdown enclosing-scope walk (the outline): each enclosing
+/// `section` (the block grammar nests sections by heading level —
+/// probed) contributes its opening heading's title. The heading's
+/// `heading_content` field carries the title directly in both kinds
+/// (probed: an `inline` node for `atx_heading`; a `paragraph` wrapping
+/// the `inline` for `setext_heading` — the field node's text is the
+/// title either way; the setext `paragraph` carries a trailing newline,
+/// so the title is read with it trimmed). A document with no headings
+/// yields `[]`.
+fn markdown_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "section" {
+            let title = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| matches!(c.kind(), "atx_heading" | "setext_heading"))
+                .and_then(|h| h.child_by_field_name("heading_content"));
+            if let Some(title) = title
+                && let Ok(raw) = title.utf8_text(source)
+            {
+                names.push(raw.trim_end_matches('\n').to_string());
+            }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,12 +889,12 @@ mod tests {
     /// Languages without a node-at implementation still degrade gracefully
     /// (`node_at` → `None`, `scope_path_at` → `[]`) — 007-01's "Rust
     /// first, graceful degradation" decision now covers the languages not
-    /// yet adopted (C landed in this issue; the rest follow).
+    /// yet adopted (Yaml is intentionally unadopted for node-at; the six
+    /// C/Cpp/Bash/Toml/Json/Markdown languages of this issue all landed).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 3] = [
+        let cases: [(LanguageId, &str, &str); 2] = [
             (LanguageId::Yaml, "key: value\n", "key"),
-            (LanguageId::Markdown, "# Heading\n", "Heading"),
             (LanguageId::Plain, "abc", "abc"),
         ];
         for (id, src, marker) in cases {
@@ -1606,6 +1651,88 @@ mod tests {
             assert_eq!(info.text, "\"a\"");
         }
         let _ = scope_path_at(LanguageId::Json, src, pos);
+    }
+
+    // ── Markdown (lang-pred) ──────────────────────────────────
+
+    /// The honest N/A pin: a heading's title text is NOT identifier-ish
+    /// (it is an `inline` node, shared with paragraphs/code spans — the
+    /// block grammar has no identifier kind), so `node_at` returns
+    /// `None` on Markdown headings and prose. Path-shaped M-. is N/A
+    /// for Markdown; the outline lives in `scope_path_at` instead.
+    #[test]
+    fn markdown_heading_text_is_not_identifier_ish() {
+        let src = "# Heading\n";
+        let at = src.find("Heading").expect("fixture");
+        assert!(node_at(LanguageId::Markdown, src, at).is_none());
+        assert!(node_at(LanguageId::Markdown, src, 0).is_none());
+    }
+
+    #[test]
+    fn markdown_scope_chain_is_the_enclosing_headings() {
+        // The block grammar nests `section` by heading level (probed),
+        // so the scope is the heading chain, outermost → innermost.
+        let src = "# Top\n\ntext\n\n## Sub\n\nmore\n\n### Deeper\n";
+        let at = src.find("Deeper").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, at),
+            vec![
+                String::from("Top"),
+                String::from("Sub"),
+                String::from("Deeper"),
+            ]
+        );
+        // Content under Sub (but before Deeper) sees two levels.
+        let more_at = src.find("more").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, more_at),
+            vec![String::from("Top"), String::from("Sub")]
+        );
+        // Content directly under Top sees one level.
+        let text_at = src.find("text").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, text_at),
+            vec![String::from("Top")]
+        );
+    }
+
+    #[test]
+    fn markdown_setext_heading_contributes_scope() {
+        let src = "Top\n=====\nbody\n";
+        let at = src.find("body").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, at),
+            vec![String::from("Top")]
+        );
+    }
+
+    #[test]
+    fn markdown_boundary_offsets_do_not_panic() {
+        let src = "# Top\n\ntext\n";
+        // Byte 0 sits on the `#` marker (not identifier-ish → no node),
+        // but the heading section is still reported as the scope.
+        assert!(node_at(LanguageId::Markdown, src, 0).is_none());
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, 0),
+            vec![String::from("Top")]
+        );
+        // A document without headings has an empty outline everywhere.
+        let src2 = "plain text\n";
+        assert!(scope_path_at(LanguageId::Markdown, src2, 0).is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Markdown, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Markdown, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Markdown, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Markdown, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn markdown_broken_source_does_not_panic() {
+        // Markdown is near-impossible to break; a lone heading marker
+        // without content is the closest thing.
+        let src = "#";
+        let _ = node_at(LanguageId::Markdown, src, 0);
+        let _ = scope_path_at(LanguageId::Markdown, src, 0);
     }
 
     #[test]
