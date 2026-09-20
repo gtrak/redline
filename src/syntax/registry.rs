@@ -398,7 +398,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext_map_covers_all_11_languages() {
+    fn ext_map_covers_all_18_languages() {
         let reg = GrammarRegistry::build();
         assert_eq!(reg.language_for("foo.rs"), LanguageId::Rust);
         assert_eq!(reg.language_for("foo.ts"), LanguageId::TypeScript);

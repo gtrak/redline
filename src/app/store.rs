@@ -16558,6 +16558,10 @@ mod tests {
             LanguageId::C,
             LanguageId::Cpp,
             LanguageId::Markdown,
+            LanguageId::Java,
+            LanguageId::CSharp,
+            LanguageId::Ruby,
+            LanguageId::Scheme,
         ] {
             for ext in AppStore::source_extensions_for(lang) {
                 let resolved = resolve_language(&format!("a.{ext}"));
@@ -16956,6 +16960,182 @@ mod tests {
             1,
             "setext heading extraction (1 heading)"
         );
+    }
+
+    /// 011-07 follow-up (new-languages lane): a Java tree indexes through
+    /// the full path — the `.java` walk set (the registry's only Java map
+    /// key) collects the source and the outline extraction lands the
+    /// class + method.
+    #[tokio::test]
+    async fn crate_index_builds_for_java_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(
+            p.join("src/Widget.java"),
+            "public class Widget {\n    public int get() { return 0; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("README.md"), "docs\n").unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("src/Widget.java"));
+        // 1 OWN source file (README.md excluded by the `java` walk set):
+        // the N/M counter is the file-set's size, not the tree's.
+        assert!(
+            s.crate_indexing_display().contains("/1)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("src/Widget.java"), "crate-relative key (.java)");
+        assert_eq!(idx.definition_count("Widget"), 1, "java class extraction");
+        assert_eq!(idx.definition_count("get"), 1, "java method extraction");
+        assert!(!idx.has("README.md"), "non-source file not indexed");
+    }
+
+    /// 011-07 follow-up (new-languages lane): a C# tree indexes through
+    /// the full path — the `.cs` walk set collects the source and the
+    /// outline extraction lands the namespace, class, property, and
+    /// method.
+    #[tokio::test]
+    async fn crate_index_builds_for_csharp_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(
+            p.join("src/Widget.cs"),
+            "namespace App {\n    public class Widget {\n\
+             \x20   public int Value { get; set; }\n\
+             \x20   public int Get() => 0;\n    }\n}\n",
+        )
+        .unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("src/Widget.cs"));
+        assert!(
+            s.crate_indexing_display().contains("/1)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("src/Widget.cs"), "crate-relative key (.cs)");
+        assert_eq!(idx.definition_count("App"), 1, "csharp namespace extraction");
+        assert_eq!(idx.definition_count("Widget"), 1, "csharp class extraction");
+        assert_eq!(idx.definition_count("Value"), 1, "csharp property extraction");
+        assert_eq!(idx.definition_count("Get"), 1, "csharp method extraction");
+    }
+
+    /// 011-07 follow-up (new-languages lane): a Ruby tree indexes through
+    /// the full path — the `.rb` walk set collects the source and the
+    /// outline extraction lands the module, class, and def.
+    #[tokio::test]
+    async fn crate_index_builds_for_ruby_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("lib")).unwrap();
+        std::fs::write(
+            p.join("lib/helper.rb"),
+            "module Util\n  class Helper\n    def run\n      1\n    end\n  end\nend\n",
+        )
+        .unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("lib/helper.rb"));
+        assert!(
+            s.crate_indexing_display().contains("/1)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("lib/helper.rb"), "crate-relative key (.rb)");
+        assert_eq!(idx.definition_count("Util"), 1, "ruby module extraction");
+        assert_eq!(idx.definition_count("Helper"), 1, "ruby class extraction");
+        assert_eq!(idx.definition_count("run"), 1, "ruby def extraction");
+    }
+
+    /// 011-07 follow-up (new-languages lane): a Scheme tree indexes
+    /// through the full path — ALL FOUR registry map keys
+    /// (`scm`/`ss`/`sls`/`sld`) are walked, one fixture per key, and the
+    /// flat-grammar outline extraction lands each form kind: the
+    /// `define` function, the `define` variable, the `define-library`
+    /// name, the nested `define`, and the `define-macro`.
+    #[tokio::test]
+    async fn crate_index_builds_for_scheme_dependency_tree() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let root = tempfile::tempdir().unwrap();
+        let p = root.path();
+        std::fs::create_dir_all(p.join("lib")).unwrap();
+        std::fs::write(
+            p.join("lib/entry.scm"),
+            "(define (entry-point args)\n  (void))\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("lib/core.ss"), "(define counter 0)\n").unwrap();
+        std::fs::write(
+            p.join("lib/defs.sld"),
+            "(define-library (app core)\n  (export run!)\n  (define (run! x) x))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("lib/lib.sls"),
+            "(define-macro (twice a b) a)\n",
+        )
+        .unwrap();
+        let mut rx = s.crate_index_bus.subscribe();
+        s.start_crate_indexing(p, &p.join("lib/entry.scm"));
+        // All four walk-set extensions are OWN source files.
+        assert!(
+            s.crate_indexing_display().contains("/4)")
+                && s.crate_indexing_display().starts_with("indexing crate "),
+            "indicator: {}",
+            s.crate_indexing_display()
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("crate index event published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_crate_index_event(&event);
+        let arc = s.crate_index_arc(p).unwrap();
+        let idx = arc.lock().unwrap();
+        assert!(idx.has("lib/entry.scm"), "`.scm` map key walked");
+        assert!(idx.has("lib/core.ss"), "`.ss` map key walked");
+        assert!(idx.has("lib/defs.sld"), "`.sld` map key walked");
+        assert!(idx.has("lib/lib.sls"), "`.sls` map key walked");
+        assert_eq!(
+            idx.definition_count("entry-point"),
+            1,
+            "scheme define-fn extraction"
+        );
+        assert_eq!(idx.definition_count("counter"), 1, "scheme define-var extraction");
+        assert_eq!(idx.definition_count("app"), 1, "scheme define-library extraction");
+        assert_eq!(
+            idx.definition_count("run!"),
+            1,
+            "scheme nested define extraction"
+        );
+        assert_eq!(idx.definition_count("twice"), 1, "scheme define-macro extraction");
     }
 
     /// 011-07 follow-up: the setext branch, pinned directly against the
