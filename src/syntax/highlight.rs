@@ -285,8 +285,8 @@ fn reuse_language(lang: LanguageId) -> Option<Language> {
         Bash => Language::from(tree_sitter_bash::LANGUAGE),
         Markdown => Language::from(tree_sitter_md::LANGUAGE),
         // JS/TS/TSX keep the Highlighter path (local-variable tracking);
-        // Java (new-languages lane; the later C#/Ruby/Scheme variants
-        // slot into this arm as they land) rides it too — the Highlighter
+        // Java (new-languages lane; the later C#/Ruby/Scheme/Clojure
+        // variants slot into this arm as they land) rides it too — the Highlighter
         // path is the safe default for any grammar, and this match is
         // exhaustive over `LanguageId` (a new variant must land here to
         // compile); Plain has no grammar.

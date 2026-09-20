@@ -84,6 +84,20 @@ One runtime in the lock (the ABI-pinning rule, 001/007 lesson):
 (and, after the Clojure landing, `tree-sitter-clojure` + its build
 deps) — no second runtime, no fork.
 
+## Recorded optional follow-up: 0.25-gen grammar releases (deliberately NOT taken)
+
+The "0.25-gen release exists?" column above records, per pinned grammar,
+the newer releases that exist: rust 0.24.1 / 0.24.2, javascript 0.25.0,
+python 0.25.0, go 0.25.0, c 0.24.0–0.24.2, bash 0.25.0 / 0.25.1, yaml
+0.7.1 / 0.7.2, c-sharp 0.23.5 (plus md 0.5.1 — optional `^0.24`, 0.5.2+
+want `^0.26`). The ts-bump deliberately took **none** of them: each such
+bump changes the grammar *binary*, and therefore parses, highlights,
+and goldens. That is a per-grammar drift decision requiring its own
+evidence + review (per-grammar drift decision), not a behavior-neutral
+runtime change. Recorded here (with the Classification note above) so it
+is not re-filed as an oversight — if a lane wants one, it is its own
+task with per-grammar drift gates, not a ride-along on a runtime bump.
+
 ## Behavioral neutrality claim
 
 Grammar binaries are UNCHANGED (all 16 pins kept byte-for-byte), so
