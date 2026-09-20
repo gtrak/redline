@@ -487,6 +487,12 @@ impl ViewId {
                 km.bind(&[Key::new(KeyCode::PageDown)], "search-next").unwrap();
                 km.bind(&[Key::new(KeyCode::PageUp)], "search-prev").unwrap();
                 km.bind(&[Key::char('g')], "search-rerun").unwrap();
+                // Watchlist item 4: `M-,` under the results view — jump-back
+                // pops through the sentinel to the pre-search position in
+                // one step (the buffer view's M-, only exists once the
+                // results view is closed; the sentinel entry's navigation
+                // re-opens the view, so the pop must work from it too).
+                km.bind(&[Key::alt_char(',')], "jump-back").unwrap();
                 km.bind(&[Key::ctrl_char('g')], "search-cancel").unwrap();
                 km
             }
@@ -3910,17 +3916,89 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
 
     /// Candidates for the Imenu picker (current file's outline — the
     /// project index for project files, the owning crate's index for
-    /// external buffers, 006-03).
+    /// external buffers, 006-03). The SAME display derivation as the
+    /// initial open (`imenu_candidate` — incl. the Rust impl-parent
+    /// grouping), so a query re-derivation cannot drift from the list
+    /// the user opened.
     fn imenu_candidates(&mut self) -> Vec<PickerCandidate> {
-        self.current_buffer_outline()
+        let outline = self.current_buffer_outline();
+        let tables = self.current_buffer_rust_tables();
+        outline
             .iter()
-            .map(|s| PickerCandidate {
-                name: format!("{}:{}", s.name, s.line + 1),
-                display: format!("{}  [{}]", s.name, s.kind.tag()),
-                docs: String::new(),
-                category: "imenu".to_string(),
-            })
+            .map(|s| Self::imenu_candidate(s, &outline, tables.as_ref()))
             .collect()
+    }
+
+    /// Watchlist (imenu impl-parent grouping): one imenu candidate for
+    /// `s` — name `name:line` (1-based, the picker's match target, never
+    /// grouped); display indented by enclosing extent (the existing PART
+    /// A rule) PLUS, for Rust files, an impl METHOD (the file's Rung 1
+    /// tables record an impl method of exactly this name on exactly this
+    /// line — a line holds at most one impl method, so the match is
+    /// conclusive) renders under the impl's type: one level deeper than
+    /// that type's own indent when the type is in the outline, else one
+    /// level deeper than its enclosing-extent depth (an impl of a type
+    /// defined elsewhere). Other languages (no tables) stay byte-for-byte
+    /// the PART A indent.
+    fn imenu_candidate(
+        s: &crate::nav::index::Symbol,
+        outline: &[crate::nav::index::Symbol],
+        tables: Option<&crate::syntax::queries::RustTables>,
+    ) -> PickerCandidate {
+        let depth = Self::imenu_depth(s, outline, tables);
+        let indent = "  ".repeat(depth);
+        PickerCandidate {
+            name: format!("{}:{}", s.name, s.line + 1),
+            display: format!("{indent}{}  [{}]", s.name, s.kind.tag()),
+            docs: String::new(),
+            category: "imenu".to_string(),
+        }
+    }
+
+    /// The imenu display depth of `s`: the count of symbols whose extent
+    /// strictly contains `s` (the PART A enclosing-extent rule), plus
+    /// one level for a Rust impl method grouped under the impl's type
+    /// (see `imenu_candidate`).
+    fn imenu_depth(
+        s: &crate::nav::index::Symbol,
+        outline: &[crate::nav::index::Symbol],
+        tables: Option<&crate::syntax::queries::RustTables>,
+    ) -> usize {
+        let enclosing = |t: &crate::nav::index::Symbol| {
+            outline
+                .iter()
+                .filter(|e| {
+                    !(**e == *t)
+                        && e.line <= t.line
+                        && t.end_line <= e.end_line
+                        && (e.line < t.line || e.end_line > t.end_line)
+                })
+                .count()
+        };
+        let base = enclosing(s);
+        let Some(tables) = tables else {
+            return base;
+        };
+        let self_type = tables
+            .impls
+            .iter()
+            .find_map(|(self_type, methods)| {
+                methods
+                    .iter()
+                    .any(|m| m.method == s.name && m.line == s.line)
+                    .then_some(self_type.as_str())
+            });
+        let Some(self_type) = self_type else {
+            return base;
+        };
+        // Under the impl's type: the type's own enclosing-extent depth
+        // when it is in this file's outline; a type defined elsewhere has
+        // no row to nest under — one level below the method's own depth.
+        let parent_depth = match outline.iter().find(|e| e.name == self_type) {
+            Some(parent) => enclosing(parent),
+            None => base,
+        };
+        parent_depth + 1
     }
 
     /// Candidates for the project-wide symbol picker (all index symbols).
@@ -7707,6 +7785,13 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.set_point(entry.line, entry.col, entry.col);
         self.recenter_landing();
         self.ensure_highlight();
+        // Watchlist: `M-,` through the sentinel lands the pre-search
+        // position — the results view must close so the landing is
+        // visible (before, the buffer/point moved underneath the results
+        // view: a no-op until the view was closed by hand).
+        if self.top_view() == ViewId::Search {
+            self.close_view();
+        }
     }
 
     /// Start the initial background index build (issue 05). Builds the full
@@ -10160,7 +10245,11 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             self.minibuffer_message("no symbols in current file");
             return;
         }
-        self.open_imenu_picker(outline);
+        // Watchlist (impl-parent grouping): the file's Rust tables (Rung 1)
+        // group the impl methods under their impl's type; other languages
+        // have no tables and stay flat.
+        let tables = self.current_buffer_rust_tables();
+        self.open_imenu_picker(outline, tables);
     }
 
     /// The current buffer's symbol outline: the project index for project
@@ -10193,35 +10282,42 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
     }
 
-    /// Open the imenu picker over `outline` (indentation by enclosing
-    /// extent — shared by the project and external-buffer paths).
-    fn open_imenu_picker(&mut self, outline: Vec<crate::nav::index::Symbol>) {
+    /// The current buffer's Rust tables (plan 010 Shape A, rung 1): the
+    /// project index for project files, the OWNING crate's index for
+    /// external (registry / tooling) buffers (006-03), `None` otherwise
+    /// (scratch / out-of-project non-external, or a non-Rust file — the
+    /// tables only exist for Rust). The imenu impl-parent grouping's data
+    /// source (watchlist item).
+    fn current_buffer_rust_tables(&mut self) -> Option<crate::syntax::queries::RustTables> {
+        let key = self.buffers.current().map(String::from)?;
+        let path = self.buffers.get(&key).and_then(|b| b.path.clone())?;
+        let project = self.project.as_ref()?;
+        match path.strip_prefix(&project.root) {
+            Ok(rel) => self.index.tables(&rel.to_string_lossy()).cloned(),
+            Err(_) if self.external_buffers.contains(&key) => self
+                .crate_index_arc_for_path(&path)
+                .and_then(|(root, arc)| {
+                    // The same strip_prefix-miss tolerance as
+                    // `current_buffer_outline`: `None`, never a panic.
+                    let crel = Self::crate_rel(&path, &root)?;
+                    Some(arc.lock().unwrap().tables(&crel).cloned())
+                })
+                .flatten(),
+            Err(_) => None,
+        }
+    }
+
+    /// Open the imenu picker over `outline` + the file's Rust `tables`
+    /// (indentation by enclosing extent, plus the Rust impl-parent
+    /// grouping — shared by the project and external-buffer paths).
+    fn open_imenu_picker(
+        &mut self,
+        outline: Vec<crate::nav::index::Symbol>,
+        tables: Option<crate::syntax::queries::RustTables>,
+    ) {
         let candidates: Vec<PickerCandidate> = outline
             .iter()
-            .map(|s| {
-                // PART A fix (item 5): indent nested symbols by their
-                // enclosing extent so imenu shows a visible outline (the old
-                // flat list hid the mod/type > fn/method hierarchy). `depth`
-                // is the count of symbols whose extent strictly contains `s`
-                // (excluding itself / exact-extent duplicates).
-                let depth = outline
-                    .iter()
-                    .filter(|e| {
-                        !(**e == *s)
-                            && e.line <= s.line
-                            && s.end_line <= e.end_line
-                            && (e.line < s.line || e.end_line > s.end_line)
-                    })
-                    .count();
-                let indent = "  ".repeat(depth);
-                let display = format!("{indent}{}  [{}]", s.name, s.kind.tag());
-                PickerCandidate {
-                    name: format!("{}:{}", s.name, s.line + 1),
-                    display,
-                    docs: String::new(),
-                    category: "imenu".to_string(),
-                }
-            })
+            .map(|s| Self::imenu_candidate(s, &outline, tables.as_ref()))
             .collect();
         self.open_picker(PickerKind::Imenu, "Imenu: ", candidates);
     }
@@ -10450,9 +10546,33 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             col: self.search.scroll,
             label: "*search*".to_string(),
         };
+        // The pre-search position, captured BEFORE the open (the open
+        // changes the current buffer): it records in front of the
+        // sentinel so a second `M-,` from the results view lands here
+        // (watchlist: `M-,` under the Search view pops through the
+        // sentinel to the pre-search position in one step — emacs
+        // `xref-pop-marker-stack`). The home state (no buffer) has none:
+        // the sentinel stays the stack's first entry, unchanged.
+        let pre_search = self.current_jump_entry();
         let file = hit.file.clone();
         let line_no = hit.line_no as usize;
-        self.open_path(&file);
+        // The open-or-report seam (like `open_resolved_source`): only the
+        // success path leaves the results view and records the jump.
+        // Watchlist (the pre-011 artifact): on an OPEN FAILURE the
+        // results view stays open and the failure is reported (the jump
+        // did not happen) — no jump entry is recorded, no view closed.
+        let opened = match self.project.as_ref() {
+            Some(project) => self
+                .open_project_path(&project.root.join(&file), &file)
+                .is_ok(),
+            None => false,
+        };
+        if !opened {
+            // The hit's file could not be opened (e.g. it was deleted
+            // since the walk, or an occur on a buffer with no file).
+            self.minibuffer_message(&format!("cannot open {file}: the jump did not happen"));
+            return;
+        }
         self.set_point_line(line_no.saturating_sub(1));
         self.ensure_highlight();
         // Leave the results view so the jumped file is what's on screen;
@@ -10461,10 +10581,13 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             self.close_view();
         }
         // 06a review P1-2: only record the destination jump when the open
-        // actually opened a buffer — a failed open leaves the home state,
-        // and a `""`-keyed entry would later create `*scratch*` via a dead
-        // jump entry (P1-1's class).
+        // actually opened a buffer (the `opened` gate above — a failed
+        // open leaves the home state, and a `""`-keyed entry would later
+        // create `*scratch*` via a dead jump entry (P1-1's class)).
         if let Some(key) = self.buffers.current().map(String::from) {
+            if let Some(pre) = pre_search {
+                self.jump_stack.record_jump(&pre, &origin);
+            }
             let dest = JumpEntry {
                 buffer_key: key,
                 line: line_no.saturating_sub(1),
@@ -14700,6 +14823,205 @@ mod tests {
     }
 
     // ── issue 05: xref tests (finding #2) ─────────────────────────────
+
+    /// Watchlist item 1 (U-D3 / U-K, review 05): `M-.` on a
+    /// type/constant name — the end-to-end jump pinned per name shape.
+    /// The extraction (`symbol_at_point`) has had no case filter since
+    /// 006-02b (the skipped-uppercase bug was the old line-split
+    /// heuristic, already replaced); this pins each shape so the fix
+    /// stays: a CamelCase type (cross-file), a SCREAMING constant,
+    /// and a mixed CamelCase type in a generic-argument position.
+    #[test]
+    fn xref_uppercase_type_and_const_shapes_jump_directly() {
+        let (mut s, _d) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "mod widget;\nconst LOCAL_CONST: u32 = 2;\nfn use_it() {\n    let w = Widget { x: 1 };\n    let v: Vec<OtherThing> = vec![];\n    let _ = LOCAL_CONST;\n}\n",
+            ),
+            (
+                "src/widget.rs",
+                "pub struct Widget { pub x: i32 }\npub struct OtherThing { pub y: i32 }\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    let w = Widget { x: 1 };" — cursor inside `Widget`
+        // (CamelCase type, defined in another file).
+        s.set_point(3, 13, 13);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/widget.rs", "CamelCase type: cross-file jump");
+        assert_eq!(s.point_line(), 0, "to the struct's definition line");
+
+        // Line 5: "    let _ = LOCAL_CONST;" — cursor inside `LOCAL_CONST`
+        // (SCREAMING constant).
+        s.open_path("src/lib.rs");
+        s.set_point(5, 16, 16);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 1, "to the const's definition line");
+
+        // Line 4: "    let v: Vec<OtherThing> = vec![];" — cursor inside
+        // `OtherThing` (mixed CamelCase, generic-argument position).
+        s.open_path("src/lib.rs");
+        s.set_point(4, 18, 18);
+        s.xref_find_definitions();
+        assert_eq!(s.view_name_display(), "src/widget.rs");
+        assert_eq!(s.point_line(), 1, "to the mixed CamelCase type");
+    }
+
+    /// Watchlist item 3 (the pre-011 artifact): a search-RET whose hit
+    /// file cannot be opened (deleted after the walk) keeps the results
+    /// view OPEN and reports that the jump did not happen — no jump
+    /// entry recorded, no view closed, the current buffer unchanged.
+    #[test]
+    fn search_jump_failed_open_keeps_the_results_view() {
+        let (dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        // The pre-search position (a different file: the failure must
+        // not move the current buffer).
+        store.open_path("src/main.rs");
+        let main_key = store.buffers.current().unwrap().to_string();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.hits[0].file, "src/lib.rs");
+        // Delete the hit file AFTER the walk finished.
+        std::fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
+        let stack_len_before = store.jump_stack.len();
+
+        store.key_event(key("RET"));
+        assert_eq!(store.top_view(), ViewId::Search, "the results view stays open");
+        assert_eq!(
+            store.buffers.current().map(String::from),
+            Some(main_key.clone()),
+            "the current buffer is unchanged"
+        );
+        assert!(store.message.contains("cannot open"), "{:?}", store.message);
+        assert!(
+            store.message.contains("the jump did not happen"),
+            "{:?}",
+            store.message
+        );
+        assert_eq!(
+            store.jump_stack.len(),
+            stack_len_before,
+            "no jump entry on a failed open"
+        );
+    }
+
+    /// Watchlist item 4: `M-,` under the Search view — the jump-back
+    /// pops through the sentinel in ONE step and lands the pre-search
+    /// position (the results view closes with the landing — emacs
+    /// `xref-pop-marker-stack`); before, the landing moved the buffer
+    /// and point underneath the results view: a no-op until the view
+    /// was closed by hand.
+    #[test]
+    fn search_mcomma_pops_the_sentinel_to_the_pre_search_position() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        // The pre-search position: main.rs, line 2.
+        store.open_path("src/main.rs");
+        store.set_point_line(2);
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+
+        // RET: the first hit (lib.rs:1), the results view closes.
+        store.key_event(key("RET"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+        assert_eq!(store.view_name_display(), "src/lib.rs");
+
+        // M-,: the sentinel — back to the results (selection restored).
+        store.key_event(key("M-,"));
+        assert_eq!(store.top_view(), ViewId::Search, "the first M-, returns to the results");
+
+        // M-, again: one step through the sentinel to the pre-search
+        // position — and the results view closes with the landing.
+        store.key_event(key("M-,"));
+        assert_eq!(
+            store.top_view(),
+            ViewId::Buffer,
+            "the results view closes with the landing"
+        );
+        assert_eq!(store.view_name_display(), "src/main.rs", "the pre-search buffer");
+        assert_eq!(store.point_line(), 2, "the pre-search line");
+    }
+
+    /// Watchlist item 2 (imenu flat, no impl-parent nesting): a Rust
+    /// file's imenu groups the impl methods under the impl's type —
+    /// the method's display is indented one level below the struct
+    /// (the Rung 1 tables: the method's definition line is not inside
+    /// the struct's extent, so the grouping can only come from the
+    /// tables). The names (the picker's match target) stay bare, and
+    /// the query re-derivation (the refilter path) keeps the same
+    /// display — the pre-fix drift where the initial open indented but
+    /// the refilter did not.
+    #[test]
+    fn imenu_groups_impl_methods_under_the_struct() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { a: i32 }\nimpl Foo {\n    pub fn new() -> Self { Self { a: 0 } }\n}\npub fn free() {}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.open_imenu();
+        assert!(s.picker_open());
+        assert_eq!(s.picker_kind(), Some(PickerKind::Imenu));
+        let rows: Vec<(String, String)> = s
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.name.clone(), c.display.clone()))
+            .collect();
+        let foo = rows.iter().find(|(n, _)| n == "Foo:1").unwrap();
+        assert_eq!(foo.1, "Foo  [type]", "the struct stays at top level: {rows:?}");
+        let new = rows.iter().find(|(n, _)| n == "new:3").unwrap();
+        assert_eq!(
+            new.1,
+            "  new  [fn]",
+            "the impl method is indented one level under the struct: {rows:?}"
+        );
+        let free = rows.iter().find(|(n, _)| n == "free:5").unwrap();
+        assert_eq!(free.1, "free  [fn]", "a free fn stays flat: {rows:?}");
+
+        // The refilter path (candidates_for) must keep the SAME display.
+        s.picker_query_char('n');
+        s.picker_query_char('e');
+        let rows: Vec<(String, String)> = s
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.name.clone(), c.display.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("new:3".to_string(), "  new  [fn]".to_string())],
+            "the re-derivation keeps the grouped display: {rows:?}"
+        );
+    }
+
+    /// Watchlist item 2 degradation (byte-for-byte): a non-Rust file
+    /// has no Rung 1 tables — its imenu stays the PART A
+    /// enclosing-extent indent, no impl-parent grouping.
+    #[test]
+    fn imenu_non_rust_stays_flat() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/app.js",
+            "function outer() {\n  function inner() {}\n}\nfunction free() {}\n",
+        )]);
+        s.open_path("src/app.js");
+        s.open_imenu();
+        let rows: Vec<(String, String)> = s
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.name.clone(), c.display.clone()))
+            .collect();
+        // The PART A enclosing-extent indent is unchanged (inner is
+        // lexically inside outer's extent)…
+        let inner = rows.iter().find(|(n, _)| n.starts_with("inner")).unwrap();
+        assert_eq!(
+            inner.1, "  inner  [fn]",
+            "the enclosing-extent indent stands: {rows:?}"
+        );
+        // …and a top-level fn has no indent (no grouping to add one).
+        let free = rows.iter().find(|(n, _)| n.starts_with("free")).unwrap();
+        assert_eq!(free.1, "free  [fn]", "a top-level fn has no indent: {rows:?}");
+    }
+
 
     fn store_with_index(files: &[(&str, &str)]) -> (AppStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

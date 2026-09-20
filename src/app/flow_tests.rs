@@ -3370,3 +3370,164 @@ fn unit_flow_window_splits_c_x_2_single_pane_report() {
     assert!(h.message.contains("unbound key: 2"), "{}", h.message);
     assert_eq!(h.view_stack, vec![ViewId::Home]);
 }
+
+// ── watchlist-fixes lane: the U-K items' unit twins ───────────────────────
+
+/// U-K item 1 (U-D3): M-. on a type/constant name — the extraction has no
+/// case filter (006-02b); the twin drives the real key (alt-dot) and
+/// asserts the cross-file type landing (state) + the definition renders
+/// (render80).
+#[test]
+fn unit_flow_xref_uppercase_type_m_dot() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(
+        p.join("src/main.rs"),
+        "mod widget;\nfn use_it() {\n    let w = Widget { x: 1 };\n}\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/widget.rs"), "pub struct Widget { pub x: i32 }\n").unwrap();
+    let mut s = store_in(p);
+    install_index(&mut s, p);
+    s.open_path("src/main.rs");
+    // Point at line 2, inside `Widget` (line "    let w = Widget {…"):
+    // C-n ×2 → line 2; C-f ×12 → the `W` column.
+    for _ in 0..2 {
+        s.key_event(key("C-n"));
+    }
+    for _ in 0..12 {
+        s.key_event(key("C-f"));
+    }
+    s.key_event(key("M-."));
+    assert_eq!(s.top_view(), ViewId::Buffer);
+    assert_eq!(s.view_name_display(), "src/widget.rs", "the CamelCase type jumps cross-file");
+    assert_eq!(s.point_line(), 0, "on the struct's definition line");
+    let frame = render80(s);
+    assert!(
+        frame.contains("pub struct Widget"),
+        "the type's definition renders: {frame}"
+    );
+}
+
+/// U-K item 2 (imenu flat, no impl-parent nesting): M-i groups the Rust
+/// impl methods under the impl's type — state on the candidate display +
+/// render80 on the indented list row.
+#[test]
+fn unit_flow_imenu_impl_parent_grouping() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(
+        p.join("src/lib.rs"),
+        "pub struct Foo { a: i32 }\nimpl Foo {\n    pub fn new() -> Self { Self { a: 0 } }\n}\npub fn free() {}\n",
+    )
+    .unwrap();
+    let mut s = store_in(p);
+    install_index(&mut s, p);
+    s.open_path("src/lib.rs");
+    s.key_event(key("M-i"));
+    assert!(s.picker_open(), "M-i opens the imenu picker");
+    assert_eq!(s.picker_kind(), Some(crate::app::store::PickerKind::Imenu));
+    let rows: Vec<(String, String)> = s
+        .picker_filtered()
+        .iter()
+        .map(|(c, _)| (c.name.clone(), c.display.clone()))
+        .collect();
+    let new = rows.iter().find(|(n, _)| n == "new:3").unwrap();
+    assert_eq!(new.1, "  new  [fn]", "impl method grouped under the struct: {rows:?}");
+    let free = rows.iter().find(|(n, _)| n == "free:5").unwrap();
+    assert_eq!(free.1, "free  [fn]", "the free fn stays flat: {rows:?}");
+    let frame = render80(s);
+    assert!(
+        frame.contains("  new  [fn]") && frame.contains("free  [fn]"),
+        "the grouped list renders: {frame}"
+    );
+}
+
+/// U-K items 3 + 4 (search_jump + M-, under Search): state + render80.
+/// Leg A — a RET whose hit file cannot be opened (deleted after the walk)
+/// keeps the results view open and reports: the jump did not happen.
+/// Leg B — M-, under the results view pops through the sentinel in one
+/// step to the pre-search position (the view closes with the landing).
+#[test]
+fn unit_flow_search_ret_and_mcomma_under_search() {
+    // Leg A: the failed open.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(
+        p.join("src/main.rs"),
+        "fn target() {}\nfn main() { target(); }\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+    let mut s = store_in(p);
+    s.open_path("src/main.rs");
+    let main_key = s.buffers.current().unwrap().to_string();
+    let mut rx = s.search_rx().unwrap();
+    s.start_project_search("target".into());
+    drain_search_finished(&mut s, &mut rx);
+    assert!(s.search_view_info().2 > 0, "hits arrived (lib.rs is the first file)");
+    std::fs::remove_file(p.join("src/lib.rs")).unwrap();
+    s.key_event(key("RET"));
+    assert_eq!(
+        s.top_view(),
+        ViewId::Search,
+        "the failed open keeps the results view open"
+    );
+    assert_eq!(
+        s.buffers.current().map(String::from),
+        Some(main_key),
+        "the current buffer is unchanged"
+    );
+    assert!(s.message.contains("cannot open"), "{}", s.message);
+    assert!(s.message.contains("the jump did not happen"), "{}", s.message);
+    let frame = render80(s);
+    assert!(
+        frame.contains("cannot open"),
+        "the report renders on the results view: {frame}"
+    );
+
+    // Leg B: the one-step sentinel pop to the pre-search position.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    std::fs::create_dir_all(p.join("src")).unwrap();
+    std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(
+        p.join("src/main.rs"),
+        "fn target() {}\nfn main() { target(); }\ntarget();\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+    let mut s = store_in(p);
+    s.open_path("src/main.rs");
+    s.key_event(key("C-n")); // line 1
+    s.key_event(key("C-n")); // line 2 — the pre-search position
+    let mut rx = s.search_rx().unwrap();
+    s.start_project_search("target".into());
+    drain_search_finished(&mut s, &mut rx);
+    s.key_event(key("RET"));
+    assert_eq!(s.top_view(), ViewId::Buffer, "RET lands the hit's file");
+    assert_eq!(s.view_name_display(), "src/lib.rs");
+    s.key_event(key("M-,"));
+    assert_eq!(s.top_view(), ViewId::Search, "the first M-, returns to the results");
+    // The watchlist fix: M-, UNDER the results view is bound and pops
+    // through the sentinel to the pre-search position in one step.
+    s.key_event(key("M-,"));
+    assert_eq!(
+        s.top_view(),
+        ViewId::Buffer,
+        "the second M-, closes the results with the landing"
+    );
+    assert_eq!(s.view_name_display(), "src/main.rs", "the pre-search buffer");
+    assert_eq!(s.point_line(), 2, "the pre-search line");
+    let frame = render80(s);
+    assert!(
+        frame.contains("fn main"),
+        "the pre-search file renders: {frame}"
+    );
+}
