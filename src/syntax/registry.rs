@@ -30,6 +30,7 @@ pub enum LanguageId {
     Java,
     CSharp,
     Ruby,
+    Scheme,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -55,6 +56,7 @@ impl LanguageId {
             Self::Java => "java",
             Self::CSharp => "csharp",
             Self::Ruby => "ruby",
+            Self::Scheme => "scheme",
             Self::Plain => "plain",
         }
     }
@@ -77,6 +79,7 @@ impl LanguageId {
         Self::Java,
         Self::CSharp,
         Self::Ruby,
+        Self::Scheme,
     ];
 }
 
@@ -133,6 +136,12 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("cs", LanguageId::CSharp);
     // Ruby
     m.insert("rb", LanguageId::Ruby);
+    // Scheme (the lisp-family landing — see docs/language-coverage.md
+    // gap 8 for the family choice rationale)
+    m.insert("scm", LanguageId::Scheme);
+    m.insert("ss", LanguageId::Scheme);
+    m.insert("sls", LanguageId::Scheme);
+    m.insert("sld", LanguageId::Scheme);
     m
 }
 
@@ -310,6 +319,13 @@ impl GrammarRegistry {
                     "",
                     tree_sitter_ruby::LOCALS_QUERY,
                 ),
+                LanguageId::Scheme => Self::build_config(
+                    Language::from(tree_sitter_scheme::LANGUAGE),
+                    "scheme",
+                    tree_sitter_scheme::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -372,6 +388,7 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
         LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
         LanguageId::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        LanguageId::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
         LanguageId::Plain => return None,
     })
 }
@@ -399,6 +416,8 @@ mod tests {
         assert_eq!(reg.language_for("Foo.java"), LanguageId::Java);
         assert_eq!(reg.language_for("Foo.cs"), LanguageId::CSharp);
         assert_eq!(reg.language_for("foo.rb"), LanguageId::Ruby);
+        assert_eq!(reg.language_for("foo.scm"), LanguageId::Scheme);
+        assert_eq!(reg.language_for("foo.sld"), LanguageId::Scheme);
     }
 
     #[test]

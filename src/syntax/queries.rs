@@ -356,6 +356,45 @@ const RUBY_QUERY: &str = r#"
 (assignment left: (constant) @name) @item
 "#;
 
+// New-languages lane: Scheme (the lisp-family landing). The pinned
+// tree-sitter-scheme 0.24.7 is a FLAT S-expression grammar (probe-
+// verified: the only node kinds are program/list/symbol/number/
+// string/character/vector/comment/quote/…) — there is no `defun` /
+// `define_library` node. LITERAL content matches on the `symbol` kind
+// are rejected at query compile time (probe-verified: `QueryError
+// NodeType` on `(symbol "define")`), so the query captures every
+// first-child-anchored `(list HEAD …)` candidate instead — the `.`
+// anchors are load-bearing (probe-verified: WITHOUT them, the engine
+// binds `@head`/`@name` to ANY children of the list, producing
+// spurious candidates like `name=core` for `(define-library (foo
+// core) …)`). `extract_all` keeps only the true define forms
+// (`scheme_kind` gates on `(pattern_index, head)`). Application forms
+// (`map name=lambda`, …), `export`, `set!`, and record accessors are
+// captured as candidates and then rejected (their head is not a define
+// form) — the honest minimal outline.
+const SCHEME_QUERY: &str = r#"
+(list . (symbol) @head . (list . (symbol) @name)) @item
+(list . (symbol) @head . (symbol) @name) @item
+"#;
+
+/// The symbol category of a SCHEME match — keyed by the query pattern's
+/// SOURCE ORDER (`QueryMatch::pattern_index`) AND the captured head
+/// symbol's text (the flat S-expression grammar gives every definition
+/// the same node kind — `list` — and its `symbol` kind refuses literal
+/// content matches, so the gating happens here, not in the query).
+/// `None` = the captured candidate is not a define form (rejected by
+/// the extraction loop).
+fn scheme_kind(pattern_index: usize, head: &str) -> Option<SymbolKind> {
+    match (head, pattern_index) {
+        ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
+        ("define", 1) => Some(SymbolKind::Constant), // (define x …)
+        ("define-library", 0) => Some(SymbolKind::Type), // (define-library (name .) …)
+        ("define-record-type", 1) => Some(SymbolKind::Type), // (define-record-type name …)
+        ("define-macro", 0) => Some(SymbolKind::Macro), // (define-macro (m .) …)
+        _ => None,
+    }
+}
+
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
@@ -376,6 +415,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Java => Some(JAVA_QUERY),
         LanguageId::CSharp => Some(C_SHARP_QUERY),
         LanguageId::Ruby => Some(RUBY_QUERY),
+        LanguageId::Scheme => Some(SCHEME_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -399,6 +439,7 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
         LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
         LanguageId::Ruby => Language::from(tree_sitter_ruby::LANGUAGE),
+        LanguageId::Scheme => Language::from(tree_sitter_scheme::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -471,6 +512,13 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         let bytes = source.as_bytes();
         let name_idx = query.capture_index_for_name("name");
         let item_idx = query.capture_index_for_name("item");
+        // Scheme (the flat S-expression grammar): the head-symbol capture
+        // the define-form gate reads (see `scheme_kind`).
+        let head_idx = if lang == LanguageId::Scheme {
+            query.capture_index_for_name("head")
+        } else {
+            None
+        };
         let mut out = Vec::new();
         let mut cursor = QueryCursor::new();
         // `matches()` yields one item per definition (with all its captures);
@@ -499,9 +547,39 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
             let kind_node = item_node.or(name_node).unwrap();
             let name_node = name_node.unwrap_or(kind_node);
             let extent_node = item_node.unwrap_or(name_node);
+            // Scheme gate (see `scheme_kind`): the query captures every
+            // `(list HEAD …)` candidate; only the true define forms
+            // survive. Rejected candidates contribute no symbol.
+            let scheme_reject = if lang == LanguageId::Scheme {
+                let head = head_idx
+                    .and_then(|i| m.captures.iter().find(|c| c.index == i))
+                    .and_then(|c| c.node.utf8_text(bytes).ok())
+                    .map(str::to_string);
+                head.as_deref().and_then(|h| scheme_kind(m.pattern_index, h)).is_none()
+            } else {
+                false
+            };
+            if scheme_reject {
+                continue;
+            }
+
             out.push(Symbol {
                 name,
-                kind: kind_of(kind_node.kind()),
+                kind: if lang == LanguageId::Scheme {
+                    // The flat S-expression grammar: the (pattern, head)
+                    // pair carries the category (see `scheme_kind`).
+                    scheme_kind(m.pattern_index,
+                        head_idx
+                            .and_then(|i| m.captures.iter().find(|c| c.index == i))
+                            .and_then(|c| c.node.utf8_text(bytes).ok())
+                            .map(str::to_string)
+                            .as_deref()
+                            .unwrap_or("")
+                    )
+                    .unwrap_or(SymbolKind::Function)
+                } else {
+                    kind_of(kind_node.kind())
+                },
                 line: name_node.start_position().row,
                 end_line: extent_node.end_position().row,
                 start_byte: name_node.start_byte(),
@@ -1475,6 +1553,41 @@ mod tests {
         assert_eq!(top.kind, SymbolKind::Method);
         // Exactly the six named definitions — the superclass `Baz`, the
         // local `x`, and the `@x` assignment are NOT in the outline.
+        assert_eq!(syms.len(), 6, "outline: {syms:?}");
+    }
+
+    // ── Scheme (new-languages lane) ──────────────────────────────────
+    /// The five define forms land with their pattern-index-derived kinds;
+    /// `export` / `set!` / record accessors stay out (honest minimal
+    /// outline for the flat S-expression grammar).
+    #[test]
+    fn scheme_extracts_define_and_library() {
+        let src = "(define (add! x y) (+ x y))\n\
+                  (define x 10)\n\
+                  (define-library (foo core)\n\
+                  \x20 (export add!)\n\
+                  \x20 (define (inner a) a))\n\
+                  (define-record-type point\n\
+                  \x20 (make-point x y)\n\
+                  \x20 point?\n\
+                  \x20 (x point-x))\n\
+                  (define-macro (my-if c a b) a)\n";
+        let syms = extract_symbols(LanguageId::Scheme, src);
+        let add = find(&syms, "add!").expect("define (add! …)");
+        assert_eq!(add.kind, SymbolKind::Function);
+        let x = find(&syms, "x").expect("define x");
+        assert_eq!(x.kind, SymbolKind::Constant);
+        let foo = find(&syms, "foo").expect("define-library (foo core)");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let inner = find(&syms, "inner").expect("nested define");
+        assert_eq!(inner.kind, SymbolKind::Function);
+        let point = find(&syms, "point").expect("define-record-type");
+        assert_eq!(point.kind, SymbolKind::Type);
+        let myif = find(&syms, "my-if").expect("define-macro");
+        assert_eq!(myif.kind, SymbolKind::Macro);
+        // Exactly the six named definitions — the `export add!` form,
+        // the record constructor, and the accessors are NOT in the
+        // outline.
         assert_eq!(syms.len(), 6, "outline: {syms:?}");
     }
 

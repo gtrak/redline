@@ -322,6 +322,31 @@ SETEXT headings, verified, not assumed)
 - **in-library follow-up**: unit-covered only (same app-unreachable
   reason as C/C++: no provider can land in a markdown dependency).
 
+## New-languages lane: Java / C# / Ruby / Scheme (no provider; walk
+sets + in-project index only)
+
+The new-languages lane (user directive "add clojure and lisp support,
+java, c#, ruby") landed these four as **basic support**: pinned grammar
++ outline query + `node_at`/`scope_path_at` machinery + the 011-04
+walk set (`store.rs::source_extensions_for`: `java`, `cs`, `rb`,
+`scm/ss/sls/sld`). **No provider** (the provider chain stays 4 —
+package-manager machinery is a separate decision): M-. outside the
+project index bails with the exact 011-01 message (`no tooling
+provider handles language \`java\`` / `\`csharp\`` / `\`ruby\`` /
+`\`scheme\``) — the same class as C / C++ / Markdown above, and the
+app-side whole-path upgrade (`dotted_path_container`) does not yet
+enumerate the Java / C# / Ruby path containers (its M-. lane owns that
+function). **Clojure is deliberately not landed**: every published
+clojure grammar crate requires the tree-sitter 0.25/0.26 runtime
+(`tree-sitter-clojure` 0.1.0: `^0.25.6` — a cargo `links` conflict with
+the pinned 0.24.7; `tree-sitter-clojure-orchard` 0.2.x: `^0.25.9` /
+`^0.26.11`; `arborium-clojure` 2.18.2: resolves and compiles, but its
+grammar is ABI 15 → `set_language` fails) — full evidence in
+language-coverage.md Gaps item 8. The lisp family landed as **Scheme**
+(`tree-sitter-scheme` 0.24.7, grammar ABI 14 — the only Lisp-family
+crate matching the pinned runtime; `tree-sitter-elisp` 1.7.2 is ABI 15
+→ fails, probe-verified).
+
 ## Regression guard: a miss probes only the matching providers
 
 - Unit (011-01, `crates/redline-resolve/src/lib.rs`):

@@ -97,7 +97,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
         | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
-        | LanguageId::CSharp | LanguageId::Ruby => {}
+        | LanguageId::CSharp | LanguageId::Ruby | LanguageId::Scheme => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -504,6 +504,19 @@ fn is_ruby_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// Scheme identifier-ish node kinds (verified against the pinned
+/// tree-sitter-scheme 0.24.7 `NODE_TYPES`): `symbol` — the flat
+/// S-expression grammar's ONLY name kind. There is no path-shaped
+/// construct in the grammar (Lisp has no dotted paths; module paths
+/// like `(foo core)` are `list`s, not path containers), so
+/// `is_path_segment` has no Scheme arm (its default returns `false`) —
+/// the honest N/A, pinned by `scheme_has_no_path_or_scope`. `node_at`
+/// resolves any symbol to itself; `scope_path_at` stays `[]` (no named
+/// definition containers exist to walk — the same honest N/A).
+fn is_scheme_identifier_kind(kind: &str) -> bool {
+    kind == "symbol"
+}
+
 // Markdown has NO identifier-ish node kind (probed against the pinned
 // tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
@@ -532,6 +545,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Java => is_java_identifier_kind(kind),
         LanguageId::CSharp => is_csharp_identifier_kind(kind),
         LanguageId::Ruby => is_ruby_identifier_kind(kind),
+        LanguageId::Scheme => is_scheme_identifier_kind(kind),
         _ => false,
     }
 }
@@ -2130,6 +2144,32 @@ mod tests {
             scope_path_at(LanguageId::Ruby, src, at),
             vec![String::from("M"), String::from("C"), String::from("m")]
         );
+    }
+
+    // ── Scheme (new-languages lane) ──────────────────────────────────
+    /// A symbol resolves to itself (the flat grammar's only name kind).
+    #[test]
+    fn scheme_symbol_resolves_bare() {
+        let src = "(define (add! x y) (+ x y))\n";
+        let at = src.find("add!").expect("fixture") + 1;
+        let info = node_at(LanguageId::Scheme, src, at).expect("node at `dd!`");
+        assert_eq!(info.text, "add!");
+        assert_eq!(info.kind, "symbol");
+    }
+
+    /// Scheme has NO path-shaped construct and NO named definition
+    /// containers: a symbol inside a `define-library` body resolves as
+    /// itself (no container walk), and the scope path stays `[]` even
+    /// nested in a library body (the honest N/A, probe-verified against
+    /// the flat tree-sitter-scheme 0.24.7 node set).
+    #[test]
+    fn scheme_has_no_path_or_scope() {
+        let src = "(define-library (foo core)\n  (define (inner a) a))\n";
+        let at = src.find("inner").expect("fixture") + 1;
+        let info = node_at(LanguageId::Scheme, src, at).expect("node at `inner`");
+        assert_eq!(info.text, "inner");
+        assert_eq!(info.kind, "symbol");
+        assert!(scope_path_at(LanguageId::Scheme, src, at).is_empty());
     }
 }
 
