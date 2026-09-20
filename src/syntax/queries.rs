@@ -923,7 +923,6 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "enum_declaration"
         | "mod_item"
         | "namespace_declaration"
-        | "struct_declaration"
         | "record_declaration"
         | "delegate_declaration"
         | "module"
