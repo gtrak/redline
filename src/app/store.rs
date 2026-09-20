@@ -2083,7 +2083,7 @@ impl AppStore {
     /// note lands in the minibuffer.
     pub fn split_window_vertical(&mut self) {
         self.minibuffer_message(
-            "single pane: C-x 2 vertical splits are a scoped follow-up",
+            "single pane: vertical splits are not available yet",
         );
     }
 
