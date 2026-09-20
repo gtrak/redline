@@ -629,6 +629,12 @@ impl CommandRegistry {
             |store, _arg| store.open_imenu(),
         ));
         reg.register(Command::new(
+            "find-implementations",
+            "Open a picker of the impl blocks implementing the trait at point (010 rung 4: no standard emacs key, so palette entry only; a trait miss degrades to the bare-symbol M-. lookup)",
+            "navigation",
+            |store, _arg| store.find_implementations(),
+        ));
+        reg.register(Command::new(
             "open-symbol-picker",
             "Open the project-wide symbol picker (M-x)",
             "navigation",
@@ -800,7 +806,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 105, "expected 105 seed commands: {names:?}");
+        assert_eq!(names.len(), 106, "expected 106 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -883,6 +889,7 @@ mod tests {
             "jump-back",
             "jump-forward",
             "imenu",
+            "find-implementations",
             "open-symbol-picker",
             "project-search",
             "references-at-point",

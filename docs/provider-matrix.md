@@ -29,7 +29,14 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
   additionally requires EVERY dot-delimited segment to be a bare
   identifier — wrong-container shapes like `a?.b`, `foo().bar`, `(*p).field`
   degrade to the bare token rather than feeding a non-path token to a
-  provider). The cells record what M-. does at a qualified use site, per
+  provider). 010-rung4-and-paths extended the container set to C and Cpp
+  (`field_expression` — `o.x`; Cpp's `::` shape stays the byte-scan whole
+  token, deliberately not double-handled) and to Toml (`dotted_key` — the
+  index stores a dotted key as ONE symbol name, so a segment's M-. only
+  reaches it with the whole path); the JSON judgment: NO container (the
+  pinned JSON grammar has no dotted-key node — every key is a standalone
+  string), so a JSON key's M-. stays the byte-for-byte bare-key index
+  lookup. The cells record what M-. does at a qualified use site, per
   language.
   (The `self.` exception is a resolution pre-step, not a provider
   matter: it consumes the 010-01 per-file Rust tables — struct fields +
@@ -81,8 +88,21 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
   never a guess. The self type is resolved LEXICALLY (innermost
   enclosing `impl_item`), so no expression typing is involved. find-
   implementations (who impls `Trait`?) is Rung 4's read-only view of the
-  same table — the `ImplKind::Trait` + impl line are already stored; the
-  picker command itself is deferred (out of this issue's scope fence).
+  same table — and it LANDED (010-rung4-and-paths): the `find-`
+  `implementations` command (M-x palette entry; no keybind — emacs has no
+  standard find-implementations key, judged not worth inventing one) takes
+  the trait at point through the SAME M-. extraction and opens a picker
+  of the `impl <Trait> for <Type>` blocks (file + impl line, the self
+  type). The data is the name-keyed TRAIT map (`nav/index.rs` — trait →
+  file → impl blocks), built in the SAME index pass as the tables (zero
+  extra parse; the 010-01 same-check-BEFORE-removal discipline applies to
+  the map — pinned in `nav/index.rs`, `trait_map_same_content_refresh_`
+  `keeps_trait_locations`). Honest degradation, byte-for-byte — the
+  existing bare-symbol M-. lookup runs when the trait has no table entry,
+  the buffer is non-Rust, or the impl's captured trait text is generic
+  (`Display<T>` never matches the bare `Display` at point; never a
+  guess). Unit-pinned in `store.rs` (`find_implementations_*` — picker +
+  RET jump, no-entry / generic-trait / no-symbol degradation).
   Unit-pinned in `store.rs` (`xref_self_*` — same-file field, cross-file
   field, method, ambiguous member picker, generic-impl + no-impl
   degradation) and `queries.rs` / `nav/index.rs` (the tables themselves).
@@ -283,20 +303,27 @@ deliberately invented none)
   LAND in a C/C++ dependency, so the live app cannot produce such a
   landing; the cell is the honest “would answer if a landing existed”
   state, not a live-verified jump.
-- **Superseded: the 011-03 degradation.** The lang-pred lane landed the
-  C/C++ node predicates + scope walks (`c_member_path_comes_back_whole`,
+- **Superseded: the 011-03 degradation — the app-side whole-path upgrade
+  landed (010-rung4-and-paths).** The lang-pred lane's node predicates +
+  scope walks (`c_member_path_comes_back_whole`,
   `cpp_member_path_comes_back_whole`,
   `cpp_qualified_path_comes_back_whole`,
   `c_scope_chain_struct_in_struct_and_function`,
-  `cpp_scope_chain_namespace_class_method` — `src/syntax/node.rs`), so
-  the per-language `node_at`/scope walks no longer stay `None` for
-  C/C++. What still stands from that bullet: import-based bare-symbol
-  hints do not apply — there is no import machinery for C to rebuild
-  qualified paths from — and the app-side whole-path upgrade
-  (`store.rs::dotted_path_container`) does not enumerate the C/C++
-  containers, so M-. extraction stays at the bare segment even though
-  the syntax layer answers the whole path (unit-pinned; see
-  `docs/language-coverage.md`, "Known corners").
+  `cpp_scope_chain_namespace_class_method` — `src/syntax/node.rs`) are
+  now consumed by the app: `store.rs::dotted_path_container` enumerates
+  C's `field_expression` and Cpp's `field_expression`, so M-. extraction
+  carries the whole dotted path (`o.x`) from a project buffer — the
+  in-project index still jumps (no C/C++ field symbols are indexed, so a
+  field access lands via the enclosing-symbol / tooling fall-through with
+  the whole path — unit-pinned by
+  `xref_c_field_access_lands_via_index_fall_through`), and `p->x` / JSON
+  keys degrade byte-for-byte (unit-pinned by
+  `symbol_at_point_c_arrow_and_json_keys_stay_bare`). What still stands
+  from that bullet: import-based bare-symbol hints do not apply — there is
+  no import machinery for C to rebuild qualified paths from — and Cpp's
+  `::` path stays the byte-scan token (`qualified_identifier` is not
+  enumerated: it would be byte-for-byte the same token — no double
+  handling).
 
 ### Markdown (unit-covered ONLY — NO PROVIDER; M-. targets are ATX +
 SETEXT headings, verified, not assumed)
@@ -350,6 +377,10 @@ SETEXT headings, verified, not assumed)
   in a non-Rust buffer's path container; byte-for-byte bare otherwise;
   Rust `::` unchanged). The live cells are the python + js legs of
   `drive_issue_011_06.py`; Go is unit-covered only (toolchain absent).
+  010-rung4-and-paths extended the container set to C / Cpp /
+  Toml (unit-pinned; see the C / C++ section) and fixed the JSON
+  judgment: no dotted-key container exists in the pinned JSON grammar,
+  so JSON keys stay the byte-for-byte bare-key index lookup.
 - **Languages with no provider** (C/C++, JSON, YAML, TOML, shell,
   Markdown, …): the dispatch bails honestly — "no tooling provider
   handles language `X`" (011-01 mapping honesty) — instead of probing

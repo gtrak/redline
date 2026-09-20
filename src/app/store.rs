@@ -494,6 +494,10 @@ pub enum PickerKind {
     Projects,
     /// `M-.` ambiguous: jump to the selected definition location.
     Xref,
+    /// find-implementations (010-04, plan 010 Shape A rung 4): the
+    /// `impl <Trait> for <Type>` blocks implementing the trait at point;
+    /// RET jumps to the selected impl header.
+    Impls,
     /// `M-i`: imenu outline of the current file.
     Imenu,
     /// `C-c p s`: project-wide symbol picker.
@@ -1506,6 +1510,12 @@ pub struct AppStore {
     /// The symbol name being looked up by the Xref picker (set by
     /// `xref_find_definitions` when the lookup is ambiguous).
     xref_lookup_name: String,
+    /// The trait keys the find-implementations picker was opened with
+    /// (010-04 — the M-. path token and/or the bare identifier), so query
+    /// re-computation inside the picker stays against the same name-keyed
+    /// trait map (mirrors `xref_lookup_name`; replaced on every Impls
+    /// picker open, inert otherwise).
+    impls_keys: Vec<String>,
     // ── tooling-aware jump fall-through (plan 006 issue 02) ─────────────
     /// The resolve-result bus: a background M-. fall-through job publishes
     /// here; the UI's drain task applies each event (mirrors `index_bus`).
@@ -1818,6 +1828,7 @@ impl AppStore {
             index_generation: 0,
             pending_index_changes: HashSet::new(),
             xref_lookup_name: String::new(),
+            impls_keys: Vec::new(),
             resolve_bus: ResolveBus::new(),
             resolve_generation: 0,
             resolving: None,
@@ -3742,6 +3753,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             PickerKind::Buffers | PickerKind::KillBuffer => self.buffer_candidates(),
             PickerKind::Projects => self.project_candidates(),
             PickerKind::Xref => self.xref_candidates(),
+            PickerKind::Impls => self.impls_candidates(),
             PickerKind::Imenu => self.imenu_candidates(),
             PickerKind::Symbols => self.symbol_candidates(),
             PickerKind::Branch => self.branch_candidates(),
@@ -3804,6 +3816,49 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 category: "xref".to_string(),
             })
             .collect()
+    }
+
+    /// Candidates for the find-implementations picker (010-04, plan 010
+    /// Shape A rung 4): the `impl <Trait> for <Type>` blocks for the
+    /// trait keys stored when the picker was opened (`impls_keys` — the
+    /// M-. path token and/or the bare identifier, like the name-keyed
+    /// M-. index lookup), from the project index or the crate index the
+    /// picker was opened with (006-03, like the Xref picker). Deterministic
+    /// (key order, then file, impl line); a block hit by both keys is
+    /// listed once (the first key's spelling).
+    fn impls_candidates(&mut self) -> Vec<PickerCandidate> {
+        let keys = self.impls_keys.clone();
+        let root = self.xref_crate_root.clone();
+        let mut out: Vec<PickerCandidate> = Vec::new();
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for key in &keys {
+            let locs: Vec<crate::nav::index::TraitImplLocation> = match root.as_ref() {
+                Some(root) => self
+                    .crate_index_arc(root)
+                    .map(|arc| arc.lock().unwrap().trait_impl_locations(key))
+                    .unwrap_or_default(),
+                None => self.index.trait_impl_locations(key),
+            };
+            for l in locs {
+                if seen.iter().any(|(f, li)| f == &l.file && *li == l.impl_line) {
+                    continue;
+                }
+                seen.push((l.file.clone(), l.impl_line));
+                out.push(PickerCandidate {
+                    name: format!("{}:{}", l.file, l.impl_line + 1),
+                    display: format!(
+                        "{}:{}  [impl {} for {}]",
+                        l.file,
+                        l.impl_line + 1,
+                        key,
+                        l.self_type
+                    ),
+                    docs: String::new(),
+                    category: "impls".to_string(),
+                });
+            }
+        }
+        out
     }
 
     /// Candidates for the Imenu picker (current file's outline — the
@@ -3999,6 +4054,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 }
             }
             Some(PickerKind::Imenu) => self.current_buffer_outline().len(),
+            Some(PickerKind::Impls) => self.impls_candidates().len(),
             Some(PickerKind::Symbols) => self.index.total(),
             Some(PickerKind::Branch) => self
                 .with_git(|g| g.branches())
@@ -4055,7 +4111,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             // Xref and Symbols: preview the file at the definition location.
             // The name is "file:line" (1-based). Show a window around the
             // definition line, not the file's first page.
-            PickerKind::Xref | PickerKind::Symbols => {
+            PickerKind::Xref | PickerKind::Symbols | PickerKind::Impls => {
                 if let Some((file, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
@@ -4206,7 +4262,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             }
             PickerKind::KillBuffer => self.kill_buffer(&name),
             PickerKind::Projects => self.switch_project_root(&name),
-            PickerKind::Xref | PickerKind::Symbols => {
+            PickerKind::Xref | PickerKind::Symbols | PickerKind::Impls => {
                 // name is "file:line" (1-based line number).
                 if let Some((file, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
@@ -7913,6 +7969,117 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
     }
 
+    /// (010-04, plan 010 Shape A rung 4) find-implementations — the
+    /// read-only view of the Rung 1 impl tables: a PICKER of the
+    /// `impl <Trait> for <Type>` blocks implementing the trait at point
+    /// (file + impl line, the self type), from the name-keyed trait map
+    /// built in the SAME index pass as the Rust tables (zero extra parse;
+    /// the 010-01 same-content-refresh discipline applies to the map —
+    /// pinned in `nav/index.rs`). The trait at point reuses the M-.
+    /// extraction (`symbol_at_point`, byte-for-byte); the map is tried
+    /// with both the path token and the bare identifier (the index is
+    /// name-keyed — `impl Display` vs `impl std::fmt::Display`, each
+    /// spelling is its own key, exactly like the M-. candidate lookup).
+    ///
+    /// Honest degradation, byte-for-byte — the EXISTING bare-symbol M-.
+    /// lookup runs (index / enclosing symbol / tooling fall-through) when:
+    /// no symbol at point; no table entry for the trait (no Rust file
+    /// impls it, or a non-Rust buffer — the tables only exist for Rust);
+    /// or the impl's captured trait text is generic (`Display<T>` — a
+    /// bare `Display` at point never matches the generic key; never a
+    /// guess). The picker's RET reuses the Xref jump path (the same
+    /// `xref_crate_root` seam, so external buffers land read-only).
+    pub fn find_implementations(&mut self) {
+        // Get the current file's project-relative path (the M-. guards).
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            self.minibuffer_message("no buffer");
+            return;
+        };
+        let path = match &buf.path {
+            Some(p) => p.clone(),
+            None => {
+                self.minibuffer_message("no file (scratch buffer)");
+                return;
+            }
+        };
+        let Some(project) = self.project.as_ref() else {
+            self.minibuffer_message("no project");
+            return;
+        };
+        let lang = self.grammar_registry.language_for(&path.to_string_lossy());
+        // The point's line text must be read (owned) BEFORE the crate-root
+        // match below (its `crate_index_arc_for_path` takes `&mut self`;
+        // the `buf` borrow must not span it — the 006-03 borrow rule).
+        let line = self.point_line();
+        let line_text: String = buf
+            .line_text(line)
+            .map(|c| c.into_owned())
+            .unwrap_or_default();
+        // The index source: the project index (project files) or the
+        // owning crate's index (external buffers, 006-03); a non-external
+        // buffer outside the root keeps the pre-006-03 refusal.
+        let crate_root: Option<PathBuf> = match path.strip_prefix(&project.root) {
+            Ok(_) => None,
+            Err(_) if self.external_buffers.contains(&key) => {
+                self.crate_index_arc_for_path(&path).map(|(root, _)| root)
+            }
+            Err(_) => {
+                self.minibuffer_message("buffer not in project");
+                return;
+            }
+        };
+        // The trait at point: the SAME extraction as M-. (byte-for-byte).
+        let Some((ident, path_token)) =
+            Self::symbol_at_point(lang, &line_text, self.point_col())
+        else {
+            self.minibuffer_message("no symbol under point");
+            return;
+        };
+        // The trait-keyed map is name-keyed: try the path token and the
+        // bare identifier (deduped — they are equal for a bare trait).
+        let mut keys: Vec<String> = vec![path_token.clone()];
+        if path_token != ident {
+            keys.push(ident.clone());
+        }
+        let mut locations: Vec<crate::nav::index::TraitImplLocation> = Vec::new();
+        for k in &keys {
+            let locs: Vec<crate::nav::index::TraitImplLocation> = match &crate_root {
+                Some(root) => self
+                    .crate_index_arc(root)
+                    .map(|arc| arc.lock().unwrap().trait_impl_locations(k))
+                    .unwrap_or_default(),
+                None => self.index.trait_impl_locations(k),
+            };
+            for l in locs {
+                if !locations.iter().any(|e| e.file == l.file && e.impl_line == l.impl_line) {
+                    locations.push(l);
+                }
+            }
+        }
+        if locations.is_empty() {
+            // Honest degradation: the EXISTING bare-symbol lookup,
+            // byte-for-byte (the M-. path — index, enclosing symbol,
+            // tooling fall-through, exactly as M-. does it).
+            if crate_root.is_some() {
+                self.xref_in_external_buffer(&key, &path);
+            } else {
+                self.xref_find_definitions();
+            }
+            return;
+        }
+        self.xref_crate_root = crate_root;
+        self.impls_keys = keys;
+        // The picker's candidate list comes from the SAME re-computation
+        // the query editing uses (`impls_candidates`) — the initial list
+        // and the filtered re-derivation cannot drift apart.
+        let candidates = self.impls_candidates();
+        self.open_picker(PickerKind::Impls, "Impls: ", candidates);
+    }
+
     /// (M-., selection rule 2) The definition candidates for the symbol at the
     /// point in `index`: the index tried with BOTH the last segment and the
     /// full `::`-path (the index is name-keyed), deduplicated, ordered
@@ -9840,9 +10007,21 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// pinned per language in `src/syntax/node.rs`: JS/TS/TSX
     /// `member_expression` (`a.b.c`) and the TS-only nested type
     /// identifiers, Python's `attribute` (`a.b.c`), Go's
-    /// `selector_expression` / `qualified_type` (`pkg.Fn`). Rust is out of
-    /// scope here — its `::` shape is extracted byte-for-byte in
-    /// `symbol_at_point` itself.
+    /// `selector_expression` / `qualified_type` (`pkg.Fn`), and (the
+    /// 010-rung4-and-paths app-side upgrade) C's `field_expression`
+    /// (`o.x` — `p->x` fails the caller's all-identifier-segment check
+    /// and stays bare), Cpp's `field_expression` (its `::` shape is
+    /// ALREADY carried whole by `symbol_at_point`'s byte-scan —
+    /// `qualified_identifier` would be byte-for-byte the same token, so
+    /// it is deliberately NOT enumerated here: no double handling), and
+    /// Toml's `dotted_key` (`a.b.c` — the index stores the dotted key as
+    /// ONE symbol name, so without the upgrade an M-. on a segment could
+    /// never hit it). Json has NO container: the pinned JSON grammar has
+    /// no dotted-key node — every key is a standalone string — so a JSON
+    /// key's M-. stays the byte-for-byte bare index lookup (judgment: the
+    /// index fall-through already lands bare keys; there is no key-PATH
+    /// to speak of). Rust is out of scope here — its `::` shape is
+    /// extracted byte-for-byte in `symbol_at_point` itself.
     fn dotted_path_container(lang: LanguageId, kind: &str) -> bool {
         match lang {
             LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
@@ -9855,6 +10034,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             LanguageId::Go => {
                 matches!(kind, "selector_expression" | "qualified_type")
             }
+            LanguageId::C => kind == "field_expression",
+            LanguageId::Cpp => kind == "field_expression",
+            LanguageId::Toml => kind == "dotted_key",
             _ => false,
         }
     }
@@ -12880,7 +13062,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 105);
+        assert_eq!(store.picker_count().0, 106);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -12898,11 +13080,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 104);
+        assert_eq!(store.picker_selected(), 105);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 103);
+        assert_eq!(store.picker_selected(), 104);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op on *scratch*, so just a message).
@@ -12937,7 +13119,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 105);
+        assert_eq!(store.picker_count().0, 106);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -14540,6 +14722,108 @@ mod tests {
         assert_eq!(s.point_line(), 0, "jumped to `pub trait Tr` (msg: {})", s.message);
     }
 
+    // ── 010-04: find-implementations (plan 010 Shape A, rung 4) ─────
+
+    /// 010-04 (discriminating): a trait at point with table entries opens
+    /// the Impls picker over the `impl <Trait> for <Type>` blocks (the
+    /// name-keyed trait map from the same index pass); RET reuses the
+    /// Xref jump path (origin captured, jump recorded).
+    #[test]
+    fn find_implementations_opens_picker_of_trait_impls() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "pub struct N;\npub trait Tr {\n    fn m(&self);\n}\nimpl Tr for N {\n    fn m(&self) {}\n}\n",
+            ),
+            (
+                "src/extra.rs",
+                "use crate::lib::Tr;\nstruct S;\nimpl Tr for S {\n    fn m(&self) {}\n}\n",
+            ),
+            ("src/main.rs", "use crate::lib::Tr;\nfn use_it<T: Tr>() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 1: "fn use_it<T: Tr>() {}" — `Tr` starts at col 13.
+        s.set_point(1, 13, 13);
+        s.find_implementations();
+        assert!(s.picker_open(), "two impls: picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Impls));
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 2, "two impl blocks: {filtered:?}");
+        // Deterministic (file, impl line) order: extra.rs's impl (line 3,
+        // 1-based) before lib.rs's (line 5, 1-based); the display carries
+        // the self type (kind: the trait impl's shape).
+        assert_eq!(filtered[0].0.name, "src/extra.rs:3", "{}", filtered[0].0.display);
+        assert!(filtered[0].0.display.contains("[impl Tr for S]"), "{}", filtered[0].0.display);
+        assert_eq!(filtered[1].0.name, "src/lib.rs:5", "{}", filtered[1].0.display);
+        assert!(
+            filtered[1].0.display.contains("[impl Tr for N]"),
+            "{}",
+            filtered[1].0.display
+        );
+        // RET on the lib.rs candidate jumps to the impl header (line 4,
+        // 0-based) and records the jump.
+        s.picker_select_next();
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 4, "the impl header (msg: {})", s.message);
+        assert_eq!(s.jump_stack.len(), 2, "origin + destination recorded");
+    }
+
+    /// 010-04 (pin): honest degradation — a trait with NO table entry
+    /// (no Rust file impls it) runs the EXISTING bare-symbol M-. lookup
+    /// byte-for-byte: `Tr` itself is indexed (`trait_item`), so the
+    /// lookup lands on the trait definition exactly as M-. would.
+    #[test]
+    fn find_implementations_no_table_entry_degrades_to_bare_symbol_lookup() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "pub trait Tr {\n    fn m(&self);\n}\n"),
+            ("src/main.rs", "fn use_it<T: Tr>() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 13, 13);
+        s.find_implementations();
+        assert!(!s.picker_open(), "degraded to the M-. path: {}", s.message);
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 0, "the trait definition (msg: {})", s.message);
+        assert!(s.message.contains("jumped"), "the M-. jump message: {}", s.message);
+    }
+
+    /// 010-04 (pin): a GENERIC trait's captured text (`Tr<Foo>`) never
+    /// matches the bare `Tr` at point — the map key is the impl's written
+    /// trait text, so this degrades to the bare-symbol lookup (never a
+    /// guess).
+    #[test]
+    fn find_implementations_generic_trait_text_never_matches_bare_name() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "pub trait Tr {\n    fn m(&self);\n}\n"),
+            ("src/impls.rs", "struct Foo;\nimpl Tr<Foo> for Foo {\n    fn m(&self) {}\n}\n"),
+            ("src/main.rs", "fn use_it<T: Tr>() {}\n"),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(0, 13, 13);
+        s.find_implementations();
+        // No entry for the bare `Tr` (the map key is `Tr<Foo>`) — the
+        // bare-symbol M-. lookup lands on the trait definition instead.
+        assert!(!s.picker_open(), "generic trait text never matches: {:?}", s.message);
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 0, "the trait definition (msg: {})", s.message);
+    }
+
+    /// 010-04 (pin): no symbol at point — the M-. guard message, no
+    /// picker, no jump.
+    #[test]
+    fn find_implementations_no_symbol_under_point() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub trait Tr {\n    fn m(&self);\n}\nimpl Tr for i32 {\n    fn m(&self) {}\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(0, 13, 13); // on the `{` after `pub trait Tr`
+        s.find_implementations();
+        assert!(!s.picker_open());
+        assert_eq!(s.message, "no symbol under point");
+    }
+
     // ── 010-01: M-. self-receiver resolution (Shape A rung 1) ──────────
 
     /// 010-01 (discriminating): the extraction carries the `self.` receiver
@@ -15256,6 +15540,114 @@ mod tests {
         // identifier-run rule is language-independent).
         assert_eq!(satp(LanguageId::Python, "let a = 1;", 7), None);
         assert_eq!(satp(LanguageId::Python, "{ ", 1), None);
+    }
+
+    /// 010-rung4-and-paths (item 2, app-side whole-path upgrade): the
+    /// per-language container pins — C's `field_expression`, Cpp's
+    /// `field_expression` (its `::` shape stays the byte-scan token —
+    /// NOT double-handled), Toml's `dotted_key` (the index stores the
+    /// dotted key as ONE symbol name, so the segment's M-. only reaches
+    /// it with the whole path).
+    #[test]
+    fn symbol_at_point_c_cpp_toml_containers_extend_the_token() {
+        // C: `o.x` — cursor on the member and parked right after it.
+        // "int y = o.x;": o@8, x@10.
+        let c = "int y = o.x;";
+        assert_eq!(
+            satp(LanguageId::C, c, 10),
+            Some(("x".into(), "o.x".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::C, c, 11),
+            Some(("x".into(), "o.x".into()))
+        );
+        // C deep chain: `o.x.y` under the MIDDLE segment (x@10).
+        let cdeep = "int v = o.x.y;";
+        assert_eq!(
+            satp(LanguageId::C, cdeep, 10),
+            Some(("x".into(), "o.x.y".into()))
+        );
+        // Cpp: `o.x` — field_expression, same shape as C.
+        let cpp = "int y = o.x;";
+        assert_eq!(
+            satp(LanguageId::Cpp, cpp, 10),
+            Some(("x".into(), "o.x".into()))
+        );
+        // Cpp deep chain: `a.b.c` under the middle segment (b@10).
+        let cppdeep = "int v = a.b.c;";
+        assert_eq!(
+            satp(LanguageId::Cpp, cppdeep, 10),
+            Some(("b".into(), "a.b.c".into()))
+        );
+        // Cpp `::` (no double handling): `ns::A::x` stays the byte-scan
+        // whole token — the pre-010-rung4 extraction, byte-for-byte
+        // (A@13).
+        let qual = "auto v = ns::A::x;";
+        assert_eq!(
+            satp(LanguageId::Cpp, qual, 13),
+            Some(("A".into(), "ns::A::x".into()))
+        );
+        // Toml: dotted key `a.b.c = 1` — cursor on either segment.
+        let toml = "a.b.c = 1";
+        assert_eq!(
+            satp(LanguageId::Toml, toml, 0),
+            Some(("a".into(), "a.b.c".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Toml, toml, 4),
+            Some(("c".into(), "a.b.c".into()))
+        );
+        // Toml table-header dotted key (`[a.b]`, b@3).
+        assert_eq!(
+            satp(LanguageId::Toml, "[a.b]", 3),
+            Some(("b".into(), "a.b".into()))
+        );
+    }
+
+    /// 010-rung4-and-paths (item 2, pin): the degradation stays
+    /// byte-for-byte — C/Cpp `p->x` (the `->` segments are not bare
+    /// identifier segments) and JSON keys (the pinned JSON grammar has
+    /// no dotted-key node; the judgment: bare-key index lookup is the
+    /// whole feature) all keep the exact bare extraction.
+    #[test]
+    fn symbol_at_point_c_arrow_and_json_keys_stay_bare() {
+        // "int y = p->x;": x@11.
+        let line = "int y = p->x;";
+        assert_eq!(
+            satp(LanguageId::C, line, 11),
+            Some(("x".into(), "x".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Cpp, line, 11),
+            Some(("x".into(), "x".into()))
+        );
+        // Json: a quoted key — the bare key, byte-for-byte (k@3).
+        let js = "  \"k\": 1";
+        assert_eq!(
+            satp(LanguageId::Json, js, 3),
+            Some(("k".into(), "k".into()))
+        );
+    }
+
+    /// 010-rung4-and-paths (item 2, app level): M-. on `p.x` in a C
+    /// buffer lands via the index fall-through with the whole path — the
+    /// project index has no C field symbols (the C query indexes
+    /// functions / structs / macros only), so the lookup degrades to the
+    /// enclosing symbol and jumps there, exactly as M-. does today;
+    /// nothing new is guessed.
+    #[test]
+    fn xref_c_field_access_lands_via_index_fall_through() {
+        let (mut s, _dir) = store_with_index(&[("c/main.c", "struct Point { int x; };\nint use_it(struct Point p) {\n    return p.x;\n}\n")]);
+        s.open_path("c/main.c");
+        // Line 2: "    return p.x;" — `x` at col 13.
+        s.set_point(2, 13, 13);
+        s.xref_find_definitions();
+        // The whole path `p.x` (and the bare `x`) has no indexed
+        // definition — the enclosing-symbol fall-through lands on
+        // `use_it` (line 1).
+        assert!(!s.picker_open(), "no picker: {}", s.message);
+        assert_eq!(s.view_name_display(), "c/main.c");
+        assert_eq!(s.point_line(), 1, "the enclosing function (msg: {})", s.message);
     }
 
     /// 011-06 × 011-02 interplay (pin): a dotted token resolves on its OWN
