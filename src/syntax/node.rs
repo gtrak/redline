@@ -92,7 +92,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
-        | LanguageId::C | LanguageId::Cpp => {}
+        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -235,6 +235,12 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
             (parent_kind == Some("field_expression") && node.is_named())
                 || (parent_kind == Some("qualified_identifier") && node.is_named())
         }
+        // Bash's `command_name` wraps its single `word` child; the word is
+        // a path part so `node_at` on the command name returns the
+        // `command_name`, not the bare word. (The pinned tree-sitter-bash
+        // grammar has no `identifier` kind at all — probed: words are
+        // `word`, commands `command_name`, variables `variable_name`.)
+        LanguageId::Bash => parent_kind == Some("command_name") && node.is_named(),
         _ => false,
     }
 }
@@ -322,6 +328,17 @@ fn is_cpp_identifier_kind(kind: &str) -> bool {
         || matches!(kind, "namespace_identifier" | "qualified_identifier")
 }
 
+/// Bash identifier-ish node kinds (verified against the pinned
+/// tree-sitter-bash `NODE_TYPES`: there is no `identifier` kind —
+/// `command_name` for command names and `variable_name` for variables
+/// are the identifier-ish kinds). Plain `word`s (arguments, function
+/// names) are deliberately NOT identifier-ish — a bare M-. context on
+/// an arbitrary word is noise; function names still contribute to the
+/// scope chain via `function_definition`.
+fn is_bash_identifier_kind(kind: &str) -> bool {
+    matches!(kind, "command_name" | "variable_name")
+}
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -333,6 +350,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Go => is_go_identifier_kind(kind),
         LanguageId::C => is_c_identifier_kind(kind),
         LanguageId::Cpp => is_cpp_identifier_kind(kind),
+        LanguageId::Bash => is_bash_identifier_kind(kind),
         _ => false,
     }
 }
@@ -394,6 +412,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Go => go_scope_path(leaf, source),
         LanguageId::C => c_scope_path(leaf, source),
         LanguageId::Cpp => cpp_scope_path(leaf, source),
+        LanguageId::Bash => bash_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -532,6 +551,27 @@ fn cpp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
             _ => None,
         };
         if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Bash enclosing-scope walk: `function_definition` (the `name`
+/// field carries the function name — a `word` node). Bash has no other
+/// meaningful scoping construct for navigation (no blocks/loops as
+/// scopes), so a function body is the only non-empty scope; top-level
+/// commands yield `[]`.
+fn bash_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "function_definition"
+            && let Some(name_node) = node.child_by_field_name("name")
             && let Ok(text) = name_node.utf8_text(source)
         {
             names.push(text.to_string());
@@ -699,11 +739,10 @@ mod tests {
     /// yet adopted (C landed in this issue; the rest follow).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 6] = [
+        let cases: [(LanguageId, &str, &str); 5] = [
             (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
             (LanguageId::Json, "{\"key\": 1}", "key"),
             (LanguageId::Yaml, "key: value\n", "key"),
-            (LanguageId::Bash, "echo hi\n", "hi"),
             (LanguageId::Markdown, "# Heading\n", "Heading"),
             (LanguageId::Plain, "abc", "abc"),
         ];
@@ -1232,6 +1271,85 @@ mod tests {
             assert_eq!(info.text, "A");
         }
         let _ = scope_path_at(LanguageId::Cpp, src, pos);
+    }
+
+    // ── Bash (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: `node_at` on a command name returns the
+    /// `command_name`, not its bare `word` child (the word is a path part
+    /// — the pinned grammar has no `identifier` kind; words are `word`).
+    #[test]
+    fn bash_command_name_resolves_as_command_name() {
+        let src = "cmd --flag other\n";
+        let at = src.find("cmd").expect("fixture");
+        let info = node_at(LanguageId::Bash, src, at).expect("node at `cmd`");
+        assert_eq!(info.kind, "command_name");
+        assert_eq!(info.text, "cmd");
+        assert_eq!(info.start_byte, at);
+        assert_eq!(info.end_byte, at + 3);
+        // A plain word argument is NOT identifier-ish (deliberate — see
+        // `is_bash_identifier_kind`).
+        assert!(node_at(LanguageId::Bash, src, src.find("other").expect("fixture")).is_none());
+    }
+
+    #[test]
+    fn bash_variable_name_resolves() {
+        let src = "echo \"$MY_VAR\"\n";
+        let at = src.find("MY_VAR").expect("fixture");
+        let info = node_at(LanguageId::Bash, src, at).expect("node at `MY_VAR`");
+        assert_eq!(info.kind, "variable_name");
+        assert_eq!(info.text, "MY_VAR");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn bash_scope_chain_function_body() {
+        let src = "my_func() {\n    echo hi\n}\ncmd --flag other\n";
+        let at = src.find("echo").expect("fixture");
+        assert_eq!(scope_path_at(LanguageId::Bash, src, at), vec![String::from("my_func")]);
+        // The function's OWN name sees itself as the enclosing item (the
+        // name `word` is not identifier-ish, so `node_at` is None there —
+        // the split surface, `scope_path_at`, still answers).
+        let name_at = src.find("my_func").expect("fixture");
+        assert!(node_at(LanguageId::Bash, src, name_at).is_none());
+        assert_eq!(
+            scope_path_at(LanguageId::Bash, src, name_at),
+            vec![String::from("my_func")]
+        );
+        // Top-level command: no scope.
+        assert!(scope_path_at(LanguageId::Bash, src, src.find("other").expect("fixture")).is_empty());
+    }
+
+    #[test]
+    fn bash_boundary_offsets_do_not_panic() {
+        // The `export` keyword token is anonymous (not identifier-ish →
+        // no node) at byte 0; top-level → no scope.
+        let src = "export X=1\n";
+        assert!(node_at(LanguageId::Bash, src, 0).is_none());
+        assert!(scope_path_at(LanguageId::Bash, src, 0).is_empty());
+        // An identifier-ish node at byte 0 does resolve.
+        let src2 = "MY_VAR=1\n";
+        let info = node_at(LanguageId::Bash, src2, 0).expect("variable at byte 0");
+        assert_eq!(info.kind, "variable_name");
+        assert_eq!(info.text, "MY_VAR");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Bash, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Bash, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Bash, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Bash, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn bash_broken_source_does_not_panic() {
+        let src = "my_func() {";
+        let pos = src.find("my_func").expect("fixture");
+        // On a broken parse the name may or may not stay attached to the
+        // `function_definition` — either answer is fine, no panic.
+        if let Some(info) = node_at(LanguageId::Bash, src, pos) {
+            assert_eq!(info.text, "my_func");
+        }
+        let _ = scope_path_at(LanguageId::Bash, src, pos);
     }
 
     #[test]
