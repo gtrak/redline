@@ -2083,7 +2083,7 @@ impl AppStore {
     /// note lands in the minibuffer.
     pub fn split_window_vertical(&mut self) {
         self.minibuffer_message(
-            "single pane: vertical splits are not available yet",
+            "single pane by design: redline runs as a herdr popup, one pane",
         );
     }
 
