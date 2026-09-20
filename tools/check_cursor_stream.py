@@ -1059,8 +1059,10 @@ def burst_release_checks():
     coalesce (last-motion-wins per render tick), so this leg asserts the
     PTY-observable consequences:
       * A BURST of 30 C-n in ONE pty write (the gamestream queue shape)
-        advances the point a BOUNDED step (1-3 lines, the coalesced drain
-        passes), NOT 30 lines — pre-fix the cursor lands ~29 lines down.
+        advances the point a BOUNDED step (2-5 lines — the coalesced drain
+        passes; the discriminating property is "bounded, not ~30", the
+        exact pass count is unit-pinned), NOT 30 lines — pre-fix the
+        cursor lands ~29 lines down.
       * RELEASE-DRAIN: after the burst settles, two quiet windows show NO
         further motion (nothing queued replays after the release).
       * BYTE-FOR-BYTE: a paced single C-n still steps exactly one line
@@ -1110,9 +1112,17 @@ def burst_release_checks():
     os.write(s.master, b"\x0e" * 30)   # C-n = 0x0E
     s._read(1.2, quiet=0.2)
     r1, l1 = cursor_row(), point_line()
-    rec("burst of 30 C-n coalesces: point advanced a bounded step (1-3 lines)",
-        r1 in (2, 3, 4) and l1 in (2, 3, 4),
-        f"cup_row={r1} line={l1} (pre-fix: ~29 lines down, L30)")
+    # Discriminating property: BOUNDED, not ~30. Pre-fix every queued
+    # repeat was applied individually, so the point lands ~29 lines down
+    # (L30, CUP row 22 — far outside the range below). The exact apply
+    # count per drain pass depends on how many passes the burst splits
+    # into (load-sensitive) and is unit-pinned instead (the event_loop
+    # motion tests + the root.rs burst twin), so this leg asserts the
+    # WIDE bounded range, not the exact pass count (review P2: coupling
+    # a PTY leg to the exact count is a load-flake risk).
+    rec("burst of 30 C-n coalesces: point advanced a BOUNDED step (not ~30 lines)",
+        2 <= r1 <= 5 and l1 is not None and 2 <= l1 <= 5,
+        f"cup_row={r1} line={l1} (want 2..=5; pre-fix: ~29 lines down, L30/row 22)")
 
     # ── RELEASE-DRAIN: no replay after the burst settles ────────────────
     s._read(1.0, quiet=0.3)
