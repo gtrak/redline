@@ -588,9 +588,18 @@ impl JumpStack {
         // Truncate forward history (keep up to and including the current
         // position, which is the origin of this jump).
         self.history.truncate(self.pos + 1);
-        // If the stack is empty, the origin is the first visited position.
+        // Plain point motion (C-n/C-p, arrows, goto-line, isearch, …) never
+        // records a jump, so unless the cursor is still where the previous
+        // landing put it, the current-position slot (`history[pos]`) is
+        // STALE — it holds the previous jump's destination, not where the
+        // cursor actually is. Sync the slot to the captured origin so `M-,`
+        // returns to the point the jump truly started from (same-file and
+        // cross-file alike). A no-op when the cursor has not moved since
+        // the last recorded jump.
         if self.history.is_empty() {
             self.history.push(origin.clone());
+        } else {
+            self.history[self.pos] = origin.clone();
         }
         self.history.push(destination.clone());
         if self.history.len() > Self::MAX {
@@ -15109,6 +15118,173 @@ mod tests {
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 2, "jumped to the same-file impl method");
         assert_eq!(s.jump_stack.len(), 2, "origin + destination recorded");
+    }
+
+    /// Same-file M-. jump-back accuracy (user report: "popping back can go
+    /// to the wrong place, not where my cursor was"). The jump stack's
+    /// "current position" slot goes STALE when the point moves via plain
+    /// motion (no jump recorded) between two M-. landings; the jump's
+    /// origin must be the cursor's ACTUAL position at the second M-., not
+    /// the previous jump's destination. M-, must land exactly at that
+    /// (line, col).
+    #[test]
+    fn xref_same_file_mdot_back_lands_at_actual_cursor_not_stale_slot() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "fn a() {}\nfn b() {\n    a();\n}\nfn c() {\n    b();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // 1. Cursor on the `a()` call (line 2, col 4). M-. -> line 0 (fn a).
+        s.set_point(2, 4, 4);
+        s.xref_find_definitions();
+        assert_eq!(s.point_line(), 0, "landed on fn a");
+        // 2. Plain motion (no jump) to the `b()` call (line 5, col 4).
+        s.set_point(5, 4, 4);
+        // 3. M-. from line 5 -> line 1 (fn b).
+        s.xref_find_definitions();
+        assert_eq!(s.point_line(), 1, "landed on fn b");
+        // 4. M-, must land exactly at the cursor (line 5, col 4) — NOT at
+        //    the previous jump destination (line 0, the fn a def).
+        s.jump_back();
+        assert_eq!(s.point_line(), 5, "M-, lands at the actual cursor line");
+        assert_eq!(s.point_col(), 4, "M-, lands at the actual cursor col");
+    }
+
+    /// Audit pin (issue: same-file jump-back): the OTHER jump entry
+    /// points share `record_jump` / `JumpStack` — the stale-slot bug
+    /// lived in the shared stack, so each entry point's M-, is pinned
+    /// here to keep the audit durable.
+    #[test]
+    fn probe_same_file_origin_scenarios() {
+        // S1: same-file jump through the PICKER (two same-file defs).
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn alpha() {}\nfn beta() {}\nfn alpha() {}\nfn caller() {\n    alpha();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(4, 8, 8); // "    alpha();" — inside `alpha`
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "S1: picker opens");
+        s.run_selected();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (4, 8), "S1: picker M-, restores origin");
+
+        // S2: origin parked at end-of-line (col == line length).
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 12, 12); // "    alpha();" line_len 12
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "S2: unique def");
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (2, 12), "S2: end-of-line origin restored");
+
+        // S3: same-file jump via IMENU (M-i) then M-,
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn beta() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 8, 8);
+        s.key_event(key("M-i"));
+        assert!(s.picker_open(), "S3: imenu picker");
+        // Select `beta` (name "beta:2").
+        let idx = s
+            .picker
+            .as_ref()
+            .and_then(|p| p.filtered.iter().position(|(c, _)| c.name.starts_with("beta")))
+            .expect("beta candidate");
+        s.picker.as_mut().unwrap().selected = idx;
+        s.run_selected();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (3, 8), "S3: imenu M-, restores origin");
+
+        // S4: same-file jump via enclosing-symbol fallback, then M-,.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn alpha() {}\nfn wrapper() {\n    // note\n    alpha();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 0, 0); // comment line: no symbol at point → enclosing = wrapper
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "S4: direct jump");
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (2, 0), "S4: enclosing-fallback M-, restores origin");
+
+        // S5: chained same-file jumps A→B→C, two M-, must land on A.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn aaa() {}\nfn bbb() {\n    aaa();\n}\nfn ccc() {\n    bbb();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(5, 8, 8); // ccc body: bbb call
+        s.xref_find_definitions(); // ccc body → bbb
+        s.xref_find_definitions(); // bbb body → aaa
+        s.jump_back();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (5, 8), "S5: chained same-file jumps land on A");
+
+        // S6: same-file jump, then C-i forward, then M-,.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 8, 8);
+        s.xref_find_definitions();
+        s.jump_forward();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (2, 8), "S6: forward+back round-trip");
+    }
+
+    /// Audit pin (issue: same-file jump-back): the 010-01/010-03
+    /// pre-step (self-receiver / local-binding) M-. arms — same origin
+    /// capture, shared stack.
+    #[test]
+    fn probe_same_file_prestep_origin_scenarios() {
+        // P1: self.method pre-step (010-01), same-file impl method; jump-back.
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub n: i32 }\nimpl Foo {\n    pub fn bump(&mut self) { self.n += 1; }\n    pub fn run(&mut self) { self.bump(); }\n}\nfn main() {\n    let mut f = Foo { n: 0 };\n    f.run();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    pub fn run(&mut self) { self.bump(); }" — inside `bump`.
+        s.set_point(3, 38, 38);
+        s.xref_find_definitions();
+        let landed = s.point_line();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (3, 38), "P1: self.method M-, restores origin (landed {landed})");
+
+        // P2: local-binding pre-step (010-03): `let x: Foo` then `x.bump()`.
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo { pub n: i32 }\nimpl Foo {\n    pub fn bump(&mut self) { self.n += 1; }\n}\nfn main() {\n    let x: Foo = Foo { n: 0 };\n    x.bump();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 6: "    x.bump();" — inside `bump` (col 7..11).
+        s.set_point(6, 9, 9);
+        s.xref_find_definitions();
+        let landed = s.point_line();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (6, 9), "P2: local-binding M-, restores origin (landed {landed})");
+
+        // P3: struct + impl, `Foo::new()` call site -> same-file impl method.
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Foo {}\nimpl Foo {\n    pub fn new() -> Self { Foo {} }\n}\nfn use_it() {\n    let f = Foo::new();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 5: "    let f = Foo::new();" — inside `new` (col 17..20).
+        s.set_point(5, 18, 18);
+        s.xref_find_definitions();
+        let landed = s.point_line();
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (5, 18), "P3: Foo::new M-, restores origin (landed {landed})");
     }
 
     #[test]
