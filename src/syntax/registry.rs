@@ -442,9 +442,9 @@ mod tests {
 
     /// ABI-pinning guard (001/007 lesson): every registry language's
     /// grammar must `set_language` against the SINGLE pinned
-    /// tree-sitter 0.24.7 runtime. A grammar built against a newer ABI
-    /// (e.g. the known-bad stragglers `tree-sitter-md` 0.5.1 /
-    /// `tree-sitter-rust` 0.24.0, grammar ABI 15 > runtime max 14) would
+    /// tree-sitter 0.25.10 runtime (ABI window 13..=15). A grammar
+    /// built outside that window (e.g. the known-bad stragglers
+    /// `tree-sitter-md` 0.5.2+ wanting the 0.26 window) would
     /// otherwise silently fall back to plain text at render time.
     #[test]
     fn all_grammars_set_language_succeeds() {
