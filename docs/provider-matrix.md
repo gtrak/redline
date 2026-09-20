@@ -50,9 +50,9 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
 
 | Capability | Rust | JS/TS | Python | Go | C | C++ | Markdown |
 |---|---|---|---|---|---|---|---|
-| path-shaped | works (live) | **works (live)** (011-06) | **works (live)** (011-06; 011-08 alias rewrite unit-pinned) | unit-covered only (incl. 011-08 alias rewrite) | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
-| bare via import | works (live) | works (live) | works (live) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
-| in-library follow-up | works (live) | works (live) | works (live) | unit-covered only | unit-covered only (011-07) | unit-covered only (011-07) | unit-covered only (011-07) |
+| path-shaped | works (live) | **works (live, JS leg only)** (011-06; TS unit-covered — no live TS leg) | **works (live)** (011-06; 011-08 alias rewrite unit-pinned) | unit-covered only (incl. 011-08 alias rewrite) | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
+| bare via import | works (live) | works (live, JS leg only; TS unit-covered) | works (live) | unit-covered only | **degrades to the bail** (unit) | **degrades to the bail** (unit) | **degrades to the bail** (unit) |
+| in-library follow-up | unit-covered only (demoted L4) | works (live, JS leg only; TS unit-covered) | works (live) | unit-covered only | unit-covered only (011-07) | unit-covered only (011-07) | unit-covered only (011-07) |
 | blame, project file | works (live, U-F7) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) | works (git-based, language-agnostic) |
 | blame, external landing | **degrades to the bail** (`no git history for external sources`) — same for every language, one code path (`store.rs::open_blame` external branch), live-pinned in the python leg | | | | | | |
 
@@ -84,14 +84,21 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
   cargo registry source. Live in the gate battery.
 - bare via import: `drive_external_use` L1 — `use serde::Deserialize;`
   → the registry `pub trait Deserialize`.
-- in-library follow-up: `drive_external_crate` L4 — an in-crate M-. on
-  `RopeBuilder` jumps cross-file with the crate-relative message.
+- in-library follow-up: `drive_external_crate` L4 — **demoted to a unit**:
+  `unit_flow_ext_crate_in_crate_mdot` (src/app/flow_tests.rs:2830) pins
+  the in-crate M-. on `RopeBuilder` jumping cross-file with the
+  crate-relative message; the drive now runs L1 only (the registry
+  landing).
 - Pre-006-03/011 this column existed alone; 011-01 added the language
   dispatch so a Rust miss still probes cargo exactly once and never the
   other toolchains.
 
 ### JS/TS (verified live: node 24 + npm present; the drive builds a
-hand-rolled `node_modules/fakelib` — no install runs)
+hand-rolled `node_modules/fakelib` — no install runs). **TS/Tsx tier:**
+the live legs exercise JavaScript ONLY — every TypeScript/Tsx cell
+rests on the shared JS machinery's unit pins (the
+`LanguageId::TypeScript | Tsx` branches in `node.rs`/`store.rs`); no
+live TS leg exists.
 
 - path-shaped: **works live from 011-06 (drive_issue_011_06 L-J1)** —
   `import * as fakelib` + `fakelib.apply(5)` + M-. on the use now lands
@@ -211,7 +218,9 @@ deliberately invented none)
   cargo, **for symbols outside the project index: in-project definitions
   still jump through the project index** (the project walk has no
   extension filter). Same code path and message shape as the live-pinned
-  python/js misses (011-05 L-P2 / L-J1a); the language parameter is the
+  python/js miss (011-02 L2 — the live dispatch pin on the miss path;
+  011-05 L-P2 / L-J1a now pin the 011-06 LANDINGS); the language
+  parameter is the
   only difference, so no live leg was added (the units are sufficient —
   see the "Drives" note below).
 - **011-07 gave these languages their 011-04 walk sets**, derived from
@@ -302,11 +311,11 @@ per-repo flock)
 | Drive | Legs | Toolchain |
 |---|---|---|
 | `drive_issue_011_01.py` | python buffer attempts exactly ONE provider; cargo never probed | python3 |
-| `drive_issue_011_02.py` | bare `dumps` lands; prelude `print` bails byte-for-byte | python3 |
+| `drive_issue_011_02.py` | bare `dumps` lands; prelude `print` bails byte-for-byte (L2 = the live dispatch pin on the miss path) | python3 |
 | `drive_issue_011_04.py` | python stdlib tree IS indexed; in-crate M-. answers | python3 |
-| `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped LANDING pin (011-06: json/__init__.py:185, was the bail) + dispatch pin · js: L-J1a ns.member LANDING pin (011-06: index.js:3, was the bail) + dispatch pin, L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
+| `drive_issue_011_05.py` | python: L-P1 bare-import landing, L-P3 external blame bail, L-P2 path-shaped LANDING pin (011-06: json/__init__.py:185, was the bail) · js: L-J1a ns.member LANDING pin (011-06: index.js:3, was the bail), L-J1b namespace-entry landing, L-J3 in-crate follow-up, L-J2 bare named-import landing · go: LOUD skip when absent | python3, node+npm (go: absent → skip) |
 | `drive_issue_011_06.py` | the two CHANGED path-shaped cells, live: L-P1 dotted `json.dumps` lands in the stdlib json source · L-J1 dotted `fakelib.apply` lands in the package entry file · loud per-runtime skip when absent (no go leg — unit-covered) | python3, node+npm |
-| `drive_external_crate.py` / `drive_external_use.py` | the Rust column (registry landing, in-crate jump, bare `use` landing) | cargo |
+| `drive_external_crate.py` / `drive_external_use.py` | the Rust column live: registry landing (L1) + bare `use` landing (L1); the in-crate jump (ex-L4) is now unit-pinned (`unit_flow_ext_crate_in_crate_mdot`, flow_tests.rs:2830), not a drive leg | cargo |
 
 No 011-07 drive: a live C/C++/Markdown landing is IMPOSSIBLE in this
 app (no provider can resolve a symbol into those files — the landing
