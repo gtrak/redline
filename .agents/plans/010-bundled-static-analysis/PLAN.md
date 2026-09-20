@@ -100,6 +100,17 @@ rung-3-style guesses feel dishonest in practice.
 | 2 | 03 local binding types (rung 3) | 02 |
 | ? | 04 in-process RA (only if user picks Shape B) | — |
 ## Outcome record (live)
+- **New languages** PASS (`72f2f06` + merge fixes, merged `3ddb824`):
+  Java, C#, Ruby, Scheme landed (Clojure evidenced-N/A — no published
+  grammar usable against the pinned 0.24.7 runtime; full record in
+  coverage Gaps item 8). Registry at 18 languages; ABI guard
+  (all_grammars_set_language_succeeds over ALL) + single runtime in
+  the lock; C# highlights vendored verbatim from the crate (checksum
+  + byte-comparison verified). Walk sets in registry lockstep (round-
+  trip test extended) + per-language index e2e tests (011-04/07
+  pattern). Follow-up queued: dotted_path_container arms for the new
+  languages (whole-path M-.) + the coverage/matrix doc sweep.
+
 - **Rung 4** PASS (`e3270e9` + review restore, merged `0126adc`):
   find-implementations (M-x `find-implementations`; trait-keyed map in
   the same index pass; Impls picker reusing the Xref jump seam, read-only
