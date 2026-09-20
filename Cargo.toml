@@ -70,7 +70,7 @@ tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar; the original
 # pinned 0.25.10 runtime (the ABI-pinning rule, 001/007 lesson). The
 # c-sharp 0.23.5 (0.25-gen) release exists — a follow-up lane, do not bump.
 tree-sitter-java = "=0.23.5"
-tree-sitter-c-sharp = "=0.23.1"
+tree-sitter-c-sharp = "=0.23.5"    # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-ruby = "=0.23.1"
 tree-sitter-scheme = "=0.24.7"
 
