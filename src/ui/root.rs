@@ -345,7 +345,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // at most once per drain pass and nothing queued after a release
     // replays. `use_ref` (not `use_state`): mutating the coalescer must not
     // itself be a re-render trigger; the tick bumps below do the waking.
-    let mut coalesce = hooks.use_ref(|| InputCoalescer::new());
+    let mut coalesce = hooks.use_ref(InputCoalescer::new);
 
     // Clone for the event closure (it must be Send); keep `store` for the
     // render snapshot below.
@@ -555,11 +555,14 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Drain-and-coalesce (input-latency fix): flush the pending queued
         // motion key on the render tick — BEFORE the snapshot — so a burst
         // of held-key repeats (C-n, arrows, ...) applies at most once per
-        // drain pass (last-wins) and never replays after release. No tick
+        // drain pass (last-wins) and never replays after release. The store
+        // lock is taken only when a motion is actually pending. No tick
         // bump here: this frame's snapshot already reflects the flush.
-        coalesce.write().flush(&mut |k| {
-            store.lock().unwrap().key_event(k);
-        });
+        if coalesce.read().pending().is_some() {
+            coalesce.write().flush(&mut |k| {
+                store.lock().unwrap().key_event(k);
+            });
+        }
         let mut s = store.lock().unwrap();
         let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
         let (search_rows, search_top_row, search_total_rows, search_selected_row) =
