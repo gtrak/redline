@@ -8976,7 +8976,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let source_node = stmt.child_by_field_name("source")?;
         let spec = Self::js_ts_specifier(source_node, source)?;
         // `import_clause` is NOT a grammar field (verified against the
-        // pinned tree-sitter-javascript 0.23.1 sexp) — find it by kind.
+        // pinned tree-sitter-javascript 0.25.0 sexp, re-pinned by the
+        // grammar-bumps suite from the probed 0.23.1) — find it by kind.
         // Its absence is the side-effect form (`import "pkg"`) — binds
         // nothing, never a hint.
         let clause = (0..stmt.child_count())
@@ -18111,7 +18112,8 @@ mod tests {
     /// definition query captures both ATX headings (`# Alpha` → symbol
     /// `Alpha`) and SETEXT headings (`Delta\n====` → symbol `Delta` — the
     /// setext branch's node shape is `setext_heading → paragraph → inline`,
-    /// verified against the pinned tree-sitter-md 0.3.2 grammar). So the
+    /// verified against the pinned tree-sitter-md 0.5.1 grammar, re-pinned
+    /// by the grammar-bumps suite). So the
     /// M-. targets in a markdown dependency are all headings: no
     /// paragraphs, no links. All three registry map keys (`md`,
     /// `markdown`, `mdx`) are walked.
@@ -18336,7 +18338,7 @@ mod tests {
     /// 011-07 follow-up: the setext branch, pinned directly against the
     /// extractor (the e2e test above pins the same truth through the
     /// full walk -> build_index path; this is the minimal unit twin).
-    /// The pinned tree-sitter-md 0.3.2 shape is
+    /// The pinned tree-sitter-md 0.5.1 shape is
     /// `setext_heading -> paragraph -> inline`, so `Delta\n====` yields
     /// exactly one Heading symbol named `Delta` (atx and setext both
     /// extract; paragraphs and links do not).

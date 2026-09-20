@@ -30,7 +30,7 @@ ropey = "1.6.1"
 # `tree-sitter` (runtime) requirements are DEV-dependencies — they do not
 # constrain which runtime THIS build links. The normal dependency is
 # `tree-sitter-language ^0.1` (the `LanguageFn` ABI bridge), and every
-# pinned grammar below is ABI 13/14, inside the 0.25.10 ABI window
+# pinned grammar below is ABI 13–15, inside the 0.25.10 ABI window
 # (13..=15) — verified by the `all_grammars_set_language_succeeds` guard.
 # One runtime in the lock (the 001/007 ABI-pinning rule); the full
 # compatibility matrix (per-crate evidence, chosen version rationale,
@@ -43,15 +43,17 @@ tree-sitter-highlight = "=0.25.10"  # requires tree-sitter ^0.25.10 (1:1 trackin
 # lock as a transitive dep of tree-sitter; named here so symbol queries
 # (issue 05) can iterate captures. Exact pin = no version change / no refetch.
 streaming-iterator = "=0.1.9"
-# ── grammar pins: UNCHANGED by the runtime bump (the compatibility matrix,
+# ── grammar pins (the compatibility matrix + verdict table:
 # docs/tree-sitter-runtime-matrix.md) ──────────────────────────────────────
-# Every pin below already resolves against 0.25.10 (its `tree-sitter`
-# requirement is a dev-dependency — no runtime constraint) and its grammar
-# ABI (13/14) is inside the 0.25.10 window (13..=15) — behavior-neutral by
-# construction: the grammar binaries are byte-for-byte the 0.24.7 ones.
-# DO NOT casually bump them: the 0.25-generation releases (e.g.
-# javascript 0.25.0, c-sharp 0.23.5) would change the grammar binary and
-# therefore the parses — a separate per-grammar drift decision.
+# The nine 0.25-generation bumps landed in the grammar-bumps lane (the
+# per-bump verdict table in docs/tree-sitter-runtime-matrix.md); the rest
+# are the newest releases in the index. Every pin resolves against 0.25.10
+# (its `tree-sitter` requirement is a dev-dependency — no runtime
+# constraint) and its grammar ABI (13–15) is inside the 0.25.10 window
+# (13..=15) — verified by the `all_grammars_set_language_succeeds` guard.
+# DO NOT casually bump them: a grammar bump changes the grammar binary and
+# therefore the parses — a per-grammar drift decision (the nine already
+# taken each carried a full workspace evidence run; see the verdict table).
 tree-sitter-rust = "=0.24.2"      # 0.25-gen bump (grammar-bumps lane): ABI in-window, full workspace evidence clean (docs/tree-sitter-runtime-matrix.md verdict table); do NOT bump further
 tree-sitter-javascript = "=0.25.0"  # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-typescript = "0.23.2"  # provides both TS and TSX grammars
@@ -65,10 +67,10 @@ tree-sitter-yaml = "=0.7.2"     # 0.25-gen bump (grammar-bumps lane): full works
 tree-sitter-md = "=0.5.1"        # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further (0.5.2+ want ^0.26)
 tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar; the original
                                    # `tree-sitter-toml` is stuck at ^0.20
-# New-languages lane (Java / C# / Ruby / Scheme): exact `=` pins on
-# releases whose parser ABI is 14 — verified `set_language` against the
-# pinned 0.25.10 runtime (the ABI-pinning rule, 001/007 lesson). The
-# c-sharp 0.23.5 (0.25-gen) release exists — a follow-up lane, do not bump.
+# New-languages lane (Java / C# / Ruby / Scheme): exact `=` pins — verified
+# `set_language` against the pinned 0.25.10 runtime (the ABI-pinning rule,
+# 001/007 lesson). The c-sharp 0.23.5 (0.25-gen) release is taken —
+# grammar-bumps lane; verdict table in docs/tree-sitter-runtime-matrix.md.
 tree-sitter-java = "=0.23.5"
 tree-sitter-c-sharp = "=0.23.5"    # 0.25-gen bump (grammar-bumps lane): full workspace evidence run on the new pin before keep (verdict table in docs/tree-sitter-runtime-matrix.md); do NOT bump further
 tree-sitter-ruby = "=0.23.1"

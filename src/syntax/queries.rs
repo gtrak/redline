@@ -183,7 +183,8 @@ const RUST_QUERY: &str = r#"
 
 // 010-01 (plan 010 Shape A, rung 1): the RUST-ONLY association + struct
 // field tables. Node shapes verified against the pinned tree-sitter-rust
-// 0.23.3 NODE_TYPES (throwaway S-expr probe, issue 010-01): an `impl_item`
+// 0.24.2 NODE_TYPES (throwaway S-expr probe, issue 010-01; re-pinned by
+// the grammar-bumps suite from the probed 0.23.3): an `impl_item`
 // names its self type in the `type` field and its implemented trait in a
 // SEPARATE `trait` field (a field match can't be made optional in a query,
 // so the trait impl and the inherent impl are two patterns — a trait impl
@@ -202,7 +203,7 @@ const RUST_TABLES_QUERY: &str = r#"
 (struct_item name: (type_identifier) @struct_name body: (field_declaration_list (field_declaration name: (field_identifier) @struct_field)))
 ;  010-03 (plan 010 Shape A, rung 3): local binding types — written-down
 ;  types ONLY (never inferred). Node shapes verified against the pinned
-;  tree-sitter-rust 0.23.3 NODE_TYPES (throwaway S-expr probe, issue
+;  tree-sitter-rust 0.24.2 NODE_TYPES (throwaway S-expr probe, issue
 ;  010-03): a `let_declaration` names its binding in the `pattern` field
 ;  (NOT `name`), its annotation in the `type` field, and a struct-literal
 ;  RHS is `value: (struct_expression name: (type_identifier) …)` — the
@@ -310,10 +311,10 @@ const JAVA_QUERY: &str = r#"
 "#;
 
 // New-languages lane: C#. Node shapes verified against the pinned
-// tree-sitter-c-sharp 0.23.1 NODE_TYPES + S-expr probe. The namespace
-// name may be a `qualified_name` (`Foo.Bar`), a `generic_name`, or a
-// plain `identifier` (probe-verified field types), so it is captured
-// with `(_)`. Enum members, local variables, and events are
+// tree-sitter-c-sharp 0.23.5 NODE_TYPES + S-expr probe (re-pinned by the
+// grammar-bumps suite from the probed 0.23.1). The namespace name may be
+// a `qualified_name` (`Foo.Bar`), a `generic_name`, or a plain
+// `identifier` (probe-verified field types), so it is captured with `(_)`. Enum members, local variables, and events are
 // deliberately out of the outline (honest minimal classes/methods/
 // properties set). `this.X` parse errors in this grammar version
 // (probe-verified) — do not build fixtures around it.

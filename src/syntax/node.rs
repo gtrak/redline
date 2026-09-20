@@ -284,7 +284,8 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
         // `::` path.
         LanguageId::Toml => parent_kind == Some("dotted_key") && node.is_named(),
         // C# dotted paths (probe-verified against the pinned
-        // tree-sitter-c-sharp 0.23.1): `o.P` / `a.b.c` nest
+        // tree-sitter-c-sharp 0.23.5, re-pinned by the grammar-bumps
+        // suite): `o.P` / `a.b.c` nest
         // `member_access_expression`s (named `expression` + `name`
         // children), and `N.Inner` / `A.B` nest `qualified_name`s
         // (named `qualifier` + `name` children; the qualifier may itself
@@ -480,8 +481,9 @@ fn is_java_identifier_kind(kind: &str) -> bool {
 }
 
 /// C# identifier-ish node kinds (verified against the pinned
-/// tree-sitter-c-sharp 0.23.1 `NODE_TYPES`): `identifier` (this grammar
-/// has no `type_identifier` — type names are plain `identifier`s),
+/// tree-sitter-c-sharp 0.23.5 `NODE_TYPES` — re-pinned by the
+/// grammar-bumps suite): `identifier` (this grammar has no
+/// `type_identifier` — type names are plain `identifier`s),
 /// `predefined_type` (`int`, `string`, … — C's `primitive_type` analog),
 /// `member_access_expression` (the whole `a.b.c` chain), and
 /// `qualified_name` (the whole `N.Inner` / `A.B` name path).
@@ -537,7 +539,8 @@ fn is_clojure_identifier_kind(kind: &str) -> bool {
 }
 
 // Markdown has NO identifier-ish node kind (probed against the pinned
-// tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
+// tree-sitter-md 0.5.1 block grammar (re-pinned by the grammar-bumps
+// suite): the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
 // alike — treating it identifier-ish would make `node_at` resolve on
 // arbitrary prose). There is also no path-shaped construct. So
@@ -2073,7 +2076,7 @@ mod tests {
     // ── C# (new-languages lane) ──────────────────────────────────────
     /// `o.P` / `a.b.c` come back whole as one `member_access_expression`
     /// (the dotted-path rule, probe-verified against the pinned
-    /// tree-sitter-c-sharp 0.23.1).
+    /// tree-sitter-c-sharp 0.23.5, re-pinned by the grammar-bumps suite).
     #[test]
     fn csharp_member_path_comes_back_whole() {
         let src = "class A { void F() { int v = o.P; } }\n";
