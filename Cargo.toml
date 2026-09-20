@@ -103,6 +103,7 @@ rayon = "1.12"
 # registry source dir, cargo fetch on demand). Path dep: the crate lives in
 # this workspace and is reviewed separately.
 redline-resolve = { path = "crates/redline-resolve" }
+tree-sitter-clojure = "=0.1.0"
 
 [dev-dependencies]
 tempfile = "3.27"

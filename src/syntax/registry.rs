@@ -31,6 +31,7 @@ pub enum LanguageId {
     CSharp,
     Ruby,
     Scheme,
+    Clojure,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -57,6 +58,7 @@ impl LanguageId {
             Self::CSharp => "csharp",
             Self::Ruby => "ruby",
             Self::Scheme => "scheme",
+            Self::Clojure => "clojure",
             Self::Plain => "plain",
         }
     }
@@ -80,6 +82,7 @@ impl LanguageId {
         Self::CSharp,
         Self::Ruby,
         Self::Scheme,
+        Self::Clojure,
     ];
 }
 
@@ -142,6 +145,10 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("ss", LanguageId::Scheme);
     m.insert("sls", LanguageId::Scheme);
     m.insert("sld", LanguageId::Scheme);
+    // Clojure (the runtime-bump lane — the first 0.25-generation grammar)
+    m.insert("clj", LanguageId::Clojure);
+    m.insert("cljs", LanguageId::Clojure);
+    m.insert("cljc", LanguageId::Clojure);
     m
 }
 
@@ -326,6 +333,18 @@ impl GrammarRegistry {
                     "",
                     "",
                 ),
+                LanguageId::Clojure => Self::build_config(
+                    Language::from(tree_sitter_clojure::LANGUAGE),
+                    "clojure",
+                    // The pinned crate ships `grammar-src/queries/
+                    // highlights.scm` but exports no highlights constant,
+                    // so the query is vendored verbatim (sha256-pinned at
+                    // copy time) and `include_str!`ed from `queries.rs` —
+                    // the same pattern as C#.
+                    crate::syntax::queries::CLOJURE_HIGHLIGHTS,
+                    "",
+                    "",
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -389,6 +408,7 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
         LanguageId::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
         LanguageId::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
+        LanguageId::Clojure => crate::syntax::queries::CLOJURE_HIGHLIGHTS,
         LanguageId::Plain => return None,
     })
 }
@@ -398,7 +418,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ext_map_covers_all_18_languages() {
+    fn ext_map_covers_all_19_languages() {
         let reg = GrammarRegistry::build();
         assert_eq!(reg.language_for("foo.rs"), LanguageId::Rust);
         assert_eq!(reg.language_for("foo.ts"), LanguageId::TypeScript);
@@ -418,6 +438,9 @@ mod tests {
         assert_eq!(reg.language_for("foo.rb"), LanguageId::Ruby);
         assert_eq!(reg.language_for("foo.scm"), LanguageId::Scheme);
         assert_eq!(reg.language_for("foo.sld"), LanguageId::Scheme);
+        assert_eq!(reg.language_for("foo.clj"), LanguageId::Clojure);
+        assert_eq!(reg.language_for("foo.cljs"), LanguageId::Clojure);
+        assert_eq!(reg.language_for("foo.cljc"), LanguageId::Clojure);
     }
 
     #[test]
