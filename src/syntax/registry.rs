@@ -27,6 +27,7 @@ pub enum LanguageId {
     Yaml,
     Bash,
     Markdown,
+    Java,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -49,6 +50,7 @@ impl LanguageId {
             Self::Yaml => "yaml",
             Self::Bash => "bash",
             Self::Markdown => "markdown",
+            Self::Java => "java",
             Self::Plain => "plain",
         }
     }
@@ -68,6 +70,7 @@ impl LanguageId {
         Self::Yaml,
         Self::Bash,
         Self::Markdown,
+        Self::Java,
     ];
 }
 
@@ -118,6 +121,8 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("md", LanguageId::Markdown);
     m.insert("markdown", LanguageId::Markdown);
     m.insert("mdx", LanguageId::Markdown);
+    // Java
+    m.insert("java", LanguageId::Java);
     m
 }
 
@@ -270,6 +275,13 @@ impl GrammarRegistry {
                     tree_sitter_md::INJECTION_QUERY_BLOCK,
                     "",
                 ),
+                LanguageId::Java => Self::build_config(
+                    Language::from(tree_sitter_java::LANGUAGE),
+                    "java",
+                    tree_sitter_java::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -329,6 +341,7 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
         LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
         LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
         LanguageId::Plain => return None,
     })
 }
@@ -353,6 +366,7 @@ mod tests {
         assert_eq!(reg.language_for("foo.yaml"), LanguageId::Yaml);
         assert_eq!(reg.language_for("foo.sh"), LanguageId::Bash);
         assert_eq!(reg.language_for("foo.md"), LanguageId::Markdown);
+        assert_eq!(reg.language_for("Foo.java"), LanguageId::Java);
     }
 
     #[test]
@@ -373,6 +387,25 @@ mod tests {
             );
         }
         assert!(reg.config(LanguageId::Plain).is_none());
+    }
+
+    /// ABI-pinning guard (001/007 lesson): every registry language's
+    /// grammar must `set_language` against the SINGLE pinned
+    /// tree-sitter 0.24.7 runtime. A grammar built against a newer ABI
+    /// (e.g. the known-bad stragglers `tree-sitter-md` 0.5.1 /
+    /// `tree-sitter-rust` 0.24.0, grammar ABI 15 > runtime max 14) would
+    /// otherwise silently fall back to plain text at render time.
+    #[test]
+    fn all_grammars_set_language_succeeds() {
+        let mut parser = tree_sitter::Parser::new();
+        for id in LanguageId::ALL {
+            let lang =
+                crate::syntax::queries::language_for(*id).expect("grammar for {id:?}");
+            assert!(
+                parser.set_language(&lang).is_ok(),
+                "{id:?}: grammar ABI incompatible with the pinned runtime"
+            );
+        }
     }
 
     #[test]

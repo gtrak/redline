@@ -51,6 +51,12 @@ tree-sitter-yaml = "=0.7.0"        # 0.7.1+ require tree-sitter ^0.25.4!
 tree-sitter-md = "0.3.2"          # 0.5.1 grammar ABI is 15 > runtime 14; 0.3.2 is ABI 13/14 — verified by test
 tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar (^0.24); the
                                    # original `tree-sitter-toml` is stuck at ^0.20
+# New-languages lane (Java / C# / Ruby / Scheme): exact `=` pins on
+# releases whose parser ABI is 14 — verified `set_language` against the
+# pinned 0.24.7 runtime (the ABI-pinning rule, 001/007 lesson). Next
+# releases of c-sharp (0.23.5) and elisp-family grammars moved to
+# tree-sitter ^0.25 (grammar ABI 15) — do not bump.
+tree-sitter-java = "=0.23.5"
 
 # ── fuzzy matching (helm-style pickers) ────────────────────────────────────
 nucleo-matcher = "0.3.1"   # add `nucleo = "0.5"` later if streaming sources needed

@@ -2,10 +2,10 @@
 
 The single "what's covered, per language" record. Sibling of
 `docs/provider-matrix.md` (which is provider-resolution-centric): this
-file is the **language × capability** grid over ALL 14 registry
+file is the **language × capability** grid over ALL 15 registry
 languages (`LanguageId::ALL` + `Plain`, `src/syntax/registry.rs`):
 Rust, TypeScript, Tsx, JavaScript, Python, Go, C, Cpp, Toml, Json,
-Yaml, Bash, Markdown, Plain.
+Yaml, Bash, Markdown, Java, Plain.
 
 ## Verification method (same standard the matrix reviews used)
 
@@ -89,6 +89,7 @@ Capability columns, in the code's terms:
 | **Yaml** | works (unit) — `yaml_extracts_keys` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`yaml\`` (011-01) | **degrades to the bail** — no import machinery | **not implemented** — `unimplemented_languages_return_none` | **none** (empty set — same judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
 | **Bash** | works (unit) — `bash_extracts_functions` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`bash\`` (011-01) (N/A path-shaped: commands are not dotted uses — `node_at` resolves `command_name` / `variable_name`, `bash_command_name_resolves_as_command_name`) | **degrades to the bail** — no import machinery | **works (unit)** — `bash_scope_chain_function_body` (node.rs: a function body is the only non-empty scope; top-level commands `[]`) | **none** (empty set — same judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
 | **Markdown** | works (unit) — `markdown_extracts_headings`, `setext_markdown_file_contributes_heading_symbols` (ATX + SETEXT headings only — verified scope, no paragraphs/links) | **degrades to the bail** — `no tooling provider handles language \`markdown\`` (011-01); `node_at` → `None` (heading titles are `inline` nodes, not identifier-ish — `markdown_heading_text_is_not_identifier_ish`) | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `markdown_scope_chain_is_the_enclosing_headings` + `markdown_setext_heading_contributes_scope` (node.rs: the ATX + SETEXT heading chain is the outline) | `md/markdown/mdx` (headings only — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — `crate_index_builds_for_markdown_dependency_tree`; **app-unreachable**: no provider can land | works — `all_grammars_have_configs` |
+| **Java** | works (unit) — `java_extracts_class_and_method` (queries.rs: classes / interfaces / enums / methods / constructors; fields and enum constants deliberately out — the outline is the honest minimal classes/methods set, and the pinned grammar version does not parse standalone record declarations, probe-verified); ABI pin `all_grammars_set_language_succeeds` (registry.rs) | **degrades to the bail** — the syntax layer answers the whole path (`java_member_path_comes_back_whole`: `A.c` as one `field_access`; `java_scoped_type_path_comes_back_whole`: `com.example.Foo` as one `scoped_type_identifier`; `java_method_invocation_stays_bare`: `o.m(…)` stays bare — node.rs), but the app-side whole-path upgrade does not enumerate the Java containers (`store.rs::dotted_path_container` — owned by the parallel M-. lane; Known corners, item 4's shape) and no Java provider exists → 011-01 message | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `java_scope_chain_class_and_method` (node.rs: class → method chain; top-level code `[]`) | `java` — `source_extensions_for` (new-languages lane) | **none — honest bail** | **app-unreachable** — no provider can land (same note as C/C++); the index walk is the language-agnostic 011-04 machinery over the `java` set | works — `all_grammars_have_configs` |
 | **Plain** | N/A (not a code language) — no grammar, `query_for` → `None` (queries.rs:262) | N/A (not a code language) — no path container; the miss path is the 011-01 unset-language backward-compat walk, pinned by `language_dispatch_unset_tries_all_in_order` (lib.rs:575) | N/A (not a code language) — `resolver_scope_for` → `Vec::new()` | N/A (not a code language) — `scope_path_at` → `[]` | **none** (empty set — asserted by `source_extensions_round_trip_through_registry_map`) | none — the unset-language dispatch walks the whole chain (backward-compat pin above) | **not applicable** | N/A (not a code language) — `LanguageId::Plain => None` (registry.rs); `all_grammars_have_configs` asserts it |
 
 **blame / light editing / notes (language-agnostic — one row for all 14
@@ -105,7 +106,7 @@ plain line anchor for every other language.
 ## In-project M-. vs cross-project M-. (reading the grid)
 
 The outline column is the floor: for every language with a definition
-query (all 13 non-Plain), definitions **inside the opened project** are
+query (all 14 non-Plain), definitions **inside the opened project** are
 M-. targets through the project index (the project walk has no
 extension filter — provider-matrix, C/C++ section). Everything in the
 right half of the grid (path-shaped, bare-via-import, provider,
@@ -163,25 +164,25 @@ is where languages genuinely diverge.
    `source_extensions_for` + the round-trip test). Intentional
    (rust-analyzer interface files are not definition sources);
    recorded here so it is not re-filed as a gap.
-8. **Clojure / Lisp / Java / C# / Ruby: lane deferred — grammar crates
-   not vendored offline.** The new-languages lane (the user directive
-   "add clojure and lisp support, java, c#, ruby") was run
-   offline-first per its contract: the FIRST check is grammar-crate
-   availability in the local cargo registry cache, and none of the
-   needed crates — `tree-sitter-java`, `tree-sitter-c-sharp`,
-   `tree-sitter-ruby`, `tree-sitter-clojure`, or any usable Lisp-family
-   crate (common lisp / scheme / elisp) — are vendored there (verified
-   against `~/.cargo/registry/cache` + `src`, the only
-   `tree-sitter-*` hits being the 12 pinned in use), and mid-task
-   network fetches of grammar crates are disallowed (ABI-pinning rule:
-   an unpinned grammar can pull a second tree-sitter runtime and fail
-   `set_language` silently). All five languages were therefore
-   **deferred; nothing landed**, the registry stays 14 + Plain, and no
-   coverage rows exist for them. Re-running the lane needs exactly: the
-   compatible grammar crates vendored (each resolving against the
-   pinned tree-sitter 0.24.7 runtime), then the staged
+8. **Clojure / Lisp / C# / Ruby: lane deferred — grammar crates
+   not usable against the pinned runtime.** The new-languages lane
+   (the user directive "add clojure and lisp support, java, c#, ruby")
+   first round (offline-first) deferred everything: none of the needed
+   crates were vendored in `~/.cargo/registry` and mid-task network
+   fetches were disallowed. Re-run under the amended contract
+   (crates.io sanctioned, ABI-pinning rules as the real constraint):
+   **Java landed** (`tree-sitter-java =0.23.5`, grammar ABI 14 —
+   `set_language` probe-verified against the pinned 0.24.7 runtime;
    registry/queries/node/walk-set work per the capability ladder,
-   NODE_TYPES probe first.
+   NODE_TYPES probe first). The remaining four are still deferred:
+   `tree-sitter-clojure` 0.1.0 requires tree-sitter `^0.25.6` (cargo
+   `links` conflict with the pinned runtime — does not even resolve),
+   `tree-sitter-clojure-orchard` 0.2.x requires `^0.25.9`/`^0.26.11`
+   (same), and `arborium-clojure` 2.18.2 resolves but its grammar is
+   ABI 15 → `set_language` fails (all three probe-verified); the
+   elisp-family crate (`tree-sitter-elisp` 1.7.2) is likewise ABI 15 →
+   `set_language` fails. C# / Ruby / Scheme have compatible crates
+   pending (in progress).
 
 ## Known corners (documented simplifications — not gaps)
 

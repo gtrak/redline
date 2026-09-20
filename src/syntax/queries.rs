@@ -293,6 +293,22 @@ const MARKDOWN_QUERY: &str = r#"
 (setext_heading (paragraph (inline) @name)) @item
 "#;
 
+// New-languages lane: Java. Node shapes verified against the pinned
+// tree-sitter-java 0.23.5 NODE_TYPES + S-expr probe: class /
+// interface / enum / method / constructor all carry a `name` field.
+// The grammar version does not parse standalone record declarations
+// (probe-verified parse error), so records are not captured — fields
+// are deliberately not in the outline either (a `static final` filter
+// is not expressible in the query; honest minimal classes/methods
+// outline).
+const JAVA_QUERY: &str = r#"
+(class_declaration name: (identifier) @name) @item
+(interface_declaration name: (identifier) @name) @item
+(enum_declaration name: (identifier) @name) @item
+(method_declaration name: (identifier) @name) @item
+(constructor_declaration name: (identifier) @name) @item
+"#;
+
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
@@ -310,6 +326,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Yaml => Some(YAML_QUERY),
         LanguageId::Bash => Some(BASH_QUERY),
         LanguageId::Markdown => Some(MARKDOWN_QUERY),
+        LanguageId::Java => Some(JAVA_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -330,6 +347,7 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::Yaml => Language::from(tree_sitter_yaml::LANGUAGE),
         LanguageId::Bash => Language::from(tree_sitter_bash::LANGUAGE),
         LanguageId::Markdown => Language::from(tree_sitter_md::LANGUAGE),
+        LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -756,7 +774,8 @@ pub fn rust_binding_type_at(
 fn kind_of(kind: &str) -> SymbolKind {
     match kind {
         "function_item" | "function_definition" | "function_declaration" => SymbolKind::Function,
-        "method_signature" | "method_definition" | "method_declaration" => SymbolKind::Method,
+        "method_signature" | "method_definition" | "method_declaration"
+        | "constructor_declaration" => SymbolKind::Method,
         "struct_item"
         | "enum_item"
         | "trait_item"
@@ -770,6 +789,7 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "abstract_class_member_definition"
         | "type_spec"
         | "type_declaration"
+        | "enum_declaration"
         | "mod_item" => SymbolKind::Type,
         "const_item"
         | "const_spec"
@@ -1277,6 +1297,44 @@ mod tests {
         assert_eq!(g.line, 2);
     }
 
+
+    // ── Java (new-languages lane) ─────────────────────────────────────
+    /// Classes / interfaces / enums / methods / constructors land with
+    /// their kinds; fields are deliberately out of the outline (a
+    /// `static final` filter is not expressible in the query) and the
+    /// grammar version does not parse standalone record declarations
+    /// (probe-verified) — the honest minimal outline.
+    #[test]
+    fn java_extracts_class_and_method() {
+        let src = "public class Foo {\n\
+                   \x20   static final int C = 1;\n\
+                   \x20   public int getX() { return 1; }\n\
+                   \x20   Foo() {}\n\
+                   \x20   public interface Bar { void doIt(); }\n\
+                   \x20   enum Color { RED }\n\
+                   }\n\
+                   class Outer { void main() {} }\n";
+        let syms = extract_symbols(LanguageId::Java, src);
+        let foo = find(&syms, "Foo").expect("class Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        // Two `Foo` entries: the class (Type) and the constructor (Method).
+        let ctor = syms
+            .iter()
+            .find(|s| s.name == "Foo" && s.kind == SymbolKind::Method)
+            .expect("constructor Foo");
+        assert_eq!(ctor.line, 3);
+        let getx = find(&syms, "getX").expect("method getX");
+        assert_eq!(getx.kind, SymbolKind::Method);
+        let bar = find(&syms, "Bar").expect("interface Bar");
+        assert_eq!(bar.kind, SymbolKind::Type);
+        let color = find(&syms, "Color").expect("enum Color");
+        assert_eq!(color.kind, SymbolKind::Type);
+        let main = find(&syms, "main").expect("method main");
+        assert_eq!(main.kind, SymbolKind::Method);
+        // Exactly the eight named definitions — the field `C` and the enum
+        // constant `RED` are NOT in the outline.
+        assert_eq!(syms.len(), 8, "outline: {syms:?}");
+    }
 
     // ── Documented empty fallback: plain text ──────────────────────────
     #[test]

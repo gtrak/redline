@@ -9273,7 +9273,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// `go`; C `c/h` (011-07 — headers ARE definition sources, the
     /// registry maps `h` to C); C++ `cc/cpp/cxx/hh/hpp/hxx` (011-07, the
     /// full registry map); Markdown `md/markdown/mdx` (011-07 — its
-    /// definition query captures headings only). Every other language:
+    /// definition query captures headings only); Java `java` /
+    /// C# `cs` / Ruby `rb` / Scheme `scm/ss/sls/sld` (new-languages
+    /// lane — the registry map per language). Every other language:
     /// nothing — the walk finds no files, so no index builds (the same
     /// end state 006-03's `.rs`-only walk had for every non-Rust
     /// landing). The JSON/TOML/YAML/Bash outline queries are not M-.
@@ -9289,6 +9291,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             LanguageId::C => &["c", "h"],
             LanguageId::Cpp => &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
             LanguageId::Markdown => &["md", "markdown", "mdx"],
+            LanguageId::Java => &["java"],
             _ => &[],
         }
     }
