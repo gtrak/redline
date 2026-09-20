@@ -7,7 +7,8 @@ in** with drives (`tools/drive_issue_011_05.py`, plus the 011-01/02/04
 legs already in the gate battery) and recorded the end state here.
 Every cell below was checked against the actual code path or a live
 PTY leg at the commit that added this file; the "verified" column says
-which.
+which. The per-language × capability grid over all 14 registry
+languages lives in `docs/language-coverage.md` (sibling tracker).
 
 ## Capability terms (so the cells cannot be misread)
 
