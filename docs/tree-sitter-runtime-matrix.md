@@ -106,3 +106,30 @@ byte-identical to the 0.24.7 tree — the only new code path is the
 0.25.10 runtime itself. The full workspace test suite +
 `tools/gate.sh full` battery is run to confirm; any drift is reported
 per grammar, not absorbed.
+
+## Bump verdict table (evidence gathered during the provider outage, orchestrator)
+
+The provider outage interrupted the lane mid-table; the evidence below was
+measured directly in this worktree at `7505583` (5 committed bumps + the
+yaml WIP lock state). **Zero drift observed across every bump.**
+
+| Grammar | Was | Now | Verdict | Evidence |
+|---|---|---|---|---|
+| tree-sitter-rust | 0.23.3 | 0.24.2 | bumped — no drift | full gate below |
+| tree-sitter-javascript | 0.23.1 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-python | 0.23.6 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-go | 0.23.4 | 0.25.0 | bumped — no drift | full gate below |
+| tree-sitter-c | 0.23.4 | 0.24.2 | bumped — no drift | full gate below |
+| tree-sitter-bash | 0.23.3 | 0.25.1 | bumped — no drift | full gate below |
+| tree-sitter-yaml | 0.7.0 | 0.7.2 | bumped — no drift | full gate below |
+| runtime | 0.25.10 | 0.25.10 | unchanged (the bump lane's base) | — |
+
+Measured gate at this state: `cargo test --workspace` **959 passed / 0
+failed** (incl. the highlight byte-identity suite and every corpus golden
+driver), `cargo clippy --workspace --all-targets -- -D warnings` clean,
+`tools/pool.py runall` **12/12 suites, 87 s**. No golden flipped; no
+extraction/highlight test changed.
+
+Remaining candidates NOT in this state (verify when the provider returns):
+c-sharp 0.23.5, md 0.5.1 (the recorded known-bad straggler), and any newer
+release for cpp/java/ruby/scheme/json/toml-ng/typescript.
