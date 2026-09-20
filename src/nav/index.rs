@@ -28,7 +28,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use tokio::sync::watch;
 
-use crate::syntax::queries::{extract_all, RustTables};
+use crate::syntax::queries::{extract_all, ImplKind, RustTables};
 use crate::syntax::registry::resolve_language;
 // Re-exported so the public index/xref API can name the symbol type.
 pub use crate::syntax::queries::Symbol;
@@ -65,6 +65,33 @@ pub struct SymbolIndex {
     /// 010-01: name-keyed struct fields for the CROSS-file self-receiver
     /// field lookup: struct name → field name → (file → [lines]).
     rust_fields: HashMap<String, HashMap<String, HashMap<String, Vec<usize>>>>,
+    /// 010-04 (plan 010 Shape A, rung 4): the name-keyed TRAIT map for
+    /// find-implementations: trait name (the impl's captured `trait:` field
+    /// text) → (file → that file's `impl Trait for Type` blocks) — built
+    /// from the SAME per-file tables in `set_file_tables` (zero extra
+    /// parse cost, same tree; the 010-01 same-check-BEFORE-removal
+    /// discipline applies to this map verbatim — the shortcut above the
+    /// removals guards it).
+    rust_traits: HashMap<String, HashMap<String, Vec<TraitImpl>>>,
+}
+
+/// (010-04) One `impl <Trait> for <Type>` block recorded by a file's
+/// tables: the impl header's line (0-based) and the impl'd (self) type.
+/// The read-only view's building block (the find-implementations picker).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitImpl {
+    pub impl_line: usize,
+    pub self_type: String,
+}
+
+/// (010-04) A trait-impl location across the index: the (project-relative,
+/// or crate-relative for an external index) file plus the impl block's
+/// line and self type — one find-implementations candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitImplLocation {
+    pub file: String,
+    pub impl_line: usize,
+    pub self_type: String,
 }
 
 impl SymbolIndex {
@@ -103,6 +130,31 @@ impl SymbolIndex {
             .flat_map(|(file, lines)| lines.iter().map(move |&l| (file.clone(), l)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out.dedup();
+        out
+    }
+
+    /// (010-04) Every `impl <trait_name> for <Type>` location in the
+    /// index (all files), in deterministic (file, impl line, self type)
+    /// order — the read-only data for find-implementations; the caller
+    /// orders the same-file hits first (the M-. same-file-first
+    /// discipline, shared with `field_locations`).
+    pub fn trait_impl_locations(&self, trait_name: &str) -> Vec<TraitImplLocation> {
+        let Some(per_file) = self.rust_traits.get(trait_name) else {
+            return Vec::new();
+        };
+        let mut out: Vec<TraitImplLocation> = per_file
+            .iter()
+            .flat_map(|(file, entries)| entries.iter().map(|e| TraitImplLocation {
+                file: file.clone(),
+                impl_line: e.impl_line,
+                self_type: e.self_type.clone(),
+            }))
+            .collect();
+        out.sort_by(|a, b| {
+            (a.file.as_str(), a.impl_line, &a.self_type)
+                .cmp(&(b.file.as_str(), b.impl_line, &b.self_type))
+        });
         out.dedup();
         out
     }
@@ -245,6 +297,24 @@ impl SymbolIndex {
                 }
             }
         }
+        // 010-04: drop this file's trait-map contributions (the same
+        // removal discipline as the field map — it only runs when the
+        // content really changed; the same-content shortcut above
+        // already returned before any removal).
+        if let Some(old_tables) = &old {
+            for methods in old_tables.impls.values() {
+                for m in methods {
+                    if let ImplKind::Trait(t) = &m.kind
+                        && let Some(by_file) = self.rust_traits.get_mut(t)
+                    {
+                        by_file.remove(path);
+                        if by_file.is_empty() {
+                            self.rust_traits.remove(t);
+                        }
+                    }
+                }
+            }
+        }
         if empty {
             return old.is_some();
         }
@@ -260,6 +330,28 @@ impl SymbolIndex {
                     .entry(path.to_string())
                     .or_default()
                     .push(f.line);
+            }
+        }
+        // 010-04: the trait-keyed map — one entry per (impl block, self
+        // type) per trait; deduped so an impl's N methods do not multiply
+        // the block's location.
+        for (self_type, methods) in &tables.impls {
+            for m in methods {
+                if let ImplKind::Trait(t) = &m.kind {
+                    let entries = self
+                        .rust_traits
+                        .entry(t.clone())
+                        .or_default()
+                        .entry(path.to_string())
+                        .or_default();
+                    let entry = TraitImpl {
+                        impl_line: m.impl_line,
+                        self_type: self_type.clone(),
+                    };
+                    if !entries.contains(&entry) {
+                        entries.push(entry);
+                    }
+                }
             }
         }
         self.rust_tables.insert(path.to_string(), tables);
@@ -297,6 +389,21 @@ impl SymbolIndex {
                     }
                     if by_field.is_empty() {
                         self.rust_fields.remove(struct_name);
+                    }
+                }
+            }
+            // 010-04: the trait map leaves with the tables (the same
+            // invariant as the field map: a file with trait impls always
+            // had a stored entry).
+            for methods in old_tables.impls.values() {
+                for m in methods {
+                    if let ImplKind::Trait(t) = &m.kind
+                        && let Some(by_file) = self.rust_traits.get_mut(t)
+                    {
+                        by_file.remove(path);
+                        if by_file.is_empty() {
+                            self.rust_traits.remove(t);
+                        }
                     }
                 }
             }
@@ -859,6 +966,110 @@ mod tests {
         refresh_in_place(root, &[path], &mut index);
         assert!(index.tables("src/point.rs").is_none());
         assert!(index.field_locations("Point", "xx").is_empty());
+    }
+
+    // ── 010-04: the name-keyed trait map (find-implementations) ──
+
+    #[test]
+    fn trait_map_supports_trait_impl_lookup_across_files() {
+        let dir = make_project();
+        let root = dir.path();
+        // Two trait impls under DIFFERENT captured trait texts (the full
+        // path as written in one file, the bare name in another — the map
+        // is name-keyed, so each spelling is its own key) plus an
+        // inherent impl that must NOT appear under any trait key.
+        std::fs::write(
+            root.join("src/alpha.rs"),
+            "struct A;\nimpl std::fmt::Display for A {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"A\") }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/beta.rs"),
+            "use std::fmt::Display;\nstruct B;\nimpl Display for B {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"B\") }\n}\nimpl B {\n    fn own(&self) {}\n}\n",
+        )
+        .unwrap();
+        let files = rel_files(root);
+        let index = build_index(root, &files, None);
+
+        // The full-path spelling: one candidate (alpha.rs's impl header,
+        // line 1, self type `A`) — one entry although the impl has one
+        // method, and deduped (no multiplication).
+        assert_eq!(
+            index.trait_impl_locations("std::fmt::Display"),
+            vec![TraitImplLocation {
+                file: "src/alpha.rs".into(),
+                impl_line: 1,
+                self_type: "A".into(),
+            }]
+        );
+        // The bare spelling: beta.rs's impl (line 2, self type `B`).
+        assert_eq!(
+            index.trait_impl_locations("Display"),
+            vec![TraitImplLocation {
+                file: "src/beta.rs".into(),
+                impl_line: 2,
+                self_type: "B".into(),
+            }]
+        );
+        // Inherent impls never enter the map.
+        assert!(index.trait_impl_locations("B").is_empty());
+        assert!(index.trait_impl_locations("Other").is_empty());
+    }
+
+    /// 010-04 pin (the 010-01 review P1 discipline on the trait map): an
+    /// UNCHANGED-content refresh (touch, linter rewrite, editor no-save)
+    /// must keep the file's trait-map contributions — the same-check runs
+    /// BEFORE the removal in `set_file_tables`, so a no-op refresh
+    /// restores rather than strips (a stripped map would silently degrade
+    /// find-implementations until the next real change).
+    #[test]
+    fn trait_map_same_content_refresh_keeps_trait_locations() {
+        let dir = make_project();
+        let root = dir.path();
+        std::fs::write(
+            root.join("src/alpha.rs"),
+            "struct A;\nimpl std::fmt::Display for A {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"A\") }\n}\n",
+        )
+        .unwrap();
+        let files = rel_files(root);
+        let mut index = build_index(root, &files, None);
+        let expected = vec![TraitImplLocation {
+            file: "src/alpha.rs".into(),
+            impl_line: 1,
+            self_type: "A".into(),
+        }];
+        assert_eq!(index.trait_impl_locations("std::fmt::Display"), expected);
+
+        // Reparse the UNCHANGED file through the refresh path.
+        let path = root.join("src/alpha.rs");
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        assert_eq!(
+            index.trait_impl_locations("std::fmt::Display"),
+            expected,
+            "a same-content refresh must not strip the trait map"
+        );
+
+        // A REAL change: rename the self type — the stale location must
+        // disappear and the new one appear (the map stays consistent).
+        std::fs::write(
+            &path,
+            "struct AA;\nimpl std::fmt::Display for AA {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"AA\") }\n}\n",
+        )
+        .unwrap();
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        assert_eq!(
+            index.trait_impl_locations("std::fmt::Display"),
+            vec![TraitImplLocation {
+                file: "src/alpha.rs".into(),
+                impl_line: 1,
+                self_type: "AA".into(),
+            }]
+        );
+
+        // Delete the file: the trait-map entry leaves with the outline.
+        std::fs::remove_file(&path).unwrap();
+        refresh_in_place(root, &[path], &mut index);
+        assert!(index.trait_impl_locations("std::fmt::Display").is_empty());
     }
 }
 
