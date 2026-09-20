@@ -2482,6 +2482,72 @@ fn unit_flow_xref_l1() {
     );
 }
 
+/// The same-file M-. origin-accuracy twin (user report: "when I jump to
+/// definition in the SAME file, popping back can go to the wrong place, not
+/// where my cursor was"): M-. from a KNOWN (line, col) with other symbols
+/// around lands on the same-file definition, and M-, restores BOTH the
+/// point line AND column (the L1 twin asserted the line only) AND the
+/// window, recentered on the origin line.
+#[test]
+fn unit_flow_xref_l1b_same_file_origin() {
+    let repo = xref_repo();
+    let p = repo.path();
+    // A tall same-file fixture: `alpha` (0-based line 22), `beta` (line 30,
+    // the other symbol around), the call site (line 41: `    let x =
+    // alpha();`, `alpha` running cols 12..16) — 49 lines total so the
+    // 21-row window recenter is discriminating.
+    let mut body = String::new();
+    for i in 0..22 {
+        body.push_str(&format!("// filler {i}\n"));
+    }
+    body.push_str("pub fn alpha() -> u32 { 1 }\n");
+    for i in 23..30 {
+        body.push_str(&format!("// filler {i}\n"));
+    }
+    body.push_str("pub fn beta() -> u32 { 2 }\n");
+    for i in 31..40 {
+        body.push_str(&format!("// filler {i}\n"));
+    }
+    body.push_str("fn caller() {\n    let x = alpha();\n}\n");
+    for i in 43..49 {
+        body.push_str(&format!("// filler {i}\n"));
+    }
+    std::fs::write(p.join("src/sf.rs"), body).unwrap();
+    git(p, &["add", "src/sf.rs"]);
+
+    let mut s = store_in(repo.path());
+    install_index(&mut s, repo.path());
+    open_via_finder(&mut s, "sf");
+    goto_line(&mut s, 42); // 1-based 42 = 0-based 41: the call site
+    // Twelve char-forwards (C-f) from col 0 → col 12, inside the `alpha`
+    // run (cols 12..16). Char motion: deterministic, no word-skip.
+    for _ in 0..12 {
+        s.key_event(key("C-f"));
+    }
+    assert_eq!(s.point_line(), 41, "origin line (call site)");
+    assert_eq!(s.point_col(), 12, "origin col (inside the alpha run)");
+    let origin_top = s.scroll_top();
+
+    s.key_event(key("M-.")); // same-file unique def → direct jump
+    assert!(!s.picker_open(), "unique same-file: no picker");
+    assert_eq!(s.point_line(), 22, "landed on the same-file alpha def");
+
+    s.key_event(key("M-,")); // jump-back
+    assert_eq!(s.point_line(), 41, "M-, restores the origin LINE");
+    assert_eq!(s.point_col(), 12, "M-, restores the origin COLUMN");
+    // The origin line is recentered in the 21-row window (store_in's PTY
+    // viewport): (41 - 10) clamped to max_scroll = total - 21 (total is
+    // the buffer's own line count; the file is 49 content lines).
+    let total = s.current_line_count();
+    assert!(total >= 49, "tall fixture: {total} lines");
+    let expected = (41u32 - 10).min((total - 21) as u32) as usize;
+    assert_eq!(
+        s.scroll_top(),
+        expected,
+        "M-, recenters the window on the origin line (pre-jump top {origin_top})"
+    );
+}
+
 /// L2 cross-file jump: M-. on `target_lib` in a fresh src/leg.rs lands in
 /// src/lib.rs on the definition.
 #[test]

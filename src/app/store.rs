@@ -15112,6 +15112,94 @@ mod tests {
     }
 
     #[test]
+    fn probe_same_file_origin_scenarios() {
+        // S1: same-file jump through the PICKER (two same-file defs).
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn alpha() {}\nfn beta() {}\nfn alpha() {}\nfn caller() {\n    alpha();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(4, 8, 8); // "    alpha();" — inside `alpha`
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "S1: picker opens");
+        s.run_selected();
+        s.jump_back();
+        println!("S1 after back: line {} col {} (want 4 8)", s.point_line(), s.point_col());
+
+        // S2: origin parked at end-of-line (col == line length).
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 12, 12); // "    alpha();" line_len 12
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "S2: unique def");
+        s.jump_back();
+        println!("S2 after back: line {} col {} (want 2 12)", s.point_line(), s.point_col());
+
+        // S3: same-file jump via IMENU (M-i) then M-,
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn beta() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 8, 8);
+        s.key_event(key("M-i"));
+        assert!(s.picker_open(), "S3: imenu picker");
+        // Select `beta` (name "beta:2").
+        let idx = s
+            .picker
+            .as_ref()
+            .and_then(|p| p.filtered.iter().position(|(c, _)| c.name.starts_with("beta")))
+            .expect("beta candidate");
+        s.picker.as_mut().unwrap().selected = idx;
+        s.run_selected();
+        s.jump_back();
+        println!("S3 after back: line {} col {} (want 3 8)", s.point_line(), s.point_col());
+
+        // S4: same-file jump via enclosing-symbol fallback, then M-,.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn alpha() {}\nfn wrapper() {\n    // note\n    alpha();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 0, 0); // comment line: no symbol at point → enclosing = wrapper
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "S4: direct jump");
+        s.jump_back();
+        println!("S4 after back: line {} col {} (want 2 0)", s.point_line(), s.point_col());
+
+        // S5: chained same-file jumps A→B→C, two M-, must land on A.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/lib.rs",
+                "fn aaa() {}\nfn bbb() {\n    aaa();\n}\nfn ccc() {\n    bbb();\n}\n",
+            ),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(5, 8, 8); // ccc body: bbb call
+        s.xref_find_definitions(); // ccc body → bbb
+        s.xref_find_definitions(); // bbb body → aaa
+        s.jump_back();
+        s.jump_back();
+        println!("S5 after 2x back: line {} col {} (want 5 8)", s.point_line(), s.point_col());
+
+        // S6: same-file jump, then C-i forward, then M-,.
+        let (mut s, _dir) = store_with_index(&[
+            ("src/lib.rs", "fn alpha() {}\nfn caller() {\n    alpha();\n}\n"),
+        ]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 8, 8);
+        s.xref_find_definitions();
+        s.jump_forward();
+        s.jump_back();
+        println!("S6 after fwd+back: line {} col {} (want 2 8)", s.point_line(), s.point_col());
+    }
+
+    #[test]
     fn xref_trait_definition_jumps() {
         // The user's report: on a Trait, jump into the trait definition.
         // `trait_item` is captured by the index, so a cursor on the trait
