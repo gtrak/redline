@@ -92,7 +92,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
-        | LanguageId::C => {}
+        | LanguageId::C | LanguageId::Cpp => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -224,7 +224,17 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
         // `foo(a).b` nests a `call_expression`), so any NAMED child of a
         // `field_expression` is a path part; the `.`/`->` tokens are
         // anonymous and never match.
-        LanguageId::C => parent_kind == Some("field_expression") && node.is_named(),
+        //
+        // C++ shares `field_expression` (the pinned tree-sitter-cpp grammar
+        // has no direct_member_access/pointer_member_access kinds — probed)
+        // and adds `::` qualified names: `qualified_identifier` with a
+        // `scope` child (a `namespace_identifier`, `type_identifier`, or a
+        // nested `qualified_identifier`) and a `name` child, so `ns::A::x`
+        // comes back whole as one node (the app's Rust `::` scan analogue).
+        LanguageId::C | LanguageId::Cpp => {
+            (parent_kind == Some("field_expression") && node.is_named())
+                || (parent_kind == Some("qualified_identifier") && node.is_named())
+        }
         _ => false,
     }
 }
@@ -303,6 +313,15 @@ fn is_c_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// C++ identifier-ish node kinds (verified against the pinned
+/// tree-sitter-cpp `NODE_TYPES`): the C set plus `namespace_identifier`
+/// (a `ns::` scope name) and `qualified_identifier` (the whole `A::x` /
+/// `ns::A::x` path).
+fn is_cpp_identifier_kind(kind: &str) -> bool {
+    is_c_identifier_kind(kind)
+        || matches!(kind, "namespace_identifier" | "qualified_identifier")
+}
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -313,6 +332,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Python => is_python_identifier_kind(kind),
         LanguageId::Go => is_go_identifier_kind(kind),
         LanguageId::C => is_c_identifier_kind(kind),
+        LanguageId::Cpp => is_cpp_identifier_kind(kind),
         _ => false,
     }
 }
@@ -373,6 +393,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Python => python_scope_path(leaf, source),
         LanguageId::Go => go_scope_path(leaf, source),
         LanguageId::C => c_scope_path(leaf, source),
+        LanguageId::Cpp => cpp_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -474,6 +495,38 @@ fn c_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
                 .child_by_field_name("declarator")
                 .and_then(|decl| decl.child_by_field_name("declarator")),
             "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                node.child_by_field_name("name")
+            }
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C++ enclosing-scope walk: `function_definition` (same
+/// `declarator` → `function_declarator` → `declarator` name shape as C,
+/// where a class method's name is a `field_identifier`),
+/// `class_specifier` / `struct_specifier` / `union_specifier` /
+/// `enum_specifier` (name child in the `name` field), and
+/// `namespace_definition` (name child in the `name` field). Blocks and
+/// control flow are intentionally not scope items.
+fn cpp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_definition" => node
+                .child_by_field_name("declarator")
+                .and_then(|decl| decl.child_by_field_name("declarator")),
+            "class_specifier" | "struct_specifier" | "enum_specifier"
+            | "union_specifier" | "namespace_definition" => {
                 node.child_by_field_name("name")
             }
             _ => None,
@@ -646,8 +699,7 @@ mod tests {
     /// yet adopted (C landed in this issue; the rest follow).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 7] = [
-            (LanguageId::Cpp, "int main() { return 0; }", "main"),
+        let cases: [(LanguageId, &str, &str); 6] = [
             (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
             (LanguageId::Json, "{\"key\": 1}", "key"),
             (LanguageId::Yaml, "key: value\n", "key"),
@@ -1014,7 +1066,7 @@ mod tests {
     /// `field_expression` in the pinned grammar).
     #[test]
     fn c_member_path_comes_back_whole() {
-        let src = "struct S { int x; }\nint f(struct S o, struct S *p) { return o.x.y + p->x; }\n";
+        let src = "struct S { int x; };\nint f(struct S o, struct S *p) { return o.x.y + p->x; }\n";
         let o_at = src.find("o.x").expect("fixture");
         let y_at = src.find(".y").expect("fixture") + 1;
         assert_whole_path(LanguageId::C, src, o_at, y_at, "field_expression", "o.x.y");
@@ -1078,6 +1130,108 @@ mod tests {
             assert_eq!(info.text, "f");
         }
         let _ = scope_path_at(LanguageId::C, src, pos);
+    }
+
+    // ── C++ (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: C++ member access `a.b.c` comes back WHOLE (one
+    /// `field_expression` — the pinned cpp grammar uses `field_expression`
+    /// for both `.` and `->`, no direct/pointer_member_access kinds).
+    #[test]
+    fn cpp_member_path_comes_back_whole() {
+        let src = "struct S { int x; int y; };\nint f(struct S o) { return o.x.y; }\n";
+        let o_at = src.find("o.x").expect("fixture");
+        let y_at = src.find(".y").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Cpp, src, o_at, y_at, "field_expression", "o.x.y");
+    }
+
+    /// Discriminating: the cpp `::` path comes back WHOLE as one
+    /// `qualified_identifier`, including the nested scope (`ns::Base::C`).
+    #[test]
+    fn cpp_qualified_path_comes_back_whole() {
+        let src = "int w = ns::Base::C;\n";
+        let ns_at = src.find("ns::").expect("fixture");
+        let c_at = src.find("::C").expect("fixture") + 2;
+        assert_whole_path(
+            LanguageId::Cpp,
+            src,
+            ns_at,
+            c_at,
+            "qualified_identifier",
+            "ns::Base::C",
+        );
+        // A single-segment `A::x` too.
+        let src2 = "int w = Base::CONST;\n";
+        assert_whole_path(
+            LanguageId::Cpp,
+            src2,
+            src2.find("Base").expect("fixture"),
+            src2.find("CONST").expect("fixture"),
+            "qualified_identifier",
+            "Base::CONST",
+        );
+    }
+
+    #[test]
+    fn cpp_plain_identifier_top_level() {
+        let src = "const int Z = 3;\n";
+        let info = node_at(LanguageId::Cpp, src, src.find("Z").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "Z");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn cpp_scope_chain_namespace_class_method() {
+        let src = "namespace outer {\nclass Base {\n    void m() { int y = 0; }\n};\n}\n";
+        let at = src.find("y = 0").expect("fixture") + 1;
+        assert_eq!(
+            scope_path_at(LanguageId::Cpp, src, at),
+            vec![
+                String::from("outer"),
+                String::from("Base"),
+                String::from("m"),
+            ]
+        );
+        // Same chain via NodeInfo at the method's own name.
+        let at_name = node_at(LanguageId::Cpp, src, src.find("m()").expect("fixture")).unwrap();
+        assert_eq!(
+            at_name.scope_path,
+            vec![
+                String::from("outer"),
+                String::from("Base"),
+                String::from("m"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_boundary_offsets_do_not_panic() {
+        // The `class` keyword token is anonymous (not identifier-ish → no
+        // node) at byte 0, but the scope is still reported.
+        let src = "class S { int x; }\n";
+        assert!(node_at(LanguageId::Cpp, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Cpp, src, 0), vec![String::from("S")]);
+        // An identifier at byte 0 does resolve; top-level → no scope.
+        let src2 = "x;\n";
+        let info = node_at(LanguageId::Cpp, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Cpp, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Cpp, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Cpp, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Cpp, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn cpp_broken_source_does_not_panic() {
+        let src = "class A {";
+        let pos = src.find("A").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Cpp, src, pos) {
+            assert_eq!(info.text, "A");
+        }
+        let _ = scope_path_at(LanguageId::Cpp, src, pos);
     }
 
     #[test]
