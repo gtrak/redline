@@ -43,3 +43,17 @@ land exactly at the point (line AND column) the jump started from.
   calls; honest-stop at half.
 - Scope fence: `src/app/store.rs`, `src/app/flow_tests.rs`. NOTHING
   else. A parallel lane owns main.rs + the event loop — do not touch.
+
+## Review P2s (recorded; reviewer said no fix required for merge)
+
+1. **Sentinel clobber under a late async landing** (store.rs sync + capture sites for
+   `open_resolved_source` / external Jump arm): if a pending resolver landing arrives
+   while the user has M-, back to a search sentinel, the sync overwrites the sentinel
+   with the true buffer point; a later M-, then lands at the file point instead of
+   reopening the results view. Reachable only inside the resolver's in-flight window
+   after search-RET + M-,; no crash; direction matches the fix's invariant (the old
+   code dropped the file position and kept a stale view marker instead).
+2. **`JumpEntry.label` is internal-only**: the sync rewrites `history[pos].label` to
+   `""` in the no-motion case; unobservable because no production code reads `.label`
+   (verified exhaustively). Document the field as internal, or label origins, if it is
+   ever surfaced.
