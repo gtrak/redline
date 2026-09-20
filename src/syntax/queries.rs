@@ -330,6 +330,24 @@ const C_SHARP_QUERY: &str = r#"
 (delegate_declaration name: (identifier) @name) @item
 "#;
 
+// Runtime-bump lane: Clojure (the 0.25-generation landing — the first
+// grammar whose crate hard-requires the 0.25 runtime, `tree-sitter
+// ^0.25.6` as a NORMAL dependency — which is what the 0.24.7→0.25.10
+// runtime bump unblocked). The pinned tree-sitter-clojure 0.1.0 is a
+// FLAT S-expression grammar (probe-verified node set: source /
+// list_lit / sym_lit / kwd_lit / num_lit / … — there is no `def` / `defn`
+// node kind; a definition is a bare `sym_lit` head inside a `list_lit`).
+// LITERAL content matches on symbol-ish kinds are not usable (the Scheme
+// `symbol` precedent, probe-verified), so the query captures every
+// two-symbol `list_lit` candidate and `flat_define_kind` gates on the
+// head symbol's text (unqualified — a namespaced head
+// `clojure.core/defn` never matches, the honest minimal set). Application
+// forms (`(+ a b)`, `map f coll`), literals, and `ns` forms are captured
+// as candidates and then rejected — their head is not a define form.
+const CLOJURE_QUERY: &str = r#"
+(list_lit . (sym_lit) @head . (sym_lit name: (sym_name) @name)) @item
+"#;
+
 /// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
 /// 0.23.1's `queries/highlights.scm` (the crate ships the file but does
 /// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
@@ -339,6 +357,17 @@ const C_SHARP_QUERY: &str = r#"
 /// version — do not edit or re-flow.
 pub const C_SHARP_HIGHLIGHTS: &str =
     include_str!("../../third_party/tree-sitter-c-sharp-0.23.1/highlights.scm");
+
+/// The Clojure highlight query — vendored VERBATIM from
+/// `tree-sitter-clojure` 0.1.0's `grammar-src/queries/highlights.scm`
+/// (the crate exports only `LANGUAGE` / `NODE_TYPES` — no highlights
+/// constant). Copy lives in
+/// `third_party/tree-sitter-clojure-0.1.0/highlights.scm` (sha256 at
+/// vendor time: 424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de);
+/// keep it in lockstep with the pinned crate version — do not edit or
+/// re-flow.
+pub const CLOJURE_HIGHLIGHTS: &str =
+    include_str!("../../third_party/tree-sitter-clojure-0.1.0/highlights.scm");
 
 // New-languages lane: Ruby. Node shapes verified against the pinned
 // tree-sitter-ruby 0.23.1 NODE_TYPES + S-expr probe: `module` /
@@ -377,20 +406,32 @@ const SCHEME_QUERY: &str = r#"
 (list . (symbol) @head . (symbol) @name) @item
 "#;
 
-/// The symbol category of a SCHEME match — keyed by the query pattern's
-/// SOURCE ORDER (`QueryMatch::pattern_index`) AND the captured head
-/// symbol's text (the flat S-expression grammar gives every definition
-/// the same node kind — `list` — and its `symbol` kind refuses literal
-/// content matches, so the gating happens here, not in the query).
-/// `None` = the captured candidate is not a define form (rejected by
-/// the extraction loop).
-fn scheme_kind(pattern_index: usize, head: &str) -> Option<SymbolKind> {
-    match (head, pattern_index) {
-        ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
-        ("define", 1) => Some(SymbolKind::Constant), // (define x …)
-        ("define-library", 0) => Some(SymbolKind::Type), // (define-library (name .) …)
-        ("define-record-type", 1) => Some(SymbolKind::Type), // (define-record-type name …)
-        ("define-macro", 0) => Some(SymbolKind::Macro), // (define-macro (m .) …)
+/// The symbol category of a flat-S-expression-grammar match (SCHEME or
+/// CLOJURE) — keyed by the language, the query pattern's SOURCE ORDER
+/// (`QueryMatch::pattern_index`), and the captured head symbol's text.
+/// The flat grammars give every definition the same item node kind
+/// (`list` in Scheme, `list_lit` in Clojure) and their symbol kinds
+/// refuse literal content matches, so the gating happens here, not in
+/// the query. `None` = the captured candidate is not a define form
+/// (rejected by the extraction loop).
+fn flat_define_kind(lang: LanguageId, pattern_index: usize, head: &str) -> Option<SymbolKind> {
+    match lang {
+        LanguageId::Scheme => match (head, pattern_index) {
+            ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
+            ("define", 1) => Some(SymbolKind::Constant), // (define x …)
+            ("define-library", 0) => Some(SymbolKind::Type), // (define-library (name .) …)
+            ("define-record-type", 1) => Some(SymbolKind::Type), // (define-record-type name …)
+            ("define-macro", 0) => Some(SymbolKind::Macro), // (define-macro (m .) …)
+            _ => None,
+        },
+        LanguageId::Clojure => match head {
+            "defn" | "defn-" => Some(SymbolKind::Function), // (defn name [args] …)
+            "def" => Some(SymbolKind::Constant), // (def name …) — fn-or-value undecidable, honest Constant
+            "defmacro" | "defmulti" => Some(SymbolKind::Macro), // (defmacro name …) / (defmulti name …)
+            "defmethod" => Some(SymbolKind::Method), // (defmethod name dispatch …)
+            "defrecord" | "deftype" | "defprotocol" => Some(SymbolKind::Type), // (defrecord Name [fields]) / (deftype Name …) / (defprotocol Name …)
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -416,6 +457,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::CSharp => Some(C_SHARP_QUERY),
         LanguageId::Ruby => Some(RUBY_QUERY),
         LanguageId::Scheme => Some(SCHEME_QUERY),
+        LanguageId::Clojure => Some(CLOJURE_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -440,6 +482,7 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
         LanguageId::Ruby => Language::from(tree_sitter_ruby::LANGUAGE),
         LanguageId::Scheme => Language::from(tree_sitter_scheme::LANGUAGE),
+        LanguageId::Clojure => Language::from(tree_sitter_clojure::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -512,9 +555,10 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         let bytes = source.as_bytes();
         let name_idx = query.capture_index_for_name("name");
         let item_idx = query.capture_index_for_name("item");
-        // Scheme (the flat S-expression grammar): the head-symbol capture
-        // the define-form gate reads (see `scheme_kind`).
-        let head_idx = if lang == LanguageId::Scheme {
+        // Flat S-expression grammars (Scheme + Clojure): the head-symbol
+        // capture the define-form gate reads (see `flat_define_kind`).
+        let gated = matches!(lang, LanguageId::Scheme | LanguageId::Clojure);
+        let head_idx = if gated {
             query.capture_index_for_name("head")
         } else {
             None
@@ -547,34 +591,37 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
             let kind_node = item_node.or(name_node).unwrap();
             let name_node = name_node.unwrap_or(kind_node);
             let extent_node = item_node.unwrap_or(name_node);
-            // Scheme gate (see `scheme_kind`): the query captures every
-            // `(list HEAD …)` candidate; only the true define forms
-            // survive. Rejected candidates contribute no symbol.
-            let scheme_reject = if lang == LanguageId::Scheme {
-                let head = head_idx
-                    .and_then(|i| m.captures.iter().find(|c| c.index == i))
-                    .and_then(|c| c.node.utf8_text(bytes).ok())
-                    .map(str::to_string);
-                head.as_deref().and_then(|h| scheme_kind(m.pattern_index, h)).is_none()
-            } else {
-                false
-            };
-            if scheme_reject {
+            // Flat-S-expression gate (Scheme + Clojure; see
+            // `flat_define_kind`): the query captures every candidate
+            // definition form; only the true define forms survive.
+            // Rejected candidates contribute no symbol.
+            let head_text = gated
+                .then(|| {
+                    head_idx
+                        .and_then(|i| m.captures.iter().find(|c| c.index == i))
+                        .and_then(|c| c.node.utf8_text(bytes).ok())
+                        .map(str::to_string)
+                })
+                .flatten();
+            let gate_reject = gated
+                && head_text
+                    .as_deref()
+                    .and_then(|h| flat_define_kind(lang, m.pattern_index, h))
+                    .is_none();
+            if gate_reject {
                 continue;
             }
 
             out.push(Symbol {
                 name,
-                kind: if lang == LanguageId::Scheme {
-                    // The flat S-expression grammar: the (pattern, head)
-                    // pair carries the category (see `scheme_kind`).
-                    scheme_kind(m.pattern_index,
-                        head_idx
-                            .and_then(|i| m.captures.iter().find(|c| c.index == i))
-                            .and_then(|c| c.node.utf8_text(bytes).ok())
-                            .map(str::to_string)
-                            .as_deref()
-                            .unwrap_or("")
+                kind: if gated {
+                    // The flat S-expression grammars: the (lang, pattern,
+                    // head) triple carries the category (see
+                    // `flat_define_kind`).
+                    flat_define_kind(
+                        lang,
+                        m.pattern_index,
+                        head_text.as_deref().unwrap_or("")
                     )
                     .unwrap_or(SymbolKind::Function)
                 } else {
@@ -1590,6 +1637,51 @@ mod tests {
         assert_eq!(syms.len(), 6, "outline: {syms:?}");
     }
 
+    // ── Clojure (runtime-bump lane) ─────────────────────────────────
+    /// `defn` / `def` / `defmacro` / `defmulti` / `defmethod` /
+    /// `defrecord` / `deftype` / `defprotocol` land with their kinds;
+    /// application forms, literals, and `ns` forms stay out (honest
+    /// minimal outline for the flat S-expression grammar — the same
+    /// candidate-and-gate shape as Scheme).
+    #[test]
+    fn clojure_extracts_defn_and_defs() {
+        let src = "(ns my.lib\n\n\n  (:require [clojure.core :as c]))\n\
+                  (def ^:doc x 10)\n\
+                  (defn double [v] (c/* 2 v))\n\
+                  (defn- helper [] :ok)\n\
+                  (defmacro my-if [cond a b] `(if ~cond ~a ~b))\n\
+                  (defmulti m class)\n\
+                  (defmethod m Integer [v] v)\n\
+                  (defrecord Point [px py])\n\
+                  (deftype Counter [n])\n\
+                  (defprotocol P (get-x [this]))\n\
+                  (let [v (double 2)]\n\n    (println v))\n";
+        let syms = extract_symbols(LanguageId::Clojure, src);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["x", "double", "helper", "my-if", "m", "m", "Point", "Counter", "P"],
+            "outline: {syms:?}"
+        );
+        let get = |n: &str| syms.iter().find(|s| s.name == n).expect(n);
+        assert_eq!(get("x").kind, SymbolKind::Constant, "def ^:doc x");
+        assert_eq!(get("double").kind, SymbolKind::Function);
+        assert_eq!(get("helper").kind, SymbolKind::Function, "defn-");
+        assert_eq!(get("my-if").kind, SymbolKind::Macro);
+        assert_eq!(get("Point").kind, SymbolKind::Type, "defrecord");
+        assert_eq!(get("Counter").kind, SymbolKind::Type, "deftype");
+        assert_eq!(get("P").kind, SymbolKind::Type, "defprotocol");
+        // The multimethod lands TWICE (the class+constructor precedent):
+        // `defmulti m` (Macro) and `defmethod m Integer` (Method — its
+        // name IS the multimethod var; the dispatch value `Integer` is
+        // not in the outline).
+        let ms: Vec<SymbolKind> = syms.iter().filter(|s| s.name == "m").map(|s| s.kind).collect();
+        assert_eq!(ms, [SymbolKind::Macro, SymbolKind::Method], "{syms:?}");
+        // `ns`, `let`, `println`, the `c/*` namespaced application, and
+        // the `v` binding are NOT in the outline (head gate).
+        assert_eq!(syms.len(), 9, "outline: {syms:?}");
+    }
+
     // ── Documented empty fallback: plain text ──────────────────────────
     #[test]
     fn plain_text_has_no_query_and_empty_outline() {
@@ -1599,3 +1691,4 @@ mod tests {
         assert!(extract_symbols(LanguageId::Plain, "some text\nfn fake() {}\n").is_empty());
     }
 }
+

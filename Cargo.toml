@@ -25,20 +25,34 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 # ── text model ──────────────────────────────────────────────────────────────
 ropey = "1.6.1"
 
-# ── syntax: tree-sitter 0.24 family ────────────────────────────────────────
-# All grammars below are pinned to releases whose `tree-sitter` requirement
-# is `^0.24`, so cargo resolves a SINGLE tree-sitter runtime (0.24.7).
-# Verified against crates.io dependency metadata 2026-09-15.
-# DO NOT casually bump grammar versions: several latest releases require
-# tree-sitter ^0.25/^0.26 and would fork the runtime (ABI mismatch).
-tree-sitter = "0.24.7"
-tree-sitter-highlight = "0.24.7"   # requires tree-sitter ^0.24.5
+# ── syntax: tree-sitter 0.25 family ────────────────────────────────────────
+# The runtime moved to 0.25.x (the runtime-bump task): the grammar crates'
+# `tree-sitter` (runtime) requirements are DEV-dependencies — they do not
+# constrain which runtime THIS build links. The normal dependency is
+# `tree-sitter-language ^0.1` (the `LanguageFn` ABI bridge), and every
+# pinned grammar below is ABI 13/14, inside the 0.25.10 ABI window
+# (13..=15) — verified by the `all_grammars_set_language_succeeds` guard.
+# One runtime in the lock (the 001/007 ABI-pinning rule); the full
+# compatibility matrix (per-crate evidence, chosen version rationale,
+# the 0.25-generation releases that could be a follow-up lane) lives in
+# docs/tree-sitter-runtime-matrix.md.
+tree-sitter = "=0.25.10"
+tree-sitter-highlight = "=0.25.10"  # requires tree-sitter ^0.25.10 (1:1 tracking)
 # Query-iterator adapter (tree-sitter's QueryCaptures/QueryMatches implement
 # streaming-iterator::StreamingIterator, not std Iterator). Already in the
 # lock as a transitive dep of tree-sitter; named here so symbol queries
 # (issue 05) can iterate captures. Exact pin = no version change / no refetch.
 streaming-iterator = "=0.1.9"
-tree-sitter-rust = "0.23.3"       # 0.24.0 grammar ABI is 15 > runtime 14; 0.23.3 is ABI 14 — verified by test
+# ── grammar pins: UNCHANGED by the runtime bump (the compatibility matrix,
+# docs/tree-sitter-runtime-matrix.md) ──────────────────────────────────────
+# Every pin below already resolves against 0.25.10 (its `tree-sitter`
+# requirement is a dev-dependency — no runtime constraint) and its grammar
+# ABI (13/14) is inside the 0.25.10 window (13..=15) — behavior-neutral by
+# construction: the grammar binaries are byte-for-byte the 0.24.7 ones.
+# DO NOT casually bump them: the 0.25-generation releases (e.g.
+# javascript 0.25.0, c-sharp 0.23.5) would change the grammar binary and
+# therefore the parses — a separate per-grammar drift decision.
+tree-sitter-rust = "0.23.3"       # ABI 14 — loads on both 0.24.7 and 0.25.10 (verified by test); 0.24.0's grammar ABI is 15, 0.24.1+/0.24.2 are the 0.25-gen follow-up lane
 tree-sitter-javascript = "0.23.1"
 tree-sitter-typescript = "0.23.2"  # provides both TS and TSX grammars
 tree-sitter-python = "0.23.6"
@@ -47,15 +61,14 @@ tree-sitter-c = "0.23.4"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-bash = "0.23.3"
 tree-sitter-json = "0.24.8"
-tree-sitter-yaml = "=0.7.0"        # 0.7.1+ require tree-sitter ^0.25.4!
-tree-sitter-md = "0.3.2"          # 0.5.1 grammar ABI is 15 > runtime 14; 0.3.2 is ABI 13/14 — verified by test
-tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar (^0.24); the
-                                   # original `tree-sitter-toml` is stuck at ^0.20
+tree-sitter-yaml = "=0.7.0"        # 0.7.1+ are 0.25-gen (dev req ^0.25.4) — follow-up lane
+tree-sitter-md = "0.3.2"          # ABI 13/14 — verified by test; 0.5.1 (ABI 15) / 0.5.2+ (^0.26) are the follow-up lane
+tree-sitter-toml-ng = "0.7.0"      # maintained TOML grammar; the original
+                                   # `tree-sitter-toml` is stuck at ^0.20
 # New-languages lane (Java / C# / Ruby / Scheme): exact `=` pins on
 # releases whose parser ABI is 14 — verified `set_language` against the
-# pinned 0.24.7 runtime (the ABI-pinning rule, 001/007 lesson). Next
-# releases of c-sharp (0.23.5) and elisp-family grammars moved to
-# tree-sitter ^0.25 (grammar ABI 15) — do not bump.
+# pinned 0.25.10 runtime (the ABI-pinning rule, 001/007 lesson). The
+# c-sharp 0.23.5 (0.25-gen) release exists — a follow-up lane, do not bump.
 tree-sitter-java = "=0.23.5"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-ruby = "=0.23.1"
@@ -90,6 +103,7 @@ rayon = "1.12"
 # registry source dir, cargo fetch on demand). Path dep: the crate lives in
 # this workspace and is reviewed separately.
 redline-resolve = { path = "crates/redline-resolve" }
+tree-sitter-clojure = "=0.1.0"
 
 [dev-dependencies]
 tempfile = "3.27"

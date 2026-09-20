@@ -87,17 +87,19 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 }
 
 /// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
-/// Go, C, C++, Bash, TOML, JSON, Markdown, and Java are implemented;
-/// every other `LanguageId` (Yaml — intentionally unadopted for node-at,
-/// and `Plain`) degrades to `None`. Future languages slot in here without
-/// restructuring the public surface.
+/// Go, C, C++, Bash, TOML, JSON, Markdown, Java, C#, Ruby, Scheme, and
+/// Clojure are implemented; every other `LanguageId` (Yaml —
+/// intentionally unadopted for node-at, and `Plain`) degrades to `None`.
+/// Future languages slot in here without restructuring the public
+/// surface.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
         | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
-        | LanguageId::CSharp | LanguageId::Ruby | LanguageId::Scheme => {}
+        | LanguageId::CSharp | LanguageId::Ruby | LanguageId::Scheme
+        | LanguageId::Clojure => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -517,6 +519,23 @@ fn is_scheme_identifier_kind(kind: &str) -> bool {
     kind == "symbol"
 }
 
+/// Clojure identifier-ish node kinds (verified against the pinned
+/// tree-sitter-clojure 0.1.0 `NODE_TYPES`): `sym_lit` — the flat
+/// S-expression grammar's name kind (a bare `foo`, a namespaced
+/// `ns.var/foo` — the `.` and `/` are INSIDE the single `sym_name` leaf,
+/// probe-verified — and a meta-prefixed name all parse as one `sym_lit`).
+/// Keywords (`kwd_lit`) are deliberately not identifier-ish: a keyword
+/// names a key, not a var. There is no path-shaped construct beyond the
+/// namespaced symbol itself (it is ONE token, not a container), so
+/// `is_path_segment` has no Clojure arm (its default returns `false`) —
+/// the honest N/A, pinned by `clojure_has_no_scope`. `node_at` resolves
+/// a symbol to its whole `sym_lit` (a namespaced name comes back whole);
+/// `scope_path_at` stays `[]` (no named definition containers exist to
+/// walk — the same honest N/A as Scheme).
+fn is_clojure_identifier_kind(kind: &str) -> bool {
+    kind == "sym_lit"
+}
+
 // Markdown has NO identifier-ish node kind (probed against the pinned
 // tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
@@ -546,6 +565,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::CSharp => is_csharp_identifier_kind(kind),
         LanguageId::Ruby => is_ruby_identifier_kind(kind),
         LanguageId::Scheme => is_scheme_identifier_kind(kind),
+        LanguageId::Clojure => is_clojure_identifier_kind(kind),
         _ => false,
     }
 }
@@ -2170,6 +2190,59 @@ mod tests {
         assert_eq!(info.text, "inner");
         assert_eq!(info.kind, "symbol");
         assert!(scope_path_at(LanguageId::Scheme, src, at).is_empty());
+    }
+
+    /// Clojure: a symbol resolves to its whole `sym_lit`, and a
+    /// namespaced symbol (`my.lib` — the `.` is INSIDE the single
+    /// `sym_name` leaf, probe-verified) comes back whole as ONE
+    /// identifier (Clojure has no path-shaped container beyond the
+    /// namespaced token itself — the honest N/A for M-. path-shaped,
+    /// same posture as Scheme).
+    #[test]
+    fn clojure_symbol_resolves_bare_and_namespaced() {
+        let src = "(defn double [v] v)\n(ns my.lib)\n";
+        let at = src.find("double").expect("fixture") + 1;
+        let info = node_at(LanguageId::Clojure, src, at).expect("node at `double`");
+        assert_eq!(info.text, "double");
+        assert_eq!(info.kind, "sym_lit");
+        // A meta prefix belongs to the symbol's OWN `sym_lit`
+        // (probe-verified: `(def ^:doc x 10)` — the `meta_lit` is a field
+        // of the name's `sym_lit` and INSIDE its byte range), so M-. on
+        // `^:doc` resolves the whole meta-carrying symbol (the honest
+        // degradation — the outline itself captures the bare `sym_name`
+        // `x`, so indexing stays clean; an M-. on the meta text bails
+        // like any unindexed name).
+        let kw_src = "(def ^:doc x 10)\n";
+        let kw_at = kw_src.find(":doc").expect("fixture") + 2;
+        let info = node_at(LanguageId::Clojure, kw_src, kw_at)
+            .expect("meta-prefixed name resolves");
+        assert_eq!(info.text, "^:doc x");
+        assert_eq!(info.kind, "sym_lit");
+        // A BARE keyword is not identifier-ish: `node_at` on `:bar` bails.
+        let kw2 = "(foo :bar)\n";
+        let kw2_at = kw2.find(":bar").expect("fixture") + 1;
+        assert!(node_at(LanguageId::Clojure, kw2, kw2_at).is_none());
+        // The namespaced symbol `my.lib` resolves whole, in the
+        // single-token namespaced name's own byte range.
+        let at = src.find("my.lib").expect("fixture") + 1;
+        let info = node_at(LanguageId::Clojure, src, at).expect("node at `my.lib`");
+        assert_eq!(info.text, "my.lib");
+        assert_eq!(info.kind, "sym_lit");
+    }
+
+    /// Clojure has NO named definition containers: a symbol inside a
+    /// `defn` body resolves as itself (no container walk), and the scope
+    /// path stays `[]` even nested in a defn body (the honest N/A,
+    /// probe-verified against the flat tree-sitter-clojure 0.1.0 node
+    /// set — `defn` is a `list_lit`, not a named container).
+    #[test]
+    fn clojure_has_no_scope() {
+        let src = "(defn outer [x]\n  (defn inner [] x))\n";
+        let at = src.find("inner").expect("fixture") + 1;
+        let info = node_at(LanguageId::Clojure, src, at).expect("node at `inner`");
+        assert_eq!(info.text, "inner");
+        assert_eq!(info.kind, "sym_lit");
+        assert!(scope_path_at(LanguageId::Clojure, src, at).is_empty());
     }
 }
 
