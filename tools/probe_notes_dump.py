@@ -158,11 +158,7 @@ class PipedSession:
     def add_live_annotation(self):
         # Point at line 2 (the `}` line — lines 0 and 1 already carry the
         # seeded records): A → empty prompt → type the note → RET commits.
-        # input-latency: paced single presses (the byte-for-byte path) — a
-        # "C-n C-n" burst in one write now coalesces (last-motion-wins) and
-        # would land the point on line 1, not line 2.
-        self.key("C-n", 0.4)
-        self.key("C-n", 0.4)
+        self.key("C-n C-n", 0.6)
         self.key("A", 0.5)
         os.write(self.master, b"live note here\r")
         self._read(1.0)

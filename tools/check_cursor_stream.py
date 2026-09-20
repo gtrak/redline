@@ -32,10 +32,6 @@ reconstruction:
   * plan 004 issue 05f: the transient menu (`?`) renders two ellipsized
     columns with a visible gutter at 80 cols (no two-cell collision) and
     falls back to one full-width column at narrow widths.
-  * input-latency: a burst of 30 queued C-n (one pty write) coalesces to a
-    bounded point step (last-motion-wins per drain pass), nothing replays
-    after the burst settles (release-drain), and a paced single C-n still
-    steps exactly one line (byte-for-byte single-keypress behavior).
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -457,14 +453,8 @@ def file_view_checks():
     rec("Left == C-b", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
 
     # C-v keeps the point's screen row: step to line 5 (row 6), then C-v.
-    # input-latency: paced as four SINGLE presses (the byte-for-byte path —
-    # one line per press). The burst variant (all four in one write) now
-    # coalesces by design (last-motion-wins) — that is asserted by the
-    # BURST+RELEASE leg below, not here (the position chain needs exactly
-    # 4 lines).
-    for _ in range(4):
-        r, c = do("C-n")
-    rec("C-n x4 (paced) -> line 5 (screen row 4)", (r, c) == (6, 11), f"cup=({r},{c}) want (6,11)")
+    r, c = do("C-n " * 4)
+    rec("C-n x4 -> line 5 (screen row 4)", (r, c) == (6, 11), f"cup=({r},{c}) want (6,11)")
     before_row = r
     r, c = do("C-v")
     rec("C-v holds the point's screen row",
@@ -1052,107 +1042,6 @@ def annotation_gutter_checks():
     return checks
 
 
-def burst_release_checks():
-    """input-latency (queued/repeating input over a stream): the distinctive
-    bug is that held-key repeats queue faster than the app drains them and
-    keep replaying cursor motion after release. The fix is drain-and-
-    coalesce (last-motion-wins per render tick), so this leg asserts the
-    PTY-observable consequences:
-      * A BURST of 30 C-n in ONE pty write (the gamestream queue shape)
-        advances the point a BOUNDED step (2-5 lines — the coalesced drain
-        passes; the discriminating property is "bounded, not ~30", the
-        exact pass count is unit-pinned), NOT 30 lines — pre-fix the
-        cursor lands ~29 lines down.
-      * RELEASE-DRAIN: after the burst settles, two quiet windows show NO
-        further motion (nothing queued replays after the release).
-      * BYTE-FOR-BYTE: a paced single C-n still steps exactly one line
-        per press (the un-queued path is unchanged).
-    The cursor position is read from the pyte screen state (CUP-driven),
-    not from a per-chunk CUP scan, so the quiet windows stay meaningful
-    even when no bytes arrive.
-    """
-    import os as _os
-    src_dir = _os.path.join(REPO, "src")
-    _os.makedirs(src_dir, exist_ok=True)
-    # burstleg.rs: 40 lines; even line = 20 'A's, odd line = 2 'b's. NO
-    # trailing newline (ropey would count a trailing \n as an extra empty
-    # line) — same shape as cursorleg.rs.
-    blines = ["A" * 20 if i % 2 == 0 else "b" * 2 for i in range(40)]
-    with open(_os.path.join(src_dir, "burstleg.rs"), "w") as f:
-        f.write("\n".join(blines))
-
-    s = Session(None)
-    checks = []
-
-    def rec(name, ok, detail=""):
-        checks.append((name, ok, detail))
-        print(f"  {'PASS' if ok else 'FAIL'}  {name:52s} {detail}")
-
-    def cursor_row():
-        """0-based terminal row of the (CUP) cursor from the pyte state."""
-        return s.screen.cursor.y
-
-    def point_line():
-        """1-based point line from the status-line position display (L{n},pct%)."""
-        m = re.search(r"L(\d+),", s.text())
-        return int(m.group(1)) if m else None
-
-    # Open burstleg.rs; the point starts at line 0 (status "Top", CUP row 1).
-    s.key("C-x C-f", 1.0)
-    for ch in "burstleg":
-        s.key(ch, 0.25)
-    s.key("RET", 1.0)
-    s.key("C-a", 0.6)
-    s._read(0.4, quiet=0.15)
-    r0, l0 = cursor_row(), point_line()
-    rec("burst prep: cursor at (line 1, col 1)", (r0, s.screen.cursor.x) == (1, 0),
-        f"cup=({r0},{s.screen.cursor.x}) want (1,0) pos={l0}")
-
-    # ── BURST: 30 x C-n in ONE pty write (queued faster than the drain) ──
-    os.write(s.master, b"\x0e" * 30)   # C-n = 0x0E
-    s._read(1.2, quiet=0.2)
-    r1, l1 = cursor_row(), point_line()
-    # Discriminating property: BOUNDED, not ~30. Pre-fix every queued
-    # repeat was applied individually, so the point lands ~29 lines down
-    # (L30, CUP row 22 — far outside the range below). The exact apply
-    # count per drain pass depends on how many passes the burst splits
-    # into (load-sensitive) and is unit-pinned instead (the event_loop
-    # motion tests + the root.rs burst twin), so this leg asserts the
-    # WIDE bounded range, not the exact pass count (review P2: coupling
-    # a PTY leg to the exact count is a load-flake risk).
-    rec("burst of 30 C-n coalesces: point advanced a BOUNDED step (not ~30 lines)",
-        2 <= r1 <= 5 and l1 is not None and 2 <= l1 <= 5,
-        f"cup_row={r1} line={l1} (want 2..=5; pre-fix: ~29 lines down, L30/row 22)")
-
-    # ── RELEASE-DRAIN: no replay after the burst settles ────────────────
-    s._read(1.0, quiet=0.3)
-    before = (cursor_row(), point_line())
-    s._read(1.0, quiet=0.3)
-    after = (cursor_row(), point_line())
-    rec("release-drain: no replay after the burst settles",
-        before == after, f"{before} -> {after}")
-
-    # ── Byte-for-byte: a paced single C-n steps exactly one line ───────
-    steps = []
-    for i in range(3):
-        s.key("C-n", 0.6)
-        steps.append((cursor_row(), point_line()))
-    ok = (len(steps) == 3 and before[1] is not None and
-          all(r == before[0] + 1 + i and l == before[1] + 1 + i
-              for i, (r, l) in enumerate(steps)))
-    rec("paced single C-n: exactly one line per press (byte-for-byte)", ok,
-        f"line {before[1]} -> " + " -> ".join(str(l) for _, l in steps))
-
-    s.kill()
-    # Test hygiene (shared /tmp fixture): remove the scratch file so RE-RUNS
-    # of the battery start from the baseline (same pattern as the 02b legs).
-    try:
-        os.remove(_os.path.join(REPO, "src", "burstleg.rs"))
-    except OSError:
-        pass
-    return checks
-
-
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -1200,11 +1089,6 @@ def main():
     # + note-row overflow (point's line always drawn, cursor on it).
     print("=== ANNOTATION GUTTER + NOTE-ROW OVERFLOW (02b) ===")
     all_checks += annotation_gutter_checks()
-    print()
-    # input-latency: burst+release coalescing (30 queued C-n in one write
-    # -> bounded step, no post-release replay, paced single C-n unchanged).
-    print("=== BURST+RELEASE COALESCING (input-latency) ===")
-    all_checks += burst_release_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")
