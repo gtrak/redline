@@ -298,12 +298,10 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       definition; status line which-function updates.
 - [ ] **U-D2 `M-.` on an ambiguous name** (same symbol, 2 files): picker
       with both definitions + preview; `RET` jumps.
-- [ ] **U-D3 `M-.` on a type/constant name** (uppercase): currently falls
-      back to enclosing symbol (known gap — verify behavior, log if fixed).
+- [x] **U-D3 `M-.` on a type/constant name** (uppercase): verified FIXED in the watchlist-fixes lane — M-. no longer falls back to the enclosing symbol for indexed type/const names; it jumps directly per shape (the enclosing-symbol fall-through remains the honest degradation for symbols the index does not know, pinned by `xref_local_binding_dot_chained_receiver_stays_bare`); pins `xref_uppercase_type_and_const_shapes_jump_directly` + `unit_flow_xref_uppercase_type_m_dot`.
 - [ ] **U-D4 `M-,` returns to the exact origin line**; `C-i` forward again;
       mash `M-,` at stack bottom — clean no-op, no panic.
-- [ ] **U-D5 `M-i` imenu**: all symbols of the file (nested present; flat
-      display is a known gap); `RET` jumps; preview sensible.
+- [x] **U-D5 `M-i` imenu**: all symbols of the file (nested present; Rust impl methods grouped under the impl's type — watchlist-fixes lane, `imenu_groups_impl_methods_under_the_struct`); `RET` jumps; preview sensible.
 - [ ] **U-D6 Symbol picker** (`C-c p s`): fuzzy over project; preview shows
       definition context; jump records onto the stack.
 - [ ] **U-D7 Which-function** while scrolling through nested fns/methods:
@@ -444,11 +442,11 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
 
 ## U-K · Known-issue watchlist (regression checks from reviews)
 
-- [ ] Uppercase-initial `M-.` misses types/constants (review 05 non-blocking)
-- [ ] imenu flat, no impl-parent nesting (review 05)
-- [ ] `search_jump` closes view when open fails; occur-on-scratch RET error
-- [ ] `M-,` under Search view: no-op until view closed
-- [ ] Page scroll has no 2-line overlap (emacs `next-screen-context-lines`)
+- [x] Uppercase-initial `M-.` misses types/constants (review 05 non-blocking) — **FIXED/verified (watchlist-fixes lane)**: the case skip was the pre-006-02b line-split heuristic; `symbol_at_point` (the M-. extraction) has had no case filter since 006-02b and extends every identifier shape. End-to-end pinned per shape: `xref_uppercase_type_and_const_shapes_jump_directly` (CamelCase type cross-file, SCREAMING const, mixed CamelCase in a generic argument) + the loop-03 twin `unit_flow_xref_uppercase_type_m_dot` (state + render80, the real alt-dot key).
+- [x] imenu flat, no impl-parent nesting (review 05) — **FIXED (watchlist-fixes lane)**: Rust files group the impl methods under the impl's type via the Rung 1 tables (`imenu_candidate`/`imenu_depth` — one level below the struct's own indent when the type is in the outline; non-Rust stays byte-for-byte the enclosing-extent indent). The refilter path (`candidates_for`) now shares the same display derivation (the pre-fix drift: initial open indented, refilter flat). Pins: `imenu_groups_impl_methods_under_the_struct` (incl. the refilter display) + `imenu_non_rust_stays_flat` (degradation) + twin `unit_flow_imenu_impl_parent_grouping` (state + render80, M-i).
+- [x] `search_jump` closes view when open fails; occur-on-scratch RET error — **FIXED (watchlist-fixes lane)**: `search_jump` now opens through `open_project_path` (the open-or-report seam); on a failed open (file deleted after the walk, or an occur hit with no file, e.g. `*scratch*`) the results view STAYS open and the report says the jump did not happen — no view closed, no jump entry, current buffer unchanged. Pin: `search_jump_failed_open_keeps_the_results_view` + twin `unit_flow_search_ret_and_mcomma_under_search` (leg A, state + render80).
+- [x] `M-,` under Search view: no-op until view closed — **FIXED (watchlist-fixes lane)**: two halves — (1) `M-,` (jump-back) is now bound on the Search view (it was unbound there, so the key did nothing at all until the view closed); (2) the search-RET records the PRE-SEARCH position in front of the sentinel (`[… pre, sentinel, dest]`) and `navigate_to_entry` closes the results view when a jump lands — so under the results view, M-, pops through the sentinel in ONE step to the pre-search position (emacs `xref-pop-marker-stack`); the first M-, (from the jumped file) still returns to the results with the selection restored (pinned by `search_ret_jump_and_mcomma_returns_to_results`, unchanged). Home-state RET (no buffer) keeps the sentinel as the first entry, byte-for-byte. Pin: `search_mcomma_pops_the_sentinel_to_the_pre_search_position` + twin (leg B, state + render80).
+- [x] Page scroll has no 2-line overlap (emacs `next-screen-context-lines`) — **ALREADY LANDING (watchlist-fixes lane verified)**: `scroll_page_down`/`scroll_page_up` step `viewport − 2` (C-v/M-v/PageDown/PageUp bound on the buffer view); pinned since the PART A fix by `scroll_page_down_keeps_two_line_overlap` + `scroll_page_up_saturates_at_zero`. No code change.
 - [x] **Window splits: DECIDED OUT** (2026-09-20, user: redline is a herdr quick popup, single pane by design — not an emacs clone; the find came from the ux_sweep keymap-coverage leg's emacs-standard-key expectation, not product intent). C-x 0/1 keep their real stack semantics; C-x 2 is bound and reports "single pane by design: redline runs as a herdr popup, one pane" (zero state; pinned by `unit_flow_window_splits_c_x_2_single_pane_report`). The `cycle_view` order-identity quirk is likewise moot (no split model to rotate). The previously queued real-splits follow-up is CLOSED.
 - [ ] `C-s`/`C-r` during isearch don't repeat (swallowed); `C-s` behind an
       open picker latches isearch
