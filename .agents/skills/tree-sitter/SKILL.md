@@ -1,48 +1,86 @@
 ---
 name: tree-sitter
 description: >-
-  Reference for the tree-sitter 0.24.7 stack pinned in redline's Cargo.toml:
+  Reference for the tree-sitter 0.25.10 stack pinned in redline's Cargo.toml:
   runtime API (Parser, Language, Tree, Node, TreeCursor, Query, QueryCursor,
-  InputEdit), the tree-sitter-highlight flow, the exact exports of the 12 pinned
-  grammar crates, and ABI pinning rules. Use when writing or modifying src/syntax/
-  (grammar registry, highlight pipeline, symbol queries), touching tree-sitter
-  dependencies in Cargo.toml, or debugging parse/highlight/query code.
+  InputEdit), the tree-sitter-highlight flow, the exact exports of the 17 pinned
+  grammar crates behind all 19 registry languages, the dev-dependency ABI
+  finding, the C#/Clojure vendored-highlights pattern, and ABI pinning rules.
+  Use when writing or modifying src/syntax/ (grammar registry, highlight
+  pipeline, symbol queries), touching tree-sitter dependencies in Cargo.toml,
+  or debugging parse/highlight/query code.
 ---
 
 # tree-sitter
 
-Reference for the pinned tree-sitter stack. Every API fact below was verified against
-docs.rs for the exact version in `Cargo.toml` / `Cargo.lock` (2026-09-16). The 0.24
-API differs from pre-0.24 in several places (see Gotchas) — do not trust older-version memory.
+Reference for the pinned tree-sitter stack. Every API fact below was verified
+against the exact versions in `Cargo.toml` / `Cargo.lock`: the 0.25.10
+signatures were re-verified after the ts-bump lane against the local registry
+source (`~/.cargo/registry/src/…/tree-sitter-0.25.10/binding_rust/lib.rs` and
+`tree-sitter-highlight-0.25.10/src`), and the 0.24-era facts carried over
+unchanged — the workspace's query/highlight code compiles and its full test
+suite passes against 0.25.10. The 0.25 Rust API is nearly identical to 0.24 on
+the surfaces redline uses — do not trust even-older-version memory.
 
 ## Version & compatibility
 
 | Crate | Pin | Notes |
 |---|---|---|
-| tree-sitter | 0.24.7 | runtime; ABI check at `set_language` |
-| tree-sitter-highlight | 0.24.7 | requires tree-sitter ^0.24.5 |
+| tree-sitter | =0.25.10 | runtime; ABI check at `set_language`; window **13..=15** |
+| tree-sitter-highlight | =0.25.10 | requires tree-sitter ^0.25.10 (tracks the runtime 1:1) |
 | tree-sitter-language | 0.1.8 (lock) | `LanguageFn` — ABI bridge; shared by runtime + all grammars |
-| tree-sitter-rust | 0.23.3 | 0.24.0 grammar ABI is 15 > runtime 0.24.7 max 14; 0.24.1+ also require tree-sitter ^0.25 |
-| tree-sitter-javascript | 0.23.1 | |
-| tree-sitter-typescript | 0.23.2 | both TS and TSX grammars |
-| tree-sitter-python | 0.23.6 | |
-| tree-sitter-go | 0.23.4 | |
-| tree-sitter-c | 0.23.4 | |
-| tree-sitter-cpp | 0.23.4 | |
-| tree-sitter-bash | 0.23.3 | |
-| tree-sitter-json | 0.24.8 | |
-| tree-sitter-yaml | =0.7.0 | 0.7.1+ require tree-sitter ^0.25.4! |
-| tree-sitter-md | 0.3.2 | 0.5.1 grammar ABI is 15 > runtime 0.24.7 max 14; 0.5.2+ require tree-sitter ^0.26 |
-| tree-sitter-toml-ng | 0.7.0 | maintained TOML (^0.24); original `tree-sitter-toml` stuck at ^0.20 |
+| tree-sitter-rust | 0.23.3 | ABI 14; 0.24.1/0.24.2 are the 0.25-gen follow-up lane (dev req ^0.25) |
+| tree-sitter-javascript | 0.23.1 | ABI 14; 0.25.0 is the 0.25-gen follow-up lane (dev req ^0.25.8) |
+| tree-sitter-typescript | 0.23.2 | ABI 14; both TS and TSX grammars (0.23.2 is newest) |
+| tree-sitter-python | 0.23.6 | ABI 14; 0.25.0 is the follow-up lane |
+| tree-sitter-go | 0.23.4 | ABI 14; 0.25.0 is the follow-up lane |
+| tree-sitter-c | 0.23.4 | ABI 14; 0.24.0–0.24.2 are the follow-up lane |
+| tree-sitter-cpp | 0.23.4 | ABI 14; 0.23.4 is newest |
+| tree-sitter-bash | 0.23.3 | ABI 14; 0.25.0/0.25.1 are the follow-up lane |
+| tree-sitter-json | 0.24.8 | ABI 14; 0.24.8 is newest |
+| tree-sitter-yaml | =0.7.0 | ABI 14; 0.7.1+ are 0.25-gen (dev req ^0.25.4) — follow-up lane |
+| tree-sitter-md | 0.3.2 | ABI 13/14; 0.5.1 is ABI 15 (in-window), 0.5.2+ want ^0.26 — follow-up lane |
+| tree-sitter-toml-ng | 0.7.0 | maintained TOML (^0.24-era); original `tree-sitter-toml` stuck at ^0.20; 0.7.0 is newest |
+| tree-sitter-java | =0.23.5 | ABI 14 (new-languages lane); 0.23.5 is newest |
+| tree-sitter-c-sharp | =0.23.1 | ABI 14; exports NO highlight constants → vendored (below); 0.23.5 is the follow-up lane |
+| tree-sitter-ruby | =0.23.1 | ABI 14; 0.23.1 is newest |
+| tree-sitter-scheme | =0.24.7 | ABI 14; flat S-expression grammar; 0.24.7 is newest |
+| tree-sitter-clojure | =0.1.0 | **the only grammar with a NORMAL `tree-sitter` req: ^0.25.6** — the hard dep that made the 0.24.7 → 0.25.10 bump necessary; 0.1.0 is its only release; exports no highlight constants → vendored (below) |
 
-- All grammar pins resolve against a SINGLE tree-sitter runtime (0.24.7). Bumping a grammar to a release requiring
-  `^0.25`/`^0.26` pulls a second runtime crate — incompatible ABIs are how you get silent `set_language` failures.
-- rust/yaml/md use exact `=` pins because their next release already moved to a newer runtime requirement; other
-  caret pins currently land on ^0.24 — re-check crates.io dependency metadata before any bump.
+That is 17 grammar crates behind ALL 19 registry `LanguageId`s (typescript
+supplies both TS and TSX; md supplies Markdown block + inline; Plain has no
+grammar).
+
+- All grammar pins resolve against a SINGLE tree-sitter runtime (=0.25.10) —
+  one runtime in the lock. A second runtime crate is the failure mode that
+  produces silent `set_language` errors. The guard
+  `all_grammars_set_language_succeeds` (registry.rs) runs `set_language`
+  over ALL 19 `LanguageId`s and pins this.
+- **The dev-dependency finding (why the bump forced zero grammar moves):** in
+  every pinned grammar crate EXCEPT clojure, the `tree-sitter` (RUNTIME)
+  requirement is a **dev-dependency**. Cargo does not resolve dev-deps when a
+  crate is consumed as a dependency, so those reqs impose **NO resolution
+  constraint** on which runtime redline links. What constrains a grammar at
+  load time is ONLY the runtime's **ABI window**: `set_language` succeeds iff
+  `MIN_COMPATIBLE_LANGUAGE_VERSION ≤ grammar ABI ≤ LANGUAGE_VERSION` — for
+  0.25.10 that window is **13..=15**, and every pinned grammar is ABI 13 or
+  14, so all 18 non-Plain grammars load unchanged. Full evidence (per-crate
+  normal vs dev reqs, ABIs, registry-index source) lives in
+  `docs/tree-sitter-runtime-matrix.md`.
+- **Clojure is the exception:** `tree-sitter-clojure =0.1.0` declares
+  `tree-sitter ^0.25.6` as a NORMAL dependency — a real resolution constraint
+  (under the old 0.24.7 pin it did not even resolve: cargo `links` conflict).
+  This is the unblock the bump bought.
+- Exact `=` pins guard yaml/md and the new-lane grammars (java, c-sharp,
+  ruby, scheme, clojure) against a bump silently changing the ABI or pulling
+  a 0.25-gen release; the remaining caret pins currently land on
+  0.24-compatible releases — re-check the registry-index dependency metadata
+  (the matrix doc records what each 0.25-gen release looks like) before any
+  bump.
 
 ## Core API
 
-Verified signatures (tree-sitter 0.24.7):
+Verified signatures (tree-sitter 0.25.10):
 
 ```
 Parser::new() -> Parser
@@ -54,7 +92,7 @@ Tree::root_node(&self) -> Node
 Tree::edit(&mut self, &InputEdit)
 Tree::walk(&self) -> TreeCursor
 Node::kind(&self) -> &'static str
-Node::start_byte / end_byte / start_position / end_position / byte_range   // start_position/end_position -> Point { row, column: usize } in the 0.24.7 Rust binding — row is the 0-based line, no cast needed (verified against the 0.24.7 source)
+Node::start_byte / end_byte / start_position / end_position / byte_range   // start_position/end_position -> Point { row, column: usize } in the 0.25.10 Rust binding — row is the 0-based line, no cast needed
 Node::child_count / child(i) / named_child(i) / child_by_field_name(impl AsRef<[u8]>)
 Node::is_named / is_missing / has_error / is_error / parent()
 Node::utf8_text(&self, &[u8]) -> Result<&str, Utf8Error>
@@ -146,6 +184,8 @@ for event in events {
 }
 ```
 
+(tree-sitter-highlight =0.25.10; signatures re-verified in its source.)
+
 - `HighlightConfiguration::new(language: Language, name: impl Into<String>, highlights: &str, injections: &str, locals: &str)
   -> Result<Self, QueryError>`; `configure(&mut self, &[impl AsRef<str>])`; `names() -> &[&str]`.
 - `Highlighter::highlight<'a>(&'a mut self, &'a HighlightConfiguration,
@@ -153,14 +193,16 @@ for event in events {
 - `Highlight(pub usize)` — an index into the list passed to `configure`.
 - `HighlightConfiguration` is `Send + Sync`, immutable after `configure` — build once per language, share everywhere.
   `Highlighter` wraps a stateful `Parser` (public field `parser`) — keep one per worker thread.
-- Per-language queries ship as `&'static str` constants in the grammar crates (table
-  below). The injection callback (last `highlight` arg) enables embedded languages
+- Per-language queries ship as `&'static str` constants in the grammar crates
+  (table below). The injection callback (last `highlight` arg) enables embedded languages
   (Markdown/TOML); redline v1 passes `|_| None`.
 
 ## Grammar crates
 
-All verified against docs.rs. Every crate exports a `LanguageFn` constant and
-`NODE_TYPES` (node-types.json content, `&'static str`). The highlight constant name is **inconsistent** across crates:
+All verified against the pinned crate sources (0.25-gen stack). Every crate
+exports a `LanguageFn` constant and `NODE_TYPES` (node-types.json content,
+`&'static str`). The highlight constant name is **inconsistent** across
+crates:
 
 | Crate (pin) | Language constant(s) | Highlight query | Also exports |
 |---|---|---|---|
@@ -176,37 +218,66 @@ All verified against docs.rs. Every crate exports a `LanguageFn` constant and
 | tree-sitter-yaml (=0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
 | tree-sitter-md (0.3.2) | `LANGUAGE` (block) + `INLINE_LANGUAGE` | `HIGHLIGHT_QUERY_BLOCK` / `HIGHLIGHT_QUERY_INLINE` | `INJECTION_QUERY_BLOCK`, `INJECTION_QUERY_INLINE`, `NODE_TYPES_BLOCK`, `NODE_TYPES_INLINE`, `MarkdownParser`, `MarkdownTree`, `MarkdownCursor` |
 | tree-sitter-toml-ng (0.7.0) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | — |
+| tree-sitter-java (=0.23.5) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `TAGS_QUERY` |
+| tree-sitter-c-sharp (=0.23.1) | `LANGUAGE` | **NONE — vendored** (see below) | — (the crate's query constants are commented out in `bindings/rust/lib.rs`) |
+| tree-sitter-ruby (=0.23.1) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `LOCALS_QUERY`, `TAGS_QUERY` |
+| tree-sitter-scheme (=0.24.7) | `LANGUAGE` | `HIGHLIGHTS_QUERY` | `INJECTIONS_QUERY`, `LOCALS_QUERY`, `TAGS_QUERY` (registry uses only `HIGHLIGHTS_QUERY`, passes `""` for the rest) |
+| tree-sitter-clojure (=0.1.0) | `LANGUAGE` | **NONE — vendored** (see below) | — (exports only `LANGUAGE` + `NODE_TYPES`) |
 
 - No crate exports a `language()` fn in these versions — the constant is the API (the `language()` calls in some crate doc examples are stale).
-- `TAGS_QUERY` (LSP-tag-style symbol queries) exists only for rust/js/ts/python/go/c/cpp. bash/json/yaml/toml/md have
-  none — write small custom queries (e.g. JSON keys, YAML keys) in `src/syntax/` for those.
+- `TAGS_QUERY` (LSP-tag-style symbol queries) is exported for rust/js/ts/python/go/c/cpp and, in the new-lane crates, java/ruby/scheme. bash/json/yaml/toml/md/c-sharp/clojure have none usable — redline writes small custom queries in `src/syntax/` for those (JSON keys, YAML keys, the lisp family's flat `define`-form outlines, C#/Clojure outlines).
 - tree-sitter-md is special: a plain `Parser` + `LANGUAGE` parses block structure only. Full markdown uses its
   `MarkdownParser`, which returns a `MarkdownTree` (block tree + inline trees per block node).
+
+## Vendored highlight queries (the C# + Clojure pattern)
+
+Two pinned crates ship a highlights file but export NO Rust constant for it:
+`tree-sitter-c-sharp` 0.23.1 (its `HIGHLIGHTS_QUERY` et al. are
+**commented out** in the crate's `bindings/rust/lib.rs`) and
+`tree-sitter-clojure` 0.1.0 (exports only `LANGUAGE` + `NODE_TYPES`). For
+these, redline vendors the query:
+
+- Copy the crate's `highlights.scm` **verbatim** into
+  `third_party/tree-sitter-<crate>-<version>/highlights.scm`. Never edit or
+  re-flow the vendored copy — it must stay byte-identical to the pinned
+  crate's file.
+- Pin it by **sha256 at copy time**: the sha256 of the vendored file is
+  recorded in the doc comment of the `include_str!` constant in
+  `src/syntax/queries.rs` (e.g. `CLOJURE_HIGHLIGHTS` pins
+  `424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de`;
+  the C# copy follows the same checksum rule at `C_SHARP_HIGHLIGHTS`).
+  Re-copy + re-pin on any grammar bump.
+- The constants (`C_SHARP_HIGHLIGHTS`, `CLOJURE_HIGHLIGHTS`) are passed to
+  `HighlightConfiguration` exactly like a crate constant (registry.rs);
+  `all_grammars_have_configs` pins that both vendored queries still compile.
 
 ## Usage in redline
 
 Maps to plan 001 issues 03/04/05:
 
 - `src/syntax/` registry (issue 03) is the only module touching grammar crates:
-  one entry per language — `LanguageFn` constant, highlight query, injections query
-  (or `""`), symbol query; plain-text fallback.
+  one entry per language — `LanguageFn` constant, highlight query (crate
+  constant or vendored), injections query (or `""`), symbol query; plain-text fallback.
 - Highlight pipeline: build one `HighlightConfiguration` per language at startup,
   `configure` with the recognized-name list from config, cache highlight events keyed by
   (path, mtime, theme). `Highlighter` per worker.
 - Symbol index (issue 05): shared `Query` per language (Send+Sync, built once); each rayon thread owns a `QueryCursor`
-  (stateful, not shared). Prefer each crate's `TAGS_QUERY` where available; custom queries for bash/json/yaml/toml/md.
+  (stateful, not shared). Prefer each crate's `TAGS_QUERY` where available; custom queries for bash/json/yaml/toml/md
+  and the no-export lisp family (c-sharp/clojure outlines are custom; scheme's flat define forms are captured
+  candidate-and-gated, as is clojure's).
 - File watching (issue 04): on external change, `Tree::edit(&InputEdit {..})`
   then `parse(new_text, Some(&old_tree))` for the incremental reparse.
 
 ## Gotchas
 
 - **`set_language` takes `&Language`, not `LanguageFn`.** Convert with `Language::from(grammars::LANGUAGE)`. ABI mismatch
-  returns `Err(LanguageError)` — compare `Language::version()` against `LANGUAGE_VERSION` / `MIN_COMPATIBLE_LANGUAGE_VERSION`.
-- **`QueryCapture.index`** (0.24) — older versions called this `name_index`.
+  returns `Err(LanguageError)` — compare `Language::version()` against `LANGUAGE_VERSION` / `MIN_COMPATIBLE_LANGUAGE_VERSION`
+  (0.25.10 window: 13..=15).
+- **`QueryCapture.index`** (0.24/0.25) — older versions called this `name_index`.
 - **`Node::utf8_text(source)`** — the old `Node::text(source)` is gone.
 - **Query iterators are `StreamingIterator`, not std `Iterator`.** `QueryCaptures`/`QueryMatches` come from the
   `streaming-iterator` crate; need `use streaming_iterator::StreamingIterator;` for `.next()`. `QueryCaptures` yields
-- **`QueryMatches` vs `QueryCaptures` item types differ** (0.24.7): `captures().next()`
+- **`QueryMatches` vs `QueryCaptures` item types differ** (0.25.10): `captures().next()`
   yields `(QueryMatch, usize)` (a tuple, per capture); `matches().next()` yields
   `&QueryMatch` (a reference, per match) — use `matches()` for definition queries
   that capture a name and its enclosing item (see "Run a query"). `QueryMatch` is !Send/!Sync.
@@ -215,11 +286,17 @@ Maps to plan 001 issues 03/04/05:
 - **`parse` returns `Option<Tree>`**, not `Result` — `None` on timeout,
   cancellation, or no language set.
 - **Highlight constant naming**: `HIGHLIGHT_QUERY` (js/c/cpp/bash) vs
-  `HIGHLIGHTS_QUERY` (rust/ts/python/go/json/yaml/toml-ng). Don't guess.
+  `HIGHLIGHTS_QUERY` (rust/ts/python/go/json/yaml/toml-ng/java/ruby/scheme). c-sharp
+  and clojure export NO highlight constant at all — vendored (above). Don't guess.
 - **`Highlighter::highlight` takes `&[u8]`**, not `&str`.
 - The tree-sitter-highlight crate-level doc example (uses `tree_sitter_javascript::language()`, older crate versions)
   is stale — don't copy it verbatim. tree-sitter-c's doc prose also mentions a `language()` fn its item list does not expose.
 - tree-sitter-md with a plain `Parser` gives block-level structure only —
   inline tokens (links, code spans) need `INLINE_LANGUAGE`/`MarkdownParser`.
 - Bumping a grammar crate silently changes the ABI if the new release requires tree-sitter ^0.25+
-  (cargo pulls a second runtime). Keep the `=` pins on rust/yaml/md and re-check crates.io metadata before any bump.
+  (cargo pulls a second runtime) — remember the dev-dependency finding: only a NORMAL
+  runtime req (clojure is the only one today) constrains resolution; an in-window
+  ABI does not. Keep the `=` pins (yaml, md, java, c-sharp, ruby, scheme, clojure)
+  and re-check the registry-index metadata before any bump; the 0.25-gen follow-up
+  releases (js 0.25.0, c-sharp 0.23.5, …) are recorded — deliberately not taken —
+  in `docs/tree-sitter-runtime-matrix.md`.

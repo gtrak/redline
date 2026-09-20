@@ -359,8 +359,8 @@ walk set (`store.rs::source_extensions_for`: `java`, `cs`, `rb`,
 `scm/ss/sls/sld`). **No provider** (the provider chain stays 4 —
 package-manager machinery is a separate decision): M-. outside the
 project index bails with the exact 011-01 message (`no tooling
-provider handles language \`java\`` / `\`csharp\`` / `\`ruby\`` /
-`\`scheme\``) — the same class as C / C++ / Markdown above. The
+provider handles language \`java\`` / `\`csharp\`` / `\`ruby\`` / 
+`\`scheme\`` / `\`clojure\``) — the same class as C / C++ / Markdown above. The
 app-side whole-path upgrade (`dotted_path_container`) now enumerates the
 Java / C# / Ruby path containers (newlang-paths): Java
 `field_access` / `scoped_identifier` / `scoped_type_identifier`, C#
@@ -377,16 +377,19 @@ access and a Ruby method access land in the project index
 (`xref_csharp_property_access_lands_in_project_index`,
 `xref_ruby_method_access_lands_in_project_index`) — while every miss
 outside the project index still bails with the exact 011-01 message
-above (no provider, unchanged). **Clojure is deliberately not landed**: every published
-clojure grammar crate requires the tree-sitter 0.25/0.26 runtime
-(`tree-sitter-clojure` 0.1.0: `^0.25.6` — a cargo `links` conflict with
-the pinned 0.24.7; `tree-sitter-clojure-orchard` 0.2.x: `^0.25.9` /
-`^0.26.11`; `arborium-clojure` 2.18.2: resolves and compiles, but its
-grammar is ABI 15 → `set_language` fails) — full evidence in
-language-coverage.md Gaps item 8. The lisp family landed as **Scheme**
+above (no provider, unchanged). **Clojure is now landed** (ts-bump lane): the pinned runtime moved
+0.24.7 → 0.25.10 (ABI window 13..=15), which is exactly what unblocked
+`tree-sitter-clojure` 0.1.0 — its hard normal dep `tree-sitter ^0.25.6`
+was a cargo `links` conflict with the old 0.24.7 pin (it did not even
+resolve). The other probes below are historical: `tree-sitter-clojure-
+orchard` 0.2.x (`^0.25.9` / `^0.26.11`) and `arborium-clojure` 2.18.2
+(resolved and compiled, but its grammar was ABI 15 → `set_language`
+failed under 0.24.7) — full evidence in language-coverage.md Gaps item
+8 (addendum: since landed). The lisp family first landed as **Scheme**
 (`tree-sitter-scheme` 0.24.7, grammar ABI 14 — the only Lisp-family
-crate matching the pinned runtime; `tree-sitter-elisp` 1.7.2 is ABI 15
-→ fails, probe-verified).
+crate matching the then-pinned 0.24.7 runtime; `tree-sitter-elisp`
+1.7.2 is ABI 15 → failed under 0.24.7, probe-verified; its ABI 15 now
+sits inside the 0.25.10 window, but redline has no elisp language).
 
 ## Regression guard: a miss probes only the matching providers
 

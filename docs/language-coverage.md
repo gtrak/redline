@@ -181,8 +181,9 @@ is where languages genuinely diverge.
    `source_extensions_for` + the round-trip test). Intentional
    (rust-analyzer interface files are not definition sources);
    recorded here so it is not re-filed as a gap.
-8. **Clojure: lane deferred — no usable grammar crate.** The
-   new-languages lane (the user directive "add clojure and lisp
+8. **Clojure: lane deferred — no usable grammar crate.**
+   *Addendum: since landed by the ts-bump lane — see the runtime note
+   above; the probe evidence below is historical.* The new-languages lane (the user directive "add clojure and lisp
    support, java, c#, ruby") first round (offline-first) deferred
    everything: none of the needed crates were vendored in
    `~/.cargo/registry` and mid-task network fetches were disallowed.
