@@ -14,13 +14,16 @@ than asserting specific values:
 What changed in loop-04: the keymap-coverage STATE half (which keys are
 bound in which view, blank-view and cursor-in-range invariants) is now the
 unit twin `unit_flow_ux_keymap_coverage` in src/app/flow_tests.rs (every
-key of every leg, driven through `AppStore::key_event`, the known-unbound
-window-split keys parity-pinned). This file keeps the terminal tier: the
-same per-key anomaly scan through the REAL terminal — input encoding,
-process liveness, the hardware cursor, raw pixels — but in TWO App
-sessions instead of thirteen (one 80-col session drives every normal leg
-in order; one 40-col session drives the narrow-terminal stress), so the
-pool battery pays two launches, not thirteen.
+key of every leg, driven through `AppStore::key_event`; the window-split
+keys C-x 2/1/0 are now BOUND on the buffer view with view-stack-degraded
+semantics — the pre-existing 3 unbound-key findings are cleared, and the
+C-x 2 vertical split itself remains a scoped follow-up: see the
+known-issue watchlist in docs/ux-testing-plan.md). This file keeps the
+terminal tier: the same per-key anomaly scan through the REAL terminal —
+input encoding, process liveness, the hardware cursor, raw pixels — but in
+TWO App sessions instead of thirteen (one 80-col session drives every
+normal leg in order; one 40-col session drives the narrow-terminal stress),
+so the pool battery pays two launches, not thirteen.
 
 Run: python3 tools/ux_sweep.py [--cols N] [--rows N]
 Exit code 0 always (diagnostic); prints a findings list.
@@ -119,9 +122,12 @@ def main():
               ["C-x C-f lib.rs RET", "M-x toggle-tree RET"],
               ["C-n", "C-p", "RET", "C-g", "M-x toggle-tree RET", "q"],
               settle=0.6)
-        # window-splits: C-x 2 / C-x 1 / C-x 0 are UNBOUND by design (the 3
-        # pre-existing findings — the unit twin parity-pins them); C-x o
-        # (open-scratch) is bound.
+        # window-splits: C-x 2 / C-x 1 / C-x 0 are BOUND on the buffer view
+        # (the 3 pre-existing unbound-key findings, cleared): view-stack
+        # degraded semantics — C-x 0 closes the top view, C-x 1 truncates
+        # the stack to the buffer view, C-x 2 reports the single-pane model
+        # (the vertical split itself is a scoped follow-up). C-x o
+        # (open-scratch) is bound too.
         drive(app, "window-splits", ["C-x C-f lib.rs RET"],
               ["C-x 2", "C-x o", "C-x o", "C-x 1", "C-x 0", "q"],
               settle=0.6)
