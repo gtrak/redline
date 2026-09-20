@@ -167,8 +167,9 @@ fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
     if lang != LanguageId::Json {
         return true;
     }
-    node.parent()
-        .map_or(false, |p| p.kind() == "pair" && p.child_by_field_name("key") == Some(node))
+    node.parent().is_some_and(|p| {
+        p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
+    })
 }
 
 /// Whether `node` is a part of a larger dotted path rather than a complete
@@ -384,16 +385,16 @@ fn is_json_identifier_kind(kind: &str) -> bool {
     kind == "string"
 }
 
-/// Markdown has NO identifier-ish node kind (probed against the pinned
-/// tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
-/// `inline` node, and `inline` spans whole paragraphs and code spans
-/// alike — treating it identifier-ish would make `node_at` resolve on
-/// arbitrary prose). There is also no path-shaped construct. So
-/// `is_identifier_kind` returns `false` for `Markdown` (its default arm)
-/// and `node_at` stays `None` — the honest N/A, pinned by
-/// `markdown_heading_text_is_not_identifier_ish`. What IS meaningful is
-/// the outline: `markdown_scope_path` reports the enclosing heading
-/// chain (the block tree nests `section` nodes by heading level).
+// Markdown has NO identifier-ish node kind (probed against the pinned
+// tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
+// `inline` node, and `inline` spans whole paragraphs and code spans
+// alike — treating it identifier-ish would make `node_at` resolve on
+// arbitrary prose). There is also no path-shaped construct. So
+// `is_identifier_kind` has no `Markdown` arm (its default arm returns
+// `false`) and `node_at` stays `None` — the honest N/A, pinned by
+// `markdown_heading_text_is_not_identifier_ish`. What IS meaningful is
+// the outline: `markdown_scope_path` reports the enclosing heading
+// chain (the block tree nests `section` nodes by heading level).
 
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
