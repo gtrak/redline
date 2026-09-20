@@ -91,7 +91,8 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
-        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go => {}
+        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
+        | LanguageId::C => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -217,6 +218,13 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
                         "identifier" | "type_identifier" | "qualified_type"
                     ))
         }
+        // C member access (`a.b`, `p->x` — both are `field_expression` in
+        // the pinned grammar, per its NODE_TYPES probe). The `argument`
+        // child may be ANY expression (`o.x.y` nests `field_expression`s;
+        // `foo(a).b` nests a `call_expression`), so any NAMED child of a
+        // `field_expression` is a path part; the `.`/`->` tokens are
+        // anonymous and never match.
+        LanguageId::C => parent_kind == Some("field_expression") && node.is_named(),
         _ => false,
     }
 }
@@ -279,6 +287,22 @@ fn is_go_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// C identifier-ish node kinds (verified against the pinned
+/// tree-sitter-c `NODE_TYPES`): `identifier` (values), `field_identifier`
+/// (struct members), `type_identifier` (struct/enum/typedef names),
+/// `primitive_type` (`int`, …), and `field_expression` (the whole
+/// `a.b` / `p->x` member access).
+fn is_c_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "primitive_type"
+            | "field_expression"
+    )
+}
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -288,6 +312,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::TypeScript | LanguageId::Tsx => is_ts_identifier_kind(kind),
         LanguageId::Python => is_python_identifier_kind(kind),
         LanguageId::Go => is_go_identifier_kind(kind),
+        LanguageId::C => is_c_identifier_kind(kind),
         _ => false,
     }
 }
@@ -347,6 +372,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         }
         LanguageId::Python => python_scope_path(leaf, source),
         LanguageId::Go => go_scope_path(leaf, source),
+        LanguageId::C => c_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -421,6 +447,35 @@ fn go_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
                 .filter_map(|i| node.child(i))
                 .find(|c| c.kind() == "type_spec")
                 .and_then(|spec| spec.child_by_field_name("name")),
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C enclosing-scope walk: `function_definition` (the name sits one
+/// level down: `declarator` field → `function_declarator` → its
+/// `declarator` field), and `struct_specifier` / `union_specifier` /
+/// `enum_specifier` (name child in the `name` field). Blocks, control
+/// flow, and nested compound statements are intentionally not scope items.
+fn c_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_definition" => node
+                .child_by_field_name("declarator")
+                .and_then(|decl| decl.child_by_field_name("declarator")),
+            "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                node.child_by_field_name("name")
+            }
             _ => None,
         };
         if let Some(name_node) = name_node
@@ -588,11 +643,10 @@ mod tests {
     /// Languages without a node-at implementation still degrade gracefully
     /// (`node_at` → `None`, `scope_path_at` → `[]`) — 007-01's "Rust
     /// first, graceful degradation" decision now covers the languages not
-    /// yet adopted by 011-03.
+    /// yet adopted (C landed in this issue; the rest follow).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 8] = [
-            (LanguageId::C, "int main(void) { return 0; }", "main"),
+        let cases: [(LanguageId, &str, &str); 7] = [
             (LanguageId::Cpp, "int main() { return 0; }", "main"),
             (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
             (LanguageId::Json, "{\"key\": 1}", "key"),
@@ -950,6 +1004,80 @@ mod tests {
             assert_eq!(info.text, "f");
         }
         let _ = scope_path_at(LanguageId::Go, src, pos);
+    }
+
+    // ── C (lang-pred) ───────────────────────────────────
+
+    /// Discriminating: `o.x.y` (chained `.` access) must come back WHOLE
+    /// (one `field_expression` node) for an offset on any segment — and
+    /// `->` member access has the same shape in C (both parse as
+    /// `field_expression` in the pinned grammar).
+    #[test]
+    fn c_member_path_comes_back_whole() {
+        let src = "struct S { int x; }\nint f(struct S o, struct S *p) { return o.x.y + p->x; }\n";
+        let o_at = src.find("o.x").expect("fixture");
+        let y_at = src.find(".y").expect("fixture") + 1;
+        assert_whole_path(LanguageId::C, src, o_at, y_at, "field_expression", "o.x.y");
+        let p_at = src.find("p->x").expect("fixture");
+        let px_at = src.find("->x").expect("fixture") + 2;
+        assert_whole_path(LanguageId::C, src, p_at, px_at, "field_expression", "p->x");
+    }
+
+    #[test]
+    fn c_plain_identifier_top_level() {
+        let src = "const int Z = 3;\n";
+        let info = node_at(LanguageId::C, src, src.find("Z").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "Z");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn c_scope_chain_struct_in_struct_and_function() {
+        let src = "struct Outer { struct Inner { int v; } inner; };\nint f() { return 0; }\n";
+        let at = src.find("v").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::C, src, at),
+            vec![String::from("Outer"), String::from("Inner")]
+        );
+        // `f`'s own name sees its function, and code inside `f` sees it too.
+        let at_name = node_at(LanguageId::C, src, src.find("f").expect("fixture")).unwrap();
+        assert_eq!(at_name.scope_path, vec![String::from("f")]);
+        let in_body = src.find("return 0").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::C, src, in_body),
+            vec![String::from("f")]
+        );
+    }
+
+    #[test]
+    fn c_boundary_offsets_do_not_panic() {
+        // The `struct` keyword token is anonymous (not identifier-ish → no
+        // node) at byte 0, but the scope is still reported. (`int` at byte 0
+        // WOULD match: `primitive_type` is identifier-ish, as in Rust.)
+        let src = "struct S { int x; }\n";
+        assert!(node_at(LanguageId::C, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::C, src, 0), vec![String::from("S")]);
+        // An identifier at byte 0 does resolve; top-level → no scope.
+        let src2 = "x;\n";
+        let info = node_at(LanguageId::C, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::C, src, src.len()).is_none());
+        assert!(node_at(LanguageId::C, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::C, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::C, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn c_broken_source_does_not_panic() {
+        let src = "int f() {";
+        let pos = src.find("f").expect("fixture");
+        if let Some(info) = node_at(LanguageId::C, src, pos) {
+            assert_eq!(info.text, "f");
+        }
+        let _ = scope_path_at(LanguageId::C, src, pos);
     }
 
     #[test]
