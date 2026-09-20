@@ -2484,18 +2484,20 @@ fn unit_flow_xref_l1() {
 
 /// The same-file M-. origin-accuracy twin (user report: "when I jump to
 /// definition in the SAME file, popping back can go to the wrong place, not
-/// where my cursor was"): M-. from a KNOWN (line, col) with other symbols
-/// around lands on the same-file definition, and M-, restores BOTH the
-/// point line AND column (the L1 twin asserted the line only) AND the
-/// window, recentered on the origin line.
+/// where my cursor was"): after a first same-file M-., the cursor moves by
+/// PLAIN MOTION (no jump recorded — the jump stack's current-position slot
+/// goes stale), then a second same-file M-. from the new point (with other
+/// symbols around). M-, must restore BOTH the point line AND column at the
+/// SECOND jump's origin (the stale slot held the first jump's destination —
+/// the "wrong place") AND the window, recentered on that origin line.
 #[test]
 fn unit_flow_xref_l1b_same_file_origin() {
     let repo = xref_repo();
     let p = repo.path();
     // A tall same-file fixture: `alpha` (0-based line 22), `beta` (line 30,
-    // the other symbol around), the call site (line 41: `    let x =
-    // alpha();`, `alpha` running cols 12..16) — 49 lines total so the
-    // 21-row window recenter is discriminating.
+    // the other symbol around), call sites (line 41: `    let x = alpha();`,
+    // line 42: `    let y = beta();`; each symbol runs from col 12) — 50
+    // lines total so the 21-row window recenter is discriminating.
     let mut body = String::new();
     for i in 0..22 {
         body.push_str(&format!("// filler {i}\n"));
@@ -2508,8 +2510,8 @@ fn unit_flow_xref_l1b_same_file_origin() {
     for i in 31..40 {
         body.push_str(&format!("// filler {i}\n"));
     }
-    body.push_str("fn caller() {\n    let x = alpha();\n}\n");
-    for i in 43..49 {
+    body.push_str("fn caller() {\n    let x = alpha();\n    let y = beta();\n}\n");
+    for i in 44..50 {
         body.push_str(&format!("// filler {i}\n"));
     }
     std::fs::write(p.join("src/sf.rs"), body).unwrap();
@@ -2518,9 +2520,9 @@ fn unit_flow_xref_l1b_same_file_origin() {
     let mut s = store_in(repo.path());
     install_index(&mut s, repo.path());
     open_via_finder(&mut s, "sf");
-    goto_line(&mut s, 42); // 1-based 42 = 0-based 41: the call site
+    goto_line(&mut s, 42); // 1-based 42 = 0-based 41: the alpha call site
     // Twelve char-forwards (C-f) from col 0 → col 12, inside the `alpha`
-    // run (cols 12..16). Char motion: deterministic, no word-skip.
+    // run. Char motion: deterministic, no word-skip.
     for _ in 0..12 {
         s.key_event(key("C-f"));
     }
@@ -2532,15 +2534,26 @@ fn unit_flow_xref_l1b_same_file_origin() {
     assert!(!s.picker_open(), "unique same-file: no picker");
     assert_eq!(s.point_line(), 22, "landed on the same-file alpha def");
 
+    // Plain motion (goto-line + C-f, no jump recorded) to the BETA call
+    // site: the jump stack's current-position slot now holds the alpha
+    // landing (line 22), not the cursor (line 42).
+    goto_line(&mut s, 43); // 1-based 43 = 0-based 42: the beta call site
+    for _ in 0..12 {
+        s.key_event(key("C-f"));
+    }
+    assert_eq!((s.point_line(), s.point_col()), (42, 12), "cursor at the beta call");
+
+    s.key_event(key("M-.")); // second same-file jump, from the new point
+    assert_eq!(s.point_line(), 30, "landed on the same-file beta def");
+
     s.key_event(key("M-,")); // jump-back
-    assert_eq!(s.point_line(), 41, "M-, restores the origin LINE");
+    assert_eq!(s.point_line(), 42, "M-, restores the origin LINE (not the stale alpha landing)");
     assert_eq!(s.point_col(), 12, "M-, restores the origin COLUMN");
     // The origin line is recentered in the 21-row window (store_in's PTY
-    // viewport): (41 - 10) clamped to max_scroll = total - 21 (total is
-    // the buffer's own line count; the file is 49 content lines).
+    // viewport): (42 - 10) clamped to max_scroll = total - 21.
     let total = s.current_line_count();
-    assert!(total >= 49, "tall fixture: {total} lines");
-    let expected = (41u32 - 10).min((total - 21) as u32) as usize;
+    assert!(total >= 50, "tall fixture: {total} lines");
+    let expected = (42u32 - 10).min((total - 21) as u32) as usize;
     assert_eq!(
         s.scroll_top(),
         expected,
@@ -2549,7 +2562,9 @@ fn unit_flow_xref_l1b_same_file_origin() {
 }
 
 /// L2 cross-file jump: M-. on `target_lib` in a fresh src/leg.rs lands in
-/// src/lib.rs on the definition.
+/// src/lib.rs on the definition; M-, returns to the leg.rs call site
+/// (line AND column — the cross-file jump-back twin: the same-file
+/// origin-accuracy fix must not degrade it).
 #[test]
 fn unit_flow_xref_l2() {
     let repo = xref_repo();
@@ -2558,6 +2573,8 @@ fn unit_flow_xref_l2() {
     open_via_finder(&mut s, "leg");
     goto_line(&mut s, 2); // "    target_lib();"
     s.key_event(key("M-f")); // end of `target_lib`
+    let origin_line = s.point_line();
+    let origin_col = s.point_col();
     s.key_event(key("M-."));
     let msg_ok = s.message == "jumped to src/lib.rs: 1";
     let in_lib = s
@@ -2572,9 +2589,17 @@ fn unit_flow_xref_l2() {
         .find(|r| !r.text.is_empty())
         .map(|r| r.text.contains("pub fn target_lib"))
         .unwrap_or(false);
+    s.key_event(key("M-,")); // jump-back (the landing recorded a jump)
+    let back = s
+        .buffers
+        .current()
+        .map(String::from)
+        .map(|k| k.ends_with("src/leg.rs"))
+        .unwrap_or(false)
+        && (s.point_line(), s.point_col()) == (origin_line, origin_col);
     assert!(
-        msg_ok && in_lib && top_def,
-        "msg={:?} in-lib={in_lib} top-def={top_def}",
+        msg_ok && in_lib && top_def && back,
+        "msg={:?} in-lib={in_lib} top-def={top_def} back={back}",
         s.message
     );
 }
