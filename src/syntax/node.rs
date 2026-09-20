@@ -45,10 +45,12 @@ pub struct NodeInfo {
 /// normal containment check (a keyword at a file start is not
 /// identifier-ish, so it yields `None`).
 ///
-/// Rust, JavaScript, TypeScript/TSX, Python, and Go are implemented;
-/// every other `LanguageId` (including `Plain`) returns `None` (the
-/// plan's "Rust first, graceful degradation" decision — callers degrade
-/// to today's behavior).
+/// Rust, JavaScript, TypeScript/TSX, Python, Go, C, C++, Bash, TOML,
+/// JSON, and Markdown are implemented (each independently degraded —
+/// see the per-language notes in this module); every other `LanguageId`
+/// (currently Yaml — intentionally unadopted for node-at, and `Plain`)
+/// returns `None` (the plan's "Rust first, graceful degradation"
+/// decision — callers degrade to today's behavior).
 pub fn node_at(lang: LanguageId, source: &str, byte: usize) -> Option<NodeInfo> {
     let tree = parse_source(lang, source)?;
     let leaf = innermost_at(tree.root_node(), byte)?;
@@ -85,13 +87,16 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 }
 
 /// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
-/// and Go are implemented; every other `LanguageId` (including `Plain`)
-/// degrades to `None`. Future languages slot in here without
+/// Go, C, C++, Bash, TOML, JSON, and Markdown are implemented; every
+/// other `LanguageId` (Yaml — intentionally unadopted for node-at, and
+/// `Plain`) degrades to `None`. Future languages slot in here without
 /// restructuring the public surface.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
-        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go => {}
+        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
+        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
+        | LanguageId::Json | LanguageId::Markdown => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -137,15 +142,34 @@ fn innermost_at(root: Node, byte: usize) -> Option<Node> {
 /// token) is skipped so the whole path comes back as one node — the outer
 /// `scoped_identifier` in value position, the outer
 /// `scoped_type_identifier` in type position. `None` when no ancestor is
-/// identifier-ish.
+/// identifier-ish. JSON additionally requires the `pair`/`key` position
+/// (its identifier kind `string` also appears in value position — see
+/// [`in_identifier_position`]).
 fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
     let mut cur = leaf;
     loop {
-        if !is_path_segment(cur, lang) && cur.is_named() && is_identifier_kind(lang, cur.kind()) {
+        if !is_path_segment(cur, lang)
+            && cur.is_named()
+            && is_identifier_kind(lang, cur.kind())
+            && in_identifier_position(lang, cur)
+        {
             return Some(cur);
         }
         cur = cur.parent()?;
     }
+}
+
+/// Whether `node` may count as an identifier at its position: true for
+/// every language except JSON, where the `string` kind is both the key
+/// kind and the value-string kind — only a `pair`'s `key` field is
+/// identifier-ish (a value string is data, not a navigable name).
+fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
+    if lang != LanguageId::Json {
+        return true;
+    }
+    node.parent().is_some_and(|p| {
+        p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
+    })
 }
 
 /// Whether `node` is a part of a larger dotted path rather than a complete
@@ -217,6 +241,35 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
                         "identifier" | "type_identifier" | "qualified_type"
                     ))
         }
+        // C member access (`a.b`, `p->x` — both are `field_expression` in
+        // the pinned grammar, per its NODE_TYPES probe). The `argument`
+        // child may be ANY expression (`o.x.y` nests `field_expression`s;
+        // `foo(a).b` nests a `call_expression`), so any NAMED child of a
+        // `field_expression` is a path part; the `.`/`->` tokens are
+        // anonymous and never match.
+        //
+        // C++ shares `field_expression` (the pinned tree-sitter-cpp grammar
+        // has no direct_member_access/pointer_member_access kinds — probed)
+        // and adds `::` qualified names: `qualified_identifier` with a
+        // `scope` child (a `namespace_identifier`, `type_identifier`, or a
+        // nested `qualified_identifier`) and a `name` child, so `ns::A::x`
+        // comes back whole as one node (the app's Rust `::` scan analogue).
+        LanguageId::C | LanguageId::Cpp => {
+            (parent_kind == Some("field_expression") && node.is_named())
+                || (parent_kind == Some("qualified_identifier") && node.is_named())
+        }
+        // Bash's `command_name` wraps its single `word` child; the word is
+        // a path part so `node_at` on the command name returns the
+        // `command_name`, not the bare word. (The pinned tree-sitter-bash
+        // grammar has no `identifier` kind at all — probed: words are
+        // `word`, commands `command_name`, variables `variable_name`.)
+        LanguageId::Bash => parent_kind == Some("command_name") && node.is_named(),
+        // TOML dotted keys are path-shaped: a `dotted_key` nests
+        // `bare_key`/`quoted_key`/inner `dotted_key` segments around `.`
+        // tokens (in BOTH pair keys and `[table.sub]` headers — probed),
+        // so `a.b.c` comes back whole as one node, same rule as the Rust
+        // `::` path.
+        LanguageId::Toml => parent_kind == Some("dotted_key") && node.is_named(),
         _ => false,
     }
 }
@@ -279,6 +332,70 @@ fn is_go_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// C identifier-ish node kinds (verified against the pinned
+/// tree-sitter-c `NODE_TYPES`): `identifier` (values), `field_identifier`
+/// (struct members), `type_identifier` (struct/enum/typedef names),
+/// `primitive_type` (`int`, …), and `field_expression` (the whole
+/// `a.b` / `p->x` member access).
+fn is_c_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "primitive_type"
+            | "field_expression"
+    )
+}
+
+/// C++ identifier-ish node kinds (verified against the pinned
+/// tree-sitter-cpp `NODE_TYPES`): the C set plus `namespace_identifier`
+/// (a `ns::` scope name) and `qualified_identifier` (the whole `A::x` /
+/// `ns::A::x` path).
+fn is_cpp_identifier_kind(kind: &str) -> bool {
+    is_c_identifier_kind(kind)
+        || matches!(kind, "namespace_identifier" | "qualified_identifier")
+}
+
+/// Bash identifier-ish node kinds (verified against the pinned
+/// tree-sitter-bash `NODE_TYPES`: there is no `identifier` kind —
+/// `command_name` for command names and `variable_name` for variables
+/// are the identifier-ish kinds). Plain `word`s (arguments, function
+/// names) are deliberately NOT identifier-ish — a bare M-. context on
+/// an arbitrary word is noise; function names still contribute to the
+/// scope chain via `function_definition`.
+fn is_bash_identifier_kind(kind: &str) -> bool {
+    matches!(kind, "command_name" | "variable_name")
+}
+
+/// TOML identifier-ish node kinds (verified against the pinned
+/// tree-sitter-toml-ng `NODE_TYPES`): `bare_key`, `quoted_key` (the
+/// key leaves), and `dotted_key` (the whole `a.b.c` path).
+fn is_toml_identifier_kind(kind: &str) -> bool {
+    matches!(kind, "bare_key" | "quoted_key" | "dotted_key")
+}
+
+/// JSON identifier-ish node kinds (verified against the pinned
+/// tree-sitter-json `NODE_TYPES`): `string` — but ONLY in a `pair`'s
+/// `key` field (see `in_identifier_position`); a value `string` is data.
+/// JSON has no dotted-key syntax, so there is no whole-path rule here —
+/// a key is always a single `string` node; JSON "paths" are structural
+/// (nesting), which `scope_path` reports as the key chain.
+fn is_json_identifier_kind(kind: &str) -> bool {
+    kind == "string"
+}
+
+// Markdown has NO identifier-ish node kind (probed against the pinned
+// tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
+// `inline` node, and `inline` spans whole paragraphs and code spans
+// alike — treating it identifier-ish would make `node_at` resolve on
+// arbitrary prose). There is also no path-shaped construct. So
+// `is_identifier_kind` has no `Markdown` arm (its default arm returns
+// `false`) and `node_at` stays `None` — the honest N/A, pinned by
+// `markdown_heading_text_is_not_identifier_ish`. What IS meaningful is
+// the outline: `markdown_scope_path` reports the enclosing heading
+// chain (the block tree nests `section` nodes by heading level).
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -288,6 +405,11 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::TypeScript | LanguageId::Tsx => is_ts_identifier_kind(kind),
         LanguageId::Python => is_python_identifier_kind(kind),
         LanguageId::Go => is_go_identifier_kind(kind),
+        LanguageId::C => is_c_identifier_kind(kind),
+        LanguageId::Cpp => is_cpp_identifier_kind(kind),
+        LanguageId::Bash => is_bash_identifier_kind(kind),
+        LanguageId::Toml => is_toml_identifier_kind(kind),
+        LanguageId::Json => is_json_identifier_kind(kind),
         _ => false,
     }
 }
@@ -347,6 +469,12 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         }
         LanguageId::Python => python_scope_path(leaf, source),
         LanguageId::Go => go_scope_path(leaf, source),
+        LanguageId::C => c_scope_path(leaf, source),
+        LanguageId::Cpp => cpp_scope_path(leaf, source),
+        LanguageId::Bash => bash_scope_path(leaf, source),
+        LanguageId::Toml => toml_scope_path(leaf, source),
+        LanguageId::Json => json_scope_path(leaf, source),
+        LanguageId::Markdown => markdown_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -427,6 +555,180 @@ fn go_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
             && let Ok(text) = name_node.utf8_text(source)
         {
             names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C enclosing-scope walk: `function_definition` (the name sits one
+/// level down: `declarator` field → `function_declarator` → its
+/// `declarator` field), and `struct_specifier` / `union_specifier` /
+/// `enum_specifier` (name child in the `name` field). Blocks, control
+/// flow, and nested compound statements are intentionally not scope items.
+fn c_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_definition" => node
+                .child_by_field_name("declarator")
+                .and_then(|decl| decl.child_by_field_name("declarator")),
+            "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                node.child_by_field_name("name")
+            }
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The C++ enclosing-scope walk: `function_definition` (same
+/// `declarator` → `function_declarator` → `declarator` name shape as C,
+/// where a class method's name is a `field_identifier`),
+/// `class_specifier` / `struct_specifier` / `union_specifier` /
+/// `enum_specifier` (name child in the `name` field), and
+/// `namespace_definition` (name child in the `name` field). Blocks and
+/// control flow are intentionally not scope items.
+fn cpp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        let name_node = match node.kind() {
+            "function_definition" => node
+                .child_by_field_name("declarator")
+                .and_then(|decl| decl.child_by_field_name("declarator")),
+            "class_specifier" | "struct_specifier" | "enum_specifier"
+            | "union_specifier" | "namespace_definition" => {
+                node.child_by_field_name("name")
+            }
+            _ => None,
+        };
+        if let Some(name_node) = name_node
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Bash enclosing-scope walk: `function_definition` (the `name`
+/// field carries the function name — a `word` node). Bash has no other
+/// meaningful scoping construct for navigation (no blocks/loops as
+/// scopes), so a function body is the only non-empty scope; top-level
+/// commands yield `[]`.
+fn bash_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "function_definition"
+            && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The TOML enclosing-scope walk: a `table` node (a `[a.b]` header and
+/// the pairs it opens) contributes its header key — the first key child
+/// (`dotted_key` for multi-segment headers, `bare_key` for single-key
+/// headers; the header's children carry no field names, so the first
+/// key-kind child is taken). The dotted header text is reported AS WRITTEN
+/// (one scope element, e.g. `"a.b"`) — a deliberate simplification; the
+/// resolver matches on this text, and splitting quoted segments is out
+/// of scope for basic navigation.
+fn toml_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "table" {
+            let header = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| matches!(c.kind(), "dotted_key" | "bare_key" | "quoted_key"));
+            if let Some(header) = header
+                && let Ok(text) = header.utf8_text(source)
+            {
+                names.push(text.to_string());
+            }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The JSON enclosing-scope walk: each enclosing `pair` contributes its
+/// key name (the `key` field's `string` node → its `string_content`
+/// child, so the UNQUOTED name — a resolver matching `outer` must not
+/// see `"outer"`), outermost → innermost. This is JSON's structural
+/// "path" (there is no dotted-key syntax to walk instead).
+fn json_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "pair" {
+            // The key's `string` node holds its unquoted name in the
+            // `string_content` CHILD (kind, not field name — probed);
+            // fall back to the raw `string` (quoted text) when the content
+            // child is absent (broken parse / empty string).
+            let key = node.child_by_field_name("key");
+            let key = key
+                .and_then(|k| {
+                    (0..k.child_count())
+                        .filter_map(|i| k.child(i))
+                        .find(|c| c.kind() == "string_content")
+                })
+                .or(key);
+            if let Some(key) = key
+                && let Ok(text) = key.utf8_text(source)
+            {
+                names.push(text.to_string());
+            }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Markdown enclosing-scope walk (the outline): each enclosing
+/// `section` (the block grammar nests sections by heading level —
+/// probed) contributes its opening heading's title. The heading's
+/// `heading_content` field carries the title directly in both kinds
+/// (probed: an `inline` node for `atx_heading`; a `paragraph` wrapping
+/// the `inline` for `setext_heading` — the field node's text is the
+/// title either way; the setext `paragraph` carries a trailing newline,
+/// so the title is read with it trimmed). A document with no headings
+/// yields `[]`.
+fn markdown_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "section" {
+            let title = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| matches!(c.kind(), "atx_heading" | "setext_heading"))
+                .and_then(|h| h.child_by_field_name("heading_content"));
+            if let Some(title) = title
+                && let Ok(raw) = title.utf8_text(source)
+            {
+                names.push(raw.trim_end_matches('\n').to_string());
+            }
         }
         cur = node.parent();
     }
@@ -588,17 +890,12 @@ mod tests {
     /// Languages without a node-at implementation still degrade gracefully
     /// (`node_at` → `None`, `scope_path_at` → `[]`) — 007-01's "Rust
     /// first, graceful degradation" decision now covers the languages not
-    /// yet adopted by 011-03.
+    /// yet adopted (Yaml is intentionally unadopted for node-at; the six
+    /// C/Cpp/Bash/Toml/Json/Markdown languages of this issue all landed).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 8] = [
-            (LanguageId::C, "int main(void) { return 0; }", "main"),
-            (LanguageId::Cpp, "int main() { return 0; }", "main"),
-            (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
-            (LanguageId::Json, "{\"key\": 1}", "key"),
+        let cases: [(LanguageId, &str, &str); 2] = [
             (LanguageId::Yaml, "key: value\n", "key"),
-            (LanguageId::Bash, "echo hi\n", "hi"),
-            (LanguageId::Markdown, "# Heading\n", "Heading"),
             (LanguageId::Plain, "abc", "abc"),
         ];
         for (id, src, marker) in cases {
@@ -950,6 +1247,493 @@ mod tests {
             assert_eq!(info.text, "f");
         }
         let _ = scope_path_at(LanguageId::Go, src, pos);
+    }
+
+    // ── C (lang-pred) ───────────────────────────────────
+
+    /// Discriminating: `o.x.y` (chained `.` access) must come back WHOLE
+    /// (one `field_expression` node) for an offset on any segment — and
+    /// `->` member access has the same shape in C (both parse as
+    /// `field_expression` in the pinned grammar).
+    #[test]
+    fn c_member_path_comes_back_whole() {
+        let src = "struct S { int x; };\nint f(struct S o, struct S *p) { return o.x.y + p->x; }\n";
+        let o_at = src.find("o.x").expect("fixture");
+        let y_at = src.find(".y").expect("fixture") + 1;
+        assert_whole_path(LanguageId::C, src, o_at, y_at, "field_expression", "o.x.y");
+        let p_at = src.find("p->x").expect("fixture");
+        let px_at = src.find("->x").expect("fixture") + 2;
+        assert_whole_path(LanguageId::C, src, p_at, px_at, "field_expression", "p->x");
+    }
+
+    #[test]
+    fn c_plain_identifier_top_level() {
+        let src = "const int Z = 3;\n";
+        let info = node_at(LanguageId::C, src, src.find("Z").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "Z");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn c_scope_chain_struct_in_struct_and_function() {
+        let src = "struct Outer { struct Inner { int v; } inner; };\nint f() { return 0; }\n";
+        let at = src.find("v").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::C, src, at),
+            vec![String::from("Outer"), String::from("Inner")]
+        );
+        // `f`'s own name sees its function, and code inside `f` sees it too.
+        let at_name = node_at(LanguageId::C, src, src.find("f").expect("fixture")).unwrap();
+        assert_eq!(at_name.scope_path, vec![String::from("f")]);
+        let in_body = src.find("return 0").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::C, src, in_body),
+            vec![String::from("f")]
+        );
+    }
+
+    #[test]
+    fn c_boundary_offsets_do_not_panic() {
+        // The `struct` keyword token is anonymous (not identifier-ish → no
+        // node) at byte 0, but the scope is still reported. (`int` at byte 0
+        // WOULD match: `primitive_type` is identifier-ish, as in Rust.)
+        let src = "struct S { int x; }\n";
+        assert!(node_at(LanguageId::C, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::C, src, 0), vec![String::from("S")]);
+        // An identifier at byte 0 does resolve; top-level → no scope.
+        let src2 = "x;\n";
+        let info = node_at(LanguageId::C, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::C, src, src.len()).is_none());
+        assert!(node_at(LanguageId::C, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::C, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::C, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn c_broken_source_does_not_panic() {
+        let src = "int f() {";
+        let pos = src.find("f").expect("fixture");
+        if let Some(info) = node_at(LanguageId::C, src, pos) {
+            assert_eq!(info.text, "f");
+        }
+        let _ = scope_path_at(LanguageId::C, src, pos);
+    }
+
+    // ── C++ (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: C++ member access `a.b.c` comes back WHOLE (one
+    /// `field_expression` — the pinned cpp grammar uses `field_expression`
+    /// for both `.` and `->`, no direct/pointer_member_access kinds).
+    #[test]
+    fn cpp_member_path_comes_back_whole() {
+        let src = "struct S { int x; int y; };\nint f(struct S o) { return o.x.y; }\n";
+        let o_at = src.find("o.x").expect("fixture");
+        let y_at = src.find(".y").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Cpp, src, o_at, y_at, "field_expression", "o.x.y");
+    }
+
+    /// Discriminating: the cpp `::` path comes back WHOLE as one
+    /// `qualified_identifier`, including the nested scope (`ns::Base::C`).
+    #[test]
+    fn cpp_qualified_path_comes_back_whole() {
+        let src = "int w = ns::Base::C;\n";
+        let ns_at = src.find("ns::").expect("fixture");
+        let c_at = src.find("::C").expect("fixture") + 2;
+        assert_whole_path(
+            LanguageId::Cpp,
+            src,
+            ns_at,
+            c_at,
+            "qualified_identifier",
+            "ns::Base::C",
+        );
+        // A single-segment `A::x` too.
+        let src2 = "int w = Base::CONST;\n";
+        assert_whole_path(
+            LanguageId::Cpp,
+            src2,
+            src2.find("Base").expect("fixture"),
+            src2.find("CONST").expect("fixture"),
+            "qualified_identifier",
+            "Base::CONST",
+        );
+    }
+
+    #[test]
+    fn cpp_plain_identifier_top_level() {
+        let src = "const int Z = 3;\n";
+        let info = node_at(LanguageId::Cpp, src, src.find("Z").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "identifier");
+        assert_eq!(info.text, "Z");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn cpp_scope_chain_namespace_class_method() {
+        let src = "namespace outer {\nclass Base {\n    void m() { int y = 0; }\n};\n}\n";
+        let at = src.find("y = 0").expect("fixture") + 1;
+        assert_eq!(
+            scope_path_at(LanguageId::Cpp, src, at),
+            vec![
+                String::from("outer"),
+                String::from("Base"),
+                String::from("m"),
+            ]
+        );
+        // Same chain via NodeInfo at the method's own name.
+        let at_name = node_at(LanguageId::Cpp, src, src.find("m()").expect("fixture")).unwrap();
+        assert_eq!(
+            at_name.scope_path,
+            vec![
+                String::from("outer"),
+                String::from("Base"),
+                String::from("m"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_boundary_offsets_do_not_panic() {
+        // The `class` keyword token is anonymous (not identifier-ish → no
+        // node) at byte 0, but the scope is still reported.
+        let src = "class S { int x; }\n";
+        assert!(node_at(LanguageId::Cpp, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Cpp, src, 0), vec![String::from("S")]);
+        // An identifier at byte 0 does resolve; top-level → no scope.
+        let src2 = "x;\n";
+        let info = node_at(LanguageId::Cpp, src2, 0).expect("identifier at byte 0");
+        assert_eq!(info.text, "x");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Cpp, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Cpp, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Cpp, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Cpp, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn cpp_broken_source_does_not_panic() {
+        let src = "class A {";
+        let pos = src.find("A").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Cpp, src, pos) {
+            assert_eq!(info.text, "A");
+        }
+        let _ = scope_path_at(LanguageId::Cpp, src, pos);
+    }
+
+    // ── Bash (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: `node_at` on a command name returns the
+    /// `command_name`, not its bare `word` child (the word is a path part
+    /// — the pinned grammar has no `identifier` kind; words are `word`).
+    #[test]
+    fn bash_command_name_resolves_as_command_name() {
+        let src = "cmd --flag other\n";
+        let at = src.find("cmd").expect("fixture");
+        let info = node_at(LanguageId::Bash, src, at).expect("node at `cmd`");
+        assert_eq!(info.kind, "command_name");
+        assert_eq!(info.text, "cmd");
+        assert_eq!(info.start_byte, at);
+        assert_eq!(info.end_byte, at + 3);
+        // A plain word argument is NOT identifier-ish (deliberate — see
+        // `is_bash_identifier_kind`).
+        assert!(node_at(LanguageId::Bash, src, src.find("other").expect("fixture")).is_none());
+    }
+
+    #[test]
+    fn bash_variable_name_resolves() {
+        let src = "echo \"$MY_VAR\"\n";
+        let at = src.find("MY_VAR").expect("fixture");
+        let info = node_at(LanguageId::Bash, src, at).expect("node at `MY_VAR`");
+        assert_eq!(info.kind, "variable_name");
+        assert_eq!(info.text, "MY_VAR");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn bash_scope_chain_function_body() {
+        let src = "my_func() {\n    echo hi\n}\ncmd --flag other\n";
+        let at = src.find("echo").expect("fixture");
+        assert_eq!(scope_path_at(LanguageId::Bash, src, at), vec![String::from("my_func")]);
+        // The function's OWN name sees itself as the enclosing item (the
+        // name `word` is not identifier-ish, so `node_at` is None there —
+        // the split surface, `scope_path_at`, still answers).
+        let name_at = src.find("my_func").expect("fixture");
+        assert!(node_at(LanguageId::Bash, src, name_at).is_none());
+        assert_eq!(
+            scope_path_at(LanguageId::Bash, src, name_at),
+            vec![String::from("my_func")]
+        );
+        // Top-level command: no scope.
+        assert!(scope_path_at(LanguageId::Bash, src, src.find("other").expect("fixture")).is_empty());
+    }
+
+    #[test]
+    fn bash_boundary_offsets_do_not_panic() {
+        // The `export` keyword token is anonymous (not identifier-ish →
+        // no node) at byte 0; top-level → no scope.
+        let src = "export X=1\n";
+        assert!(node_at(LanguageId::Bash, src, 0).is_none());
+        assert!(scope_path_at(LanguageId::Bash, src, 0).is_empty());
+        // An identifier-ish node at byte 0 does resolve.
+        let src2 = "MY_VAR=1\n";
+        let info = node_at(LanguageId::Bash, src2, 0).expect("variable at byte 0");
+        assert_eq!(info.kind, "variable_name");
+        assert_eq!(info.text, "MY_VAR");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Bash, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Bash, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Bash, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Bash, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn bash_broken_source_does_not_panic() {
+        let src = "my_func() {";
+        let pos = src.find("my_func").expect("fixture");
+        // On a broken parse the name may or may not stay attached to the
+        // `function_definition` — either answer is fine, no panic.
+        if let Some(info) = node_at(LanguageId::Bash, src, pos) {
+            assert_eq!(info.text, "my_func");
+        }
+        let _ = scope_path_at(LanguageId::Bash, src, pos);
+    }
+
+    // ── TOML (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: the dotted KEY `a.b.c` comes back WHOLE (one
+    /// `dotted_key`) for an offset on any segment — TOML dotted keys are
+    /// the grammar's path-shaped construct (in pair keys AND table
+    /// headers).
+    #[test]
+    fn toml_dotted_key_comes_back_whole() {
+        let src = "a.b.c = 1\n";
+        let a_at = src.find("a.b").expect("fixture");
+        let c_at = src.find(".c").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Toml, src, a_at, c_at, "dotted_key", "a.b.c");
+    }
+
+    #[test]
+    fn toml_table_header_dotted_key_comes_back_whole() {
+        let src = "[table.sub]\nkey = 2\n";
+        let table_at = src.find("table.sub").expect("fixture");
+        let sub_at = src.find("sub").expect("fixture");
+        assert_whole_path(
+            LanguageId::Toml,
+            src,
+            table_at,
+            sub_at,
+            "dotted_key",
+            "table.sub",
+        );
+        // A plain key inside the table: the scope is the table header text
+        // (reported as written — one element, see `toml_scope_path`).
+        let key_at = src.find("key = 2").expect("fixture");
+        let info = node_at(LanguageId::Toml, src, key_at).expect("node at `key`");
+        assert_eq!(info.kind, "bare_key");
+        assert_eq!(info.text, "key");
+        assert_eq!(info.scope_path, vec![String::from("table.sub")]);
+        assert_eq!(
+            scope_path_at(LanguageId::Toml, src, key_at + 1),
+            vec![String::from("table.sub")]
+        );
+    }
+
+    #[test]
+    fn toml_top_level_dotted_key_has_no_scope() {
+        let src = "a.b.c = 1\n";
+        let info = node_at(LanguageId::Toml, src, src.find("a").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "dotted_key");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn toml_boundary_offsets_do_not_panic() {
+        // Byte 0 sits on the `[` token (not identifier-ish → no node),
+        // but the table header is still reported as the scope.
+        let src = "[table]\nk = 1\n";
+        assert!(node_at(LanguageId::Toml, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Toml, src, 0), vec![String::from("table")]);
+        // A key at byte 0 does resolve; top-level → no scope.
+        let src2 = "key = 1\n";
+        let info = node_at(LanguageId::Toml, src2, 0).expect("key at byte 0");
+        assert_eq!(info.text, "key");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Toml, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Toml, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Toml, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Toml, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn toml_broken_source_does_not_panic() {
+        let src = "[table";
+        let pos = src.find("table").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Toml, src, pos) {
+            assert_eq!(info.text, "table");
+        }
+        let _ = scope_path_at(LanguageId::Toml, src, pos);
+    }
+
+    // ── JSON (lang-pred) ──────────────────────────────────
+
+    /// Discriminating for the JSON position rule: a `pair` KEY resolves
+    /// (kind `string`, raw text WITH its quotes — `NodeInfo.text` is the
+    /// node's source text), but a value string at the SAME offset does
+    /// not (`string` is not identifier-ish outside the `key` field).
+    #[test]
+    fn json_key_resolves_but_value_string_does_not() {
+        let src = "{\"k\": \"text\"}\n";
+        let key_at = src.find("\"k\"").expect("fixture");
+        let info = node_at(LanguageId::Json, src, key_at + 1).expect("node at key `k`");
+        assert_eq!(info.kind, "string");
+        assert_eq!(info.text, "\"k\"");
+        assert_eq!(info.scope_path, vec![String::from("k")]);
+        let value_at = src.find("text").expect("fixture");
+        assert!(node_at(LanguageId::Json, src, value_at).is_none(), "value string must not resolve");
+    }
+
+    #[test]
+    fn json_scope_chain_is_the_enclosing_key_chain() {
+        // JSON's path-shaped concept is STRUCTURAL (nesting, not dotted
+        // text): the scope chain is the enclosing keys, unquoted.
+        let src = "{\"outer\": {\"inner\": {\"deep\": 1}}}\n";
+        let deep_at = src.find("deep").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Json, src, deep_at),
+            vec![
+                String::from("outer"),
+                String::from("inner"),
+                String::from("deep"),
+            ]
+        );
+        // The value `1` sits inside the innermost pair only.
+        let value_at = src.find("1").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Json, src, value_at),
+            vec![
+                String::from("outer"),
+                String::from("inner"),
+                String::from("deep"),
+            ]
+        );
+    }
+
+    #[test]
+    fn json_boundary_offsets_do_not_panic() {
+        let src = "{\"a\": 1}\n";
+        // Byte 0 sits on the `{` token (not identifier-ish → no node),
+        // top-level → no scope either (the pair starts at the key).
+        assert!(node_at(LanguageId::Json, src, 0).is_none());
+        assert!(scope_path_at(LanguageId::Json, src, 0).is_empty());
+        // A key at byte 0 does resolve (top-level pair → sees itself).
+        let src2 = "{\"x\": 1}\n";
+        let info = node_at(LanguageId::Json, src2, 1).expect("key at byte 1");
+        assert_eq!(info.text, "\"x\"");
+        assert_eq!(info.scope_path, vec![String::from("x")]);
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Json, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Json, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Json, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Json, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn json_broken_source_does_not_panic() {
+        let src = "{\"a\":";
+        let pos = src.find("a").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Json, src, pos) {
+            assert_eq!(info.text, "\"a\"");
+        }
+        let _ = scope_path_at(LanguageId::Json, src, pos);
+    }
+
+    // ── Markdown (lang-pred) ──────────────────────────────────
+
+    /// The honest N/A pin: a heading's title text is NOT identifier-ish
+    /// (it is an `inline` node, shared with paragraphs/code spans — the
+    /// block grammar has no identifier kind), so `node_at` returns
+    /// `None` on Markdown headings and prose. Path-shaped M-. is N/A
+    /// for Markdown; the outline lives in `scope_path_at` instead.
+    #[test]
+    fn markdown_heading_text_is_not_identifier_ish() {
+        let src = "# Heading\n";
+        let at = src.find("Heading").expect("fixture");
+        assert!(node_at(LanguageId::Markdown, src, at).is_none());
+        assert!(node_at(LanguageId::Markdown, src, 0).is_none());
+    }
+
+    #[test]
+    fn markdown_scope_chain_is_the_enclosing_headings() {
+        // The block grammar nests `section` by heading level (probed),
+        // so the scope is the heading chain, outermost → innermost.
+        let src = "# Top\n\ntext\n\n## Sub\n\nmore\n\n### Deeper\n";
+        let at = src.find("Deeper").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, at),
+            vec![
+                String::from("Top"),
+                String::from("Sub"),
+                String::from("Deeper"),
+            ]
+        );
+        // Content under Sub (but before Deeper) sees two levels.
+        let more_at = src.find("more").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, more_at),
+            vec![String::from("Top"), String::from("Sub")]
+        );
+        // Content directly under Top sees one level.
+        let text_at = src.find("text").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, text_at),
+            vec![String::from("Top")]
+        );
+    }
+
+    #[test]
+    fn markdown_setext_heading_contributes_scope() {
+        let src = "Top\n=====\nbody\n";
+        let at = src.find("body").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, at),
+            vec![String::from("Top")]
+        );
+    }
+
+    #[test]
+    fn markdown_boundary_offsets_do_not_panic() {
+        let src = "# Top\n\ntext\n";
+        // Byte 0 sits on the `#` marker (not identifier-ish → no node),
+        // but the heading section is still reported as the scope.
+        assert!(node_at(LanguageId::Markdown, src, 0).is_none());
+        assert_eq!(
+            scope_path_at(LanguageId::Markdown, src, 0),
+            vec![String::from("Top")]
+        );
+        // A document without headings has an empty outline everywhere.
+        let src2 = "plain text\n";
+        assert!(scope_path_at(LanguageId::Markdown, src2, 0).is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Markdown, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Markdown, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Markdown, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Markdown, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn markdown_broken_source_does_not_panic() {
+        // Markdown is near-impossible to break; a lone heading marker
+        // without content is the closest thing.
+        let src = "#";
+        let _ = node_at(LanguageId::Markdown, src, 0);
+        let _ = scope_path_at(LanguageId::Markdown, src, 0);
     }
 
     #[test]
