@@ -100,6 +100,18 @@ rung-3-style guesses feel dishonest in practice.
 | 2 | 03 local binding types (rung 3) | 02 |
 | ? | 04 in-process RA (only if user picks Shape B) | — |
 ## Outcome record (live)
+- **Rung 4** PASS (`e3270e9` + review restore, merged `0126adc`):
+  find-implementations (M-x `find-implementations`; trait-keyed map in
+  the same index pass; Impls picker reusing the Xref jump seam, read-only
+  external landings; degradation byte-for-byte; palette-only keybind —
+  judged defensible vs the dense M- family). Same-check-before-removal
+  pinned by a CONTRIBUTION-CARRYING file (the 010-03 false-mirror
+  lesson avoided). Plus the whole-path upgrade for C/Cpp `field_expression`
+  + Toml `dotted_key` (the Known corner closed; JSON correctly no —
+  no dotted-key node; Cpp `::` stays on the byte-scan). Review
+  BLOCKING→fixed: an out-of-fence 19-line docs deletion restored.
+  SHAPE A COMPLETE (Rung 2 subsumed by 011; Rung 3 landed).
+
 - **Rung 3** PASS (4 commits + review fixes `171deca`, merged): local
   binding types — `let x: Type` (and struct-literal RHS) keyed by the
   innermost enclosing BLOCK byte-range (exact Rust scoping; last-let-
