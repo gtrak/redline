@@ -5,3 +5,6 @@
 
 # Python bytecode from the tools/ drive suites.
 tools/__pycache__/
+# Lane worktrees (agent sessions): numbered slots under .agents/worktrees/.
+# Convention + lifecycle in .agents/skills/plan-process/SKILL.md.
+/.agents/worktrees/
