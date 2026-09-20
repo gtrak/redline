@@ -183,6 +183,7 @@ the first hit event.)
 
 ## Architecture
 
+- `docs/language-coverage.md` — the language × capability grid (all 14 registry languages: what works live / unit-only / bails / is not implemented)
 - `src/app/` — store, command registry, keymap engine, watcher
 - `src/model/` — project, buffer (ropey), file walk
 - `src/nav/` — symbol index (tree-sitter, rayon-parallel)
