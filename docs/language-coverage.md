@@ -163,6 +163,25 @@ is where languages genuinely diverge.
    `source_extensions_for` + the round-trip test). Intentional
    (rust-analyzer interface files are not definition sources);
    recorded here so it is not re-filed as a gap.
+8. **Clojure / Lisp / Java / C# / Ruby: lane deferred — grammar crates
+   not vendored offline.** The new-languages lane (the user directive
+   "add clojure and lisp support, java, c#, ruby") was run
+   offline-first per its contract: the FIRST check is grammar-crate
+   availability in the local cargo registry cache, and none of the
+   needed crates — `tree-sitter-java`, `tree-sitter-c-sharp`,
+   `tree-sitter-ruby`, `tree-sitter-clojure`, or any usable Lisp-family
+   crate (common lisp / scheme / elisp) — are vendored there (verified
+   against `~/.cargo/registry/cache` + `src`, the only
+   `tree-sitter-*` hits being the 12 pinned in use), and mid-task
+   network fetches of grammar crates are disallowed (ABI-pinning rule:
+   an unpinned grammar can pull a second tree-sitter runtime and fail
+   `set_language` silently). All five languages were therefore
+   **deferred; nothing landed**, the registry stays 14 + Plain, and no
+   coverage rows exist for them. Re-running the lane needs exactly: the
+   compatible grammar crates vendored (each resolving against the
+   pinned tree-sitter 0.24.7 runtime), then the staged
+   registry/queries/node/walk-set work per the capability ladder,
+   NODE_TYPES probe first.
 
 ## Known corners (documented simplifications — not gaps)
 
