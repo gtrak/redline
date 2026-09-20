@@ -106,7 +106,10 @@ which.
   types and type aliases (a `type P = …` alias's name simply isn't in
   the field map — a natural miss, no alias following), `&T { … }` /
   `T::<u8> { … }` literals, expression receivers (`(e).f`, `a[0].f`),
-  `::`-path receivers, shadowed-out names, and non-Rust buffers →
+  `::`-path receivers, dot-chained receivers (`a.b.f` — the middle
+  segment is a field access, never a local binding), pattern bindings
+  (`if let` / `while let` / match arms — not `let_declaration`s),
+  shadowed-out names, and non-Rust buffers →
   byte-for-byte today's bare behavior (the extraction's path token is
   never changed for these — the pre-step owns its own receiver scan).
   The pre-step runs in the project AND the external-crate M-. paths
@@ -114,10 +117,12 @@ which.
   `store.rs` (`xref_local_binding_*` — same-file + cross-file field,
   struct-literal RHS, mut, ambiguous-impls narrowing, shadow,
   unannotated + non-struct degradation pins; `rust_dotted_receiver_*`
-  the scan pin), `queries.rs` (`rust_binding_type_at_*` — the
-  innermost-wins / shadow / string-literal misses), and `nav/index.rs`
-  (the 010-01-review-P1 mirror: a bindings-only file's same-content
-  refresh keeps its table).
+  the scan pin, dot-chained receivers included), `queries.rs`
+  (`rust_binding_type_at_*` — the innermost-wins / shadow /
+  string-literal misses; the `&T { … }` / `T::<u8> { … }` literal misses
+  pinned at table level in `rust_tables_extract_local_bindings`), and
+  `nav/index.rs` (the 010-01-review-P1 mirror: a bindings-only file's
+  same-content refresh keeps its table).
 - path-shaped: `drive_external_crate` L1 — `ropey::Rope` lands in the
   cargo registry source. Live in the gate battery.
 - bare via import: `drive_external_use` L1 — `use serde::Deserialize;`

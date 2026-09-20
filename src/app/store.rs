@@ -8080,8 +8080,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// usual call-site spot). `None` for: the `self.` receiver (the
     /// 010-01 pre-step owns it — `Self` too, a type position), a
     /// receiver that isn't a bare identifier (`(expr).m`, `a[0].m`,
-    /// `call().m`), a `::`-path receiver (`a::b.m` — not a local
-    /// binding), and a point not on a member run (the dot, whitespace).
+    /// `call().m`), a `::`-path receiver (`a::b.m`), a dot-chained
+    /// receiver (`a.b.m` — the middle segment `b` is a field access,
+    /// never a local binding), and a point not on a member run (the
+    /// dot, whitespace).
     /// The extraction's path token stays BARE for these accesses — this
     /// scan is the pre-step's own, so a miss is byte-for-byte today's
     /// behavior (the caller gates on the language).
@@ -8120,8 +8122,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
         // A bare identifier: nothing glued on the left (`myself.` is
         // fine — the run is the whole word — but `a::b.m`'s `b` has a
-        // `:` before it: a path receiver, not a local binding).
-        if i > 0 && (is_ident(chars[i - 1]) || chars[i - 1] == ':') {
+        // `:` before it: a path receiver; and `a.b.m`'s `b` has a `.`
+        // before it: the middle segment of a dot chain — neither is a
+        // local binding).
+        if i > 0 && (is_ident(chars[i - 1]) || chars[i - 1] == ':' || chars[i - 1] == '.') {
             return None;
         }
         let receiver: String = chars[i..start - 1].iter().collect();
@@ -14598,6 +14602,12 @@ mod tests {
         assert_eq!(rd("let _ = self.x;", 13), None);
         // A `::`-path receiver (`a::b.x`): not a local binding.
         assert_eq!(rd("let _ = a::b.x;", 13), None);
+        // A DOT-CHAINED receiver (`a.b.x`): the middle segment `b` is a
+        // field access, never a local binding (review P1 — a misread
+        // here would jump to the wrong struct's member); the call
+        // variant `a.b.go()` too.
+        assert_eq!(rd("let _ = a.b.x;", 12), None);
+        assert_eq!(rd("let _ = a.b.go();", 14), None);
         // Expression receivers: a call / an index / a paren.
         assert_eq!(rd("let _ = f().x;", 12), None);
         assert_eq!(rd("let _ = v[0].x;", 13), None);
@@ -15040,6 +15050,34 @@ mod tests {
         // 006-02b item 2: the enclosing hit bumps the generation (one
         // supersede bump, no job).
         assert_eq!(s.resolve_generation, 1, "the enclosing hit supersedes in-flight resolves");
+    }
+
+    /// 010-03 review P1 (pin): a DOT-CHAINED receiver — `a.b.c` where
+    /// the middle segment `b` happens to be a local binding with a
+    /// written type (`D`) that ALSO has a field `c` — must NOT be
+    /// misattributed to `b`: the middle segment is a field access, never
+    /// a local binding, so today's bare `c` behavior stands (no jump to
+    /// `D`'s `c` — the wrong struct — the enclosing `main` takes over
+    /// instead).
+    #[test]
+    fn xref_local_binding_dot_chained_receiver_stays_bare() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct B { pub c: i32 }\npub struct D { pub c: i32 }\npub struct A { pub b: B }\nfn main() {\n    let b: D;\n    let a = A { b: B { c: 1 } };\n    let _ = a.b.c;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 6: "    let _ = a.b.c;" — `c` at col 16. Pre-fix this
+        // jumped to `D`'s `c` (line 1) through the misattributed `b`.
+        s.set_point(6, 16, 16);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no candidates: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            3,
+            "the bare `c` degraded to the enclosing `main` — NOT `D`'s `c` (msg: {})",
+            s.message
+        );
     }
 
     // ── plan 006 issue 02: tooling-resolver fall-through ─────────────────────────

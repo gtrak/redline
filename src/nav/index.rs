@@ -785,10 +785,17 @@ mod tests {
 
     /// 010-03 (010-01 review P1 mirror pin): a file whose ONLY table
     /// content is local bindings (no structs, no impls — empty fields
-    /// AND impls) still stores a tables entry, and an UNCHANGED-content
-    /// refresh (touch / linter rewrite / editor no-save) restores it
-    /// rather than stripping the bindings (the same-check-before-removal
-    /// order, with `bindings` counted as content in the empty check).
+    /// AND impls) still stores a tables entry (bindings counted as
+    /// content in the empty check), and an UNCHANGED-content refresh
+    /// (touch / linter rewrite / editor no-save) restores it rather
+    /// than dropping it. What this pin discriminates: the CONTENT
+    /// COUNTING (pre-010-03 a bindings-only table was `empty` and
+    /// never stored) and the entry's restore-on-refresh; it does NOT
+    /// discriminate the same-check-before-removal ORDER itself — a
+    /// bindings-only file makes no field-map contributions, so the
+    /// removal loop below the shortcut is a no-op for it either way.
+    /// The order discipline is discriminated by 010-01's field pin
+    /// (`rust_tables_same_content_refresh_keeps_field_locations`).
     #[test]
     fn rust_tables_bindings_only_same_content_refresh_keeps_bindings() {
         let dir = make_project();

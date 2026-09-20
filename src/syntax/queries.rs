@@ -104,8 +104,11 @@ pub enum ImplKind {
 /// (010-03, plan 010 Shape A rung 3) One local binding's WRITTEN-DOWN
 /// type: a `let x: Type` annotation (only a bare `type_identifier`
 /// annotation contributes — generic, path-shaped, and non-struct types
-/// degrade) or a `let x = Type { … }` struct-literal RHS. `let mut x: T`
-/// records the same binding as `let x: T`. Never inferred — an
+/// degrade) or a `let x = Type { … }` struct-literal RHS (`&T { … }` /
+/// `T::<u8> { … }` literals contribute nothing). `let mut x: T` records
+/// the same binding as `let x: T`. PATTERN bindings (`if let` / `while
+/// let` / match arm patterns) are `let_expression` / pattern nodes, not
+/// `let_declaration`s — they contribute nothing. Never inferred — an
 /// unannotated binding contributes nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalBinding {
@@ -209,8 +212,12 @@ const RUST_TABLES_QUERY: &str = r#"
 ;  while `Vec<i32>` (`generic_type`), `std::path::PathBuf`
 ;  (`scoped_type_identifier`), `&T { … }` (a `reference_expression`),
 ;  and `T::<u8> { … }` (`generic_type_with_turbofish`) all miss
-;  deliberately. A `let` inside a macro invocation's token tree never
-;  parses as a `let_declaration`, so macros contribute nothing.
+;  deliberately. Probe note on macros: the probe's `macro!(let m: H;)`
+;  invocation parsed as ANONYMOUS token-tree tokens (no `let_declaration`
+;  node), so that macro contributed nothing — which is exactly what we
+;  want; if a grammar version ever parsed token-tree contents as real
+;  nodes, only a WRITTEN-DOWN type would still be recorded (never an
+;  inference), so either direction is safe.
 (let_declaration pattern: (identifier) @bnd_name type: (type_identifier) @bnd_type) @bnd_let
 (let_declaration pattern: (identifier) @bnd_name value: (struct_expression name: (type_identifier) @bnd_lit)) @bnd_let
 "#;
@@ -959,6 +966,8 @@ mod tests {
                    fn f() {\n\
                    \x20   let x: Pt = Pt { a: 1 };\n\
                    \x20   let mut m: Pt;\n\
+                   \x20   let refd = &Pt { a: 1 };\n\
+                   \x20   let turbo = Pt::<i32> { a: 1 };\n\
                    \x20   let plain = 5;\n\
                    \x20   let gen: Vec<i32>;\n\
                    \x20   let pathed: std::path::PathBuf;\n\
@@ -970,8 +979,12 @@ mod tests {
                    }\n";
         let (_syms, tables) = extract_all(LanguageId::Rust, src);
         // Exactly five written-down bindings: x:Pt (annotation + literal
-        // deduped to one), mut m:Pt, the nested block's x:Other + y:Other,
-        // and late:Other. plain / gen / pathed contribute nothing.
+        // deduped to one), mut m:Pt, the nested block's x:Other +
+        // y:Other, and late:Other. The `&Pt { … }` literal (a
+        // reference_expression, not a struct_expression), the
+        // `Pt::<i32> { … }` turbofish literal (a
+        // generic_type_with_turbofish name), plain / gen / pathed
+        // contribute nothing — the documented literal misses pinned here.
         assert_eq!(tables.bindings.len(), 5, "{:?}", tables.bindings);
         let get = |binding: &str, type_name: &str| -> &LocalBinding {
             tables.bindings
@@ -988,7 +1001,7 @@ mod tests {
         let x_other = get("x", "Other");
         let y_other = get("y", "Other"); // the struct literal's type
         let late = get("late", "Other");
-        assert_eq!((x_other.line, y_other.line, late.line), (9, 10, 12));
+        assert_eq!((x_other.line, y_other.line, late.line), (11, 12, 14));
         // Scope key: the innermost enclosing `block`. The fn-body lets
         // share ONE scope; the nested block's lets share ANOTHER, inside
         // the first (the nested block shadows the fn body's scope).
