@@ -360,10 +360,24 @@ walk set (`store.rs::source_extensions_for`: `java`, `cs`, `rb`,
 package-manager machinery is a separate decision): M-. outside the
 project index bails with the exact 011-01 message (`no tooling
 provider handles language \`java\`` / `\`csharp\`` / `\`ruby\`` /
-`\`scheme\``) — the same class as C / C++ / Markdown above, and the
-app-side whole-path upgrade (`dotted_path_container`) does not yet
-enumerate the Java / C# / Ruby path containers (its M-. lane owns that
-function). **Clojure is deliberately not landed**: every published
+`\`scheme\``) — the same class as C / C++ / Markdown above. The
+app-side whole-path upgrade (`dotted_path_container`) now enumerates the
+Java / C# / Ruby path containers (newlang-paths): Java
+`field_access` / `scoped_identifier` / `scoped_type_identifier`, C#
+`member_access_expression` / `qualified_name`, and Ruby's argumentless
+`call` (a call WITH arguments must never match — node.rs's
+receiver/no-`arguments` position gate + the 011-06 all-identifier-segment
+guard: `a.b(1).c` degrades byte-for-byte, unit-pinned by
+`symbol_at_point_java_csharp_ruby_containers_extend_the_token` /
+`symbol_at_point_java_csharp_ruby_degradation_stays_bare`, store.rs). So
+M-. carries the whole dotted path in a project buffer — a Java field
+access lands via the enclosing-symbol fall-through
+(`xref_java_field_access_lands_via_index_fall_through`), a C# property
+access and a Ruby method access land in the project index
+(`xref_csharp_property_access_lands_in_project_index`,
+`xref_ruby_method_access_lands_in_project_index`) — while every miss
+outside the project index still bails with the exact 011-01 message
+above (no provider, unchanged). **Clojure is deliberately not landed**: every published
 clojure grammar crate requires the tree-sitter 0.25/0.26 runtime
 (`tree-sitter-clojure` 0.1.0: `^0.25.6` — a cargo `links` conflict with
 the pinned 0.24.7; `tree-sitter-clojure-orchard` 0.2.x: `^0.25.9` /
@@ -406,6 +420,11 @@ crate matching the pinned runtime; `tree-sitter-elisp` 1.7.2 is ABI 15
   Toml (unit-pinned; see the C / C++ section) and fixed the JSON
   judgment: no dotted-key container exists in the pinned JSON grammar,
   so JSON keys stay the byte-for-byte bare-key index lookup.
+  newlang-paths extended it further to Java (`field_access` /
+  `scoped_identifier` / `scoped_type_identifier`), C#
+  (`member_access_expression` / `qualified_name`), and Ruby (the
+  argumentless `call` — an argument-carrying call never matches) —
+  unit-pinned; see the new-languages section.
 - **Languages with no provider** (C/C++, JSON, YAML, TOML, shell,
   Markdown, …): the dispatch bails honestly — "no tooling provider
   handles language `X`" (011-01 mapping honesty) — instead of probing

@@ -10012,21 +10012,37 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     /// pinned per language in `src/syntax/node.rs`: JS/TS/TSX
     /// `member_expression` (`a.b.c`) and the TS-only nested type
     /// identifiers, Python's `attribute` (`a.b.c`), Go's
-    /// `selector_expression` / `qualified_type` (`pkg.Fn`), and (the
-    /// 010-rung4-and-paths app-side upgrade) C's `field_expression`
-    /// (`o.x` — `p->x` fails the caller's all-identifier-segment check
-    /// and stays bare), Cpp's `field_expression` (its `::` shape is
-    /// ALREADY carried whole by `symbol_at_point`'s byte-scan —
-    /// `qualified_identifier` would be byte-for-byte the same token, so
-    /// it is deliberately NOT enumerated here: no double handling), and
-    /// Toml's `dotted_key` (`a.b.c` — the index stores the dotted key as
-    /// ONE symbol name, so without the upgrade an M-. on a segment could
-    /// never hit it). Json has NO container: the pinned JSON grammar has
+    /// `selector_expression` / `qualified_type` (`pkg.Fn`), C's
+    /// `field_expression` (`o.x` — `p->x` fails the caller's
+    /// all-identifier-segment check and stays bare), Cpp's
+    /// `field_expression` (its `::` shape is ALREADY carried whole by
+    /// `symbol_at_point`'s byte-scan — `qualified_identifier` would be
+    /// byte-for-byte the same token, so it is deliberately NOT enumerated
+    /// here: no double handling), Toml's `dotted_key` (`a.b.c` — the
+    /// index stores the dotted key as ONE symbol name, so without the
+    /// upgrade an M-. on a segment could never hit it), Java's
+    /// `field_access` (`A.c` — `o.m(…)` is a `method_invocation`, NOT a
+    /// container: node.rs returns the bare `m` identifier there) plus
+    /// `scoped_identifier` / `scoped_type_identifier` (`com.example.Foo`
+    /// — the Rust `::` shape, dot-delimited), C#'s
+    /// `member_access_expression` (`o.P` / `a.b.c`) + `qualified_name`
+    /// (`N.Inner`), and Ruby's argumentless `call` (`a.b.c` — `node_at`
+    /// returns a `call` node only while it is a genuine path container:
+    /// a `receiver` field AND no `arguments` field, the same gate as
+    /// node.rs's `in_identifier_position`, so an argument-carrying call
+    /// NEVER reaches this arm; its inner segments come back as bare
+    /// identifiers instead). Ruby's `scope_resolution` (`Foo::Bar`) is
+    /// deliberately NOT enumerated: the `::` byte-scan above already
+    /// carries it whole, and the all-identifier-segment check would
+    /// reject a `Foo::Bar` segment anyway (no double handling). Json has
+    /// NO container: the pinned JSON grammar has
     /// no dotted-key node — every key is a standalone string — so a JSON
     /// key's M-. stays the byte-for-byte bare index lookup (judgment: the
     /// index fall-through already lands bare keys; there is no key-PATH
-    /// to speak of). Rust is out of scope here — its `::` shape is
-    /// extracted byte-for-byte in `symbol_at_point` itself.
+    /// to speak of). Scheme has no dotted-path construct at all (the
+    /// flat S-expression grammar — `is_path_segment`'s default arm).
+    /// Rust is out of scope here — its `::` shape is extracted
+    /// byte-for-byte in `symbol_at_point` itself.
     fn dotted_path_container(lang: LanguageId, kind: &str) -> bool {
         match lang {
             LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
@@ -10042,6 +10058,21 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             LanguageId::C => kind == "field_expression",
             LanguageId::Cpp => kind == "field_expression",
             LanguageId::Toml => kind == "dotted_key",
+            LanguageId::Java => matches!(
+                kind,
+                "field_access" | "scoped_identifier" | "scoped_type_identifier"
+            ),
+            LanguageId::CSharp => {
+                matches!(kind, "member_access_expression" | "qualified_name")
+            }
+            // node_at returns a `call` node only for the argumentless
+            // receiver-carrying shape (node.rs's `in_identifier_position`
+            // gate), so `a.b(1)` never arrives here — the caller's
+            // all-identifier-segment check additionally rejects any
+            // `call` whose text carries a `(...)` segment (`a.b(1).c`
+            // → the `b(1)` segment is not a bare identifier → bare
+            // extraction, byte-for-byte).
+            LanguageId::Ruby => kind == "call",
             _ => false,
         }
     }
@@ -15634,6 +15665,155 @@ mod tests {
         );
     }
 
+    /// newlang-paths (discriminating): the M-. path token becomes the
+    /// WHOLE dotted path for the new-languages-lane containers — Java's
+    /// `field_access` / `scoped_identifier` / `scoped_type_identifier`,
+    /// C#'s `member_access_expression` / `qualified_name`, and Ruby's
+    /// argumentless `call` (the node.rs position gate + container-validity
+    /// rule; the kinds are pinned there — `java_member_path_comes_back_
+    /// whole`, `java_scoped_type_path_comes_back_whole`,
+    /// `csharp_member_path_comes_back_whole`,
+    /// `csharp_qualified_name_comes_back_whole`,
+    /// `ruby_method_chain_comes_back_whole`). Pre-newlang-paths every one
+    /// of these returned the BARE identifier.
+    #[test]
+    fn symbol_at_point_java_csharp_ruby_containers_extend_the_token() {
+        // Java `field_access`: `A.c` — cursor on the receiver and the
+        // member. "class A { int c; void f() { int x = A.c; } }\n": A@36,
+        // c@38.
+        let java = "class A { int c; void f() { int x = A.c; } }\n";
+        assert_eq!(
+            satp(LanguageId::Java, java, 36),
+            Some(("A".into(), "A.c".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Java, java, 38),
+            Some(("c".into(), "A.c".into()))
+        );
+        // Java deep chain: `a.b.c` under the MIDDLE segment (b@31).
+        let javadeep = "class A { void f() { int v = a.b.c; } }\n";
+        assert_eq!(
+            satp(LanguageId::Java, javadeep, 31),
+            Some(("b".into(), "a.b.c".into()))
+        );
+        // Java scoped type: `com.example.Foo` under the middle segment
+        // (example@25).
+        let javatype = "class B { void f() { com.example.Foo o; } }\n";
+        assert_eq!(
+            satp(LanguageId::Java, javatype, 25),
+            Some(("example".into(), "com.example.Foo".into()))
+        );
+        // C# `member_access_expression`: `o.P` — cursor on the member
+        // and parked right after it. "class A { void F() { int v = o.P;
+        // } }\n": o@29, P@31.
+        let cs = "class A { void F() { int v = o.P; } }\n";
+        assert_eq!(
+            satp(LanguageId::CSharp, cs, 31),
+            Some(("P".into(), "o.P".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::CSharp, cs, 32),
+            Some(("P".into(), "o.P".into()))
+        );
+        // C# deep chain: `a.b.c` under the middle segment (b@31).
+        let csdeep = "class A { void F() { int v = a.b.c; } }\n";
+        assert_eq!(
+            satp(LanguageId::CSharp, csdeep, 31),
+            Some(("b".into(), "a.b.c".into()))
+        );
+        // C# `qualified_name` in a namespace header (Inner@12).
+        assert_eq!(
+            satp(LanguageId::CSharp, "namespace N.Inner { class A { } }", 12),
+            Some(("Inner".into(), "N.Inner".into()))
+        );
+        // Ruby argumentless `call`: `obj.name` — cursor on EITHER
+        // segment (obj@0, name@4).
+        assert_eq!(
+            satp(LanguageId::Ruby, "obj.name", 0),
+            Some(("obj".into(), "obj.name".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Ruby, "obj.name", 4),
+            Some(("name".into(), "obj.name".into()))
+        );
+        // Ruby deep chain: `a.b.c` under the middle segment (b@2).
+        assert_eq!(
+            satp(LanguageId::Ruby, "a.b.c", 2),
+            Some(("b".into(), "a.b.c".into()))
+        );
+    }
+
+    /// newlang-paths (pin): the degradation stays byte-for-byte — a Ruby
+    /// call WITH arguments must never match (the node.rs container rule:
+    /// a `call` is a path container only with a `receiver` field and NO
+    /// `arguments` field, and node_at never returns an argument-carrying
+    /// `call`), the 011-06 all-identifier guard rejects an argumentless
+    /// outer chain whose receiver carries a `(...)` segment, a Java
+    /// `method_invocation` stays the bare member, and Scheme (no path
+    /// syntax at all) is untouched.
+    #[test]
+    fn symbol_at_point_java_csharp_ruby_degradation_stays_bare() {
+        // Ruby: `a.b(1).c` — the OUTER call is argumentless (its
+        // receiver is `a.b(1)`), so node_at returns the whole chain as
+        // one `call`; the 011-06 all-identifier-segment guard then
+        // rejects it (`b(1)` is not a bare identifier) → bare `c`,
+        // byte-for-byte (c@7).
+        assert_eq!(
+            satp(LanguageId::Ruby, "a.b(1).c", 7),
+            Some(("c".into(), "c".into()))
+        );
+        // Ruby: the argument-carrying segment ITSELF — `a.b(1)` at `b`
+        // (b@2) and at its receiver `a` (a@0): node_at returns the bare
+        // identifiers (an argument-carrying call is not a container), so
+        // no upgrade, byte-for-byte.
+        assert_eq!(
+            satp(LanguageId::Ruby, "a.b(1)", 2),
+            Some(("b".into(), "b".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Ruby, "a.b(1)", 0),
+            Some(("a".into(), "a".into()))
+        );
+        // Ruby: a bare call with arguments — `puts 1` stays the plain
+        // `puts` identifier (node.rs pin `ruby_bare_call_stays_bare`).
+        assert_eq!(
+            satp(LanguageId::Ruby, "puts 1", 1),
+            Some(("puts".into(), "puts".into()))
+        );
+        // Ruby: `::` inside a member chain — `Foo::Bar.new` (node_at
+        // returns the whole argumentless `call`), but the `Foo::Bar`
+        // segment is not a bare identifier segment → bare `new` (new@9);
+        // the `Foo::Bar` half itself stays the byte-scan `::` token.
+        assert_eq!(
+            satp(LanguageId::Ruby, "Foo::Bar.new", 9),
+            Some(("new".into(), "new".into()))
+        );
+        assert_eq!(
+            satp(LanguageId::Ruby, "Foo::Bar.new", 6),
+            Some(("Bar".into(), "Foo::Bar".into()))
+        );
+        // Java: `o.m(1)` at `m` — a `method_invocation` is NOT a path
+        // container (node.rs pin `java_method_invocation_stays_bare`):
+        // the bare `m` identifier, byte-for-byte (m@23).
+        assert_eq!(
+            satp(LanguageId::Java, "class A { void f() { o.m(1); } }", 23),
+            Some(("m".into(), "m".into()))
+        );
+        // C#: `o.P` whose segment is a bare identifier still upgrades —
+        // but the DEEP call `o.P().Q` (member access on an invocation)
+        // carries a `()` segment → bare `Q` (Q@7).
+        assert_eq!(
+            satp(LanguageId::CSharp, "o.P().Q", 7),
+            Some(("Q".into(), "Q".into()))
+        );
+        // Scheme: untouched — the flat grammar has no path container, so
+        // a bare symbol stays the bare extraction (x@8).
+        assert_eq!(
+            satp(LanguageId::Scheme, "(define x 1)", 8),
+            Some(("x".into(), "x".into()))
+        );
+    }
+
     /// 010-rung4-and-paths (item 2, app level): M-. on `p.x` in a C
     /// buffer lands via the index fall-through with the whole path — the
     /// project index has no C field symbols (the C query indexes
@@ -15653,6 +15833,82 @@ mod tests {
         assert!(!s.picker_open(), "no picker: {}", s.message);
         assert_eq!(s.view_name_display(), "c/main.c");
         assert_eq!(s.point_line(), 1, "the enclosing function (msg: {})", s.message);
+    }
+
+    /// newlang-paths (e2e pin, Java): M-. on `A.c` in a Java buffer — the
+    /// whole path `A.c` (and the bare `c`) has NO indexed definition: the
+    /// Java outline indexes classes / methods only (fields are
+    /// deliberately out — queries.rs), so the index fall-through lands on
+    /// the enclosing method `f`, exactly like the C pin above; nothing
+    /// new is guessed.
+    #[test]
+    fn xref_java_field_access_lands_via_index_fall_through() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/A.java",
+            "class A {\n    int c;\n    void f() {\n        int x = A.c;\n    }\n}\n",
+        )]);
+        s.open_path("src/A.java");
+        // Line 3 (0-based): "        int x = A.c;" — `c` at col 18.
+        s.set_point(3, 18, 18);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker: {}", s.message);
+        assert_eq!(s.view_name_display(), "src/A.java");
+        assert_eq!(
+            s.point_line(),
+            2,
+            "the enclosing method (msg: {})",
+            s.message
+        );
+    }
+
+    /// newlang-paths (e2e pin, C#): M-. on `o.P` in a C# buffer — the
+    /// C# outline indexes properties (queries.rs): the whole path `o.P`
+    /// has no indexed symbol, but the fall-through to the last segment
+    /// `P` lands on the property declaration — one candidate, direct
+    /// jump (no picker).
+    #[test]
+    fn xref_csharp_property_access_lands_in_project_index() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/A.cs",
+            "class A {\n    public int P { get; set; }\n    void F() {\n        int v = o.P;\n    }\n}\n",
+        )]);
+        s.open_path("src/A.cs");
+        // Line 3 (0-based): "        int v = o.P;" — `P` at col 18.
+        s.set_point(3, 18, 18);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker: {}", s.message);
+        assert_eq!(s.view_name_display(), "src/A.cs");
+        assert_eq!(
+            s.point_line(),
+            1,
+            "the property declaration (msg: {})",
+            s.message
+        );
+    }
+
+    /// newlang-paths (e2e pin, Ruby): M-. on `obj.name` in a Ruby buffer
+    /// — the whole path `obj.name` (the argumentless `call` container)
+    /// has no indexed symbol, but the fall-through to the last segment
+    /// `name` lands on the `def name` the Ruby outline indexes — one
+    /// candidate, direct jump (no picker).
+    #[test]
+    fn xref_ruby_method_access_lands_in_project_index() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/obj.rb",
+            "class Obj\n  def name\n    42\n  end\nend\n\ndef show(obj)\n  puts obj.name\nend\n",
+        )]);
+        s.open_path("src/obj.rb");
+        // Line 7 (0-based): "  puts obj.name" — `name` at col 12.
+        s.set_point(7, 12, 12);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker: {}", s.message);
+        assert_eq!(s.view_name_display(), "src/obj.rb");
+        assert_eq!(
+            s.point_line(),
+            1,
+            "the `def name` declaration (msg: {})",
+            s.message
+        );
     }
 
     /// 011-06 × 011-02 interplay (pin): a dotted token resolves on its OWN
