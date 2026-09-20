@@ -7,11 +7,12 @@ step between hits (store.search.selected). At every step exactly ONE content
 row must carry the blue selected-row signature and it must be the hit the
 store's cursor points at.
 """
-import sys, time
-sys.path.insert(0, "/home/gary/dev/red/tools")
+import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+app = App(repo("redline_pyte_repo"), rows=24, cols=80)
 app.key("C-c p s s")    # enter project-search prompt
 for ch in "target":
     app.key(ch, settle=0.3)

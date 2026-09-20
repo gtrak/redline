@@ -35,8 +35,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-REPO = "/tmp/redline_ext_crate_repo"
+REPO = repo("redline_ext_crate_repo")
 ROPEY_ROOT = os.path.expanduser(
     "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ropey-1.6.1")
 ROPE_RS = os.path.join(ROPEY_ROOT, "src", "rope.rs")

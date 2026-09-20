@@ -35,6 +35,7 @@ import argparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from pyte_driver import App
+from fixture import repo
 from fixture import reset
 
 
@@ -69,8 +70,7 @@ def main():
     ap.add_argument("--rows", type=int, default=24)
     args = ap.parse_args()
     reset()
-    root = "/tmp/redline_pyte_repo"
-
+    root = repo("redline_pyte_repo")
     findings = []
 
     def drive(app, label, setup, keys, settle=0.5):

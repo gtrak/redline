@@ -23,12 +23,14 @@ Content rows are rows 0..ROWS-3; the minibuffer (row ROWS-2) and status line
 Exit 0 = all transitions clean; 1 = overprint found.
 """
 import re
+import os
 import sys
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 from fixture import reset as _reset_fixture
 
-REPO = "/tmp/redline_pyte_repo"
+REPO = repo("redline_pyte_repo")
 ROWS, COLS = 24, 80
 
 # The log view renders a trailing relative-time token (e.g. "48m") that ticks

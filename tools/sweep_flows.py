@@ -38,15 +38,15 @@ import re
 import subprocess
 import sys
 import time
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App, encode_key
-from fixture import reset as _reset_fixture
+from fixture import repo, reset as _reset_fixture
 
-REPO = "/tmp/redline_pyte_repo"
+REPO = repo("redline_pyte_repo")
 # A dedicated repo for the U-H2 "search running" C-g state: large enough
 # that the walk is still in flight when C-g lands immediately after RET
 # (the small fixture repo finishes a search before C-g can arrive).
-SLOW_REPO = "/tmp/redline_sweep_slow_repo"
+SLOW_REPO = repo("redline_sweep_slow_repo")
 SLOW_FILES = 6000
 ROWS, COLS = 24, 80
 

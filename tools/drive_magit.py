@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Drive the magit status view cursor and report the blue-row trajectory."""
+import os
 import sys
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+app = App(repo("redline_pyte_repo"), rows=24, cols=80)
 app.key("C-x g")          # open magit status
 
 def snapshot(tag):

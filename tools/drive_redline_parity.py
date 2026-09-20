@@ -3,6 +3,8 @@
 import sys, os, shutil, subprocess
 sys.path.insert(0, '/tmp')
 from uxdrive import Session
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fixture import repo
 
 def fixture(root):
     shutil.rmtree(root, ignore_errors=True)
@@ -26,7 +28,7 @@ def step(s, name, keys=b'', wait=0.8):
     print()
 
 if __name__ == '__main__':
-    root = '/tmp/redline_parity_repo'
+    root = repo('redline_parity_repo')
     fixture(root)
     s = Session(root)
     step(s, 'startup (file given)', b'', 1.2)          # observe startup state

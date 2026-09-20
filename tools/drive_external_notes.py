@@ -38,11 +38,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
 BIN = os.environ.get("REDLINE_BIN",
                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "..", "target", "debug", "redline"))
-REPO = "/tmp/redline_ext_repo"
+REPO = repo("redline_ext_repo")
 ROPEY_SRC = os.path.expanduser(
     "~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ropey-1.6.1/src/rope.rs")
 REGISTRY_SRC_ROOT = os.path.expanduser("~/.cargo/registry/src")

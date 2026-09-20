@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Reset the /tmp/redline_pyte_repo fixture to a known baseline so the sweep is
+"""Reset the <root>/redline_pyte_repo fixture to a known baseline so the sweep is
 reproducible regardless of prior (possibly state-mutating) runs.
+
+The fixture root is REDLINE_FIXTURE_ROOT (default /tmp): every tools/ fixture
+path resolves as <root>/<basename> via repo(), so a battery invocation can run
+against a private tree (tools/gate.sh defaults the root to /tmp/fx<pid>;
+tools/pool.py points each lane at its own dir).
 
 Baseline:
   * src/lib.rs  — working-tree change, STAGED   (git diff --cached shows it)
@@ -14,7 +19,19 @@ import os
 import shutil
 import subprocess
 
-REPO = "/tmp/redline_pyte_repo"
+def fixture_root():
+    """Fixture tree root: REDLINE_FIXTURE_ROOT, default /tmp. Keep roots SHORT
+    (fixture paths land on the 80-col status line)."""
+    return os.environ.get("REDLINE_FIXTURE_ROOT", "/tmp")
+
+
+def repo(name):
+    """<root>/<name>: the single path indirection for every fixture repo.
+    Basenames are fixed — suites assert on them."""
+    return os.path.join(fixture_root(), name)
+
+
+REPO = repo("redline_pyte_repo")
 
 
 def _git(*args):

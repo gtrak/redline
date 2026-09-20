@@ -3,6 +3,8 @@
 import os, sys
 sys.path.insert(0, '/tmp')
 from uxdrive import Session
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fixture import repo
 
 def fixture(root):
     import shutil, subprocess
@@ -25,7 +27,7 @@ def step(s, name, keys=b'', wait=0.8):
     print()
 
 if __name__ == '__main__':
-    root = '/tmp/redline_parity2_repo'
+    root = repo('redline_parity2_repo')
     fixture(root)
     s = Session(root)
     s.pump(3.0)

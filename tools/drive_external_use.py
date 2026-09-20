@@ -34,8 +34,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-REPO = "/tmp/redline_ext_use_repo"
+REPO = repo("redline_ext_use_repo")
 REGISTRY_SRC_ROOT = os.path.expanduser("~/.cargo/registry/src")
 COLS, ROWS = 200, 24
 # 200 cols: the M-. landing message carries the FULL absolute registry path

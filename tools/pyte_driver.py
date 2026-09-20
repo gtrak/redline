@@ -14,7 +14,12 @@ import os, pty, fcntl, termios, struct, time, select, signal, sys
 
 import pyte
 
-BIN = os.environ.get("REDLINE_BIN", "/home/gary/dev/red/target/debug/redline")
+# Default to THIS tree's binary (the tree containing tools/), so a serial
+# gate in a lane worktree cannot silently test main's stale binary.
+BIN = os.environ.get(
+    "REDLINE_BIN",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                 "target", "debug", "redline"))
 COLS = int(os.environ.get("COLS", "80"))
 ROWS = int(os.environ.get("ROWS", "24"))
 
@@ -41,18 +46,22 @@ PTY_QUIET = float(os.environ.get("REDLINE_PTY_QUIET", "0.06"))
 _POLL_GRAN = 0.01
 
 # ── Shared-fixture mutual exclusion ──────────────────────────────────────
-# Every PTY suite drives the SAME fixture repo (/tmp/redline_pyte_repo) and
-# several of them mutate it (flow legs create/save/delete files, magit
-# stages things). Two suites running at once therefore corrupt each other
-# and produce PHANTOM failures — observed live on 2026-09-18: an
-# independent `sweep.py` gave 10/14 while the worker's own run gave 13/14
-# purely because both were driving the fixture concurrently.
+# Suites in one battery drive the SAME fixture repos (the shared baseline is
+# redline_pyte_repo) and several of them mutate it (flow legs create/save/
+# delete files, magit stages things). Two suites in the same fixture root
+# running at once therefore corrupt each other and produce PHANTOM failures —
+# observed live on 2026-09-18: an independent `sweep.py` gave 10/14 while the
+# worker's own run gave 13/14 purely because both were driving the fixture
+# concurrently.
 #
-# Fail fast instead: take an exclusive flock on a lock file keyed to the
-# repo path when an App starts, and release it on kill(). A second suite
-# aborts with a clear message rather than silently producing bad results.
-# Set REDLINE_NO_PTY_LOCK=1 to opt out (e.g. a deliberate two-fixture run
-# using REDLINE_REPO).
+# Fail fast instead: take an exclusive flock on a lock file keyed to the repo
+# abspath when an App starts, and release it on kill(). A second suite aborts
+# with a clear message rather than silently producing bad results. The lock
+# lives under the fixture root, so it guards ONE root: with REDLINE_FIXTURE_ROOT
+# (tools/gate.sh defaults it to a per-invocation tree, tools/pool.py to each
+# lane) the flock is the intra-root belt-and-braces guard, not the only
+# defence. Set REDLINE_NO_PTY_LOCK=1 to opt out (e.g. a deliberate two-fixture
+# run using REDLINE_REPO).
 _LOCK_FD = None
 
 def _acquire_fixture_lock(repo):
@@ -63,11 +72,14 @@ def _acquire_fixture_lock(repo):
         return
     import fcntl as _f
     import hashlib as _h
+    from fixture import fixture_root
     # NOTE: do NOT use the builtin hash() — string hashing is randomized per
     # process (PYTHONHASHSEED), so two runs would compute different lock
     # paths and never contend.
     digest = _h.sha1(os.path.abspath(repo).encode()).hexdigest()[:16]
-    path = "/tmp/redline_pty_%s.lock" % digest
+    root = fixture_root()
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, "redline_pty_%s.lock" % digest)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         _f.flock(fd, _f.LOCK_EX | _f.LOCK_NB)
@@ -75,8 +87,10 @@ def _acquire_fixture_lock(repo):
         os.close(fd)
         sys.stderr.write(
             "\n*** shared PTY fixture is busy (another suite is running).\n"
+            "*** fixture: %s (root: %s)\n"
             "*** Refusing to start to avoid phantom failures.\n"
-            "*** Wait for it to finish, or set REDLINE_NO_PTY_LOCK=1.\n\n")
+            "*** Wait for it to finish, or set REDLINE_NO_PTY_LOCK=1.\n\n"
+            % (os.path.abspath(repo), root))
         raise SystemExit(3)
     os.write(fd, str(os.getpid()).encode())
     _LOCK_FD = fd

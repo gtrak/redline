@@ -35,8 +35,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-REPO = "/tmp/redline_011_04_py_repo"
+REPO = repo("redline_011_04_py_repo")
 COLS, ROWS = 200, 24
 MINI = ROWS - 2      # minibuffer row (0-based)
 STATUS = ROWS - 1    # status-line row (0-based)

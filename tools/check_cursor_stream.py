@@ -40,9 +40,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pyte
 from pyte_driver import encode_key, BAR_BGS
+from fixture import repo
 
 BIN = os.environ.get("REDLINE_BIN", os.path.join(os.path.dirname(__file__), "..", "target", "debug", "redline"))
-REPO = os.environ.get("REDLINE_REPO", "/tmp/redline_pyte_repo")
+REPO = os.environ.get("REDLINE_REPO") or repo("redline_pyte_repo")
 COLS, ROWS = 80, 24
 
 

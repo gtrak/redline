@@ -697,17 +697,38 @@ binary bit the session twice).
 - Pooled battery: 70.5s (was ~117s; serial 0.2-era was 524s at session start). Reviewer: PASS, no verdict loss on any sampled twin.
 - Deferred follow-up (scheduled): demote drive_windowing/panes, drive_xref/external suites, ux_sweep — all state+text, still run in the battery.
 
-## Cross-lane PTY contention (2026-09-20, open)
+## Cross-lane PTY contention (2026-09-20) — RESOLVED (per-invocation fixture roots)
 
-Two lanes running serial `gate.sh full` concurrently can bleed renders
-through the SHARED `/tmp/redline_pyte_repo` fixture (hint-rel saw another
-lane's content in mismatched renders; py-roots hit exit-3 refusals +
-backlog-#12 stray-file residue). The flock serializes suites, but two
-concurrent GATES each run their own suite sequence against the same
-fixtures — the quiet-window wait is the only documented mitigation.
-Gap: every battery (not just pooled) should use private per-lane
-fixtures (`REDLINE_POOL_ROOT`) or the fixture repos need per-lane copies
-at the driver level. Spec'd for the next harness lane.
+Two lanes running serial `gate.sh full` concurrently bled renders through the
+SHARED `/tmp/redline_pyte_repo` fixture (hint-rel saw another lane's content in
+mismatched renders; py-roots hit exit-3 refusals + backlog-#12 stray-file
+residue). The flock serialized suites within one fixture tree, but two
+concurrent GATES each ran their own suite sequence against the same fixtures —
+the contamination class, not just the serialization.
+
+**Fix (structural): a single fixture-root knob, `REDLINE_FIXTURE_ROOT`
+(default /tmp). Every tools/ fixture path resolves as <root>/<basename> through
+one indirection (`tools/fixture.py repo()`), so a battery invocation can run
+against a private tree:**
+
+- `tools/gate.sh` defaults the root to a SHORT per-invocation dir
+  (`/tmp/fx<pid>`), seeded once from the /tmp baseline (basenames preserved —
+  suites assert on them). Two concurrent gates get disjoint trees, so they
+  cannot collide; the per-repo flock is now an intra-root guard (belt and
+  braces), and its refusal message names the resolved fixture path + root.
+- `tools/pool.py` unifies: the lane root IS the fixture root — each lane runs
+  with `REDLINE_FIXTURE_ROOT=<lane>` instead of a second parallel rewrite.
+
+**Verified: two concurrent `gate.sh full` runs with different roots
+(`REDLINE_FIXTURE_ROOT=/tmp/fa` + `/tmp/fb`) BOTH green (pre-fix at least one
+fails); single full gate green; `pool.py setup 4 && runall --lanes 4` green on
+the unified root.** The contamination class is closed structurally: inside
+the gate battery (every suite `gate.sh full`/`pooled` runs) the shared-tree
+assumption no longer exists — all fixture paths route through the knob.
+Outside the battery, two legacy paths still bypass it (documented, not
+gate-relevant): the emacs-vs-redline differential probes' shared fixture
+and the battery2/parity legacy drives' `uxdrive` import from `/tmp`.
+Note: a lone battery is unchanged except for the root spelling
 
 ## loop-04 (2026-09-20): other suites demoted — DONE
 

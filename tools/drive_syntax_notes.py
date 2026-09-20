@@ -27,9 +27,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 from fixture import reset
 
-REPO = os.environ.get("REDLINE_REPO", "/tmp/redline_pyte_repo")
+REPO = os.environ.get("REDLINE_REPO") or repo("redline_pyte_repo")
 ROWS, COLS = 24, 80
 
 CHECKS = []

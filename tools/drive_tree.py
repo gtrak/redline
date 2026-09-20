@@ -6,11 +6,13 @@ the top view is the buffer, arrows move the tree cursor. At every step exactly
 ONE content row carries the blue signature (in the tree column) and it is the
 file the store's `tree.selected` points at.
 """
+import os
 import sys
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+app = App(repo("redline_pyte_repo"), rows=24, cols=80)
 app.key("C-c p t")      # toggle the tree sidebar on
 
 

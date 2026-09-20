@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from drive_emacs import EmacsSession, fixture as emacs_fixture
 from pyte_driver import App as Redline
-from fixture import reset as redline_reset
+from fixture import repo, reset as redline_reset
 
 ROWS, COLS = 24, 80
 
@@ -173,7 +173,7 @@ def run_redline(root):
 
 if __name__ == '__main__':
     em = run_emacs('/tmp/emacs_probe2_repo')
-    rl = run_redline('/tmp/redline_pyte_repo')
+    rl = run_redline(repo('redline_pyte_repo'))
     keys = list(em.keys())
     print(f'{"probe":22} | {"emacs":>26} | {"redline":>26} | match')
     for k in keys:

@@ -34,12 +34,12 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pyte_driver
 from pyte_driver import encode_key
-from fixture import reset
+from fixture import repo, reset
 
 BIN = os.environ.get("REDLINE_BIN",
                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "..", "target", "debug", "redline"))
-REPO = os.environ.get("REDLINE_REPO", "/tmp/redline_pyte_repo")
+REPO = os.environ.get("REDLINE_REPO") or repo("redline_pyte_repo")
 COLS, ROWS = 80, 24
 
 LEG_RS = "src/dumpleg.rs"

@@ -10,6 +10,7 @@ attributes, not text, so the region legs report the blue/attr scan.
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
 from pyte_driver import App
+from fixture import repo
 from fixture import reset
 
 
@@ -26,7 +27,7 @@ def step(a, name, keys=None, settle=1.0):
 
 if __name__ == '__main__':
     reset()
-    root = '/tmp/redline_pyte_repo'
+    root = repo('redline_pyte_repo')
     # mirror the emacs fixture: a tall file with varied line lengths
     tall = os.path.join(root, 'src', 'tall.rs')
     with open(tall, 'w') as f:

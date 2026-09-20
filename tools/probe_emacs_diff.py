@@ -11,10 +11,10 @@ diagnostic, not a pass/fail gate. Run manually:
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/tools')
-sys.path.insert(0, '/home/gary/dev/red/tools')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive_emacs import EmacsSession, fixture as emacs_fixture
 from pyte_driver import App as Redline
-from fixture import reset as redline_reset
+from fixture import repo, reset as redline_reset
 
 LINE = 'fn alpha() { let x = 1; }'          # len 25
 TALL = '\n'.join([LINE] + [f'fn filler_{i}() {{ /* pad */ }}' for i in range(60)]) + '\n'
@@ -91,7 +91,7 @@ def probe_redline(root):
 if __name__ == '__main__':
     em = probe_emacs('/tmp/emacs_probe_repo')
     redline_reset()
-    rl = probe_redline('/tmp/redline_pyte_repo')
+    rl = probe_redline(repo('redline_pyte_repo'))
     print(f'line = {LINE!r}  (len {len(LINE)})')
     print(f'{"op":4} {"from":>4} | {"emacs":>5} | {"redline":>7} | match')
     for col in (0, 2, 3, 8, 9, 12, 25):

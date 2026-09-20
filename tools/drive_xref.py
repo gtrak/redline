@@ -25,11 +25,12 @@ import shutil
 import sys
 import time
 
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fixture import reset
 from pyte_driver import App
+from fixture import repo
 
-REPO = "/tmp/redline_pyte_repo"
+REPO = repo("redline_pyte_repo")
 LEG_RS = os.path.join(REPO, "src", "leg.rs")
 MINI = 22  # minibuffer row (content rows 0..20 in a 24-row PTY, 1-based
            # terminal row 23 is the status line)

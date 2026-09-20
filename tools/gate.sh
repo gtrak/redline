@@ -43,9 +43,15 @@
 #   REDLINE_BIN        binary under test (default target/debug/redline).
 #   REDLINE_POOL_LANES lane count for the `pooled` tier (default 4; a 24-core
 #                      box measured well at 4-6 lanes).
+#   REDLINE_FIXTURE_ROOT  fixture tree root for every PTY suite (default /
+#                      per-invocation /tmp/fx<pid>, set below; an explicit
+#                      value from the caller wins). Two concurrent gates get
+#                      disjoint roots, so their suites can no longer collide
+#                      on shared fixtures (cross-lane contention class).
 #
 # Every PTY invocation is under `timeout` and the shared PTY flock still
-# refuses to run two fixture-touching suites at once (backlog #13).
+# refuses to run two fixture-touching suites at once within ONE root
+# (backlog #13).
 set -u
 cd "$(dirname "$0")/.."
 
@@ -59,6 +65,35 @@ TIER="${1:-full}"
 # e.g. REDLINE_PTY_QUIET=0.2 for the old conservative window).
 _default_quiet=0.06
 export REDLINE_PTY_QUIET="${REDLINE_PTY_QUIET:-$_default_quiet}"
+
+# Per-invocation fixture root: every hardcoded tools/ fixture path resolves
+# as <root>/<basename> (tools/fixture.py repo()), so two concurrent gate.sh
+# runs get disjoint fixture trees and cannot collide. Keep it SHORT: the
+# fixture path lands on the 80-col status line. An explicit
+# REDLINE_FIXTURE_ROOT from the caller always wins. A root other than /tmp
+# is seeded once from the /tmp baseline (basenames are preserved — the
+# suites assert on them).
+# caller-supplied root is remembered as-is; gate.sh's own default gets a
+# cleanup marker so a green run removes its /tmp/fx<pid> tree.
+_fixture_root_defaulted=0
+if [ -z "${REDLINE_FIXTURE_ROOT:-}" ]; then
+  REDLINE_FIXTURE_ROOT="/tmp/fx$$"
+  _fixture_root_defaulted=1
+fi
+export REDLINE_FIXTURE_ROOT
+if [ "$REDLINE_FIXTURE_ROOT" != "/tmp" ] && [ "$TIER" != "pooled" ]; then
+  # Seed any non-/tmp root (gate default OR caller-supplied) from the /tmp
+  # baseline. (pooled tier: the gate root is unused — pool.py's lanes ARE
+  # the fixture roots and setup copies their baselines itself.)
+  mkdir -p "$REDLINE_FIXTURE_ROOT"
+  for d in /tmp/redline_*; do
+    [ -d "$d" ] || continue
+    b="${d##*/}"
+    case "$b" in redline_pty_*.lock) continue;; esac
+    [ -e "$REDLINE_FIXTURE_ROOT/$b" ] && continue
+    cp -a "$d" "$REDLINE_FIXTURE_ROOT/"
+  done
+fi
 
 # Shared-fixture suites: MUST run one at a time (the driver's flock enforces
 # this and exits 3 if a rival is live). Ordered cheapest-first for a fast fail.
@@ -199,5 +234,11 @@ esac
 if [ "$fail" -ne 0 ]; then
   printf '\nGATE RESULT: FAIL\n'
   exit 1
+fi
+# Per-invocation root cleanup: only when THIS invocation created the root
+# (caller-supplied roots are the caller's to manage) and only on success —
+# a failed gate keeps its tree for forensics.
+if [ "$_fixture_root_defaulted" -eq 1 ]; then
+  rm -rf "$REDLINE_FIXTURE_ROOT"
 fi
 printf '\nGATE RESULT: OK (%s)\n' "$TIER"

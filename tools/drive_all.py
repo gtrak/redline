@@ -10,8 +10,9 @@ at. The active-buffer status line (bottom row) is excluded from the count.
 import os
 import subprocess
 import sys
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
 VERDICTS = []
 
@@ -26,7 +27,7 @@ def one_blue(app, expect_one=True):
 
 
 def drive_magit():
-    app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+    app = App(repo("redline_pyte_repo"), rows=24, cols=80)
     app.key("C-x g")
     ok = one_blue(app)
     steps = [one_blue(app) for _ in range(8)]
@@ -42,7 +43,7 @@ def drive_magit():
 
 
 def drive_log():
-    app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+    app = App(repo("redline_pyte_repo"), rows=24, cols=80)
     app.key("C-x g"); app.key("l")
     steps = [one_blue(app)]
     subjects = ["commit 4", "commit 3", "commit 2", "commit 1", "init"]
@@ -61,7 +62,7 @@ def drive_log():
 
 
 def drive_search():
-    app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+    app = App(repo("redline_pyte_repo"), rows=24, cols=80)
     app.key("C-c p s s")
     for ch in "target":
         app.key(ch, settle=0.3)
@@ -78,7 +79,7 @@ def drive_search():
 
 
 def drive_tree():
-    app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+    app = App(repo("redline_pyte_repo"), rows=24, cols=80)
     app.key("C-c p t")
     steps = [one_blue(app)]
     for _ in range(3):
@@ -91,7 +92,7 @@ def drive_tree():
 
 
 def drive_buffer_list():
-    app = App("/tmp/redline_pyte_repo", rows=24, cols=80)
+    app = App(repo("redline_pyte_repo"), rows=24, cols=80)
     app.key("C-c p t"); app.key("down"); app.key("RET")   # open src/lib.rs
     app.key("C-c p t")                                   # tree off
     app.key("C-x C-b")                                   # buffer list
@@ -105,7 +106,7 @@ def drive_buffer_list():
 
 
 def drive_windowing():
-    app = App("/tmp/redline_tall_repo", rows=24, cols=80)
+    app = App(repo("redline_tall_repo"), rows=24, cols=80)
     app.key("C-x g")
     HELP = "s stage"
     top, bot = 1, app.rows - 3

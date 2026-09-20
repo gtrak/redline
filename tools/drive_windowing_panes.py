@@ -19,8 +19,9 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
 COLS, ROWS = 80, 24
 VERDICTS = []
@@ -43,7 +44,7 @@ def git(root, *args):
                    capture_output=True, env=env)
 
 
-DIFF_REPO = "/tmp/redline_win_diff_repo"
+DIFF_REPO = repo("redline_win_diff_repo")
 
 
 def ensure_diff_repo():

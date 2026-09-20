@@ -85,8 +85,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-REPO = "/tmp/redline_011_05_repo"   # drive-owned root (removed on exit)
+REPO = repo("redline_011_05_repo")   # drive-owned root (removed on exit)
 PROJ = os.path.join(REPO, "proj")   # the app's workspace root (flock key)
 COLS, ROWS = 200, 24
 MINI = ROWS - 2      # minibuffer row (0-based)

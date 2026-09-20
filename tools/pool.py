@@ -10,12 +10,14 @@ parallelize to max(suite) instead of sum(suite).
 
 HOW (no edits to tools/*.py). For each lane we:
   1. copy the baseline fixture repos (/tmp/redline_*) into  <POOL_ROOT>/<i>/
-  2. copy tools/ into that lane and rewrite the hardcoded fixture literals to
-     point at the lane copy (and the tools-import path),
-  3. run the suite there with a per-lane XDG_CACHE_HOME (isolates the app's
-     log + projects registry).
-The driver's lock is keyed on repo abspath (sha1), so lane copies never
-contend -- real parallelism, and a lane crash cannot corrupt another lane.
+  2. copy tools/ into that lane and rewrite the tools-import path
+  3. run the suite there with REDLINE_FIXTURE_ROOT=<lane> (the lane root IS
+     the fixture root — the tools/fixture.py repo() indirection points the
+     lane's suites at the lane's fixture copies) plus a per-lane
+     XDG_CACHE_HOME (isolates the app's log + projects registry).
+The driver's lock (keyed on repo abspath, under the fixture root) is an
+intra-lane guard, so lane copies never contend -- real parallelism, and a
+lane crash cannot corrupt another lane.
 
 Constraints (see docs/ux-testing-plan.md, "Pooled parallel sweep"):
   * Lane fixture paths must stay SHORT. The status line shows the project
@@ -52,6 +54,8 @@ MAIN = os.environ.get(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )
 POOL_ROOT = os.environ.get("REDLINE_POOL_ROOT", "/tmp/rl")
+# Canonical baseline tree the lanes are copied from (the fixture baselines
+# live under /tmp; each lane's own tree is addressed via REDLINE_FIXTURE_ROOT).
 FIXTURE_ROOT = "/tmp"
 LANE_REPO_PREFIX = "redline_"
 DEFAULT_LANES = 4
@@ -119,29 +123,13 @@ def setup(n):
         tdir = os.path.join(lane, "tools")
         shutil.copytree(os.path.join(MAIN, "tools"), tdir)
         shutil.rmtree(os.path.join(tdir, "__pycache__"), ignore_errors=True)
-        _rewrite(tdir, lane)
+        # No per-lane rewrites: fixture paths resolve via REDLINE_FIXTURE_ROOT
+        # (set to the lane dir per suite, see run_pooled) and the suites'
+        # sys.path inserts are self-relative to the lane's own tools copy.
         os.makedirs(os.path.join(lane, "xdg"), exist_ok=True)
     print("pool: %d lanes at %s (%d fixtures each, %d total fixture copies)"
           % (n, POOL_ROOT, len(fixtures), len(fixtures)))
     return 0
-
-
-def _rewrite(tdir, lane):
-    """Point the lane's tools at the lane's own fixtures + tools dir."""
-    for name in os.listdir(tdir):
-        if not name.endswith(".py"):
-            continue
-        p = os.path.join(tdir, name)
-        with open(p) as f:
-            s = f.read()
-        # Fixture paths: /tmp/redline_X -> <lane>/redline_X (basename preserved).
-        s = s.replace("/tmp/" + LANE_REPO_PREFIX, lane + "/" + LANE_REPO_PREFIX)
-        # Tools import path (most suites hardcode the main tree's tools dir).
-        s = s.replace('sys.path.insert(0, "%s/tools")' % MAIN,
-                      'sys.path.insert(0, "%s")' % tdir)
-        s = s.replace('"/home/gary/dev/red/tools"', '"%s"' % tdir)
-        with open(p, "w") as f:
-            f.write(s)
 
 
 def existing_lanes():
@@ -200,6 +188,10 @@ def run_pooled(suites, lanes, timeout=1800, binpath=None):
             env = dict(os.environ)
             env["XDG_CACHE_HOME"] = os.path.join(lane, "xdg")
             env["REDLINE_BIN"] = binpath
+            # The lane root IS the fixture root: every fixture path in the
+            # lane's tools resolves to <lane>/redline_*. (Overrides any
+            # inherited REDLINE_FIXTURE_ROOT, e.g. gate.sh's /tmp/fx<pid>.)
+            env["REDLINE_FIXTURE_ROOT"] = lane
             env["REDLINE_PTY_QUIET"] = os.environ.get("REDLINE_PTY_QUIET", "0.2")
             env.pop("REDLINE_NO_PTY_LOCK", None)  # keep the per-lane safety lock
             tdir = os.path.join(lane, "tools")

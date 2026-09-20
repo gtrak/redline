@@ -11,11 +11,13 @@ attribute level (exactly-one-blue), and the real on-screen help line.
 Fixture: /tmp/redline_tall_repo (30 changed files — the status buffer is
 taller than the window, so the follow must scroll).
 """
+import os
 import sys
-sys.path.insert(0, "/home/gary/dev/red/tools")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
+from fixture import repo
 
-app = App("/tmp/redline_tall_repo", rows=24, cols=80)
+app = App(repo("redline_tall_repo"), rows=24, cols=80)
 app.key("C-x g")      # magit status on the tall repo
 
 HELP = "s stage"
