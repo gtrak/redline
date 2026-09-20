@@ -8,3 +8,6 @@ tools/__pycache__/
 # Lane worktrees (agent sessions): numbered slots under .agents/worktrees/.
 # Convention + lifecycle in .agents/skills/plan-process/SKILL.md.
 /.agents/worktrees/
+
+# Slot marker (local lane state, never committed).
+.lane
