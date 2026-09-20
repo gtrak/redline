@@ -92,7 +92,8 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
-        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml => {}
+        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
+        | LanguageId::Json => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -138,15 +139,33 @@ fn innermost_at(root: Node, byte: usize) -> Option<Node> {
 /// token) is skipped so the whole path comes back as one node — the outer
 /// `scoped_identifier` in value position, the outer
 /// `scoped_type_identifier` in type position. `None` when no ancestor is
-/// identifier-ish.
+/// identifier-ish. JSON additionally requires the `pair`/`key` position
+/// (its identifier kind `string` also appears in value position — see
+/// [`in_identifier_position`]).
 fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
     let mut cur = leaf;
     loop {
-        if !is_path_segment(cur, lang) && cur.is_named() && is_identifier_kind(lang, cur.kind()) {
+        if !is_path_segment(cur, lang)
+            && cur.is_named()
+            && is_identifier_kind(lang, cur.kind())
+            && in_identifier_position(lang, cur)
+        {
             return Some(cur);
         }
         cur = cur.parent()?;
     }
+}
+
+/// Whether `node` may count as an identifier at its position: true for
+/// every language except JSON, where the `string` kind is both the key
+/// kind and the value-string kind — only a `pair`'s `key` field is
+/// identifier-ish (a value string is data, not a navigable name).
+fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
+    if lang != LanguageId::Json {
+        return true;
+    }
+    node.parent()
+        .map_or(false, |p| p.kind() == "pair" && p.child_by_field_name("key") == Some(node))
 }
 
 /// Whether `node` is a part of a larger dotted path rather than a complete
@@ -352,6 +371,16 @@ fn is_toml_identifier_kind(kind: &str) -> bool {
     matches!(kind, "bare_key" | "quoted_key" | "dotted_key")
 }
 
+/// JSON identifier-ish node kinds (verified against the pinned
+/// tree-sitter-json `NODE_TYPES`): `string` — but ONLY in a `pair`'s
+/// `key` field (see `in_identifier_position`); a value `string` is data.
+/// JSON has no dotted-key syntax, so there is no whole-path rule here —
+/// a key is always a single `string` node; JSON "paths" are structural
+/// (nesting), which `scope_path` reports as the key chain.
+fn is_json_identifier_kind(kind: &str) -> bool {
+    kind == "string"
+}
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -365,6 +394,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Cpp => is_cpp_identifier_kind(kind),
         LanguageId::Bash => is_bash_identifier_kind(kind),
         LanguageId::Toml => is_toml_identifier_kind(kind),
+        LanguageId::Json => is_json_identifier_kind(kind),
         _ => false,
     }
 }
@@ -428,6 +458,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Cpp => cpp_scope_path(leaf, source),
         LanguageId::Bash => bash_scope_path(leaf, source),
         LanguageId::Toml => toml_scope_path(leaf, source),
+        LanguageId::Json => json_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -625,6 +656,40 @@ fn toml_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
     names
 }
 
+/// The JSON enclosing-scope walk: each enclosing `pair` contributes its
+/// key name (the `key` field's `string` node → its `string_content`
+/// child, so the UNQUOTED name — a resolver matching `outer` must not
+/// see `"outer"`), outermost → innermost. This is JSON's structural
+/// "path" (there is no dotted-key syntax to walk instead).
+fn json_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "pair" {
+            // The key's `string` node holds its unquoted name in the
+            // `string_content` CHILD (kind, not field name — probed);
+            // fall back to the raw `string` (quoted text) when the content
+            // child is absent (broken parse / empty string).
+            let key = node.child_by_field_name("key");
+            let key = key
+                .and_then(|k| {
+                    (0..k.child_count())
+                        .filter_map(|i| k.child(i))
+                        .find(|c| c.kind() == "string_content")
+                })
+                .or(key);
+            if let Some(key) = key
+                && let Ok(text) = key.utf8_text(source)
+            {
+                names.push(text.to_string());
+            }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,8 +847,7 @@ mod tests {
     /// yet adopted (C landed in this issue; the rest follow).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 4] = [
-            (LanguageId::Json, "{\"key\": 1}", "key"),
+        let cases: [(LanguageId, &str, &str); 3] = [
             (LanguageId::Yaml, "key: value\n", "key"),
             (LanguageId::Markdown, "# Heading\n", "Heading"),
             (LanguageId::Plain, "abc", "abc"),
@@ -1469,6 +1533,79 @@ mod tests {
             assert_eq!(info.text, "table");
         }
         let _ = scope_path_at(LanguageId::Toml, src, pos);
+    }
+
+    // ── JSON (lang-pred) ──────────────────────────────────
+
+    /// Discriminating for the JSON position rule: a `pair` KEY resolves
+    /// (kind `string`, raw text WITH its quotes — `NodeInfo.text` is the
+    /// node's source text), but a value string at the SAME offset does
+    /// not (`string` is not identifier-ish outside the `key` field).
+    #[test]
+    fn json_key_resolves_but_value_string_does_not() {
+        let src = "{\"k\": \"text\"}\n";
+        let key_at = src.find("\"k\"").expect("fixture");
+        let info = node_at(LanguageId::Json, src, key_at + 1).expect("node at key `k`");
+        assert_eq!(info.kind, "string");
+        assert_eq!(info.text, "\"k\"");
+        assert_eq!(info.scope_path, vec![String::from("k")]);
+        let value_at = src.find("text").expect("fixture");
+        assert!(node_at(LanguageId::Json, src, value_at).is_none(), "value string must not resolve");
+    }
+
+    #[test]
+    fn json_scope_chain_is_the_enclosing_key_chain() {
+        // JSON's path-shaped concept is STRUCTURAL (nesting, not dotted
+        // text): the scope chain is the enclosing keys, unquoted.
+        let src = "{\"outer\": {\"inner\": {\"deep\": 1}}}\n";
+        let deep_at = src.find("deep").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Json, src, deep_at),
+            vec![
+                String::from("outer"),
+                String::from("inner"),
+                String::from("deep"),
+            ]
+        );
+        // The value `1` sits inside the innermost pair only.
+        let value_at = src.find("1").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Json, src, value_at),
+            vec![
+                String::from("outer"),
+                String::from("inner"),
+                String::from("deep"),
+            ]
+        );
+    }
+
+    #[test]
+    fn json_boundary_offsets_do_not_panic() {
+        let src = "{\"a\": 1}\n";
+        // Byte 0 sits on the `{` token (not identifier-ish → no node),
+        // top-level → no scope either (the pair starts at the key).
+        assert!(node_at(LanguageId::Json, src, 0).is_none());
+        assert!(scope_path_at(LanguageId::Json, src, 0).is_empty());
+        // A key at byte 0 does resolve (top-level pair → sees itself).
+        let src2 = "{\"x\": 1}\n";
+        let info = node_at(LanguageId::Json, src2, 1).expect("key at byte 1");
+        assert_eq!(info.text, "\"x\"");
+        assert_eq!(info.scope_path, vec![String::from("x")]);
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Json, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Json, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Json, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Json, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn json_broken_source_does_not_panic() {
+        let src = "{\"a\":";
+        let pos = src.find("a").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Json, src, pos) {
+            assert_eq!(info.text, "\"a\"");
+        }
+        let _ = scope_path_at(LanguageId::Json, src, pos);
     }
 
     #[test]
