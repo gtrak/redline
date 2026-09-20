@@ -739,7 +739,6 @@ mod tests {
         assert!(index.field_locations("Other", "x").is_empty());
     }
 
-    #[test]
     /// 010-01 review P1 regression: an UNCHANGED-content refresh (touch,
     /// linter rewrite, editor no-save) must keep the file's field-map
     /// contributions — `set_file_tables`' same-check now runs BEFORE the
@@ -772,6 +771,7 @@ mod tests {
         assert_eq!(index.field_locations("Point", "y"), vec![("src/point.rs".into(), 0)]);
     }
 
+    #[test]
     fn rust_tables_refresh_and_remove_with_the_file() {
         let dir = make_project();
         let root = dir.path();
