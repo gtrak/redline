@@ -92,7 +92,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
     match lang {
         LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
-        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash => {}
+        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -241,6 +241,12 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
         // grammar has no `identifier` kind at all — probed: words are
         // `word`, commands `command_name`, variables `variable_name`.)
         LanguageId::Bash => parent_kind == Some("command_name") && node.is_named(),
+        // TOML dotted keys are path-shaped: a `dotted_key` nests
+        // `bare_key`/`quoted_key`/inner `dotted_key` segments around `.`
+        // tokens (in BOTH pair keys and `[table.sub]` headers — probed),
+        // so `a.b.c` comes back whole as one node, same rule as the Rust
+        // `::` path.
+        LanguageId::Toml => parent_kind == Some("dotted_key") && node.is_named(),
         _ => false,
     }
 }
@@ -339,6 +345,13 @@ fn is_bash_identifier_kind(kind: &str) -> bool {
     matches!(kind, "command_name" | "variable_name")
 }
 
+/// TOML identifier-ish node kinds (verified against the pinned
+/// tree-sitter-toml-ng `NODE_TYPES`): `bare_key`, `quoted_key` (the
+/// key leaves), and `dotted_key` (the whole `a.b.c` path).
+fn is_toml_identifier_kind(kind: &str) -> bool {
+    matches!(kind, "bare_key" | "quoted_key" | "dotted_key")
+}
+
 /// The identifier-kind predicate for `lang` — the per-language extension
 /// point used by `nearest_identifier`.
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
@@ -351,6 +364,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::C => is_c_identifier_kind(kind),
         LanguageId::Cpp => is_cpp_identifier_kind(kind),
         LanguageId::Bash => is_bash_identifier_kind(kind),
+        LanguageId::Toml => is_toml_identifier_kind(kind),
         _ => false,
     }
 }
@@ -413,6 +427,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::C => c_scope_path(leaf, source),
         LanguageId::Cpp => cpp_scope_path(leaf, source),
         LanguageId::Bash => bash_scope_path(leaf, source),
+        LanguageId::Toml => toml_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -582,6 +597,34 @@ fn bash_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
     names
 }
 
+/// The TOML enclosing-scope walk: a `table` node (a `[a.b]` header and
+/// the pairs it opens) contributes its header key — the first key child
+/// (`dotted_key` for multi-segment headers, `bare_key` for single-key
+/// headers; the header's children carry no field names, so the first
+/// key-kind child is taken). The dotted header text is reported AS WRITTEN
+/// (one scope element, e.g. `"a.b"`) — a deliberate simplification; the
+/// resolver matches on this text, and splitting quoted segments is out
+/// of scope for basic navigation.
+fn toml_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if node.kind() == "table" {
+            let header = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| matches!(c.kind(), "dotted_key" | "bare_key" | "quoted_key"));
+            if let Some(header) = header
+                && let Ok(text) = header.utf8_text(source)
+            {
+                names.push(text.to_string());
+            }
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,8 +782,7 @@ mod tests {
     /// yet adopted (C landed in this issue; the rest follow).
     #[test]
     fn unimplemented_languages_return_none() {
-        let cases: [(LanguageId, &str, &str); 5] = [
-            (LanguageId::Toml, "[table]\nkey = 1\n", "table"),
+        let cases: [(LanguageId, &str, &str); 4] = [
             (LanguageId::Json, "{\"key\": 1}", "key"),
             (LanguageId::Yaml, "key: value\n", "key"),
             (LanguageId::Markdown, "# Heading\n", "Heading"),
@@ -1350,6 +1392,83 @@ mod tests {
             assert_eq!(info.text, "my_func");
         }
         let _ = scope_path_at(LanguageId::Bash, src, pos);
+    }
+
+    // ── TOML (lang-pred) ──────────────────────────────────
+
+    /// Discriminating: the dotted KEY `a.b.c` comes back WHOLE (one
+    /// `dotted_key`) for an offset on any segment — TOML dotted keys are
+    /// the grammar's path-shaped construct (in pair keys AND table
+    /// headers).
+    #[test]
+    fn toml_dotted_key_comes_back_whole() {
+        let src = "a.b.c = 1\n";
+        let a_at = src.find("a.b").expect("fixture");
+        let c_at = src.find(".c").expect("fixture") + 1;
+        assert_whole_path(LanguageId::Toml, src, a_at, c_at, "dotted_key", "a.b.c");
+    }
+
+    #[test]
+    fn toml_table_header_dotted_key_comes_back_whole() {
+        let src = "[table.sub]\nkey = 2\n";
+        let table_at = src.find("table.sub").expect("fixture");
+        let sub_at = src.find("sub").expect("fixture");
+        assert_whole_path(
+            LanguageId::Toml,
+            src,
+            table_at,
+            sub_at,
+            "dotted_key",
+            "table.sub",
+        );
+        // A plain key inside the table: the scope is the table header text
+        // (reported as written — one element, see `toml_scope_path`).
+        let key_at = src.find("key = 2").expect("fixture");
+        let info = node_at(LanguageId::Toml, src, key_at).expect("node at `key`");
+        assert_eq!(info.kind, "bare_key");
+        assert_eq!(info.text, "key");
+        assert_eq!(info.scope_path, vec![String::from("table.sub")]);
+        assert_eq!(
+            scope_path_at(LanguageId::Toml, src, key_at + 1),
+            vec![String::from("table.sub")]
+        );
+    }
+
+    #[test]
+    fn toml_top_level_dotted_key_has_no_scope() {
+        let src = "a.b.c = 1\n";
+        let info = node_at(LanguageId::Toml, src, src.find("a").expect("fixture")).unwrap();
+        assert_eq!(info.kind, "dotted_key");
+        assert!(info.scope_path.is_empty());
+    }
+
+    #[test]
+    fn toml_boundary_offsets_do_not_panic() {
+        // Byte 0 sits on the `[` token (not identifier-ish → no node),
+        // but the table header is still reported as the scope.
+        let src = "[table]\nk = 1\n";
+        assert!(node_at(LanguageId::Toml, src, 0).is_none());
+        assert_eq!(scope_path_at(LanguageId::Toml, src, 0), vec![String::from("table")]);
+        // A key at byte 0 does resolve; top-level → no scope.
+        let src2 = "key = 1\n";
+        let info = node_at(LanguageId::Toml, src2, 0).expect("key at byte 0");
+        assert_eq!(info.text, "key");
+        assert!(info.scope_path.is_empty());
+        // At end-of-file and past EOF: nothing contains the offset.
+        assert!(node_at(LanguageId::Toml, src, src.len()).is_none());
+        assert!(node_at(LanguageId::Toml, src, src.len() + 4096).is_none());
+        assert!(scope_path_at(LanguageId::Toml, src, src.len()).is_empty());
+        assert!(scope_path_at(LanguageId::Toml, src, usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn toml_broken_source_does_not_panic() {
+        let src = "[table";
+        let pos = src.find("table").expect("fixture");
+        if let Some(info) = node_at(LanguageId::Toml, src, pos) {
+            assert_eq!(info.text, "table");
+        }
+        let _ = scope_path_at(LanguageId::Toml, src, pos);
     }
 
     #[test]
