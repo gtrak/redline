@@ -97,7 +97,7 @@ fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
         | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
         | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
         | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
-        | LanguageId::CSharp => {}
+        | LanguageId::CSharp | LanguageId::Ruby => {}
         _ => return None,
     }
     // The grammar itself comes from the shared `queries::language_for` pin
@@ -163,14 +163,24 @@ fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
 /// Whether `node` may count as an identifier at its position: true for
 /// every language except JSON, where the `string` kind is both the key
 /// kind and the value-string kind — only a `pair`'s `key` field is
-/// identifier-ish (a value string is data, not a navigable name).
+/// identifier-ish (a value string is data, not a navigable name) — and
+/// RUBY, where a `call` is identifier-ish only in member-access shape
+/// (a `call` with a `receiver` field and NO `arguments` field — `a.b`
+/// parses as a receiver-carrying argumentless call, while a bare call
+/// with arguments, `puts x`, must not become a path; probe-verified
+/// against the pinned tree-sitter-ruby 0.23.1: a bare `foo` with no
+/// arguments parses as a plain `identifier`, not a `call`).
 fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
-    if lang != LanguageId::Json {
-        return true;
+    match lang {
+        LanguageId::Ruby if node.kind() == "call" => {
+            node.child_by_field_name("receiver").is_some()
+                && node.child_by_field_name("arguments").is_none()
+        }
+        LanguageId::Json => node.parent().is_some_and(|p| {
+            p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
+        }),
+        _ => true,
     }
-    node.parent().is_some_and(|p| {
-        p.kind() == "pair" && p.child_by_field_name("key") == Some(node)
-    })
 }
 
 /// Whether `node` is a part of a larger dotted path rather than a complete
@@ -283,6 +293,28 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
                 parent_kind,
                 Some("member_access_expression") | Some("qualified_name")
             ) && node.is_named()
+        }
+        // Ruby dotted paths (probe-verified against the pinned
+        // tree-sitter-ruby 0.23.1): `a.b.c` nests `call`s (named
+        // `receiver` + `method` children — a `call`'s receiver may
+        // itself be a `call`, an `identifier`, or a `scope_resolution`),
+        // and `Foo::Bar` nests `scope_resolution`s (named `scope` +
+        // `name` children, both `constant`s; the scope may itself be a
+        // `scope_resolution`). Any NAMED child of either container is a
+        // path part — same rule as the JS `member_expression` — EXCEPT a
+        // `call`'s children count only while the `call` is a genuine path
+        // container (a `receiver` field AND no `arguments` field, the same
+        // gate as `in_identifier_position`): otherwise the `method` child
+        // of an argument-carrying call (`puts` in `puts 1`) would be
+        // swallowed as a segment and resolve to nothing.
+        LanguageId::Ruby => match parent_kind {
+            Some("scope_resolution") => node.is_named(),
+            Some("call") => node.is_named()
+                && node.parent().is_some_and(|p| {
+                    p.child_by_field_name("receiver").is_some()
+                        && p.child_by_field_name("arguments").is_none()
+                }),
+            _ => false,
         }
         // Java dotted paths (probe-verified against the pinned
         // tree-sitter-java 0.23.5): `com.example.Foo` nests
@@ -458,6 +490,20 @@ fn is_csharp_identifier_kind(kind: &str) -> bool {
     )
 }
 
+/// Ruby identifier-ish node kinds (verified against the pinned
+/// tree-sitter-ruby 0.23.1 `NODE_TYPES`): `constant` (type / class
+/// names, bare or in a `scope_resolution` chain), `identifier` (method
+/// names, local variables, bare calls), `instance_variable` (`@x`),
+/// `call` (the whole `a.b` member chain — position-gated by
+/// `in_identifier_position`), and
+/// `scope_resolution` (the whole `Foo::Bar` path).
+fn is_ruby_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "constant" | "identifier" | "instance_variable" | "call" | "scope_resolution"
+    )
+}
+
 // Markdown has NO identifier-ish node kind (probed against the pinned
 // tree-sitter-md 0.3.2 block grammar: the title text of a heading is an
 // `inline` node, and `inline` spans whole paragraphs and code spans
@@ -485,6 +531,7 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
         LanguageId::Json => is_json_identifier_kind(kind),
         LanguageId::Java => is_java_identifier_kind(kind),
         LanguageId::CSharp => is_csharp_identifier_kind(kind),
+        LanguageId::Ruby => is_ruby_identifier_kind(kind),
         _ => false,
     }
 }
@@ -552,6 +599,7 @@ fn scope_path_for(lang: LanguageId, leaf: Node, source: &[u8]) -> Vec<String> {
         LanguageId::Markdown => markdown_scope_path(leaf, source),
         LanguageId::Java => java_scope_path(leaf, source),
         LanguageId::CSharp => csharp_scope_path(leaf, source),
+        LanguageId::Ruby => ruby_scope_path(leaf, source),
         _ => Vec::new(),
     }
 }
@@ -860,6 +908,29 @@ fn csharp_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
                 | "enum_declaration"
                 | "record_declaration"
                 | "method_declaration"
+        ) && let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(text) = name_node.utf8_text(source)
+        {
+            names.push(text.to_string());
+        }
+        cur = node.parent();
+    }
+    names.reverse(); // innermost-first walk → outermost-first answer
+    names
+}
+
+/// The Ruby enclosing-scope walk (new-languages lane): `module` and
+/// `class` (name child in the `name` field — a `constant`) plus
+/// `method` and `singleton_method` (name field), outermost → innermost.
+/// Blocks / case arms / begin-end are intentionally not scope items —
+/// keep it simple and honest.
+fn ruby_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = Some(leaf);
+    while let Some(node) = cur {
+        if matches!(
+            node.kind(),
+            "module" | "class" | "method" | "singleton_method"
         ) && let Some(name_node) = node.child_by_field_name("name")
             && let Ok(text) = name_node.utf8_text(source)
         {
@@ -2001,6 +2072,63 @@ mod tests {
                 String::from("A"),
                 String::from("F")
             ]
+        );
+    }
+
+    // ── Ruby (new-languages lane) ────────────────────────────────────
+    /// `obj.name` comes back whole as one argumentless `call` (the
+    /// member-access shape), from either segment.
+    #[test]
+    fn ruby_method_chain_comes_back_whole() {
+        let src = "def show(obj)\n  puts obj.name\nend\n";
+        let at = src.find("obj.name").expect("fixture");
+        for off in 0..=5 {
+            let info =
+                node_at(LanguageId::Ruby, src, at + off).expect("node in `obj.name`");
+            assert_eq!(info.text, "obj.name", "offset {off}");
+            assert_eq!(info.kind, "call");
+        }
+    }
+
+    /// `Foo::Bar` comes back as part of the whole chain: `Foo::Bar.new`
+    /// is one argumentless `call` whose receiver is the `scope_
+    /// resolution` — the whole chain comes back as one node (the JS
+    /// whole-`A.B.C` rule), from either segment.
+    #[test]
+    fn ruby_scope_resolution_comes_back_whole() {
+        let src = "module Foo\n  def f\n    Foo::Bar.new\n  end\nend\n";
+        let at = src.find("Foo::Bar").expect("fixture") + 4;
+        let info = node_at(LanguageId::Ruby, src, at).expect("node at `Bar`");
+        assert_eq!(info.text, "Foo::Bar.new");
+        assert_eq!(info.kind, "call");
+    }
+
+    /// A bare call WITH arguments is not a path: `puts 1` resolves on
+    /// the plain `puts` identifier (the honest degradation — the
+    /// argumentless-receiver rule, probe-verified).
+    #[test]
+    fn ruby_bare_call_stays_bare() {
+        let src = "def f\n  puts 1\nend\n";
+        let at = src.find("puts").expect("fixture") + 1;
+        let info = node_at(LanguageId::Ruby, src, at).expect("node at `uts`");
+        assert_eq!(info.text, "puts");
+        assert_eq!(info.kind, "identifier");
+        // `a.b(1).c` keeps its argumentless outer chain whole, but the
+        // inner `b(1)` call (with arguments) does not contribute.
+        let src2 = "def g\n  a.b(1).c\nend\n";
+        let at2 = src2.find("a.b").expect("fixture");
+        let info2 = node_at(LanguageId::Ruby, src2, at2 + 7).expect("node at `c`");
+        assert_eq!(info2.text, "a.b(1).c");
+        assert_eq!(info2.kind, "call");
+    }
+
+    #[test]
+    fn ruby_scope_chain_module_class_method() {
+        let src = "module M\n  class C\n    def m\n      o.p\n    end\n  end\nend\n";
+        let at = src.find("o.p").expect("fixture");
+        assert_eq!(
+            scope_path_at(LanguageId::Ruby, src, at),
+            vec![String::from("M"), String::from("C"), String::from("m")]
         );
     }
 }

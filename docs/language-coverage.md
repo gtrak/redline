@@ -2,10 +2,10 @@
 
 The single "what's covered, per language" record. Sibling of
 `docs/provider-matrix.md` (which is provider-resolution-centric): this
-file is the **language × capability** grid over ALL 16 registry
+file is the **language × capability** grid over ALL 17 registry
 languages (`LanguageId::ALL` + `Plain`, `src/syntax/registry.rs`):
 Rust, TypeScript, Tsx, JavaScript, Python, Go, C, Cpp, Toml, Json,
-Yaml, Bash, Markdown, Java, CSharp, Plain.
+Yaml, Bash, Markdown, Java, CSharp, Ruby, Plain.
 
 ## Verification method (same standard the matrix reviews used)
 
@@ -91,6 +91,7 @@ Capability columns, in the code's terms:
 | **Markdown** | works (unit) — `markdown_extracts_headings`, `setext_markdown_file_contributes_heading_symbols` (ATX + SETEXT headings only — verified scope, no paragraphs/links) | **degrades to the bail** — `no tooling provider handles language \`markdown\`` (011-01); `node_at` → `None` (heading titles are `inline` nodes, not identifier-ish — `markdown_heading_text_is_not_identifier_ish`) | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `markdown_scope_chain_is_the_enclosing_headings` + `markdown_setext_heading_contributes_scope` (node.rs: the ATX + SETEXT heading chain is the outline) | `md/markdown/mdx` (headings only — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — `crate_index_builds_for_markdown_dependency_tree`; **app-unreachable**: no provider can land | works — `all_grammars_have_configs` |
 | **Java** | works (unit) — `java_extracts_class_and_method` (queries.rs: classes / interfaces / enums / methods / constructors; fields and enum constants deliberately out — the outline is the honest minimal classes/methods set, and the pinned grammar version does not parse standalone record declarations, probe-verified); ABI pin `all_grammars_set_language_succeeds` (registry.rs) | **degrades to the bail** — the syntax layer answers the whole path (`java_member_path_comes_back_whole`: `A.c` as one `field_access`; `java_scoped_type_path_comes_back_whole`: `com.example.Foo` as one `scoped_type_identifier`; `java_method_invocation_stays_bare`: `o.m(…)` stays bare — node.rs), but the app-side whole-path upgrade does not enumerate the Java containers (`store.rs::dotted_path_container` — owned by the parallel M-. lane; Known corners, item 4's shape) and no Java provider exists → 011-01 message | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `java_scope_chain_class_and_method` (node.rs: class → method chain; top-level code `[]`) | `java` — `source_extensions_for` (new-languages lane) | **none — honest bail** | **app-unreachable** — no provider can land (same note as C/C++); the index walk is the language-agnostic 011-04 machinery over the `java` set | works — `all_grammars_have_configs` |
 | **CSharp** | works (unit) — `csharp_extracts_class_and_method` (queries.rs: namespaces / classes / interfaces / enums / structs / records / properties / methods / constructors / delegates; enum members and local variables deliberately out); highlight query vendored verbatim from the pinned crate (`third_party/tree-sitter-c-sharp-0.23.1/highlights.scm` — the crate exports no `HIGHLIGHTS_QUERY` constant) | **degrades to the bail** — the syntax layer answers the whole path (`csharp_member_path_comes_back_whole`: `o.P` as one `member_access_expression`; `csharp_qualified_name_comes_back_whole`: `N.Inner` as one `qualified_name` — node.rs), but the app-side whole-path upgrade does not enumerate the C# containers (`store.rs::dotted_path_container` — owned by the parallel M-. lane; Known corners, item 4's shape) and no C# provider exists → 011-01 message | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `csharp_scope_chain_namespace_class_method` (node.rs: namespace → class → method chain) | `cs` — `source_extensions_for` (new-languages lane) | **none — honest bail** | **app-unreachable** — no provider can land (same note as C/C++); the index walk is the language-agnostic 011-04 machinery over the `cs` set | works — `all_grammars_have_configs` (the vendored highlight query must compile) |
+| **Ruby** | works (unit) — `ruby_extracts_module_class_method` (queries.rs: modules / classes / defs / singleton defs / top-level constants; local variables, instance-variable assignments, and superclass references deliberately out) | **degrades to the bail** — the syntax layer answers the whole path (`ruby_method_chain_comes_back_whole`: `obj.name` as one argumentless `call`; `ruby_scope_resolution_comes_back_whole`: `Foo::Bar` as one `scope_resolution`; `ruby_bare_call_stays_bare`: `puts 1` stays bare — the argumentless-receiver rule, node.rs), but the app-side whole-path upgrade does not enumerate the Ruby containers (`store.rs::dotted_path_container` — owned by the parallel M-. lane; Known corners, item 4's shape) and no Ruby provider exists → 011-01 message | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `ruby_scope_chain_module_class_method` (node.rs: module → class → method chain) | `rb` — `source_extensions_for` (new-languages lane) | **none — honest bail** | **app-unreachable** — no provider can land (same note as C/C++); the index walk is the language-agnostic 011-04 machinery over the `rb` set | works — `all_grammars_have_configs` |
 | **Plain** | N/A (not a code language) — no grammar, `query_for` → `None` (queries.rs:262) | N/A (not a code language) — no path container; the miss path is the 011-01 unset-language backward-compat walk, pinned by `language_dispatch_unset_tries_all_in_order` (lib.rs:575) | N/A (not a code language) — `resolver_scope_for` → `Vec::new()` | N/A (not a code language) — `scope_path_at` → `[]` | **none** (empty set — asserted by `source_extensions_round_trip_through_registry_map`) | none — the unset-language dispatch walks the whole chain (backward-compat pin above) | **not applicable** | N/A (not a code language) — `LanguageId::Plain => None` (registry.rs); `all_grammars_have_configs` asserts it |
 
 **blame / light editing / notes (language-agnostic — one row for all 14
@@ -107,7 +108,7 @@ plain line anchor for every other language.
 ## In-project M-. vs cross-project M-. (reading the grid)
 
 The outline column is the floor: for every language with a definition
-query (all 15 non-Plain), definitions **inside the opened project** are
+query (all 16 non-Plain), definitions **inside the opened project** are
 M-. targets through the project index (the project walk has no
 extension filter — provider-matrix, C/C++ section). Everything in the
 right half of the grid (path-shaped, bare-via-import, provider,
@@ -189,8 +190,9 @@ is where languages genuinely diverge.
    elisp-family crate (`tree-sitter-elisp` 1.7.2) is likewise ABI 15 →
    `set_language` fails. The lisp family lands as Scheme
    (`tree-sitter-scheme` 0.24.7, ABI 14 — the only Lisp-family crate
-   matching the pinned runtime) and Ruby (`tree-sitter-ruby` 0.23.1,
-   ABI 14) are in progress.
+   matching the pinned runtime); **Ruby landed** (`tree-sitter-ruby`
+   0.23.1, ABI 14 — same staging; its `LOCALS_QUERY` feeds the
+   highlight config like TypeScript's).
 
 ## Known corners (documented simplifications — not gaps)
 

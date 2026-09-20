@@ -29,6 +29,7 @@ pub enum LanguageId {
     Markdown,
     Java,
     CSharp,
+    Ruby,
     /// Plain-text fallback (no highlighting).
     Plain,
 }
@@ -53,6 +54,7 @@ impl LanguageId {
             Self::Markdown => "markdown",
             Self::Java => "java",
             Self::CSharp => "csharp",
+            Self::Ruby => "ruby",
             Self::Plain => "plain",
         }
     }
@@ -74,6 +76,7 @@ impl LanguageId {
         Self::Markdown,
         Self::Java,
         Self::CSharp,
+        Self::Ruby,
     ];
 }
 
@@ -128,6 +131,8 @@ fn ext_map() -> HashMap<&'static str, LanguageId> {
     m.insert("java", LanguageId::Java);
     // C#
     m.insert("cs", LanguageId::CSharp);
+    // Ruby
+    m.insert("rb", LanguageId::Ruby);
     m
 }
 
@@ -298,6 +303,13 @@ impl GrammarRegistry {
                     "",
                     "",
                 ),
+                LanguageId::Ruby => Self::build_config(
+                    Language::from(tree_sitter_ruby::LANGUAGE),
+                    "ruby",
+                    tree_sitter_ruby::HIGHLIGHTS_QUERY,
+                    "",
+                    tree_sitter_ruby::LOCALS_QUERY,
+                ),
                 LanguageId::Plain => None,
             };
             if cfg.is_none() && *id != LanguageId::Plain {
@@ -359,6 +371,7 @@ pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
         LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
         LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
+        LanguageId::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
         LanguageId::Plain => return None,
     })
 }
@@ -385,6 +398,7 @@ mod tests {
         assert_eq!(reg.language_for("foo.md"), LanguageId::Markdown);
         assert_eq!(reg.language_for("Foo.java"), LanguageId::Java);
         assert_eq!(reg.language_for("Foo.cs"), LanguageId::CSharp);
+        assert_eq!(reg.language_for("foo.rb"), LanguageId::Ruby);
     }
 
     #[test]

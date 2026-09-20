@@ -340,6 +340,22 @@ const C_SHARP_QUERY: &str = r#"
 pub const C_SHARP_HIGHLIGHTS: &str =
     include_str!("../../third_party/tree-sitter-c-sharp-0.23.1/highlights.scm");
 
+// New-languages lane: Ruby. Node shapes verified against the pinned
+// tree-sitter-ruby 0.23.1 NODE_TYPES + S-expr probe: `module` /
+// `class` name their `constant` in the `name` field; `def` is a
+// `method` (a `def self.helper` is a `singleton_method`); a top-level
+// `CONST = …` is an `assignment` whose `left` is a `constant` (an
+// `@x = …` instance-variable assignment does NOT match — its `left`
+// is an `instance_variable`). Local variables and methods with
+// default/blocked bodies stay out (honest minimal outline).
+const RUBY_QUERY: &str = r#"
+(module name: (constant) @name) @item
+(class name: (constant) @name) @item
+(method name: (identifier) @name) @item
+(singleton_method name: (identifier) @name) @item
+(assignment left: (constant) @name) @item
+"#;
+
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
@@ -359,6 +375,7 @@ pub fn query_for(lang: LanguageId) -> Option<&'static str> {
         LanguageId::Markdown => Some(MARKDOWN_QUERY),
         LanguageId::Java => Some(JAVA_QUERY),
         LanguageId::CSharp => Some(C_SHARP_QUERY),
+        LanguageId::Ruby => Some(RUBY_QUERY),
         LanguageId::Plain => None,
     }
 }
@@ -381,6 +398,7 @@ pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
         LanguageId::Markdown => Language::from(tree_sitter_md::LANGUAGE),
         LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
         LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
+        LanguageId::Ruby => Language::from(tree_sitter_ruby::LANGUAGE),
         LanguageId::Plain => return None,
     })
 }
@@ -808,7 +826,9 @@ fn kind_of(kind: &str) -> SymbolKind {
     match kind {
         "function_item" | "function_definition" | "function_declaration" => SymbolKind::Function,
         "method_signature" | "method_definition" | "method_declaration"
-        | "constructor_declaration" => SymbolKind::Method,
+        | "constructor_declaration" | "method" | "singleton_method" => {
+            SymbolKind::Method
+        }
         "struct_item"
         | "enum_item"
         | "trait_item"
@@ -827,7 +847,9 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "namespace_declaration"
         | "struct_declaration"
         | "record_declaration"
-        | "delegate_declaration" => SymbolKind::Type,
+        | "delegate_declaration"
+        | "module"
+        | "class" => SymbolKind::Type,
         "const_item"
         | "const_spec"
         | "variable_declarator"
@@ -837,6 +859,7 @@ fn kind_of(kind: &str) -> SymbolKind {
         | "static_initializer"
         | "constant"
         | "property_declaration"
+        | "assignment"
         | "enumerator" => SymbolKind::Constant,
         "macro_definition" | "preproc_def" => SymbolKind::Macro,
         "atx_heading" | "setext_heading" | "heading" => SymbolKind::Heading,
@@ -1414,6 +1437,45 @@ mod tests {
         // Exactly the seven named definitions — the enum members `A` /
         // `B` are NOT in the outline.
         assert_eq!(syms.len(), 7, "outline: {syms:?}");
+    }
+
+    // ── Ruby (new-languages lane) ────────────────────────────────────
+    /// Modules / classes / defs / singleton defs / top-level constants
+    /// land with their kinds; local variables, instance-variable
+    /// assignments, and class names referenced as superclasses stay
+    /// out (honest minimal outline).
+    #[test]
+    fn ruby_extracts_module_class_method() {
+        let src = "module Foo\n\
+                   \x20  class Bar < Baz\n\
+                   \x20    CONST = 1\n\
+                   \x20    def initialize(x)\n\
+                   \x20      @x = x\n\
+                   \x20    end\n\
+                   \x20    def self.helper\n\
+                   \x20      42\n\
+                   \x20    end\n\
+                   \x20  end\n\
+                   \x20  def top\n\
+                   \x20    Foo::Bar.new(1)\n\
+                   \x20  end\n\
+                   end\n";
+        let syms = extract_symbols(LanguageId::Ruby, src);
+        let foo = find(&syms, "Foo").expect("module Foo");
+        assert_eq!(foo.kind, SymbolKind::Type);
+        let bar = find(&syms, "Bar").expect("class Bar");
+        assert_eq!(bar.kind, SymbolKind::Type);
+        let const_c = find(&syms, "CONST").expect("top-level constant");
+        assert_eq!(const_c.kind, SymbolKind::Constant);
+        let init = find(&syms, "initialize").expect("def initialize");
+        assert_eq!(init.kind, SymbolKind::Method);
+        let helper = find(&syms, "helper").expect("def self.helper");
+        assert_eq!(helper.kind, SymbolKind::Method);
+        let top = find(&syms, "top").expect("def top");
+        assert_eq!(top.kind, SymbolKind::Method);
+        // Exactly the six named definitions — the superclass `Baz`, the
+        // local `x`, and the `@x` assignment are NOT in the outline.
+        assert_eq!(syms.len(), 6, "outline: {syms:?}");
     }
 
     // ── Documented empty fallback: plain text ──────────────────────────

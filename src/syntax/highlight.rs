@@ -290,7 +290,9 @@ fn reuse_language(lang: LanguageId) -> Option<Language> {
         // path is the safe default for any grammar, and this match is
         // exhaustive over `LanguageId` (a new variant must land here to
         // compile); Plain has no grammar.
-        TypeScript | Tsx | JavaScript | Java | CSharp | Plain => return None,
+        TypeScript | Tsx | JavaScript | Java | CSharp | Ruby | Plain => {
+            return None
+        }
     })
 }
 
