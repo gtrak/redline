@@ -8,7 +8,10 @@
 //! per-file tables (struct fields, impl methods with their impl kind —
 //! `RustTables`), stored per file plus a name-keyed field map for the
 //! cross-file self-receiver field lookup the M-. consumption queries
-//! synchronously.
+//! synchronously. 010-03 (rung 3) extends the same per-file tables with
+//! the local binding map (written-down types only); bindings stay
+//! per-file (their type then resolves through the existing field / impl
+//! maps, same-file or cross-file alike).
 //!
 //! Layering (plan): `nav/` is plain Rust — tree-sitter + rayon + tokio are
 //! allowed; there is no iocraft. The indexer never holds a lock the UI needs:
@@ -53,9 +56,11 @@ pub struct SymbolIndex {
     by_name: HashMap<String, HashMap<String, Vec<Symbol>>>,
     /// Total symbol count across all files.
     total: usize,
-    /// 010-01: per-file Rust tables (Rust files with impls/structs only),
-    /// built in the same pass as the outlines (same tree — zero extra parse
-    /// cost). Same-file self-receiver method/field lookup.
+    /// 010-01: per-file Rust tables (Rust files with impls/structs, or
+    /// local binding annotations (010-03) only), built in the same pass
+    /// as the outlines (same tree — zero extra parse
+    /// cost). Same-file self-receiver / local-binding method + field
+    /// lookup.
     rust_tables: HashMap<String, RustTables>,
     /// 010-01: name-keyed struct fields for the CROSS-file self-receiver
     /// field lookup: struct name → field name → (file → [lines]).
@@ -201,7 +206,14 @@ impl SymbolIndex {
     /// store no entry. Returns `true` when the stored tables actually
     /// changed.
     pub fn set_file_tables(&mut self, path: &str, tables: RustTables) -> bool {
-        let empty = tables.fields.is_empty() && tables.impls.is_empty();
+        // 010-03: bindings count as content — a file whose ONLY table
+        // content is local bindings (no structs / impls) still stores an
+        // entry, and the unchanged-content shortcut below (010-01 review
+        // P1: the same-check runs BEFORE any removal) restores it rather
+        // than stripping it.
+        let empty = tables.fields.is_empty()
+            && tables.impls.is_empty()
+            && tables.bindings.is_empty();
         let old = self.rust_tables.remove(path);
         // 010-01 review P1: the unchanged-content shortcut MUST run before
         // any field-map removal — the removal is unconditional below, so a
@@ -769,6 +781,53 @@ mod tests {
         refresh_in_place(root, std::slice::from_ref(&path), &mut index);
         assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
         assert_eq!(index.field_locations("Point", "y"), vec![("src/point.rs".into(), 0)]);
+    }
+
+    /// 010-03 (010-01 review P1 mirror pin): a file whose ONLY table
+    /// content is local bindings (no structs, no impls — empty fields
+    /// AND impls) still stores a tables entry, and an UNCHANGED-content
+    /// refresh (touch / linter rewrite / editor no-save) restores it
+    /// rather than stripping the bindings (the same-check-before-removal
+    /// order, with `bindings` counted as content in the empty check).
+    #[test]
+    fn rust_tables_bindings_only_same_content_refresh_keeps_bindings() {
+        let dir = make_project();
+        let root = dir.path();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "fn main() {\n    let p: Pt = make();\n    let _ = p.x;\n}\n",
+        )
+        .unwrap();
+        let files = rel_files(root);
+        let mut index = build_index(root, &files, None);
+        let tables = index
+            .tables("src/lib.rs")
+            .expect("a bindings-only file stores its tables entry");
+        assert!(tables.fields.is_empty() && tables.impls.is_empty());
+        assert_eq!(tables.bindings.len(), 1, "{:?}", tables.bindings);
+        assert_eq!(tables.bindings[0].binding, "p");
+        assert_eq!(tables.bindings[0].type_name, "Pt");
+
+        // Reparse the UNCHANGED file through the refresh path: the
+        // same-content shortcut must restore, not strip.
+        let path = root.join("src/lib.rs");
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        let tables = index
+            .tables("src/lib.rs")
+            .expect("the same-content refresh must not strip the bindings");
+        assert_eq!(tables.bindings.len(), 1, "{:?}", tables.bindings);
+
+        // A real change right after still replaces cleanly (no
+        // double-removal / corruption from the shortcut).
+        std::fs::write(
+            &path,
+            "fn main() {\n    let p: Pt = make();\n    let q: Q = Q;\n    let _ = p.x;\n}\n",
+        )
+        .unwrap();
+        refresh_in_place(root, std::slice::from_ref(&path), &mut index);
+        let tables = index.tables("src/lib.rs").expect("refreshed entry");
+        let names: Vec<&str> = tables.bindings.iter().map(|b| b.binding.as_str()).collect();
+        assert_eq!(names, vec!["p", "q"], "the real change replaced the map: {names:?}");
     }
 
     #[test]
