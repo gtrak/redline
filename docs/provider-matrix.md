@@ -283,10 +283,20 @@ deliberately invented none)
   LAND in a C/C++ dependency, so the live app cannot produce such a
   landing; the cell is the honest “would answer if a landing existed”
   state, not a live-verified jump.
-- **011-03 degradation (deliberate)**: the per-language `node_at`/scope
-  walks stay `None` for C/C++ (no identifier predicates in this issue),
-  so import-based bare-symbol hints do not apply — there is no import
-  machinery for C to rebuild qualified paths from.
+- **Superseded: the 011-03 degradation.** The lang-pred lane landed the
+  C/C++ node predicates + scope walks (`c_member_path_comes_back_whole`,
+  `cpp_member_path_comes_back_whole`,
+  `cpp_qualified_path_comes_back_whole`,
+  `c_scope_chain_struct_in_struct_and_function`,
+  `cpp_scope_chain_namespace_class_method` — `src/syntax/node.rs`), so
+  the per-language `node_at`/scope walks no longer stay `None` for
+  C/C++. What still stands from that bullet: import-based bare-symbol
+  hints do not apply — there is no import machinery for C to rebuild
+  qualified paths from — and the app-side whole-path upgrade
+  (`store.rs::dotted_path_container`) does not enumerate the C/C++
+  containers, so M-. extraction stays at the bare segment even though
+  the syntax layer answers the whole path (unit-pinned; see
+  `docs/language-coverage.md`, "Known corners").
 
 ### Markdown (unit-covered ONLY — NO PROVIDER; M-. targets are ATX +
 SETEXT headings, verified, not assumed)

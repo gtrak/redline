@@ -57,8 +57,11 @@ Capability columns, in the code's terms:
 - **M-. bare via import** — M-. on a bare identifier an import in the
   buffer binds: 011-02 scope hints
   (`store.rs::resolver_scope_for` — provider-chain languages only).
-- **scope walk** — `node.rs::scope_path_at` (011-03); non-`[]` only
-  for Rust / JS / TS / Tsx / Python / Go.
+- **scope walk** — `node.rs::scope_path_at` (011-03, extended to
+  C / Cpp / Bash / Toml / Json / Markdown by the lang-pred lane):
+  non-`[]` for Rust / JS / TS / Tsx / Python / Go / C / Cpp / Bash /
+  Toml / Json / Markdown; `Yaml` and `Plain` stay `[]`
+  (`unimplemented_languages_return_none` now pins only those two).
 - **index walk set** — 011-07's `store.rs::source_extensions_for`:
   which languages build dependency (crate) indexes for a landed tree.
 - **provider** — which chain provider handles misses
@@ -79,13 +82,13 @@ Capability columns, in the code's terms:
 | **JavaScript** | works (unit) — `js_extracts_exported_constants` (queries.rs); live landings go through the provider's own walk (011-05 L-J1b) | works (live) — `drive_issue_011_06` L-J1 (`fakelib.apply` → entry file) | works (live) — `drive_issue_011_05` L-J2 (`import { clamp }`); relative-import shape unit-pinned (`resolver_scope_js_relative_*`) | works (unit) — `js_member_path_comes_back_whole`, `js_scope_chain_function_class_method_arrow` (node.rs) | `js/jsx/ts/tsx/mjs/cjs` — `source_extensions_for` | `JsProvider` | works (live) — `drive_issue_011_05` L-J3; unit `crate_index_builds_for_js_dependency_tree` | works — `all_grammars_have_configs` |
 | **Python** | works (unit) — `python_extracts_class_and_def` (queries.rs); `crate_index_builds_for_python_dependency_tree` (store.rs) | works (live) — `drive_issue_011_06` L-P1 (`json.dumps` → stdlib); alias rewrite unit-pinned (`aliased_dotted_use_rewrites_to_original_path`) | works (live) — `drive_issue_011_05` L-P1 / `drive_issue_011_02` L1; alias/wildcard bails unit-pinned (`resolver_scope_python_*`) | works (unit) — `python_scope_path` (node.rs:389) + scope pins `python_scope_chain_function_in_class`, `python_boundary_offsets_do_not_panic` (node.rs) | `py/pyi` — `source_extensions_for` | `PythonProvider` (`python_provider.rs::languages() = ["python"]`) | works (live) — `drive_issue_011_04` L3 (`JSONDecoder` → `json/decoder.py`); unit `crate_index_builds_for_python_dependency_tree` | works — `all_grammars_have_configs` |
 | **Go** | works (unit) — `go_extracts_func_and_type` (queries.rs); go_provider.rs unit set (38 run without a toolchain) | works (unit) — `symbol_at_point_dotted_path_extends_token_per_language` (`fmt.Println` / `fmt.Stringer`); `aliased_dot_qualified_use_rewrites_to_real_package` (go_provider.rs) | works (unit) — `resolver_scope_go_dot_import_carries_package_name` + not-guessed pins (store.rs) | works (unit) — `go_scope_path` + `go_scope_chain_method_and_function` (node.rs:412, :911) | `go` — `source_extensions_for` | `GoProvider` — present in the chain but **not live-verified here** (`go` toolchain absent; 3 `#[ignore]`d live legs) | works (unit) — 011-04 pure-tree-sitter Go walk/extraction (go_provider.rs / store.rs); no live leg | works — `all_grammars_have_configs` |
-| **C** | works (unit) — `c_extracts_function_and_struct` (queries.rs); `crate_index_builds_for_c_dependency_tree` (incl. `.h`) | **degrades to the bail** — `node_at` → `None` (no path container; `unimplemented_languages_return_none`, node.rs:593) → bare token → no provider → `no tooling provider handles language \`c\`` (011-01) | **degrades to the bail** — `resolver_scope_for` → `Vec::new()` (no hint, store.rs:8184); same message; pinned live for the identical dispatch by 011-02 L2 (`drive_issue_011_02.py:112-122`: prelude `print` → the exact no-hint bail — 011-05 L-P2/L-J1a now pin the 011-06 LANDINGS) | **not implemented** — `scope_path_for` `_ => Vec::new()` (node.rs:350); `unimplemented_languages_return_none` | `c/h` (headers ARE definition sources — 011-07) — `source_extensions_for` | **none — honest bail** (no C provider; 011-07 deliberately invented none) | works (unit) — index side unit-pinned; **app-unreachable**: no provider can ever land in a C dependency | works — `all_grammars_have_configs` |
-| **Cpp** | works (unit) — `cpp_extracts_function_class_struct` (queries.rs); `crate_index_builds_for_cpp_dependency_tree` (incl. `.hpp`/`.hh`) | **degrades to the bail** — same as C (`unimplemented_languages_return_none` + no provider → 011-01 message) | **degrades to the bail** — same as C (no hint) | **not implemented** — `unimplemented_languages_return_none` | `cc/cpp/cxx/hh/hpp/hxx` (full registry map — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — same app-unreachable note as C | works — `all_grammars_have_configs` |
-| **Toml** | works (unit) — `toml_extracts_keys` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`toml\`` (011-01); `node_at` → `None` | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **not implemented** — `unimplemented_languages_return_none` | **none** (empty set — 011-04 judgment carried by 011-07: config files are not M-. definition sources; asserted empty by `source_extensions_round_trip_through_registry_map`) | **none — honest bail** | **not applicable** — no index builds (empty walk set) and no provider can land | works — `all_grammars_have_configs` |
-| **Json** | works (unit) — `json_extracts_keys` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`json\`` (011-01) | **degrades to the bail** — no import machinery | **not implemented** — `unimplemented_languages_return_none` | **none** (empty set — same 011-04/011-07 judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
+| **C** | works (unit) — `c_extracts_function_and_struct` (queries.rs); `crate_index_builds_for_c_dependency_tree` (incl. `.h`) | **degrades to the bail** — the whole path now comes back at the syntax layer (`c_member_path_comes_back_whole`: `o.x.y` / `p->x` as one `field_expression`, node.rs), but the app-side whole-path upgrade does not enumerate the C containers (Known corners, item 4), so the extraction stays bare → no C provider → `no tooling provider handles language \`c\`` (011-01) | **degrades to the bail** — `resolver_scope_for` → `Vec::new()` (no hint, store.rs:8184); same message; pinned live for the identical dispatch by 011-02 L2 (`drive_issue_011_02.py:112-122`: prelude `print` → the exact no-hint bail — 011-05 L-P2/L-J1a now pin the 011-06 LANDINGS) | **works (unit)** — `c_scope_chain_struct_in_struct_and_function` (node.rs); pointer-returning functions scope as the function declarator text — Known corners, item 2 | `c/h` (headers ARE definition sources — 011-07) — `source_extensions_for` | **none — honest bail** (no C provider; 011-07 deliberately invented none) | works (unit) — index side unit-pinned; **app-unreachable**: no provider can ever land in a C dependency | works — `all_grammars_have_configs` |
+| **Cpp** | works (unit) — `cpp_extracts_function_class_struct` (queries.rs); `crate_index_builds_for_cpp_dependency_tree` (incl. `.hpp`/`.hh`) | **degrades to the bail** — same as C: the syntax layer answers the whole path (`cpp_member_path_comes_back_whole`, `cpp_qualified_path_comes_back_whole` — `ns::Base::C` as one `qualified_identifier`) but the app-side whole-path upgrade does not enumerate the C++ containers (Known corners, item 4) and no provider exists → 011-01 message | **degrades to the bail** — same as C (no hint) | **works (unit)** — `cpp_scope_chain_namespace_class_method` (node.rs: namespace → class → method chain); pointer-returning corner as C — Known corners, item 2 | `cc/cpp/cxx/hh/hpp/hxx` (full registry map — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — same app-unreachable note as C | works — `all_grammars_have_configs` |
+| **Toml** | works (unit) — `toml_extracts_keys` (queries.rs) | **degrades to the bail** — the dotted key now comes back whole at the syntax layer (`toml_dotted_key_comes_back_whole`, `toml_table_header_dotted_key_comes_back_whole` — one `dotted_key`), but the app-side whole-path upgrade does not enumerate the TOML containers (Known corners, item 4) and no TOML provider exists → `no tooling provider handles language \`toml\`` (011-01) | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `toml_table_header_dotted_key_comes_back_whole` (an enclosing `[table.sub]` header IS the scope — its text as written, one element); `toml_top_level_dotted_key_has_no_scope`; `[[array.table]]` headers contribute no element — Known corners, item 3 | **none** (empty set — 011-04 judgment carried by 011-07: config files are not M-. definition sources; asserted empty by `source_extensions_round_trip_through_registry_map`) | **none — honest bail** | **not applicable** — no index builds (empty walk set) and no provider can land | works — `all_grammars_have_configs` |
+| **Json** | works (unit) — `json_extracts_keys` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`json\`` (011-01); JSON has no dotted path syntax — its path concept is STRUCTURAL (the scope column's key chain), and `node_at` answers keys in pair position (the `string` key kind; `json_boundary_offsets_do_not_panic`) | **degrades to the bail** — no import machinery | **works (unit)** — `json_scope_chain_is_the_enclosing_key_chain` (node.rs: the enclosing keys, unquoted — the structural path); an escaped key's scope element is its first `string_content` child — Known corners, item 1 | **none** (empty set — same 011-04/011-07 judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
 | **Yaml** | works (unit) — `yaml_extracts_keys` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`yaml\`` (011-01) | **degrades to the bail** — no import machinery | **not implemented** — `unimplemented_languages_return_none` | **none** (empty set — same judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
-| **Bash** | works (unit) — `bash_extracts_functions` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`bash\`` (011-01) | **degrades to the bail** — no import machinery | **not implemented** — `unimplemented_languages_return_none` | **none** (empty set — same judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
-| **Markdown** | works (unit) — `markdown_extracts_headings`, `setext_markdown_file_contributes_heading_symbols` (ATX + SETEXT headings only — verified scope, no paragraphs/links) | **degrades to the bail** — `no tooling provider handles language \`markdown\`` (011-01); `node_at` → `None` | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **not implemented** — `unimplemented_languages_return_none` | `md/markdown/mdx` (headings only — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — `crate_index_builds_for_markdown_dependency_tree`; **app-unreachable**: no provider can land | works — `all_grammars_have_configs` |
+| **Bash** | works (unit) — `bash_extracts_functions` (queries.rs) | **degrades to the bail** — `no tooling provider handles language \`bash\`` (011-01) (N/A path-shaped: commands are not dotted uses — `node_at` resolves `command_name` / `variable_name`, `bash_command_name_resolves_as_command_name`) | **degrades to the bail** — no import machinery | **works (unit)** — `bash_scope_chain_function_body` (node.rs: a function body is the only non-empty scope; top-level commands `[]`) | **none** (empty set — same judgment) | **none — honest bail** | **not applicable** — no index builds; no provider can land | works — `all_grammars_have_configs` |
+| **Markdown** | works (unit) — `markdown_extracts_headings`, `setext_markdown_file_contributes_heading_symbols` (ATX + SETEXT headings only — verified scope, no paragraphs/links) | **degrades to the bail** — `no tooling provider handles language \`markdown\`` (011-01); `node_at` → `None` (heading titles are `inline` nodes, not identifier-ish — `markdown_heading_text_is_not_identifier_ish`) | **degrades to the bail** — no import machinery; `resolver_scope_for` → `Vec::new()` | **works (unit)** — `markdown_scope_chain_is_the_enclosing_headings` + `markdown_setext_heading_contributes_scope` (node.rs: the ATX + SETEXT heading chain is the outline) | `md/markdown/mdx` (headings only — 011-07) — `source_extensions_for` | **none — honest bail** | works (unit) — `crate_index_builds_for_markdown_dependency_tree`; **app-unreachable**: no provider can land | works — `all_grammars_have_configs` |
 | **Plain** | N/A (not a code language) — no grammar, `query_for` → `None` (queries.rs:262) | N/A (not a code language) — no path container; the miss path is the 011-01 unset-language backward-compat walk, pinned by `language_dispatch_unset_tries_all_in_order` (lib.rs:575) | N/A (not a code language) — `resolver_scope_for` → `Vec::new()` | N/A (not a code language) — `scope_path_at` → `[]` | **none** (empty set — asserted by `source_extensions_round_trip_through_registry_map`) | none — the unset-language dispatch walks the whole chain (backward-compat pin above) | **not applicable** | N/A (not a code language) — `LanguageId::Plain => None` (registry.rs); `all_grammars_have_configs` asserts it |
 
 **blame / light editing / notes (language-agnostic — one row for all 14
@@ -111,15 +114,22 @@ is where languages genuinely diverge.
 
 ## Gaps (prioritized — what is missing per language)
 
-1. **C / C++: no node predicates + no scope walk + no provider.**
-   `node_at`/`scope_path_at` return `None`/`[]`
-   (`unimplemented_languages_return_none`, node.rs:593) and no
-   tooling provider exists, so path-shaped and bare M-. both degrade
-   to the 011-01 bail and only in-project definitions resolve. The
-   011-07 walk sets (`c/h`, `cc/cpp/cxx/hh/hpp/hxx`) already make a
-   *landed* C/C++ tree indexable — but no provider can ever produce
-   the landing. Highest-value gap if C/C++ source navigation is a
-   goal; the index side is done, the resolution side is absent.
+1. **C / C++: no provider** (the node predicates + scope walk landed
+   with the lang-pred lane). `node_at`/`scope_path_at` now answer for
+   C/C++ (`c_member_path_comes_back_whole`,
+   `cpp_qualified_path_comes_back_whole`,
+   `c_scope_chain_struct_in_struct_and_function`,
+   `cpp_scope_chain_namespace_class_method` — node.rs), and
+   `unimplemented_languages_return_none` now covers only Yaml + Plain.
+   What still bails: no tooling provider exists, and the app-side
+   whole-path upgrade (`store.rs::dotted_path_container`) does not
+   enumerate the C/C++ containers (Known corners, item 4), so
+   path-shaped and bare M-. both degrade to the 011-01 bail and only
+   in-project definitions resolve. The 011-07 walk sets (`c/h`,
+   `cc/cpp/cxx/hh/hpp/hxx`) already make a *landed* C/C++ tree
+   indexable — but no provider can ever produce the landing.
+   Highest-value gap if C/C++ source navigation is a goal; the index
+   side and the syntax side are done, the resolution side is absent.
 2. **TypeScript / Tsx: no live drive leg.** Every TS/Tsx cell rests on
    the shared JS machinery's unit pins; `drive_issue_011_05`/`_06` only
    exercise JavaScript. A TS leg (or an explicit "TS rides the JS
@@ -153,6 +163,45 @@ is where languages genuinely diverge.
    `source_extensions_for` + the round-trip test). Intentional
    (rust-analyzer interface files are not definition sources);
    recorded here so it is not re-filed as a gap.
+
+## Known corners (documented simplifications — not gaps)
+
+The lang-pred lane's per-language node predicates + scope walks carry
+these pinned corners, recorded here so they are not re-filed as bugs:
+
+1. **JSON keys with escape sequences: the scope element is the FIRST
+   `string_content` child.** `json_scope_path` (node.rs) reads the
+   key's `string_content` child; for an escaped key the first child is
+   only the leading unescaped run — `{"a\\nb": 1}` → scope element
+   `a`, not the full unescaped key. A silent partial, no app-side
+   consumer reads JSON scope paths yet, so it is not reachable today.
+   (Verified by direct probe of `scope_path_at`.)
+2. **C/C++ pointer-returning functions scope as the function
+   declarator text.** `c_scope_path`/`cpp_scope_path` take the
+   `function_definition`'s `declarator` field, then its `declarator`
+   field: for a plain function that lands on the name (bare `f`), but
+   for a pointer return the intermediate node is a `pointer_declarator`,
+   so the element is the inner `function_declarator` text — `int *f()`
+   → scope element `f()` (it can carry the parameter list and is not
+   the bare name). Deliberate simplification; the resolver matches on
+   this text. (Verified by direct probe of `scope_path_at`.)
+3. **TOML `[[array.table]]` headers contribute no scope element.**
+   `toml_scope_path` (node.rs) walks `table` nodes only; an
+   array-table header is an `array_table` node, so keys inside a
+   `[[a.b]]` block see `[]` (a plain `[a.b]` header DOES contribute —
+   its text as written, one element). (Verified by direct probe of
+   `scope_path_at`.)
+4. **The app-side whole-path upgrade does not enumerate the C / Cpp /
+   Toml containers.** `store.rs::dotted_path_container` lists only
+   JS/TS/Tsx (`member_expression`, `nested_type_identifier`,
+   `nested_identifier`), Python (`attribute`), Go
+   (`selector_expression`, `qualified_type`) — every other language
+   returns `false`, so M-. extraction stays at the bare segment even
+   though the syntax layer's `node_at` returns the whole path
+   (`field_expression` / `qualified_identifier` / `dotted_key`).
+   Boundary: the syntax layer answers the whole path; the app's M-. 
+   extraction does not consume it. (JSON/Bash/Markdown have no dotted
+   path container to enumerate in the first place.)
 
 ## What this file deliberately does NOT claim
 
