@@ -32,6 +32,52 @@ existing numbers, take the highest `NNN`, and add 1:
 ls .agents/plans/ docs/plans/ 2>/dev/null | grep -E '^[0-9]+' | sed 's/-.*//' | sort -n | tail -1
 ```
 
+## Lane worktrees (numbered slots)
+
+Reusable isolation slots for parallel agent sessions. Fixed numbered paths
+— not branch-named — so pool/fixture constraints (path length, per-lane
+fixtures) stay deterministic and the slot count **is** the concurrency cap.
+
+### Location
+
+`.agents/worktrees/<N>` for N = 1..**3**. The cap is memory-driven: each
+lane builds its own `target/`; three concurrent Rust workspace builds is
+what exhausted the box. Raise only for read-only or non-building lanes.
+`.gitignore` covers `/.agents/worktrees/`; the project index skips hidden
+dirs so slots are never self-indexed.
+
+### Slot ↔ lane mapping
+
+Each occupied slot carries a **`.lane`** marker file (branch,
+purpose/lane name, session id, state: `active`|`parked`) so a stale slot
+is never anonymous. Record the slot path in the lane board before the
+first mutation (the existing rule).
+
+### Lifecycle
+
+**Acquire** — pick the lowest free slot. Verify empty/clean/prunable
+(`git worktree list`, `git worktree prune`). If occupied, that is a leak
+signal — resolve it, never clobber.
+
+**Release** — a slot may be freed when its branch has **no uncommitted
+changes**.
+
+- Merged → remove the worktree **and** delete the branch.
+- Unmerged (abandoned/interrupted) → keep the branch, free the slot,
+  record why in the lane board/task file. WIP must be committed first
+  (the checkpoint pattern).
+
+On release the slot's `target/` goes with the checkout (or is removed
+explicitly) — **never** a shared `CARGO_TARGET_DIR`, which would
+serialize parallel builds on cargo's lock.
+
+### Session-boundary audits
+
+- **Start of session**: `git worktree list` + `git worktree prune`;
+  decide every leftover slot (resume, park, or release).
+- **End of mission**: every slot is terminal — merged+released, or parked
+  with a named owner and next action.
+
 ## Pattern
 
 ### Active plan
