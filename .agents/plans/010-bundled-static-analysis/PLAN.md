@@ -100,6 +100,17 @@ rung-3-style guesses feel dishonest in practice.
 | 2 | 03 local binding types (rung 3) | 02 |
 | ? | 04 in-process RA (only if user picks Shape B) | — |
 ## Outcome record (live)
+- **Rung 3** PASS (4 commits + review fixes `171deca`, merged): local
+  binding types — `let x: Type` (and struct-literal RHS) keyed by the
+  innermost enclosing BLOCK byte-range (exact Rust scoping; last-let-
+  before-use wins, innermost shadow wins), M-. on `x.field`/`x.method()`
+  resolves through the written type via the field/method tables. Review
+  BLOCKING→fixed: the dot-chained receiver guard (`a.b.c` was
+  misattributed to the middle segment — a confident wrong-struct jump;
+  now rejects `.` gluing, pinned 3 ways incl. the review's exact repro
+  proven discriminating). Pattern bindings (`if let`/`while let`/match
+  arms) contribute nothing — documented, table-level asserted.
+
 
 - **Rung 1** PASS (`2111d03` + review fixes `53f0965`, merged): RustTables
   (impl association + struct field tables) in the same parse pass; M-.
