@@ -99,3 +99,14 @@ rung-3-style guesses feel dishonest in practice.
 | 1 | 02 use-path/mod-tree resolution (rung 2, absorbs 007-03) | 01 |
 | 2 | 03 local binding types (rung 3) | 02 |
 | ? | 04 in-process RA (only if user picks Shape B) | — |
+## Outcome record (live)
+
+- **Rung 1** PASS (`2111d03` + review fixes `53f0965`, merged): RustTables
+  (impl association + struct field tables) in the same parse pass; M-.
+  self-receiver resolution (fields cross-file via the index, methods via
+  the enclosing impl's type; ambiguous members → picker; generic impls,
+  macros, non-Rust degrade byte-for-byte). Review BLOCKING→fixed: the
+  same-content shortcut stripped the field map on no-op watcher refreshes
+  (P1, regression-pinned); find-implementations deferred with the seam
+  stored (honest call — a command surface, not picker reuse). Rung 3
+  (local binding types) next; Rung 2 subsumed by 011.
