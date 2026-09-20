@@ -34,7 +34,13 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
   (The `self.` exception is a resolution pre-step, not a provider
   matter: it consumes the 010-01 per-file Rust tables — struct fields +
   impl methods, built in the same index pass as the outlines — and is
-  recorded in the Rust section below, not in the provider cells.)
+  recorded in the Rust section below, not in the provider cells. 010-03,
+  rung 3, adds a SECOND Rust `.` pre-step — `x.<member>` when the local
+  binding `x` has a WRITTEN-DOWN type in the enclosing scope — which is
+  even more strictly a resolution matter: it scans the line itself and
+  the extraction's bare path token is NEVER changed, so a miss is
+  byte-for-byte the pre-010-03 behavior; also recorded in the Rust
+  section below, not in the provider cells.)
 - **bare via import** — M-. on a bare identifier that an import statement
   in the current buffer binds (the 011-02 scope hints).
 - **in-library follow-up** — after a landing, M-. on a symbol defined in
@@ -80,6 +86,44 @@ languages lives in `docs/language-coverage.md` (sibling tracker).
   Unit-pinned in `store.rs` (`xref_self_*` — same-file field, cross-file
   field, method, ambiguous member picker, generic-impl + no-impl
   degradation) and `queries.rs` / `nav/index.rs` (the tables themselves).
+- local-binding resolution (010-03, plan 010 Shape A rung 3): M-. on
+  `x.<member>` / `x.<member>()` resolves `<member>` against the local
+  binding `x`'s WRITTEN-DOWN type when one exists in the enclosing
+  scope — a `let x: Type` annotation (bare identifier only) or a
+  `let x = Type { … }` struct-literal RHS — through the SAME field /
+  method tables as the self pre-step (fields cross-file via the index's
+  field map, methods same-file via the impl table; same-file first,
+  ambiguous members → the picker). The per-file binding map (scope
+  range → (binding, type, line, let byte)) builds in the SAME rayon
+  index pass (the table query runs on the same tree — zero extra parse
+  cost; `queries::extract_all`). Scoping is LEXICAL over the current
+  buffer's enclosing `block` chain (innermost first — a fn body IS a
+  `block`, as are closure / loop / arm / nested-block bodies): the
+  innermost scope with a yet-active binding wins, and within a scope
+  the last `let` before the use — shadow rule. `let mut x: T` is the
+  same as `let x: T`. Degradation, pinned per case: unannotated
+  bindings (never INFERRED — that's the compiler's job), generic /
+  path-shaped annotations (`Vec<T>`, `std::path::PathBuf`), non-struct
+  types and type aliases (a `type P = …` alias's name simply isn't in
+  the field map — a natural miss, no alias following), `&T { … }` /
+  `T::<u8> { … }` literals, expression receivers (`(e).f`, `a[0].f`),
+  `::`-path receivers, dot-chained receivers (`a.b.f` — the middle
+  segment is a field access, never a local binding), pattern bindings
+  (`if let` / `while let` / match arms — not `let_declaration`s),
+  shadowed-out names, and non-Rust buffers →
+  byte-for-byte today's bare behavior (the extraction's path token is
+  never changed for these — the pre-step owns its own receiver scan).
+  The pre-step runs in the project AND the external-crate M-. paths
+  (uniform by construction, as the self pre-step). Unit-pinned in
+  `store.rs` (`xref_local_binding_*` — same-file + cross-file field,
+  struct-literal RHS, mut, ambiguous-impls narrowing, shadow,
+  unannotated + non-struct degradation pins; `rust_dotted_receiver_*`
+  the scan pin, dot-chained receivers included), `queries.rs`
+  (`rust_binding_type_at_*` — the innermost-wins / shadow /
+  string-literal misses; the `&T { … }` / `T::<u8> { … }` literal misses
+  pinned at table level in `rust_tables_extract_local_bindings`), and
+  `nav/index.rs` (the 010-01-review-P1 mirror: a bindings-only file's
+  same-content refresh keeps its table).
 - path-shaped: `drive_external_crate` L1 — `ropey::Rope` lands in the
   cargo registry source. Live in the gate battery.
 - bare via import: `drive_external_use` L1 — `use serde::Deserialize;`
