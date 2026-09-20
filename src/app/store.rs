@@ -7814,6 +7814,34 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                         }
                     }
                 }
+                // 010-03 (plan 010 Shape A, rung 3): the local-binding
+                // pre-step — `x.<member>` / `x.<member>()` resolves via
+                // the binding's WRITTEN-DOWN type (a `let x: Type`
+                // annotation or a `let x = Type { … }` literal) recorded
+                // in an enclosing scope, through the same field / method
+                // tables as the self pre-step above. An empty result
+                // keeps today's bare-`<member>` behavior byte-for-byte
+                // (the extraction's path token never changed; never a
+                // guess — unannotated bindings are never inferred).
+                if lang == LanguageId::Rust
+                    && let Some((receiver, member_col)) =
+                        Self::rust_dotted_receiver(&line_text, self.point_col())
+                {
+                    let source = buf.rope.to_string();
+                    if let Some(byte) = point_byte_offset(&buf.rope, line, member_col) {
+                        let cands = Self::local_binding_candidates(
+                            &self.index,
+                            &rel,
+                            &source,
+                            byte,
+                            &receiver,
+                            ident,
+                        );
+                        if !cands.is_empty() {
+                            return Some(cands);
+                        }
+                    }
+                }
                 Self::xref_definition_candidates(&self.index, ident, path_token, &rel)
             });
         let defs = defs.unwrap_or_default();
@@ -7944,6 +7972,57 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let Some(type_name) = crate::syntax::queries::rust_self_type_at(source, byte) else {
             return Vec::new();
         };
+        Self::type_member_candidates(index, rel, &type_name, member)
+    }
+
+    /// (010-03, plan 010 Shape A rung 3) The M-. local-binding
+    /// candidates: `x.<member>` / `x.<member>()` resolves when the
+    /// binding `x` has a WRITTEN-DOWN type in the enclosing scope — a
+    /// `let x: Type` annotation or a `let x = Type { … }` struct
+    /// literal (innermost scope wins; within a scope the last `let`
+    /// before the use wins — the shadow rule) — and then exactly like
+    /// the self pre-step: field → the struct's `field_declaration`
+    /// line (cross-file via the index), method → the impl method's line
+    /// in the same file.
+    ///
+    /// `Vec::new()` (the caller degrades to today's bare-`<member>`
+    /// behavior byte-for-byte) when the file has no binding table, the
+    /// binding's type isn't written down anywhere in the scope chain
+    /// (never inferred), or no field/method named `<member>` is recorded
+    /// for that type (non-struct types, `&T { … }`, generics, … all
+    /// degrade here or earlier).
+    fn local_binding_candidates(
+        index: &SymbolIndex,
+        rel: &str,
+        source: &str,
+        byte: usize,
+        receiver: &str,
+        member: &str,
+    ) -> Vec<crate::nav::index::Location> {
+        let Some(tables) = index.tables(rel) else {
+            return Vec::new();
+        };
+        let Some(type_name) =
+            crate::syntax::queries::rust_binding_type_at(tables, source, byte, receiver)
+        else {
+            return Vec::new();
+        };
+        Self::type_member_candidates(index, rel, &type_name, member)
+    }
+
+    /// The shared member gathering of the 010-01 / 010-03 pre-steps: for
+    /// type `type_name`, the member `member` — a FIELD → the struct's
+    /// `field_declaration` lines from the index's cross-file field
+    /// locations (the same file orders first below), a METHOD → the
+    /// same file's impl tables (an impl's methods are lexically one
+    /// file); both are gathered when a name is both (the picker lets the
+    /// user choose — never guessed away), deduped, same-file-first.
+    fn type_member_candidates(
+        index: &SymbolIndex,
+        rel: &str,
+        type_name: &str,
+        member: &str,
+    ) -> Vec<crate::nav::index::Location> {
         let mk = |file: String, kind: crate::syntax::queries::SymbolKind, line: usize| {
             crate::nav::index::Location {
                 file,
@@ -7960,7 +8039,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let mut out: Vec<crate::nav::index::Location> = Vec::new();
         // Fields: the struct's `field_declaration` lines, all files (the
         // same file orders first below).
-        for (file, line) in index.field_locations(&type_name, member) {
+        for (file, line) in index.field_locations(type_name, member) {
             out.push(mk(
                 file,
                 crate::syntax::queries::SymbolKind::Constant,
@@ -7970,7 +8049,7 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // Methods: the same file's impl tables only (lexical — an impl's
         // methods all live in its own file).
         if let Some(tables) = index.tables(rel)
-            && let Some(methods) = tables.impls.get(&type_name)
+            && let Some(methods) = tables.impls.get(type_name)
         {
             for m in methods.iter().filter(|m| m.method == member) {
                 out.push(mk(
@@ -7990,6 +8069,66 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         });
         out.dedup_by(|a, b| a.file == b.file && a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
         out
+    }
+
+    /// (010-03, plan 010 Shape A rung 3) The bare receiver identifier of
+    /// a Rust `x.<member>` access when the point sits on (or
+    /// immediately after) the MEMBER identifier run, plus the member
+    /// run's char column (for the byte translation). The run derivation
+    /// mirrors `symbol_at_point`'s (the char at the point when it is an
+    /// identifier char, else the run ending immediately before it — the
+    /// usual call-site spot). `None` for: the `self.` receiver (the
+    /// 010-01 pre-step owns it — `Self` too, a type position), a
+    /// receiver that isn't a bare identifier (`(expr).m`, `a[0].m`,
+    /// `call().m`), a `::`-path receiver (`a::b.m` — not a local
+    /// binding), and a point not on a member run (the dot, whitespace).
+    /// The extraction's path token stays BARE for these accesses — this
+    /// scan is the pre-step's own, so a miss is byte-for-byte today's
+    /// behavior (the caller gates on the language).
+    fn rust_dotted_receiver(line_text: &str, col: usize) -> Option<(String, usize)> {
+        let chars: Vec<char> = line_text.chars().collect();
+        if col > chars.len() {
+            return None;
+        }
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let start = if col < chars.len() && is_ident(chars[col]) {
+            let mut i = col;
+            while i > 0 && is_ident(chars[i - 1]) {
+                i -= 1;
+            }
+            i
+        } else if col > 0 && is_ident(chars[col - 1]) {
+            let mut i = col - 1;
+            while i > 0 && is_ident(chars[i - 1]) {
+                i -= 1;
+            }
+            i
+        } else {
+            return None;
+        };
+        // The member run must be preceded by the `.`.
+        if start < 2 || chars[start - 1] != '.' {
+            return None;
+        }
+        // The receiver run ends at the char BEFORE the dot.
+        let mut i = start - 2;
+        if !is_ident(chars[i]) {
+            return None; // `(expr).m`, `a[0].m`, `call().m` …
+        }
+        while i > 0 && is_ident(chars[i - 1]) {
+            i -= 1;
+        }
+        // A bare identifier: nothing glued on the left (`myself.` is
+        // fine — the run is the whole word — but `a::b.m`'s `b` has a
+        // `:` before it: a path receiver, not a local binding).
+        if i > 0 && (is_ident(chars[i - 1]) || chars[i - 1] == ':') {
+            return None;
+        }
+        let receiver: String = chars[i..start - 1].iter().collect();
+        match receiver.as_str() {
+            "self" | "Self" => None,
+            _ => Some((receiver, start)),
+        }
     }
 
     /// (M., selection rule 4) Start the tooling-resolver fall-through OFF the
@@ -9459,6 +9598,31 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                     if let Some(byte) = point_byte_offset(&buf.rope, line, self.point_col()) {
                         let cands =
                             Self::self_receiver_candidates(&idx, &rel, &source, byte, member);
+                        if !cands.is_empty() {
+                            return Some(cands);
+                        }
+                    }
+                }
+                // 010-03: the local-binding pre-step (the SAME seam as the
+                // project path — external crates are Rust in practice, and
+                // the behavior is uniform by construction).
+                if lang == LanguageId::Rust
+                    && let Some(buf) = self.buffers.get(key)
+                    && let Some((receiver, member_col)) = Self::rust_dotted_receiver(
+                        &buf.line_text(line).unwrap_or_default(),
+                        self.point_col(),
+                    )
+                {
+                    let source = buf.rope.to_string();
+                    if let Some(byte) = point_byte_offset(&buf.rope, line, member_col) {
+                        let cands = Self::local_binding_candidates(
+                            &idx,
+                            &rel,
+                            &source,
+                            byte,
+                            &receiver,
+                            ident,
+                        );
                         if !cands.is_empty() {
                             return Some(cands);
                         }
@@ -14418,6 +14582,35 @@ mod tests {
         );
     }
 
+    /// 010-03 (pin): the local-binding pre-step's own receiver scan — a
+    /// bare receiver on a Rust `x.<member>` is carried; `self.` stays
+    /// 010-01's, and expression / path / call receivers are never
+    /// treated as local bindings (they stay bare, byte-for-byte).
+    #[test]
+    fn rust_dotted_receiver_scan_rules() {
+        let rd = AppStore::rust_dotted_receiver;
+        // `let _ = p.x;` — `x` at col 10.
+        assert_eq!(rd("let _ = p.x;", 10), Some(("p".into(), 10)));
+        // Call-shaped, parked right after the name (before the `(`):
+        // `go` spans col 10-11, parked at 12.
+        assert_eq!(rd("let _ = p.go();", 12), Some(("p".into(), 10)));
+        // `self.` is the 010-01 pre-step's — never reported here.
+        assert_eq!(rd("let _ = self.x;", 13), None);
+        // A `::`-path receiver (`a::b.x`): not a local binding.
+        assert_eq!(rd("let _ = a::b.x;", 13), None);
+        // Expression receivers: a call / an index / a paren.
+        assert_eq!(rd("let _ = f().x;", 12), None);
+        assert_eq!(rd("let _ = v[0].x;", 13), None);
+        assert_eq!(rd("let _ = (p).x;", 12), None);
+        // The point not on a member run: the dot itself, or the
+        // receiver's own run.
+        assert_eq!(rd("let _ = p.x;", 9), None);
+        assert_eq!(rd("let _ = p.x;", 8), None);
+        // A longer receiver word is ONE bare identifier (`myself.x`
+        // is the binding `myself` — not a self access, not rejected).
+        assert_eq!(rd("let _ = myself.x;", 15), Some(("myself".into(), 15)));
+    }
+
     /// 010-01 (discriminating): `self.a` inside `impl Foo` jumps to the
     /// struct field's line. `a` is NOT in the symbol index (field
     /// declarations are not outline symbols) — pre-010-01 this degraded to
@@ -14570,6 +14763,231 @@ mod tests {
         s.xref_find_definitions();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 1, "enclosing `free` (msg: {})", s.message);
+    }
+
+    // ── 010-03: M-. local-binding resolution (Shape A rung 3) ───────
+
+    /// 010-03 (discriminating): `p.x` where `p` has a written annotation
+    /// jumps to the struct field's line. `x` is NOT in the symbol index
+    /// (field declarations are not outline symbols), so pre-010-03 this
+    /// degraded to the enclosing-symbol fallback (`main`) — this outcome
+    /// only exists because of the binding pre-step.
+    #[test]
+    fn xref_local_binding_field_jumps_to_struct_field_line() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\nfn main() {\n    let p: Pt = Pt { x: 1 };\n    let _ = p.x;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    let _ = p.x;" — `x` at col 14.
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "jumped to the field declaration (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (discriminating): the binding's type comes from the
+    /// struct-literal RHS — NO annotation on the `let`. Pre-010-03 the
+    /// literal was invisible to the tables.
+    #[test]
+    fn xref_local_binding_struct_literal_jumps_to_field() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\nfn main() {\n    let p = Pt { x: 1 };\n    let _ = p.x;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "the struct literal's type carried the jump (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (discriminating): `let mut p: Pt` is the SAME binding as
+    /// `let p: Pt` — the annotation pre-step resolves through `mut`.
+    #[test]
+    fn xref_local_binding_mut_resolves_like_plain() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\nfn main() {\n    let mut p: Pt = Pt { x: 1 };\n    let _ = p.x;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique same-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(s.point_line(), 0, "mut binding resolved (msg: {})", s.message);
+    }
+
+    /// 010-03 (discriminating): `b.go()` where TWO types define `go` —
+    /// pre-010-03 the bare `go` index lookup was ambiguous (the picker
+    /// over both impls); the binding's written type narrows it to B's
+    /// impl method: a unique jump.
+    #[test]
+    fn xref_local_binding_method_call_narrows_ambiguous_impls() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct A { pub m: i32 }\n\
+             pub struct B { pub m: i32 }\n\
+             impl A {\n\
+             \x20   fn go(&self) { let _ = self.m; }\n\
+             }\n\
+             impl B {\n\
+             \x20   fn go(&self) { let _ = self.m; }\n\
+             }\n\
+             fn main() {\n\
+             \x20   let b: B = B { m: 1 };\n\
+             \x20   b.go();\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 10: "    b.go();" — `go` at col 6.
+        s.set_point(10, 6, 6);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "the written type narrows to one impl: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            6,
+            "jumped to B's `go` (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (discriminating): the field lives in ANOTHER file — the
+    /// binding's type resolves through the index's cross-file field
+    /// locations (the same-file-first ordering lands in `src/model.rs`).
+    #[test]
+    fn xref_local_binding_field_resolves_cross_file() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/model.rs", "pub struct Point { pub x: i32, pub y: i32 }\n"),
+            (
+                "src/main.rs",
+                "use crate::model::Point;\nfn main() {\n    let p: Point = Point { x: 1, y: 2 };\n    let _ = p.x;\n}\n",
+            ),
+        ]);
+        s.open_path("src/main.rs");
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique cross-file field: no picker");
+        assert_eq!(s.view_name_display(), "src/model.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "jumped to `x` in model.rs (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (pin): a SHADOWED name — the innermost binding wins.
+    /// `x.f` inside the nested block resolves via the inner `x: B`, not
+    /// the outer `x: A`; the same use AFTER the block (outside the
+    /// shadow) resolves via the outer `A`. Pre-010-03 both degraded to
+    /// the enclosing-symbol fallback.
+    #[test]
+    fn xref_local_binding_shadow_innermost_wins() {
+        let files: &[(&str, &str)] = &[(
+            "src/lib.rs",
+            "pub struct A { pub f: i32 }\n\
+             pub struct B { pub f: i32 }\n\
+             fn main() {\n\
+             \x20   let x: A;\n\
+             \x20   let _o = x.f;\n\
+             \x20   {\n\
+             \x20       let x: B;\n\
+             \x20       let _i = x.f;\n\
+             \x20   }\n\
+             }\n",
+        )];
+        // Inner use (line 7: "        let _i = x.f;") — `f` at col 19:
+        // the shadow → B's field (line 1).
+        let (mut s, _dir) = store_with_index(files);
+        s.open_path("src/lib.rs");
+        s.set_point(7, 19, 19);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique field: no picker");
+        assert_eq!(
+            s.point_line(),
+            1,
+            "inner use resolves via the inner shadow `x: B` (msg: {})",
+            s.message
+        );
+        // Outer use (line 4: "    let _o = x.f;") — `f` at col 15: the
+        // shadow is out of scope → A's field (line 0).
+        let (mut s, _dir) = store_with_index(files);
+        s.open_path("src/lib.rs");
+        s.set_point(4, 15, 15);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique field: no picker");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "outer use resolves via the outer `x: A` (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (pin): an UNANNOTATED receiver — the pre-step misses and
+    /// the exact pre-010-03 bare-`<member>` behavior stands: `x` still
+    /// resolves to the indexed `fn x` (the bare path token, byte-for-
+    /// byte; the extraction was never changed for non-self receivers).
+    #[test]
+    fn xref_local_binding_unannotated_receiver_stays_bare() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\npub fn x() {}\nfn main() {\n    let p = make();\n    let _ = p.x;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 4: "    let _ = p.x;" — `x` at col 14. `p` is not
+        // annotated (the RHS is a call, not a struct literal), so the
+        // pre-step misses and the bare `x` index lookup carries it.
+        s.set_point(4, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique bare hit: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            1,
+            "the bare `x` lookup landed on `fn x` (msg: {})",
+            s.message
+        );
+    }
+
+    /// 010-03 (pin): a binding annotated to a type with no recorded
+    /// fields or impls (`Marker` is a unit struct — nothing in the
+    /// tables) degrades to today's behavior: the bare `thing` carries
+    /// through to the indexed `fn thing` (the pre-step gathered no
+    /// candidates and never guessed) — not a table hit, not the
+    /// enclosing symbol.
+    #[test]
+    fn xref_local_binding_non_struct_type_degrades_to_today() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub fn thing() {}\nstruct Marker;\nfn main() {\n    let m: Marker = Marker;\n    let _ = m.thing;\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 4: "    let _ = m.thing;" — `thing` starts at col 14.
+        s.set_point(4, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique bare hit: no picker");
+        assert_eq!(s.view_name_display(), "src/lib.rs");
+        assert_eq!(
+            s.point_line(),
+            0,
+            "the bare `thing` lookup landed on `fn thing` (msg: {})",
+            s.message
+        );
     }
 
     #[test]
