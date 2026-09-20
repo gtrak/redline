@@ -71,6 +71,24 @@ On release the slot's `target/` goes with the checkout (or is removed
 explicitly) — **never** a shared `CARGO_TARGET_DIR`, which would
 serialize parallel builds on cargo's lock.
 
+### Landing (squash, no merge commits)
+
+Land a lane by SQUASHING its branch into ONE commit on main — no merge
+commits (user directive, 2026-09-20):
+
+```bash
+git merge --squash <branch> && git commit   # then: git branch -d <branch>
+```
+
+The squashed commit message carries the lane's story (what changed, the
+gate evidence, the deviations). Consequences to plan for:
+- The lane's intermediate commits (WIP checkpoints, review-fix rounds) drop
+  off main's history; keep the branch (do not delete) when the work is
+  likely to be reverted/re-landed, e.g. an experiment the user asked to
+  park. Otherwise delete it per the release rule.
+- Reverting a landed lane is `git revert <squash-sha>` (no `-m 1`
+  mechanics), and re-landing is reverting the revert.
+
 ### Session-boundary audits
 
 - **Start of session**: `git worktree list` + `git worktree prune`;
