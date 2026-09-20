@@ -3059,8 +3059,10 @@ fn unit_flow_synleg_reanchor() {
 /// The store-side twin of one ux_sweep leg: `setup` opens the view (a fresh
 /// store, the PTY's fresh App per drive), then every key is pressed and
 /// checked — no "unbound key" echo (EXCEPT the `known_unbound` parity keys,
-/// which MUST echo — the PTY's 3 pre-existing window-split findings, kept
-/// as a positive pin), no quit, and the live view stays coherent. Returns
+/// which MUST echo — no keys remain in that set: the window-split keys were
+/// the last three and are now bound on the buffer view, see
+/// `unit_flow_window_splits_*`), no quit, and the live view stays coherent.
+/// Returns
 /// the per-key ok flags + the store (for the end-of-leg render check).
 fn ux_sweep_leg(
     repo: &std::path::Path,
@@ -3142,12 +3144,11 @@ type UxLeg = (
 );
 
 /// ux_sweep: keymap coverage across every view the PTY sweep drives — every
-/// key is bound where the sweep expects (no "unbound key" echo), the
-/// known-unbound window-split keys echo (the 3 pre-existing findings,
-/// parity-pinned), nothing quits the app, every view stays coherent, and
-/// the narrow-40 frame is intact at the width-bounded static render. (The
-/// terminal-tier residue — real input encoding, process death, hardware
-/// cursor, raw pixels — stays in the thin PTY tier.)
+/// key is bound where the sweep expects (no "unbound key" echo), nothing
+/// quits the app, every view stays coherent, and the narrow-40 frame is
+/// intact at the width-bounded static render. (The terminal-tier residue —
+/// real input encoding, process death, hardware cursor, raw pixels — stays
+/// in the thin PTY tier.)
 #[test]
 fn unit_flow_ux_keymap_coverage() {
     let repo = fixture_repo();
@@ -3177,11 +3178,12 @@ fn unit_flow_ux_keymap_coverage() {
             "window-splits",
             &["C-x", "C-f", "lib.rs", "RET"],
             // The terminal sends the digit PLAIN after the C-x prefix
-            // (encode_key's literal-char path) — C-x 2 / C-x 1 / C-x 0 are
-            // unbound by design (the PTY's 3 pre-existing findings); C-x o
-            // (open-scratch) is bound.
+            // (encode_key's literal-char path). C-x 2 / C-x 1 / C-x 0 are
+            // bound on the buffer view (view-stack-degraded semantics —
+            // `unit_flow_window_splits_*` below), so NO key in this leg
+            // echoes; C-x o (open-scratch) is bound too.
             &["C-x", "2", "C-x", "o", "C-x", "o", "C-x", "1", "C-x", "0"],
-            &["2", "1", "0"], // unbound by design — the PTY's 3 findings
+            &[],
         ),
     ];
     for (name, setup, keys, known_unbound) in legs {
@@ -3205,4 +3207,166 @@ fn unit_flow_ux_keymap_coverage() {
         oks.iter().all(|ok| *ok) && non_blank,
         "narrow-40: per-key ok={oks:?} frame-non-blank={non_blank}\n{frame40}"
     );
+}
+
+// ═══════ window splits (C-x 2 / C-x 1 / C-x 0 — the 3 pre-existing
+// ux_sweep findings, now bound with view-stack-degraded semantics) ═══════
+
+/// Open lib.rs in the buffer view (the window-splits setup).
+fn window_splits_buffer_store(repo: &std::path::Path) -> AppStore {
+    let mut s = store_in(repo);
+    for tok in ["C-x", "C-f", "lib.rs", "RET"] {
+        drive_token(&mut s, tok);
+    }
+    assert_eq!(s.top_view(), ViewId::Buffer, "setup must land in the buffer view");
+    s
+}
+
+/// C-x 0 (close current view) on the buffer view: bound (no unbound echo),
+/// and a no-op on the last view — the buffer view is the only view and
+/// close-view cannot close it (the home root never dies, 06a). Home has no
+/// view-local bindings at all (06a), so C-x 0 there dead-ends to the
+/// unbound-key echo. The stacked top-view leg (the binding really
+/// dispatches `close-view`) uses a test-constructed `[Buffer, MagitStatus,
+/// Buffer]` — production entry points never push Buffer over another view,
+/// but the state is legal to the stack model.
+#[test]
+fn unit_flow_window_splits_c_x_0_close_current() {
+    let repo = fixture_repo();
+    let mut s = window_splits_buffer_store(repo.path());
+    assert_eq!(s.view_stack, vec![ViewId::Buffer]);
+
+    // Degradation: C-x 0 on the last view — no-op, no echo.
+    s.key_event(key("C-x"));
+    assert_eq!(s.pending_display(), "C-x", "the prefix must arm, not echo");
+    s.key_event(key("0"));
+    assert!(
+        !s.message.contains("unbound key"),
+        "C-x 0 must be bound on the buffer view: {}",
+        s.message
+    );
+    assert_eq!(s.view_stack, vec![ViewId::Buffer], "last view must survive");
+    let frame = render80(s);
+    assert!(
+        frame.contains("target_lib") && frame.contains("src/lib.rs"),
+        "buffer view still renders:\n{frame}"
+    );
+
+    // Home (06a: no view-local bindings): C-x 0 echoes unbound.
+    let mut h = store_in(repo.path());
+    h.key_event(key("C-x"));
+    h.key_event(key("0"));
+    assert!(
+        h.message.contains("unbound key: 0"),
+        "home has no C-x 0 (06a): {}",
+        h.message
+    );
+
+    // Stacked top: the binding dispatches close-view and pops the top.
+    let mut s = window_splits_buffer_store(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g")); // [Buffer, MagitStatus]
+    s.push_view(ViewId::Buffer); // [Buffer, MagitStatus, Buffer]
+    s.key_event(key("C-x"));
+    s.key_event(key("0"));
+    assert_eq!(s.top_view(), ViewId::MagitStatus);
+    assert_eq!(
+        s.view_stack,
+        vec![ViewId::Buffer, ViewId::MagitStatus],
+        "C-x 0 must pop exactly the top view"
+    );
+}
+
+/// C-x 1 (only-this-window, view-stack degraded): closes every view except
+/// the current buffer view — the stack collapses to `[Buffer]`. Degradation:
+/// with a single view it is already "only this window", so a no-op (like
+/// emacs's C-x 1 on a single window).
+#[test]
+fn unit_flow_window_splits_c_x_1_only_this_view() {
+    let repo = fixture_repo();
+    let mut s = window_splits_buffer_store(repo.path());
+
+    // Degradation: one view — no-op, no echo, no message.
+    s.key_event(key("C-x"));
+    s.key_event(key("1"));
+    assert!(!s.message.contains("unbound key"), "{}", s.message);
+    assert!(s.message.is_empty(), "no-op leaves the minibuffer: {}", s.message);
+    assert_eq!(s.view_stack, vec![ViewId::Buffer]);
+
+    // Stacked: [Buffer, MagitStatus, Buffer] truncates to [Buffer] (the
+    // test-constructed state, as in the C-x 0 leg).
+    let mut s = window_splits_buffer_store(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g"));
+    s.push_view(ViewId::Buffer);
+    s.key_event(key("C-x"));
+    s.key_event(key("1"));
+    assert_eq!(s.view_stack, vec![ViewId::Buffer], "C-x 1 keeps only the buffer view");
+    assert_eq!(s.top_view(), ViewId::Buffer);
+    let frame = render80(s);
+    assert!(
+        frame.contains("target_lib") && frame.contains("src/lib.rs"),
+        "the current buffer must survive the truncation:\n{frame}"
+    );
+}
+
+/// C-x 2 (split-window-vertically) on the single-pane model: the key is
+/// bound (no unbound echo — the pre-existing finding cleared) but reports
+/// instead of splitting: the minibuffer says so, and the buffer, point, and
+/// view stack are all untouched. Degradation: in a non-file view (magit
+/// status — and home, 06a) the key is NOT bound (the split keys live only
+/// on the buffer view), so it dead-ends to the unbound-key echo with no
+/// state change.
+#[test]
+fn unit_flow_window_splits_c_x_2_single_pane_report() {
+    let repo = fixture_repo();
+    let mut s = window_splits_buffer_store(repo.path());
+    let before = s.point_line();
+    s.key_event(key("C-x"));
+    s.key_event(key("2"));
+    assert!(!s.message.contains("unbound key"), "{}", s.message);
+    assert!(
+        s.message.contains("single pane"),
+        "C-x 2 must report the single-pane model: {}",
+        s.message
+    );
+    assert_eq!(s.view_stack, vec![ViewId::Buffer], "no view-state change");
+    assert_eq!(s.point_line(), before, "no point change");
+    // render80: the buffer still renders + the note is in the minibuffer
+    // row (the report must be visible, not just state).
+    let frame = render80(s);
+    assert!(
+        frame.contains("target_lib") && frame.contains("single pane"),
+        "buffer still renders + the note is in the minibuffer row:\n{frame}"
+    );
+
+    // Non-file view degradation: magit status has no C-x 2 binding.
+    let mut s = window_splits_buffer_store(repo.path());
+    s.key_event(key("C-x"));
+    s.key_event(key("g")); // [Buffer, MagitStatus]
+    s.key_event(key("C-x"));
+    s.key_event(key("2"));
+    assert!(
+        s.message.contains("unbound key: 2"),
+        "C-x 2 is buffer-view-only: {}",
+        s.message
+    );
+    assert_eq!(
+        s.view_stack,
+        vec![ViewId::Buffer, ViewId::MagitStatus],
+        "no state change on the echo"
+    );
+    // render80: the magit view still renders after the dead end.
+    let frame = render80(s);
+    assert!(
+        frame.lines().any(|l| !l.trim().is_empty()) && !frame.contains("single pane"),
+        "magit view intact, no split report:\n{frame}"
+    );
+
+    // Home (06a): the split keys are not bound there either.
+    let mut h = store_in(repo.path());
+    h.key_event(key("C-x"));
+    h.key_event(key("2"));
+    assert!(h.message.contains("unbound key: 2"), "{}", h.message);
+    assert_eq!(h.view_stack, vec![ViewId::Home]);
 }

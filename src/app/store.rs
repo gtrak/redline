@@ -287,6 +287,25 @@ impl ViewId {
                 // C-x C-x: exchange point and mark.
                 km.bind(&[Key::ctrl_char('x'), Key::ctrl_char('x')], "exchange-point-and-mark")
                     .unwrap();
+                // Window-split keys (the 3 pre-existing ux_sweep findings),
+                // degraded onto the single-pane view-stack model — a full
+                // vertical split is a scoped follow-up (per-pane buffer /
+                // point / scroll state, a second render pane, window-focus
+                // cycling), so the keys are bound and degrade honestly:
+                // C-x 0 closes the top view (the `q` close-view command;
+                // no-op on the last view), C-x 1 truncates the stack to the
+                // buffer view (no-op when it is already the only view),
+                // C-x 2 reports the single-pane model without changing
+                // state.
+                km.bind(&[Key::ctrl_char('x'), Key::char('0')], "close-view").unwrap();
+                km
+                    .bind(&[Key::ctrl_char('x'), Key::char('1')], "close-other-views")
+                    .unwrap();
+                km.bind(
+                    &[Key::ctrl_char('x'), Key::char('2')],
+                    "split-window-vertical",
+                )
+                .unwrap();
                 // plan 005 issue 02: inline annotations. `A` prompts for a
                 // note on the line at point (minibuffer; RET commits and
                 // the cue appears immediately); on an annotated line it
@@ -2038,6 +2057,34 @@ impl AppStore {
             self.buffer_list_selected = 0;
             self.normalize_top_view();
         }
+    }
+
+    /// C-x 1 (emacs's `only-this-window`) on the view-stack model: close
+    /// every view except the current buffer view — the stack collapses to
+    /// exactly `[Buffer]`. Bound only in the buffer view's keymap (and that
+    /// view renders only WITH a current buffer, 06a), so the buffer view
+    /// always exists; when it is already the only view the command is a
+    /// no-op, like emacs's C-x 1 on a single window.
+    pub fn close_other_views(&mut self) {
+        if self.top_view() != ViewId::Buffer || self.view_stack.len() <= 1 {
+            return;
+        }
+        self.view_stack = vec![ViewId::Buffer];
+        self.buffer_list_selected = 0;
+        self.normalize_top_view();
+    }
+
+    /// C-x 2 (emacs's `split-window-vertically`) on the single-pane
+    /// view-stack model: there is no split layout yet (the scoped
+    /// follow-up — a real split needs per-pane buffer / point / scroll /
+    /// edit-mode state, a second render pane, and window-focus cycling),
+    /// so the key is bound and reports the model instead of dead-ending:
+    /// no state change (buffer, point, and view stack all untouched), the
+    /// note lands in the minibuffer.
+    pub fn split_window_vertical(&mut self) {
+        self.minibuffer_message(
+            "single pane: C-x 2 vertical splits are a scoped follow-up",
+        );
     }
 
     /// Rotate the view stack by `delta` positions (positive: the top
@@ -13098,7 +13145,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 106);
+        assert_eq!(store.picker_count().0, 108);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -13116,11 +13163,11 @@ mod tests {
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 105);
+        assert_eq!(store.picker_selected(), 107);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 104);
+        assert_eq!(store.picker_selected(), 106);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op on *scratch*, so just a message).
@@ -13155,7 +13202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 106);
+        assert_eq!(store.picker_count().0, 108);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

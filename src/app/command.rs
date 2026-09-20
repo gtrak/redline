@@ -350,6 +350,18 @@ impl CommandRegistry {
             |store, _arg| store.close_view(),
         ));
         reg.register(Command::new(
+            "close-other-views",
+            "Close every view except the current buffer view (C-x 1; view-stack degraded only-this-window; no-op on the single view)",
+            "navigation",
+            |store, _arg| store.close_other_views(),
+        ));
+        reg.register(Command::new(
+            "split-window-vertical",
+            "Split the window vertically (C-x 2; single-pane model: reports the scoped follow-up, no split yet)",
+            "navigation",
+            |store, _arg| store.split_window_vertical(),
+        ));
+        reg.register(Command::new(
             "open-transient-menu",
             "Open this view's command menu (?; h in magit views)",
             "navigation",
@@ -806,7 +818,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 106, "expected 106 seed commands: {names:?}");
+        assert_eq!(names.len(), 108, "expected 108 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -844,6 +856,8 @@ mod tests {
             "isearch-forward",
             "isearch-backward",
             "close-view",
+            "close-other-views",
+            "split-window-vertical",
             "open-transient-menu",
             "open-buffer-list-selected",
             "buffer-list-next",
