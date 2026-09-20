@@ -12,6 +12,7 @@ use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
 use crate::app::store::{AppStore, BufferRow, DirtyCounts, FileViewRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
 use crate::model::sections::MagitRow;
 use crate::theme;
+use crate::ui::event_loop::InputCoalescer;
 use crate::ui::file_view::FileView;
 use crate::ui::home_view::HomeView;
 use crate::ui::blame_view::BlameView;
@@ -337,6 +338,15 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // or a hook future wakes AND a State is set in that future).
     let mut tick = hooks.use_state(|| 0u64);
 
+    // Input-latency fix (drain-and-coalesce): the pending slot for queued
+    // motion keys. The event callback queues them (last-wins) instead of
+    // applying each repeat, and the render tick flushes the pending motion
+    // before the snapshot (below) — so a burst of held-key repeats applies
+    // at most once per drain pass and nothing queued after a release
+    // replays. `use_ref` (not `use_state`): mutating the coalescer must not
+    // itself be a re-render trigger; the tick bumps below do the waking.
+    let mut coalesce = hooks.use_ref(InputCoalescer::new);
+
     // Clone for the event closure (it must be Send); keep `store` for the
     // render snapshot below.
     let event_store = store.clone();
@@ -352,8 +362,19 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             && key.kind != KeyEventKind::Release
             && let Some(app_key) = to_app_key(key)
         {
-            event_store.lock().unwrap().key_event(app_key);
-            tick.set(tick.get() + 1);
+            // Drain-and-coalesce (input-latency fix): motion keys queue
+            // (last-wins) instead of applying per event; state-changing
+            // keys apply immediately, flushing any queued motion first so
+            // ordering is preserved. The tick bump happens for BOTH paths
+            // — a queued motion key must still wake the render tick, whose
+            // flush (in the component body) applies it on this frame.
+            let applied_now = coalesce.write().drain(app_key, &mut |k| {
+                event_store.lock().unwrap().key_event(k);
+                tick.set(tick.get() + 1);
+            });
+            if !applied_now {
+                tick.set(tick.get() + 1);
+            }
         }
         // Mouse support (issue 09, step 4: best-effort). Wheel scroll in
         // all list views; click-to-position in the file view (Buffer);
@@ -531,6 +552,17 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // are invisible (written but never observed) and the UI stays on its
         // first frame.
         let _revision = tick.get();
+        // Drain-and-coalesce (input-latency fix): flush the pending queued
+        // motion key on the render tick — BEFORE the snapshot — so a burst
+        // of held-key repeats (C-n, arrows, ...) applies at most once per
+        // drain pass (last-wins) and never replays after release. The store
+        // lock is taken only when a motion is actually pending. No tick
+        // bump here: this frame's snapshot already reflects the flush.
+        if coalesce.read().pending().is_some() {
+            coalesce.write().flush(&mut |k| {
+                store.lock().unwrap().key_event(k);
+            });
+        }
         let mut s = store.lock().unwrap();
         let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
         let (search_rows, search_top_row, search_total_rows, search_selected_row) =
@@ -1023,6 +1055,108 @@ mod tests {
         assert!(s.contains("C-x C-c quit"), "home help line missing: {s:?}");
         assert!(s.contains("ready"), "{s:?}");
         assert!(!s.contains("*scratch*"), "no auto-created scratch at boot: {s:?}");
+    }
+
+    /// input-latency REPRO (store-level): a burst of 50 rapid C-n (queued
+    /// held-key repeats) fed through the drain-and-coalescing path applies
+    /// to the store EXACTLY ONCE (last-wins, bounded), the final point is
+    /// byte-for-byte the one of a single direct C-n, and after the
+    /// simulated release the idle render ticks replay NOTHING.
+    #[test]
+    fn burst_motion_coalesces_to_bounded_apply() {
+        use crate::ui::event_loop::InputCoalescer;
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let c_n = AppKey::ctrl_char('n');
+
+        let mut s = pty_store(dir.path());
+        s.open_path("src/main.rs");
+        let store = std::sync::Arc::new(std::sync::Mutex::new(s));
+        let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::<AppKey>::new()));
+        let mut coalescer = InputCoalescer::new();
+        for _ in 0..50 {
+            coalescer.drain(c_n, &mut |k| {
+                applied.lock().unwrap().push(k);
+                store.lock().unwrap().key_event(k);
+            });
+        }
+        coalescer.flush(&mut |k| {
+            applied.lock().unwrap().push(k);
+            store.lock().unwrap().key_event(k);
+        });
+        assert_eq!(
+            *applied.lock().unwrap(),
+            vec![c_n],
+            "50 queued C-n coalesce to exactly one store apply"
+        );
+
+        // (a) final state correct: identical to ONE direct C-n.
+        let mut control = pty_store(dir.path());
+        control.open_path("src/main.rs");
+        control.key_event(c_n);
+        assert_eq!(
+            store.lock().unwrap().file_view_point(),
+            control.file_view_point(),
+            "coalesced burst must land where a single C-n lands"
+        );
+
+        // (c) release-drain bound: idle ticks after the release apply nothing.
+        let idle = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        for _ in 0..10 {
+            coalescer.flush(&mut |k| {
+                *idle.lock().unwrap() += 1;
+                store.lock().unwrap().key_event(k);
+            });
+        }
+        assert_eq!(*idle.lock().unwrap(), 0, "no queued motion replays after release");
+    }
+
+    /// input-latency REPRO (ordering): a state-changing key that arrives
+    /// after queued motion flushes the (coalesced) motion FIRST — the
+    /// store sees exactly [C-n, C-f], never [C-f, C-n] or per-event C-n's.
+    #[test]
+    fn burst_motion_ordering_state_key_flushes_first() {
+        use crate::ui::event_loop::InputCoalescer;
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let c_n = AppKey::ctrl_char('n');
+        let c_f = AppKey::ctrl_char('f');
+
+        let mut s = pty_store(dir.path());
+        s.open_path("src/main.rs");
+        let store = std::sync::Arc::new(std::sync::Mutex::new(s));
+        let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::<AppKey>::new()));
+        let mut coalescer = InputCoalescer::new();
+        for _ in 0..7 {
+            coalescer.drain(c_n, &mut |k| {
+                applied.lock().unwrap().push(k);
+                store.lock().unwrap().key_event(k);
+            });
+        }
+        coalescer.drain(c_f, &mut |k| {
+            applied.lock().unwrap().push(k);
+            store.lock().unwrap().key_event(k);
+        });
+        coalescer.flush(&mut |k| {
+            applied.lock().unwrap().push(k);
+            store.lock().unwrap().key_event(k);
+        });
+        assert_eq!(
+            *applied.lock().unwrap(),
+            vec![c_n, c_f],
+            "coalesced motion precedes the state key"
+        );
+
+        // Final state == the direct C-n, C-f sequence (byte-for-byte).
+        let mut control = pty_store(dir.path());
+        control.open_path("src/main.rs");
+        control.key_event(c_n);
+        control.key_event(c_f);
+        assert_eq!(
+            store.lock().unwrap().file_view_point(),
+            control.file_view_point(),
+            "coalesced ordering must land where direct C-n C-f lands"
+        );
     }
 
     /// The status line shows the detected project name (not the old

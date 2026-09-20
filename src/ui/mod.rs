@@ -5,6 +5,7 @@
 pub mod blame_view;
 pub mod commit_editor;
 pub mod diff_view;
+pub mod event_loop;
 pub mod file_view;
 pub mod home_view;
 pub mod log_view;
