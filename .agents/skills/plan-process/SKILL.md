@@ -478,6 +478,14 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    touched file still hashes to the expected blob and that `git status` and the
    diff stat are unchanged. Report it — a self-repaired index incident is worth
    knowing about, because the alternative is a silent wrong commit.
+   **Corollary: break-it-and-see mutations belong in a SCRATCH copy, never in the
+   reviewed worktree — not even "just the index".** A gate that staged a base
+   revision with `git checkout <rev> -- <paths>` (or `git restore --source`) in the
+   live tree left the index holding a *revert* of the lane's work: `git diff HEAD`
+   empty (the worktree still had the work) but `git diff --cached HEAD` showing
+   `-1074`. The work was safe, but a later squash-land would have used a dirty
+   index, and any `git diff` without an explicit revision would have read the wrong
+   tree. The tell is `MM` in `git status --porcelain` with an empty unstaged diff.
 5. **A scratch copy needs its OWN target dir, or a forced rebuild.** `git archive`
    sets old mtimes, and a shared `CARGO_TARGET_DIR` then looks *fresh* to cargo —
    so a "break it and see the test fail" run can silently execute the **base**
