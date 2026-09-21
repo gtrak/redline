@@ -89,7 +89,7 @@ src/
 | 11813–11817 | 5 | `impl Default for AppStore` (delegates to `new`) |
 | 11819–11843 | 25 | `impl Picker` (`recompute`) |
 | 11844–11854 | 11 | free fn `point_byte_offset` (→ navigation, §3) |
-| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **379 top-level fns + 9 `fn git_cli` variants nested inside test bodies + 2 nested `main`s** (the census was re-derived by the store-concerns gate and is identical pre/post-012-03). The test-split lane must carry the **nested** fns too, or they are lost. Earlier figures in this map (389, 401) were top-level-only counts. |
+| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 top-level items = 379 plain `fn` + 22 `async fn`**, plus **11 nested** (9 `fn git_cli` variants + 2 nested `main`s) = 412 total fns. Earlier figures here (389, 401, 379) were different denominators for the same set — this is the reconciled census, re-derived by the store-tests lane and its gate. **LANDED**: the block is now `src/app/store/tests/*.rs` (15 files) with `tests/mod.rs` holding the shared fixtures; `mod.rs` dropped from 13,701 to 2,439 lines. |
 | 23121–23126 | 6 | loop-03 comment (23121–23123) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` (23124–23126) |
 
 Helper items in lines 1–1444 (move with their concern in Phase 2):
