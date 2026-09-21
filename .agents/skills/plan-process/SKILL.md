@@ -199,9 +199,13 @@ where the missing 20 commands lived. The fix is procedural, not diligence:
    matching *and deleted the newlines inside them*, so every reported `file:line`
    drifted earlier by that count — in `src/syntax/queries.rs` (test fixtures full of
    multi-line raw strings, 227 newlines inside literals) by ~115 lines: it claimed
-   `extract_all` was at `:360` when it is at `:475`. The **sizes** were right
-   (brace-matched) and the **locations** were wrong, which is the worse half — a spec
-   that says "this function at file:line" must not be wrong about the line. Fixed and
+   `extract_all` was at `:360` when it is at `:475`. **Both the locations AND the sizes
+   were wrong** — I first wrote "sizes were right, locations were wrong", and that was
+   itself wrong: a function whose body contains a multi-line string also measures
+   *shorter*, because those newlines were deleted. `xref_find_definitions` measured 177
+   when it is 189 (the worker's independent count agreed with 189, which is what
+   exposed the error). A spec that says "this function is N lines at file:line" must not
+   be wrong about either number. Fixed and
    promoted to a real tool: `tools/fn_survey.py` (newlines preserved, `#[cfg(test)]`
    and `tests/` excluded, `--min`/`--nest` modes). Use the tool, not an ad-hoc heredoc;
    it is the deterministic measurement behind the logic-organization agenda.
