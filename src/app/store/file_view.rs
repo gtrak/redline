@@ -369,10 +369,20 @@ impl AppStore {
                 .map(|hl| hl.spans.clone())
                 .unwrap_or_default();
             let annotated = records.iter().any(|a| a.line == line);
+            // Issue match-highlight: this line's match ranges, clipped to
+            // the line (VISIBLE lines only — the context is pre-computed,
+            // so nothing here scans the whole buffer per frame).
+            let matches = match_ranges_for_line(
+                &self.match_context,
+                &key,
+                buf.try_line_to_byte(line),
+                text.len(),
+            );
             out.push(FileViewRow {
                 line,
                 is_note: false,
                 annotated,
+                matches,
                 text,
                 spans,
             });
@@ -390,6 +400,7 @@ impl AppStore {
                         line,
                         is_note: true,
                         annotated: false,
+                        matches: Vec::new(),
                         text: note,
                         spans: Vec::new(),
                     });
@@ -404,8 +415,7 @@ impl AppStore {
     /// annotation note rows (zero when `C-c a` hid them). The renderer's
     /// bottom scroll indicator compares the slice length against this in
     /// rendered-row space.
-    pub fn file_view_total_rows(&mut self) -> usize {
-        let total = self
+    pub fn file_view_total_rows(&mut self) -> usize {        let total = self
             .buffers
             .current_buffer()
             .map(|b| b.line_count())
@@ -997,4 +1007,42 @@ impl AppStore {
         self.goto_line_input.clear();
         self.minibuffer_message("cancel");
     }
+}
+
+/// Issue match-highlight: the active match context's ranges clipped to ONE
+/// visible line: line-relative byte offsets (the same domain as the syntax
+/// spans — the renderer converts to char offsets for the overlay), the end
+/// clipped to the line's byte length (a stale or line-straddling range
+/// clips rather than overhanging), `selected` flagged. Ranges are
+/// consulted by binary search over the start-sorted `ctx.ranges`, so the
+/// per-line cost is independent of the match count. Empty when the context
+/// is for another buffer, has no ranges, or no range starts inside the
+/// line (a line-straddling query's second half never highlights —
+/// queries in practice cannot carry a newline: Enter confirms, it does
+/// not self-insert).
+pub(super) fn match_ranges_for_line(
+    ctx: &MatchContext,
+    key: &str,
+    line_start: Option<usize>,
+    line_len: usize,
+) -> Vec<LineMatch> {
+    if ctx.ranges.is_empty() || ctx.buffer_key != key {
+        return Vec::new();
+    }
+    let Some(line_start) = line_start else {
+        return Vec::new();
+    };
+    let line_end = line_start + line_len;
+    let first = ctx.ranges.partition_point(|&(s, _)| s < line_start);
+    ctx.ranges
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take_while(|&(_, &(s, _))| s < line_end)
+        .map(|(i, &(s, e))| LineMatch {
+            start: s - line_start,
+            end: e.saturating_sub(line_start).min(line_len),
+            selected: i == ctx.selected,
+        })
+        .collect()
 }

@@ -860,3 +860,272 @@ use super::*;
             "C-r must move the match position");
     }
 
+
+    // ── issue match-highlight: the store's match context ─────────────
+
+    /// (a) A visible line with two matches produces two match ranges, the
+    /// selected one flagged; the flag follows the cursor as isearch
+    /// navigates. Discriminates: without the context the rows carry no
+    /// ranges at all; with it, ranges stay put while only `selected`
+    /// moves.
+    #[test]
+    fn isearch_visible_line_two_matches_selected_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "foo a foo b\nzzz\n").unwrap();
+        let mut s = store(dir.path());
+        s.set_viewport_lines(10);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        s.isearch_query_char('o');
+        let rows = s.file_view_rows();
+        assert_eq!(rows[0].line, 0);
+        assert_eq!(
+            rows[0].matches,
+            vec![
+                LineMatch { start: 0, end: 3, selected: true },
+                LineMatch { start: 6, end: 9, selected: false },
+            ],
+            "two ranges; the cursor's match (the first) is selected"
+        );
+        assert!(rows[1].matches.is_empty(), "the matchless line has no ranges");
+        // C-s moves the selection: the ranges stay, the flag follows.
+        s.isearch_next();
+        let rows = s.file_view_rows();
+        assert_eq!(
+            rows[0].matches,
+            vec![
+                LineMatch { start: 0, end: 3, selected: false },
+                LineMatch { start: 6, end: 9, selected: true },
+            ],
+            "the selected flag follows the cursor"
+        );
+    }
+
+    /// (d) A multibyte line: the per-row ranges are BYTE offsets relative
+    /// to the line start (the renderer's overlay does the byte→char
+    /// conversion) — a byte/char mix-up here would be off-by-N on the
+    /// `é` (the same bug class as the isearch column fix). The point
+    /// lands at the CHAR column inside the selected range.
+    #[test]
+    fn isearch_multibyte_line_ranges_are_byte_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // "café omega": bytes c0 a1 f2 é3-4 ' '5 o6 m7 e8 g9 a10.
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let mut s = store(dir.path());
+        s.set_viewport_lines(10);
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o');
+        s.isearch_query_char('m');
+        let rows = s.file_view_rows();
+        assert_eq!(
+            rows[0].matches,
+            vec![LineMatch { start: 6, end: 8, selected: true }],
+            "byte range 6..8 (not char 5..7) — the line-relative byte domain"
+        );
+        assert_eq!(s.point_col(), 5, "the point lands at CHAR column 5");
+        assert_eq!(s.point_line(), 0);
+    }
+
+    /// (b) After a search-results jump the match context covers the hits
+    /// in THIS buffer only: a hit in another file must not highlight.
+    #[test]
+    fn search_jump_context_covers_only_the_current_buffer() {
+        let (_dir, mut s) = search_project();
+        let mut rx = s.search_rx().unwrap();
+        s.open_path("src/main.rs");
+        s.set_viewport_lines(10);
+        s.start_project_search("target".into());
+        drain_search_finished(&mut s, &mut rx);
+        assert_eq!(s.search.hits.len(), 4, "3 hits in main.rs + 1 in lib.rs");
+        // Jump into main.rs (lib.rs sorts first in the deterministic order).
+        let sel = s
+            .search
+            .hits
+            .iter()
+            .position(|h| h.file == "src/main.rs")
+            .unwrap();
+        s.search.selected = sel;
+        s.key_event(key("RET"));
+        // The context is keyed by the BUFFER KEY (the absolute path — the
+        // buffer table's key space), while the hits stay file-relative.
+        let key = s.buffers.current().unwrap().to_string();
+        assert_eq!(s.match_context.buffer_key, key);
+        assert_eq!(s.match_context.query, "target");
+        assert_eq!(
+            s.match_context.ranges.len(),
+            3,
+            "only THIS buffer's hits — lib.rs's hit must not highlight"
+        );
+        // The visible rows carry exactly those 3 ranges (no more).
+        let rows = s.file_view_rows();
+        let total: usize = rows.iter().map(|r| r.matches.len()).sum();
+        assert_eq!(total, 3, "the 3 main.rs hits, none from lib.rs");
+    }
+
+    /// (c) The selected (prominent) range is exactly the hit that was
+    /// jumped to: the point lands inside it (the user's actual complaint
+    /// — the cursor being hard to see where the match highlight is).
+    #[test]
+    fn search_jump_selected_range_is_the_jumped_hit() {
+        let (_dir, mut s) = search_project();
+        let mut rx = s.search_rx().unwrap();
+        s.open_path("src/main.rs");
+        s.set_viewport_lines(10);
+        s.start_project_search("target".into());
+        drain_search_finished(&mut s, &mut rx);
+        // Jump to the main.rs line-3 hit ("target();" at col 0).
+        let sel = s
+            .search
+            .hits
+            .iter()
+            .position(|h| h.file == "src/main.rs" && h.line_no == 3)
+            .unwrap();
+        s.search.selected = sel;
+        s.key_event(key("RET"));
+        assert_eq!(s.point_line(), 2, "landed on the hit's line (0-based 2)");
+        assert_eq!(s.point_col(), 0, "the hit's char column");
+        let rows = s.file_view_rows();
+        let row = &rows[FileViewRow::row_for_line(&rows, 2).unwrap()];
+        let sel_match = row
+            .matches
+            .iter()
+            .find(|m| m.selected)
+            .expect("a selected range on the jumped line");
+        assert_eq!(sel_match.start, 0, "the selected range starts at the hit's byte column");
+        assert!(sel_match.end > sel_match.start);
+        // The other main.rs hits are flagged plain.
+        let others: Vec<&LineMatch> = rows
+            .iter()
+            .flat_map(|r| r.matches.iter())
+            .filter(|m| !m.selected)
+            .collect();
+        assert_eq!(others.len(), 2, "the 2 non-jumped hits are plain matches");
+    }
+
+    /// (P2, gate finding) The jumped hit can carry NO column: a literal
+    /// search that matched a line case-insensitively without the literal
+    /// spelling makes rg emit `col: None` (rg.rs) while sibling lines in
+    /// the same buffer still carry columns. The cursor then sits on no
+    /// range at all, so NO range may wear the prominent face — the
+    /// contract is "the selected match must be the one the cursor is on".
+    /// Regression: `selected` was seeded from the (still empty) `ranges`,
+    /// so it defaulted to 0 and the FIRST sibling range took the
+    /// prominent face.
+    #[test]
+    fn search_jump_with_no_column_selects_no_range() {
+        use crate::search::rg::Hit;
+        let (_dir, mut s) = search_project();
+        let mut rx = s.search_rx().unwrap();
+        s.open_path("src/main.rs");
+        s.set_viewport_lines(10);
+        s.start_project_search("target".into());
+        drain_search_finished(&mut s, &mut rx);
+        // Two hits in the current buffer: a sibling WITH a column, and the
+        // jumped-to hit with none (the case-insensitive literal case).
+        s.search.query = "target".into();
+        s.search.hits = vec![
+            Hit {
+                file: "src/main.rs".into(),
+                line_no: 3,
+                col: Some(0),
+                line: "target();".into(),
+            },
+            Hit {
+                file: "src/main.rs".into(),
+                line_no: 5,
+                col: None,
+                line: "TARGET".into(),
+            },
+        ];
+        s.search.selected = 1;
+        s.key_event(key("RET"));
+        let rows = s.file_view_rows();
+        let matches: Vec<&LineMatch> = rows.iter().flat_map(|r| r.matches.iter()).collect();
+        assert!(
+            matches.iter().all(|m| !m.selected),
+            "no range may be prominent when the jumped hit has no column: {matches:?}"
+        );
+        assert_eq!(
+            matches.len(),
+            1,
+            "the sibling hit is still highlighted (plainly): {matches:?}"
+        );
+    }
+
+    /// (f) The pinned lifetime rule: the highlight tracks the active
+    /// isearch; CANCEL clears it; CONFIRM keeps it (the context after the
+    /// search ends is the point of the feature); point motion keeps it; a
+    /// DIFFERENT search clears it; a same-query re-run keeps it; leaving
+    /// the results view ends the session; C-g outside isearch clears it.
+    #[test]
+    fn match_context_lifetime_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "foo world\nfoo there\nbar\n").unwrap();
+        let mut s = store(dir.path());
+        s.set_viewport_lines(10);
+        s.open_path("src/t.rs");
+        let type_foo = |s: &mut AppStore| {
+            s.isearch_start(IsearchDirection::Forward);
+            s.isearch_query_char('f');
+            s.isearch_query_char('o');
+            s.isearch_query_char('o');
+        };
+        // 1. Active isearch: the context is live.
+        type_foo(&mut s);
+        assert_eq!(s.match_context.ranges.len(), 2, "active isearch drives the highlight");
+        // 2. Cancel (C-g) clears.
+        s.isearch_cancel();
+        assert!(s.match_context.ranges.is_empty(), "C-g cancel clears the highlight");
+        // 3. Confirm (RET) keeps — the user wants the context after the
+        //    search ends (emacs's faces vanish; here cancel is the
+        //    boundary, confirm is not).
+        type_foo(&mut s);
+        s.isearch_confirm();
+        assert_eq!(s.match_context.ranges.len(), 2, "confirm keeps the context");
+        // 4. Point motion does not clear it.
+        s.point_down();
+        s.point_up();
+        s.point_forward();
+        s.point_line_start();
+        assert_eq!(s.match_context.ranges.len(), 2, "point motion keeps the context");
+        // 5. A different search clears it.
+        s.start_project_search("bar".into());
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "a different search clears the old highlight"
+        );
+        // 6. A same-query re-run keeps it.
+        type_foo(&mut s);
+        s.isearch_confirm();
+        assert_eq!(s.match_context.ranges.len(), 2, "re-established context before the re-run");
+        s.start_project_search("foo".into());
+        assert_eq!(
+            s.match_context.ranges.len(),
+            2,
+            "a same-query re-run keeps the highlight"
+        );
+        // 7. Leaving the results view (q / ESC) ends the session.
+        s.search_close();
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "closing the results view clears the highlight"
+        );
+        // 8. Global C-g (buffer view, no isearch active) clears it.
+        type_foo(&mut s);
+        s.isearch_confirm();
+        assert!(!s.match_context.ranges.is_empty());
+        s.key_event(Key::ctrl_char('g'));
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "C-g outside isearch clears the highlight"
+        );
+    }

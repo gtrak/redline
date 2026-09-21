@@ -710,3 +710,68 @@ use super::*;
         assert_eq!(symbol, "漢字");
     }
 
+
+    // ── issue match-highlight: per-row range clipping ─────────────────
+
+    /// (e) A match range that runs past a line's end clips to the line's
+    /// byte length (no panic, no overhang), and a match that lives only on
+    /// an OFF-SCREEN line produces no range at all — the per-row
+    /// computation covers the visible lines only, never a whole-buffer
+    /// scan per frame.
+    #[test]
+    fn match_ranges_beyond_line_end_clip_and_offscreen_lines_are_unscanned() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // line 0 "aaaa" (bytes 0..4), line 1 "bbbb" (5..9), filler
+        // lines 2..19 ("fill\n" ×18, bytes 10..99), line 20 "aaaa"
+        // (bytes 100..104).
+        let mut content = String::from("aaaa\nbbbb\n");
+        for _ in 0..18 {
+            content.push_str("fill\n");
+        }
+        content.push_str("aaaa\n");
+        std::fs::write(dir.path().join("src/t.rs"), &content).unwrap();
+        let mut s = store(dir.path());
+        s.set_viewport_lines(2);
+        s.open_path("src/t.rs");
+        let key = s.buffers.current().unwrap().to_string();
+        // A range that starts in line 0 and runs 8 bytes — overhanging
+        // the newline into line 1: it must clip to line 0's length.
+        s.match_context = MatchContext {
+            buffer_key: key.clone(),
+            query: "aaaa\nbb".into(),
+            ranges: vec![(0, 8)],
+            selected: 0,
+        };
+        let rows = s.file_view_rows();
+        assert_eq!(rows.len(), 2, "the viewport is 2 lines");
+        assert_eq!(
+            rows[0].matches,
+            vec![LineMatch { start: 0, end: 4, selected: true }],
+            "the overhanging range clips to the line's byte length"
+        );
+        assert!(
+            rows[1].matches.is_empty(),
+            "the range's tail on line 1 never highlights (a range anchors at its start)"
+        );
+        // The same query's match on the OFF-SCREEN line 20: no range is
+        // emitted for it (per-row, visible lines only).
+        s.match_context = MatchContext {
+            buffer_key: key,
+            query: "aaaa".into(),
+            ranges: vec![(0, 4), (100, 104)],
+            selected: 1,
+        };
+        let rows = s.file_view_rows();
+        let total: usize = rows.iter().map(|r| r.matches.len()).sum();
+        assert_eq!(
+            total, 1,
+            "only the visible line's range is emitted, not the off-screen match"
+        );
+        assert_eq!(
+            rows[0].matches,
+            vec![LineMatch { start: 0, end: 4, selected: false }],
+            "the SELECTED match is the off-screen one: the visible range stays plain"
+        );
+    }

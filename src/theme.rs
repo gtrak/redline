@@ -72,6 +72,14 @@ pub struct Theme {
     /// The region face (mark/region highlighting; plan 004 issue 03).
     /// High-contrast background distinct from the cursor/status-line blue.
     pub region: Face,
+    /// The search-match faces (issue match-highlight): the dim face for
+    /// ALL matches of the active query (`lazy-highlight`'s analogue) and
+    /// the prominent face for the match the cursor is on (`isearch`'s
+    /// analogue — a background band so the selected match reads as the
+    /// cursor's context). The current face must be the more prominent of
+    /// the two.
+    pub search_match: Face,
+    pub search_match_current: Face,
     /// One face per tree-sitter token category, indexed by
     /// `HIGHLIGHT_FACES`. See `Theme::syntax_face`.
     pub syntax_faces: Vec<Face>,
@@ -106,6 +114,8 @@ impl Theme {
             log_commit: Face::new(Color::White, Color::Black, false),
             blame: Face::new(Color::DarkGrey, Color::Black, false),
             region: Face::new(Color::White, Color::DarkGrey, false),
+            search_match: Face::new(Color::Grey, Color::Black, false),
+            search_match_current: Face::new(Color::White, Color::Blue, true),
             syntax_faces: dark_syntax_faces(),
         }
     }
@@ -134,6 +144,8 @@ impl Theme {
             log_commit: Face::new(fg, bg, false),
             blame: Face::new(Color::DarkGrey, bg, false),
             region: Face::new(Color::Black, Color::Grey, false),
+            search_match: Face::new(Color::DarkGrey, bg, false),
+            search_match_current: Face::new(Color::White, Color::Blue, true),
             syntax_faces: light_syntax_faces(),
         }
     }
@@ -302,5 +314,37 @@ mod tests {
     fn theme_name_is_stable() {
         let t = Theme::default();
         assert_eq!(t.name(), "default");
+    }
+
+    /// Issue match-highlight: the two search faces exist in both themes,
+    /// and the SELECTED match is the more prominent one: it carries a
+    /// background distinct from the view's (the inverse-video band the
+    /// renderer paints under the matched text) and is bold, while the
+    /// all-match face is a plain foreground-only variation.
+    #[test]
+    fn search_match_faces_distinguished_current_is_prominent() {
+        let themes = [("dark", Theme::dark("d")), ("light", Theme::light("l"))];
+        for (name, t) in themes {
+            assert_ne!(
+                t.search_match, t.view,
+                "{name}: the all-match face must differ from the view face"
+            );
+            assert_ne!(
+                t.search_match_current, t.search_match,
+                "{name}: the selected face must be distinct from the all-match face"
+            );
+            assert_ne!(
+                t.search_match_current.background, t.view.background,
+                "{name}: the selected match needs its own background band"
+            );
+            assert!(
+                t.search_match_current.bold,
+                "{name}: the selected match is bold (the prominent one)"
+            );
+            assert!(
+                !t.search_match.bold,
+                "{name}: the all-match face stays unbolded (the dim one)"
+            );
+        }
     }
 }

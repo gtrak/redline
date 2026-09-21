@@ -25,6 +25,10 @@ impl AppStore {
             // off-by-N on a multibyte line.
             pre_search_col: self.point_col(),
         };
+        // A fresh isearch session supersedes any leftover highlight
+        // context (issue match-highlight's lifetime rule: a new search
+        // with a different query clears; the new query starts empty).
+        self.match_context = MatchContext::default();
         self.minibuffer_message("I-search: ");
     }
 
@@ -57,8 +61,7 @@ impl AppStore {
             .map(|b| b.text())
             .unwrap_or_default();
         self.isearch.matches = Self::find_all_matches(&text, &query, self.isearch.direction);
-        if self.isearch.matches.is_empty() {
-            self.isearch.current = 0;
+        if self.isearch.matches.is_empty() {            self.isearch.current = 0;
             self.minibuffer_message(&format!("I-search: {query} [no matches]"));
         } else {
             // Jump to the first match in the search direction.
@@ -91,6 +94,10 @@ impl AppStore {
             let idx = self.isearch.current + 1;
             self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
         }
+        // Issue match-highlight: the buffer view highlights all matches
+        // (the current one prominently) — sync the context with the live
+        // state on every query change (cleared on no matches).
+        self.isearch_sync_match_context();
     }
 
     /// Navigate to the next match (C-s) with wrap-around.
@@ -101,6 +108,7 @@ impl AppStore {
         let n = self.isearch.matches.len();
         self.isearch.current = (self.isearch.current + 1) % n;
         self.isearch_jump_to_current();
+        self.isearch_sync_match_context();
         let count = n;
         let idx = self.isearch.current + 1;
         let query = self.isearch.query.clone();
@@ -115,10 +123,43 @@ impl AppStore {
         let n = self.isearch.matches.len();
         self.isearch.current = (self.isearch.current + n - 1) % n;
         self.isearch_jump_to_current();
+        self.isearch_sync_match_context();
         let count = n;
         let idx = self.isearch.current + 1;
         let query = self.isearch.query.clone();
         self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+    }
+
+    /// Sync the match-highlight context with the LIVE isearch state
+    /// (issue match-highlight): the query, every match's buffer-absolute
+    /// byte range `(start, start + query's byte length)`, and the match
+    /// under the cursor as selected. Ranges are normalized to start-
+    /// ascending order (a backward isearch's `matches` run descending) so
+    /// the per-line clipping can binary-search. Cleared on an empty query
+    /// or when no match is current.
+    fn isearch_sync_match_context(&mut self) {
+        let query = self.isearch.query.clone();
+        let matches = self.isearch.matches.clone();
+        let current = self.isearch.current;
+        if query.is_empty() || matches.is_empty() || current >= matches.len() {
+            self.match_context = MatchContext::default();
+            return;
+        }
+        let len = query.len();
+        let mut ranges: Vec<(usize, usize)> =
+            matches.iter().map(|&m| (m, m + len)).collect();
+        ranges.sort_by_key(|&(s, _)| s);
+        let sel_start = matches[current];
+        let selected = ranges
+            .iter()
+            .position(|&(s, _)| s == sel_start)
+            .unwrap_or(0);
+        self.match_context = MatchContext {
+            buffer_key: self.buffers.current().map(String::from).unwrap_or_default(),
+            query,
+            ranges,
+            selected,
+        };
     }
 
     /// Land the point ON the current match (line and column — the user
@@ -145,12 +186,16 @@ impl AppStore {
     }
 
     /// Confirm isearch (RET): keep the current position, deactivate.
+    /// The highlight context is KEPT (issue match-highlight's lifetime
+    /// rule: confirm ends the search but the user wants the context —
+    /// cancel, not confirm, is the clearing boundary).
     pub fn isearch_confirm(&mut self) {
         if !self.isearch.active {
             return;
         }
         let query = self.isearch.query.clone();
         self.isearch.active = false;
+        self.isearch_sync_match_context();
         if query.is_empty() {
             self.minibuffer_message("");
         } else if self.isearch.matches.is_empty() {
@@ -162,7 +207,9 @@ impl AppStore {
 
     /// Cancel isearch (C-g): restore the pre-search position (line AND
     /// column — the cursor goes back where it was, not to the line's
-    /// start). The landing column becomes the goal column.
+    /// start). The landing column becomes the goal column. The match
+    /// highlight goes with the session (issue match-highlight's lifetime
+    /// rule: cancel clears).
     pub fn isearch_cancel(&mut self) {
         if !self.isearch.active {
             return;
@@ -170,6 +217,7 @@ impl AppStore {
         self.isearch.active = false;
         self.isearch.matches.clear();
         self.isearch.query.clear();
+        self.match_context = MatchContext::default();
         self.set_point(
             self.isearch.pre_search_line,
             self.isearch.pre_search_col,
@@ -236,8 +284,10 @@ impl AppStore {
     }
 
     /// `C-g` in the results view: cancel the in-flight search (the view
-    /// stays open on the partial results).
+    /// stays open on the partial results). A cancel gesture also ends the
+    /// highlight session (issue match-highlight's lifetime rule).
     pub fn search_cancel(&mut self) {
+        self.match_context = MatchContext::default();
         if self.search.running {
             self.cancel_search_job();
             self.minibuffer_message("search cancelled");
@@ -247,11 +297,14 @@ impl AppStore {
     }
 
     /// `q` / `ESC` in the results view: cancel any in-flight search and
-    /// close the view.
+    /// close the view. Leaving the results ends the highlight session
+    /// (issue match-highlight's lifetime rule: the context survives a
+    /// jump back INTO a buffer, not a close of the session).
     pub fn search_close(&mut self) {
         if self.search.running {
             self.cancel_search_job();
         }
+        self.match_context = MatchContext::default();
         if self.top_view() == ViewId::Search {
             self.close_view();
         }
@@ -362,6 +415,10 @@ impl AppStore {
         if self.top_view() == ViewId::Search {
             self.close_view();
         }
+        // Issue match-highlight: the jump is the reported use case —
+        // highlight this buffer's matches of the query (all one face, the
+        // jumped hit's range the prominent one, under the cursor).
+        self.set_match_context_from_jump(sel);
         // 06a review P1-2: only record the destination jump when the open
         // actually opened a buffer (the `opened` gate above — a failed
         // open leaves the home state, and a `""`-keyed entry would later
@@ -399,6 +456,62 @@ impl AppStore {
             col += 1;
         }
         col
+    }
+
+    /// The match-highlight context after a search-results jump (issue
+    /// match-highlight): ONLY the current buffer's hits become ranges — a
+    /// hit in another file must not highlight here. Each range is
+    /// `(line start byte + hit's byte column, + the query's byte length)`
+    /// in buffer-absolute bytes (fixed-string hits carry a column; regex
+    /// hits carry none and get no range — no guessing). The jumped hit is
+    /// the selected one; when its own column was undeterminable nothing is
+    /// selected (an out-of-range index), so no range wears the prominent
+    /// face by mistake.
+    fn set_match_context_from_jump(&mut self, sel: usize) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return;
+        };
+        let Some(rel) = self.buffer_annotation_path(&key) else {
+            return;
+        };
+        let query_len = self.search.query.len();
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        // Out of range = none selected. This must NOT be derived from
+        // `ranges`, which is empty here — that would always yield 0, and
+        // when the jumped hit is skipped below (`col: None` from a
+        // case-insensitive literal match, or an unreadable line) the cursor
+        // is on no range at all, so the FIRST sibling range would wrongly
+        // wear the prominent face (gate P2).
+        let mut selected = usize::MAX;
+        for (i, h) in self.search.hits.iter().enumerate() {
+            if h.file != rel {
+                continue; // hits in OTHER buffers never highlight here
+            }
+            let Some(col) = h.col else {
+                continue; // undeterminable column (non-literal regex): no range
+            };
+            let line_idx = h.line_no.saturating_sub(1) as usize;
+            let Some(line_start) = self
+                .buffers
+                .get(&key)
+                .and_then(|b| b.try_line_to_byte(line_idx))
+            else {
+                continue;
+            };
+            let start = line_start + col as usize;
+            if i == sel {
+                selected = ranges.len();
+            }
+            ranges.push((start, start + query_len));
+        }
+        // `hits` is sorted (path, line, col) after `search_sort_hits`, so
+        // this buffer's ranges are already start-ascending.
+        self.match_context = MatchContext {
+            buffer_key: key,
+            query: self.search.query.clone(),
+            ranges,
+            selected,
+        };
     }
 
     /// The visible window of results-view rows, pre-computed for the UI:
@@ -511,6 +624,9 @@ impl AppStore {
 
     pub(super) fn search_prompt_cancel(&mut self) {
         self.search_prompt.take();
+        // A cancel gesture: the highlight goes with it (issue
+        // match-highlight's lifetime rule).
+        self.match_context = MatchContext::default();
         self.minibuffer_message("cancel");
     }
 
@@ -534,6 +650,13 @@ impl AppStore {
     /// results view (unless it is already on top).
     fn begin_search(&mut self, kind: SearchKind, query: String, spawn: impl FnOnce(&SearchBus, usize, Arc<AtomicBool>)) {
         self.cancel_search_job();
+        // Issue match-highlight's lifetime rule: a DIFFERENT search clears
+        // the old highlight context; re-running the SAME query keeps it
+        // (the ranges are the query's, and a re-run re-derives the
+        // selection on the next jump).
+        if !self.match_context.ranges.is_empty() && self.match_context.query != query {
+            self.match_context = MatchContext::default();
+        }
         self.search_generation += 1;
         let generation = self.search_generation;
         let cancel = Arc::new(AtomicBool::new(false));

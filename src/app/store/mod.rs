@@ -862,6 +862,12 @@ pub struct FileViewRow {
     /// Highlight spans (code rows only; byte offsets relative to the line
     /// start). Empty for note rows.
     pub spans: Vec<redline_syntax::highlight::LineSpan>,
+    /// This line's search-match ranges (issue match-highlight; code rows
+    /// only): BYTE offsets relative to the line start, clipped to the line's
+    /// byte length. `selected` marks the match the cursor is on (the
+    /// renderer's overlay gives its face priority on overlap). Empty for
+    /// note rows and when no match context applies to this buffer.
+    pub matches: Vec<LineMatch>,
 }
 
 impl FileViewRow {
@@ -1056,6 +1062,49 @@ pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> S
 pub enum IsearchDirection {
     Forward,
     Backward,
+}
+
+/// One search-match range on a RENDERED line (issue match-highlight):
+/// byte offsets relative to the line start, the end clipped to the line's
+/// byte length (a range that would run past the line end — e.g. a stale or
+/// line-straddling context — clips rather than overhanging). `selected`
+/// marks the match the cursor is on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineMatch {
+    /// Byte offset within the line (inclusive).
+    pub start: usize,
+    /// Byte offset within the line (exclusive, <= the line's byte length).
+    pub end: usize,
+    /// True for the match the cursor is on (the prominent face).
+    pub selected: bool,
+}
+
+/// The active match-highlight context for the buffer view (issue
+/// match-highlight): the query, its match byte ranges in ONE buffer
+/// (buffer-absolute byte offsets, sorted by start), and which one is
+/// selected. This is the honest single "what should the buffer highlight
+/// right now" field: both match sources feed it — the active isearch (the
+/// live `matches`/`current`, synced on every query change and navigation)
+/// and the search-results jump (the persisted `search` state, whose hits
+/// carry per-file paths, so only THIS buffer's hits enter the context).
+///
+/// Lifetime (pinned in the store tests): while isearch is active the
+/// context tracks it; isearch confirm (RET) KEEPS it (the user wants the
+/// context after the search ends); it is cleared by C-g / cancel (isearch
+/// cancel, the global C-g, and closing or cancelling the results view),
+/// and by a new search with a DIFFERENT query (a same-query re-run keeps
+/// it). A search jump REPLACES it with the jumped buffer's hits.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MatchContext {
+    /// The buffer key the ranges belong to (empty = inactive).
+    pub buffer_key: String,
+    /// The query the ranges were computed for.
+    pub query: String,
+    /// Match ranges in buffer-absolute byte offsets, sorted by start.
+    pub ranges: Vec<(usize, usize)>,
+    /// Index into `ranges` of the selected match (out of range = none —
+    /// e.g. a jumped hit whose column is undeterminable).
+    pub selected: usize,
 }
 
 /// Incremental in-buffer search state. The store owns this; the UI
@@ -1383,6 +1432,9 @@ pub struct AppStore {
     point: HashMap<String, FilePoint>,
     /// Incremental in-buffer search state (C-s / C-r).
     isearch: IsearchState,
+    /// The active match-highlight context for the buffer view (issue
+    /// match-highlight) — see `MatchContext` for the lifetime rule.
+    match_context: MatchContext,
     /// Goto-line mode active (M-g g).
     goto_line_active: bool,
     /// Goto-line digit input buffer.
@@ -1651,6 +1703,7 @@ impl AppStore {
             scroll: HashMap::new(),
             point: HashMap::new(),
             isearch: IsearchState::default(),
+            match_context: MatchContext::default(),
             goto_line_active: false,
             goto_line_input: String::new(),
             viewport_lines: 24, // default; the UI updates on resize
@@ -2319,6 +2372,10 @@ impl AppStore {
             buf.mark = None;
             did = true;
         }
+        // C-g is a cancel gesture: the search-match highlight goes with the
+        // session (issue match-highlight's lifetime rule — it is cleared by
+        // cancel, kept by confirm and by point motion).
+        self.match_context = MatchContext::default();
         if did {
             self.minibuffer_message("cancel");
         }

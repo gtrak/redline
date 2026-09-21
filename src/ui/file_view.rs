@@ -7,7 +7,7 @@
 
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
-use crate::app::store::FileViewRow;
+use crate::app::store::{FileViewRow, LineMatch};
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::{color, text_style};
@@ -114,8 +114,7 @@ impl Component for FileViewCanvas {
                     row as isize,
                     gutter,
                     w.saturating_sub(gutter),
-                    &r.text,
-                    &r.spans,
+                    r,
                     &t,
                 );
                 if r.annotated {
@@ -159,24 +158,30 @@ impl Component for FileViewCanvas {
 }
 
 /// Render one line on the canvas: the base text in the default face,
-/// then overlay each span with its face color.
+/// then overlay each span with its face color, then the match overlay
+/// (issue match-highlight) substitutes the search faces over the match
+/// ranges.
 ///
 /// `x_start` is the terminal cell where the text begins (the annotation
 /// gutter offset, plan 005 issue 02b). `width` is the available cell count
-/// from `x_start` to the right edge (the truncation budget).
+/// from `x_start` to the right edge (the truncation budget). `matches` are
+/// this line's search-match ranges (byte offsets relative to the line
+/// start; empty when no match context applies).
 fn draw_line(
     canvas: &mut iocraft::CanvasSubviewMut<'_>,
     row: isize,
     x_start: usize,
     width: usize,
-    text: &str,
-    spans: &[redline_syntax::highlight::LineSpan],
+    file_row: &FileViewRow,
     t: &theme::Theme,
 ) {
+    let text = &file_row.text;
+    let spans = &file_row.spans;
+    let matches = &file_row.matches;
     if text.is_empty() || width == 0 {
         return;
     }
-    if spans.is_empty() {
+    if spans.is_empty() && matches.is_empty() {
         let face = t.view;
         let style = text_style(face.foreground, false, face.bold);
         let display = truncate(text, width);
@@ -184,7 +189,7 @@ fn draw_line(
         return;
     }
 
-    // Build segments: (char_start, char_end, Option<face_index>).
+    // Build the base segments: (char_start, char_end, Option<face_index>).
     let chars: Vec<char> = text.chars().collect();
     let total_chars = chars.len();
     let mut segments: Vec<(usize, usize, Option<usize>)> = Vec::new();
@@ -211,8 +216,13 @@ fn draw_line(
         }
     }
 
+    // Issue match-highlight: the second pass — split the base segments at
+    // the match boundaries and substitute the match faces (the selected
+    // match's face wins on overlap).
+    let segments = overlay_match_ranges(text, &segments, matches);
+
     let mut x = x_start as isize;
-    for (cs, ce, face_idx) in &segments {
+    for (cs, ce, face) in &segments {
         if *cs >= *ce || *cs >= total_chars {
             continue;
         }
@@ -224,10 +234,20 @@ fn draw_line(
         if segment.is_empty() {
             continue;
         }
-        let face = match face_idx {
-            Some(idx) => t.syntax_face(*idx),
-            None => t.view,
+        let (face, selected_match) = match face {
+            RowFace::View => (t.view, false),
+            RowFace::Syntax(idx) => (t.syntax_face(*idx), false),
+            RowFace::Match => (t.search_match, false),
+            RowFace::MatchCurrent => (t.search_match_current, true),
         };
+        // The selected match's background band (issue match-highlight):
+        // the user's complaint was the cursor being hard to see when
+        // jumping to a search result — the inverse-video band under the
+        // matched text is the prominence the fg-only faces can't give.
+        if selected_match {
+            let bg = color(face.background);
+            canvas.set_background_color(x, row, display_width(&segment), 1, bg);
+        }
         let style = text_style(face.foreground, false, face.bold);
         canvas.set_text(x, row, &segment, style);
         // Advance by DISPLAY width, not char count: a segment ending in a
@@ -239,6 +259,101 @@ fn draw_line(
             break;
         }
     }
+}
+
+/// A cell face in the match overlay's second pass (issue match-highlight):
+/// the base face (view or syntax) with the search-match faces substituted
+/// over the match ranges — `Match` for the query's other matches,
+/// `MatchCurrent` for the match the cursor is on (wins on overlap).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowFace {
+    View,
+    Syntax(usize),
+    Match,
+    MatchCurrent,
+}
+
+/// The match overlay (issue match-highlight): split the base syntax
+/// segments at the match boundaries and substitute the match face over the
+/// overlapping ranges. `matches` are LINE-RELATIVE BYTE ranges (the same
+/// byte domain as the syntax spans) — they go through `byte_to_char_offset`
+/// for the char-indexed segments, so a match after a multibyte character
+/// highlights the right cells (a byte/char mix-up is the same bug class as
+/// the isearch column fix). The selected face wins where matches overlap;
+/// a range running past the text's end clips (byte_to_char_offset floors
+/// to the last char) instead of panicking. Syntax faces outside the match
+/// ranges are untouched.
+fn overlay_match_ranges(
+    text: &str,
+    base: &[(usize, usize, Option<usize>)],
+    matches: &[LineMatch],
+) -> Vec<(usize, usize, RowFace)> {
+    let total = text.chars().count();
+    // Byte ranges → char ranges up front (both ends clamped to the text
+    // length by byte_to_char_offset).
+    let char_ranges: Vec<(usize, usize, bool)> = matches
+        .iter()
+        .map(|m| {
+            (
+                byte_to_char_offset(text, m.start),
+                byte_to_char_offset(text, m.end),
+                m.selected,
+            )
+        })
+        .filter(|&(s, e, _)| s < e)
+        .collect();
+    if char_ranges.is_empty() {
+        return base
+            .iter()
+            .map(|&(cs, ce, face)| {
+                (
+                    cs.min(total),
+                    ce.min(total),
+                    match face {
+                        Some(i) => RowFace::Syntax(i),
+                        None => RowFace::View,
+                    },
+                )
+            })
+            .filter(|&(s, e, _)| s < e)
+            .collect();
+    }
+    // Per-char winning face: the base face, overridden by the match faces
+    // — a char inside BOTH a selected and a plain match takes the
+    // selected face (selected wins on overlap, the isearch "aa"-in-
+    // "aaa" overlap class). The ranges are start-ascending, so each char
+    // scans only the ranges that can still cover it.
+    let mut faces = vec![RowFace::View; total];
+    for (cs, ce, face) in base {
+        let cs = (*cs).min(total);
+        let ce = (*ce).min(total);
+        let own = match face {
+            Some(i) => RowFace::Syntax(*i),
+            None => RowFace::View,
+        };
+        faces[cs..ce].fill(own);
+    }
+    for (ms, me, sel) in &char_ranges {
+        let sel_face = if *sel { RowFace::MatchCurrent } else { RowFace::Match };
+        for f in &mut faces[*ms..(*me).min(total)] {
+            // The selected face overwrites anything; the plain face
+            // overwrites only the base faces (it must not demote a
+            // selected match's coverage).
+            if *f != RowFace::MatchCurrent || *sel {
+                *f = sel_face;
+            }
+        }
+    }
+    // Merge runs of equal faces back into segments.
+    let mut out: Vec<(usize, usize, RowFace)> = Vec::new();
+    for (c, &face) in faces.iter().enumerate() {
+        if out.last().is_some_and(|(_, _, f)| *f == face) {
+            out.last_mut().unwrap().1 = c + 1;
+        } else {
+            out.push((c, c + 1, face));
+        }
+    }
+    out
 }
 
 /// Convert a byte offset in `text` to a char offset.
@@ -454,8 +569,163 @@ mod tests {
         let row = FileViewRow::default();
         assert!(row.text.is_empty());
         assert!(row.spans.is_empty());
+        assert!(row.matches.is_empty());
         assert!(!row.is_note);
         assert!(!row.annotated);
+    }
+
+    // ── issue match-highlight: the match overlay's second pass ─────
+
+    /// (a) A line with two matches produces two match segments, the
+    /// selected one flagged `MatchCurrent`, the other `Match`; the rest of
+    /// the line keeps its base face. Discriminates: without the overlay the
+    /// whole line would be one View segment.
+    #[test]
+    fn overlay_two_matches_selected_flagged() {
+        // "foo a foo b": matches at bytes 0..3 and 6..9; the second is
+        // selected.
+        let text = "foo a foo b";
+        let base: Vec<(usize, usize, Option<usize>)> = vec![(0, 11, None)];
+        let matches = vec![
+            LineMatch {
+                start: 0,
+                end: 3,
+                selected: false,
+            },
+            LineMatch {
+                start: 6,
+                end: 9,
+                selected: true,
+            },
+        ];
+        let segs = overlay_match_ranges(text, &base, &matches);
+        assert_eq!(
+            segs,
+            vec![
+                (0, 3, RowFace::Match),
+                (3, 6, RowFace::View),
+                (6, 9, RowFace::MatchCurrent),
+                (9, 11, RowFace::View),
+            ]
+        );
+    }
+
+    /// The match overlay must not disturb syntax faces OUTSIDE the match
+    /// ranges: a syntax span straddling a match is split, but the
+    /// non-overlapping halves keep their syntax face.
+    #[test]
+    fn overlay_preserves_syntax_faces_outside_matches() {
+        // "hello world": a syntax span over 0..5 ("hello"), a match over
+        // 6..11 ("world").
+        let text = "hello world";
+        let base: Vec<(usize, usize, Option<usize>)> =
+            vec![(0, 5, Some(4)), (5, 11, None)];
+        let matches = vec![LineMatch {
+            start: 6,
+            end: 11,
+            selected: false,
+        }];
+        let segs = overlay_match_ranges(text, &base, &matches);
+        assert_eq!(
+            segs,
+            vec![
+                (0, 5, RowFace::Syntax(4)),
+                (5, 6, RowFace::View),
+                (6, 11, RowFace::Match),
+            ]
+        );
+    }
+
+    /// The selected face wins where a selected and a plain match overlap
+    /// (isearch's non-anchored find can return overlapping starts for
+    /// repeated queries like "aa" in "aaa").
+    #[test]
+    fn overlay_selected_face_wins_on_overlap() {
+        // "aa b aa": plain match 0..2, selected match 1..5 (overlapping
+        // start).
+        let text = "aa b aa";
+        let base: Vec<(usize, usize, Option<usize>)> = vec![(0, 7, None)];
+        let matches = vec![
+            LineMatch {
+                start: 0,
+                end: 2,
+                selected: false,
+            },
+            LineMatch {
+                start: 1,
+                end: 5,
+                selected: true,
+            },
+        ];
+        let segs = overlay_match_ranges(text, &base, &matches);
+        // Overlap [1,2) must be the SELECTED face, not the plain one.
+        assert_eq!(
+            segs,
+            vec![
+                (0, 1, RowFace::Match),
+                (1, 5, RowFace::MatchCurrent),
+                (5, 7, RowFace::View),
+            ]
+        );
+    }
+
+    /// (d) A multibyte line: the highlighted char range is the right one
+    /// (byte ≠ char). "caf\u{e9} caf\u{e9}": the second "café" is bytes 6..11
+    /// but chars 5..9 — a byte-indexed overlay would highlight char 6..9,
+    /// i.e. the wrong cells (shifted one cell right).
+    #[test]
+    fn overlay_multibyte_highlights_the_right_chars() {
+        let text = "caf\u{e9} caf\u{e9}"; // 9 chars, 11 bytes
+        let base: Vec<(usize, usize, Option<usize>)> = vec![(0, 9, None)];
+        let matches = vec![LineMatch {
+            start: 6,
+            end: 11,
+            selected: false,
+        }];
+        let segs = overlay_match_ranges(text, &base, &matches);
+        assert_eq!(
+            segs,
+            vec![
+                (0, 5, RowFace::View),
+                (5, 9, RowFace::Match),
+            ]
+        );
+        // Sanity: the highlighted chars really are the second café.
+        let chars: Vec<char> = text.chars().collect();
+        let highlighted: String = chars[5..9].iter().collect();
+        assert_eq!(highlighted, "caf\u{e9}");
+    }
+
+    /// (e) A range running past the line's end (stale context, or a range
+    /// that was never clipped) clips to the text end without panicking —
+    /// the render loop then clips the rest by the visible width.
+    #[test]
+    fn overlay_range_beyond_text_end_clips_without_panicking() {
+        let text = "short";
+        let base: Vec<(usize, usize, Option<usize>)> = vec![(0, 5, None)];
+        let matches = vec![LineMatch {
+            start: 1,
+            end: 999,
+            selected: true,
+        }];
+        let segs = overlay_match_ranges(text, &base, &matches);
+        assert_eq!(
+            segs,
+            vec![
+                (0, 1, RowFace::View),
+                (1, 5, RowFace::MatchCurrent),
+            ]
+        );
+    }
+
+    /// No matches: the overlay is a pure face rewrite (syntax faces
+    /// survive, nothing else moves).
+    #[test]
+    fn overlay_no_matches_leaves_base_faces() {
+        let text = "abc";
+        let base: Vec<(usize, usize, Option<usize>)> = vec![(0, 3, Some(2))];
+        let segs = overlay_match_ranges(text, &base, &[]);
+        assert_eq!(segs, vec![(0, 3, RowFace::Syntax(2))]);
     }
 
     /// plan 005 issue 02: the rendered-row map round-trips buffer_line ↔
@@ -470,6 +740,7 @@ mod tests {
             annotated: true,
             text: format!("line {line}"),
             spans: Vec::new(),
+            matches: Vec::new(),
         };
         let note = |line: usize| FileViewRow {
             line,
@@ -477,6 +748,7 @@ mod tests {
             annotated: false,
             text: format!("  \u{25b8} note {line}"),
             spans: Vec::new(),
+            matches: Vec::new(),
         };
         let rows = vec![
             code(0),
