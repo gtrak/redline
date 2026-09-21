@@ -595,7 +595,7 @@ remainder:
 | iocraft post-canvas hook (the cursor race's only real fix) | decision + upstream PR / vendored patch | **open — user decision** |
 | clearing swap (`swapoff -a && swapon -a`) to stop load-induced flakes | ops | **open — user decision** |
 | plan 012 archival | mechanical | ready on request |
-| `Snapshot::from_store` if the tail lane skips it | design (small) | optional |
+| ~~`Snapshot::from_store`~~ | design | **CLOSED — recommendation SUPERSEDED.** The tail lane skipped it; the gate verified the skip and showed the earlier `root-split` suggestion ("a constructor would be materially better design") **under-counted the read sites**: the 66 fields are read from the render literal (~66 lines), ~20 `geometry.rs` reads, two full-literal test fixtures, **and post-construction field mutation in the geometry tests** (which a constructor cannot address without setters); the render path needs `&mut` store accessors so the signature cannot be `&AppStore`. Private fields would cost ~60 accessors + ~100 rewrites on the render hot path for zero behavioural gain. The 67 `pub(super)` are the correct end state (`a1c2e47`). |
 | **A7 — split `store/navigation.rs`** (2,394 lines, ONE impl, ~70 methods) | structural (pure move) | **NEW — the plan's own criterion is unmet, see below** |
 | re-land input coalescing (`git revert 0ddaf46`) | UX (user asked to park it) | parked, recipe in the commit |
 | Shape B (rust-analyzer as a library) | architecture | only if written-down-types ever bites |
