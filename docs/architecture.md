@@ -1,9 +1,19 @@
 # Architecture — module map and the `store.rs` split plan
 
 Plan 012, issue 01. All line numbers and counts below were measured from
-`src/app/store.rs` at the time of writing (22,992 lines); re-measure after
-any code move. This file is the shared map for every later 012 stage and
-for reviewers.
+`src/app/store.rs` at **`acd974e`** (22,992 lines). This file is the shared map
+for every later 012 stage and for reviewers.
+
+> **The map is baseline-pinned — re-derive before executing.** `store.rs` has
+> already moved once since measurement: the picker-density landing (`6d01393`)
+> added 45 lines and removed 1, so **every line number below is stale** (the file
+> is now 23,037 lines). A stage that trusts these numbers edits the wrong lines.
+> **Step 1 of the split is therefore to re-run the census against the current
+> file and update this map** — the invariants to check are: the `impl` method
+> count (421 = 253 `pub` + 168 private), the §3 ranges are disjoint and cover
+> every method line exactly once, and the per-module name lists reconcile (no
+> duplicates; union = the methods + the assigned free fns). The **counts** are
+> stable across the move; only the **line numbers** need re-deriving.
 
 ## 1. Crate module map
 
@@ -69,10 +79,10 @@ src/
 | 1–1428 | 1,428 | helper types + free fns (see below) |
 | 1429–1699 | 271 | `pub struct AppStore` — **83 fields: 19 `pub`, 64 private** |
 | 1701–11588 | 9,888 | single `impl AppStore { … }` — **421 methods (253 `pub`, 168 private; 2 private methods are formatted at column 0 — lines 2602/2627)** |
-| 11599–11753 | 155 | 11 module-level **free fns** (assigned to core/commit/picker in §3) + the `EditorMove` enum (11617 → commit) |
+| 11589–11759 | 171 | 11 module-level **free fns** (assigned to core/commit/picker in §3) + the `EditorMove` enum (11617 → commit) |
 | 11761–11765 | 5 | `impl Default for AppStore` (delegates to `new`) |
 | 11767–11791 | 25 | `impl Picker` (`recompute`) |
-| 11795–11802 | 8 | free fn `point_byte_offset` (→ navigation, §3) |
+| 11793–11802 | 10 | free fn `point_byte_offset` (→ navigation, §3) |
 | 11804–22985 | 11,182 | `#[cfg(test)] mod tests` — **389 fns (349 `#[test]` + 22 `#[tokio::test]` + 18 non-test helpers)** |
 | 22987–22992 | 6 | loop-03 comment (22987–22989) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` |
 
@@ -123,7 +133,7 @@ Helper items in lines 1–1428 (move with their concern in Phase 2):
 Concern counts sum: 23+18+29+30+52+39+24+61+52+34+42+17+1+11 = **433**
 = 421 `impl` methods + 12 associated free fns (the earlier headline 432
 = 421 + 11, before `point_byte_offset` was assigned to navigation).
-Methods-only counts: core 18, commit 56, picker 41 (the rest as listed).
+Methods-only counts: core 18, commit 56, picker 41, navigation 51 (the rest as listed).
 Line ranges are disjoint runs (verified by program) — each method line in
 1701–11588 falls in exactly one concern. Concerns are
 interleaved in the file — methods are ordered roughly by feature-landing,

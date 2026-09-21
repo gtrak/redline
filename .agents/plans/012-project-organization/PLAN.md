@@ -36,6 +36,13 @@ Inventory the methods into coherent concerns with line ranges; publish
 constraints). Reviewer checks the inventory against the file.
 
 **Phase 2 — split `store.rs`, one concern per stage.**
+
+**Step 0 (mandatory, do it first):** the authoritative concern map is
+`docs/architecture.md`, but its **line numbers are baseline-pinned** to the commit
+they were measured at and `store.rs` has already moved once (+45/−1 from the
+picker-density landing). Re-run the census against the current file, update the
+map, and only then start moving code. The counts (421 methods = 253 `pub` +
+168 private) are stable; the line numbers are not.
 Target layout (names indicative; the inventory confirms):
 `src/app/store/mod.rs` (the struct + state + shared helpers),
 `buffers.rs`, `views.rs`, `file_view.rs`, `search.rs`, `magit.rs`,
