@@ -24,9 +24,18 @@ evidence. If any has a caller the scanner missed, keep it and say why.
 Also re-check whether the `Default`/builder impls that construct them become dead
 in turn (a cascade is fine — report the final state).
 
-## Item 2 — audit the 46 `#[allow(dead_code)]`
+## Item 2 — audit the `#[allow(dead_code)]` set
 
-`rg -c 'allow\(dead_code\)' src/ crates/` → 46. Round 1 found a whole **stale**
+`rg -c 'allow\(dead_code\)' src/ crates/` → 46 at spec time; **A2 (`6d52129`) added
+two more**, so the count is now 48. Two of them are already adjudicated by a gate:
+- **`Key::tab` (`src/app/keymap.rs:90`) — genuinely dead, delete it.** It has **zero
+  callers in the entire tree, production AND tests**, yet carries an allow and a doc
+  comment claiming "used by tests" — which is false for `tab`. (The sibling
+  `Key::alt_char` is genuinely test-used, so it stays; add a one-line reason on its
+  attribute to match the `store/mod.rs:684` pattern.)
+- **`src/app/store/mod.rs`'s 10 keymap tables are `pub const`** — `pub(crate)` is the
+  narrowest-correct visibility (consumers are `store/mod.rs` itself and `keymap`'s
+  test module; bin-only crate). A7 precedent. Narrow them here. Round 1 found a whole **stale**
 cluster in `nav/index.rs` (removed by the `nav-index` lane), so the class is real:
 an allow outlives the reason it was added, and it silently hides the next dead item.
 
