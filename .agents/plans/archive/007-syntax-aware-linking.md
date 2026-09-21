@@ -1,3 +1,21 @@
+# 007 — Redline: syntax-aware linking (tree-sitter beyond highlighting) (ARCHIVED)
+
+Status: ARCHIVED 2026-09-21 — all 4 issues (01–04) LANDED, each verified at
+landing (gate + review + evidence rows in the 007 table in
+`.agents/plans/STATUS.md`; issue 04's "unscheduled" status line in the plan
+was corrected at the tracker repair — it merged `825edae`).
+
+This file is the durable record: the full original folder, verbatim. The
+folder contained only `PLAN.md` — the per-issue contracts (the "What"
+section) and the per-issue outcome record live in it, and the task specs
+remain in `.agents/tasks/` (`issue-007-01-impl` … `issue-007-04-impl`). No
+text was edited or summarized; status lines inside the plan are as written
+when true.
+
+---
+
+## PLAN.md (full text)
+
 # 007 — Redline: syntax-aware linking (tree-sitter beyond highlighting)
 
 Status: complete — 01+02+03+04 all PASS (04 merged `825edae`, see the outcome record below)

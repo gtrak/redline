@@ -1,3 +1,27 @@
+# 010 — Redline: bundled static analysis (ARCHIVED)
+
+Status: ARCHIVED 2026-09-21 — SHAPE A COMPLETE: Rung 1/3/4 LANDED (verified
+at landing, evidence rows in the 010 table in `.agents/plans/STATUS.md`),
+Rung 2 SUPERSEDED (subsumed by plan 011), new languages + whole-path arms
+LANDED.
+
+**Shape B (in-process rust-analyzer) remains an OPEN contingent — issue
+010-04 ("only if user picks Shape B") is still tracked as an OPEN
+(contingent) row in `.agents/plans/STATUS.md` and in the short-answer
+table; it did not vanish with this archival. The Shape B design section
+below is the standing decision record for that call.**
+
+This file is the durable record: the full original folder, verbatim. The
+folder contained only `PLAN.md` (the rung/shape designs and the live
+outcome record); the task specs remain in `.agents/tasks/`
+(`issue-010-01-impl`, `issue-010-03-impl`, `issue-rung4-and-paths`,
+`issue-new-languages`, `issue-newlang-paths`). No text was edited or
+summarized; status lines inside the plan are as written when true.
+
+---
+
+## PLAN.md (full text)
+
 # 010 — Redline: bundled static analysis (SPITBALL — no decisions made)
 
 Status: **SHAPE A COMPLETE** — Rung 1/3/4 landed, Rung 2 subsumed by 011,
