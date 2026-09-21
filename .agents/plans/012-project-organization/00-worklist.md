@@ -56,6 +56,9 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **M9** | Narrow `pub`→`pub(crate)` where no `crates/*` consumer (binary crate ⇒ safe); incl. `command.rs:95 dispatch_by_name` (test-only) | ~many | low |
 | **M10** | `current_key()` (24 sites) + `project_root()` (10 sites) guard helpers — **but both live in `store.rs`; fold into the store split stage, don't do as a separate pass** | 34 | low |
 | **M11** | Shared render preamble for the `element! { … }` block repeated in `ui/{file_view,magit_status,results_view,rows_view,views/buffer}.rs` (found by the deterministic pass; not in any scan) | 5 | low-med |
+| **M12** | Delete **4 dead public constructors with zero in-repo references** (incl. tests/docs): `cargo.rs::with_cargo_bin`, `go_provider::with_go_bin`, `js_provider::with_npm_bin`, `lib.rs::with_providers` (`tools/cleanup_scan.py deadpub`) | 4 | low |
+| **M13** | **Correctness-adjacent**: `store.rs:2627 is_syntax_anchor_kind` and `syntax/node.rs:357 is_rust_identifier_kind` have **byte-identical bodies** — the Rust-identifier-kind list exists twice, in production code, in two modules, so a grammar bump can silently desync them (and `store.rs` carrying syntax knowledge is itself a layering smell). Single source in `syntax/` | 2 | med |
+| **M14** | Identical test helper `fn file(path, content)` in `model/files.rs:145` + `model/project.rs:214` | 2 | low |
 
 ## Tier 2 — Structural (each needs one stated design call)
 
@@ -132,6 +135,29 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 5. **012-09** other oversized files + docs index (S4–S9, S11).
 
 ## Deterministic cross-check (no LLM)
+
+**Tool: `tools/cleanup_scan.py`** (`dup` | `deadpub` | `all`) — committed so this is
+repeatable rather than ad-hoc. It runs (a) normalized 6-line-window duplicates,
+(b) brace-matched **whole-function** duplicates, (c) pub fns with zero in-repo
+references. Excludes `.agents/` and `target/`. This is the referee for inventory
+questions: round-2 LLM verdicts get cross-checked against it, and "did the scan
+cover the project?" is answered by running it, not by trusting prose.
+
+### Results (78 files, 2,220 functions parsed)
+
+Whole-function duplicate groups (cross-file): **10**, of which the notable ones:
+- the git harness family (4× `git()`, 5× `git_cli()`, 3× `init_repo()`) — see M3;
+- golden-suite helpers (`sub_path`, `assert_bless_stopped`, `copy_tree`, `bless_*`) — see T1;
+- `text_style` (M4);
+- **`is_syntax_anchor_kind` ≡ `is_rust_identifier_kind`** (M13) — missed by all four round-1 scans;
+- identical test helper `file()` in `model/{files,project}.rs` (M14).
+
+Dead pub surface: **7** zero-reference pub fns, of which 4 are real dead code (M12)
+and 3 are corpus fixtures (expected).
+
+Window duplicates: 176 cross-file windows (77 prod-involving across 22 files,
+99 test-only).
+
 
 A normalized 6-line-window hash pass over every `.rs` file in `src/` +
 `crates/` (comments/whitespace stripped, cross-file repeats only, 78 files
