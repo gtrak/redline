@@ -5,6 +5,7 @@
 //! context, set up by `main`).
 
 mod geometry;
+mod hooks;
 mod input;
 mod render;
 mod snapshot;
@@ -17,26 +18,17 @@ use std::sync::{Arc, Mutex};
 
 use iocraft::prelude::*;
 
-use crate::app::store::{AppStore, ViewId};
-use crate::ui::blame_view::BlameView;
-use crate::ui::commit_editor::CommitEditorView;
-use crate::ui::file_view::FileView;
-use crate::ui::home_view::HomeView;
-use crate::ui::log_view::LogView;
-use crate::ui::magit_status::MagitStatusView;
-use crate::ui::picker::Picker;
-use crate::ui::results_view::ResultsView;
-use crate::ui::rows_view::MagitRowsView;
-use crate::ui::transient_menu::TransientMenuView;
-use crate::ui::tree::TreeSidebar;
-use crate::ui::buffer_view::BufferListView;
+use crate::app::store::AppStore;
+#[cfg(test)]
+use crate::app::store::ViewId;
 
-use geometry::click_pane;
 use geometry::cursor_cell;
-use input::to_app_key;
+use hooks::{
+    drain_crate_index, drain_project_changes, drain_search, drain_symbol_index,
+    drain_tooling_resolve, install_cursor_effect, install_terminal_events,
+};
 use render::StaticRenderWidth;
 use snapshot::Snapshot;
-use widgets::{Minibuffer, StatusLine};
 
 #[component]
 pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -76,473 +68,35 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // re-read the store snapshot. Without it, store mutations are invisible
     // to the render loop (iocraft only re-renders when tracked State changes
     // or a hook future wakes AND a State is set in that future).
-    let mut tick = hooks.use_state(|| 0u64);
+    let tick = hooks.use_state(|| 0u64);
 
     // Clone for the event closure (it must be Send); keep `store` for the
     // render snapshot below.
     let event_store = store.clone();
-    hooks.use_terminal_events(move |event: TerminalEvent| {
-        if let TerminalEvent::Resize(_, height) = &event {
-            // Update the viewport height on resize (subtract room for
-            // the title, help line, and status line).
-            let viewport = (*height as usize).saturating_sub(3);
-            event_store.lock().unwrap().set_viewport_lines(viewport);
-            tick.set(tick.get() + 1);
-        }
-        if let TerminalEvent::Key(key) = &event
-            && key.kind != KeyEventKind::Release
-            && let Some(app_key) = to_app_key(key)
-        {
-            event_store.lock().unwrap().key_event(app_key);
-            tick.set(tick.get() + 1);
-        }
-        // Mouse support (issue 09, step 4: best-effort). Wheel scroll in
-        // all list views; click-to-position in the file view (Buffer);
-        // click-to-select in the tree sidebar (plan 004 issue 05e: with the
-        // tree visible, clicks in the tree's columns select a tree row and
-        // clicks in the code pane are shifted by TREE_WIDTH). Limitations:
-        // no drag-select, no click in pickers/menus, no click-to-select in
-        // list views (v1).
-        if let TerminalEvent::FullscreenMouse(mouse) = &event {
-            use iocraft::MouseEventKind;
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    event_store.lock().unwrap().mouse_scroll_up();
-                    tick.set(tick.get() + 1);
-                }
-                MouseEventKind::ScrollDown => {
-                    event_store.lock().unwrap().mouse_scroll_down();
-                    tick.set(tick.get() + 1);
-                }
-                MouseEventKind::Down(iocraft::MouseButton::Left) => {
-                    // Click-to-position: the file view's content area starts
-                    // at terminal row 0 (the title is part of the view's
-                    // first line). The row is 0-based from the top.
-                    // Subtract 1 for the title line offset. The column is a
-                    // terminal (display) column, which maps 1:1 to the line's
-                    // display column with the tree hidden (the file view
-                    // renders from column 0 — no gutter, plan 004 issue 05c)
-                    // and is shifted by the tree width when it is visible
-                    // (plan 004 issue 05e): a click inside the tree's
-                    // columns selects the tree row under it and never moves
-                    // the code point.
-                    let row = (mouse.row as usize).saturating_sub(1);
-                    let mut store = event_store.lock().unwrap();
-                    let (in_tree, pane_col) =
-                        click_pane(store.tree_visible(), mouse.column as usize);
-                    if in_tree {
-                        store.tree_click_row(mouse.row as usize);
-                    } else {
-                        store.mouse_click_position(row, pane_col);
-                    }
-                    tick.set(tick.get() + 1);
-                }
-                _ => {}
-            }
-        }
-    });
+    install_terminal_events(&mut hooks, event_store, tick);
 
-    // Live file watching (issue 04): subscribe to the project-change bus and
-    // apply each change to the store (auto-reload non-edited buffers keeping
-    // the scroll anchor, set the conflict marker on locally-edited ones,
-    // refresh git status). The watch channel is latest-value-wins; `changed`
-    // is cancellation-safe, so no change is lost on re-poll.
-    let bus_store = store.clone();
-    let bus_rx = bus_store.lock().unwrap().watch_bus().subscribe();
-    hooks.use_future(async move {
-        let mut rx = bus_rx;
-        // Latest-value-wins: `changed` is cancellation-safe, so no change is
-        // lost on re-poll. Loop until the publisher (the store) is dropped.
-        while let Ok(()) = rx.changed().await {
-            // Coalesce (PART A fix): after each wake, drain ALL
-            // immediately-available changes before bumping the tick once —
-            // one repaint per burst, not one per event (the churn flashing
-            // fix). `borrow_and_update` consumes the latest value; if another
-            // publish lands while we apply, `has_changed` catches it.
-            loop {
-                let change = rx.borrow_and_update().clone();
-                bus_store.lock().unwrap().apply_project_change(&change);
-                if !rx.has_changed().unwrap_or(false) {
-                    break;
-                }
-            }
-            tick.set(tick.get() + 1);
-        }
-    });
+    // Hook order (iocraft, like React): every `use_*` call below happens
+    // unconditionally, in this exact order, on every render — the helpers
+    // each make one hook call and none is conditional.
+    drain_project_changes(&mut hooks, store.clone(), tick);
+    drain_symbol_index(&mut hooks, store.clone(), tick);
+    drain_tooling_resolve(&mut hooks, store.clone(), tick);
+    drain_crate_index(&mut hooks, store.clone(), tick);
+    drain_search(&mut hooks, store.clone(), tick);
 
-    // Symbol index drain (issue 05): subscribe to the IndexBus and install
-    // each result into the store. The concurrency contract runs at most one
-    // in-flight index job per generation; changed paths arriving during a
-    // flight are accumulated in a pending set and coalesced into one job
-    // when the flight clears. Events from a stale generation (previous
-    // project) are discarded by `apply_index_event`.
-    let idx_store = store.clone();
-    let idx_rx = idx_store.lock().unwrap().take_index_rx();
-    hooks.use_future(async move {
-        let mut rx = idx_rx;
-        while let Ok(()) = rx.changed().await {
-            // Coalesce (PART A fix): drain all immediately-available index
-            // events (progress + final) before one repaint.
-            loop {
-                let event = rx.borrow_and_update().clone();
-                idx_store.lock().unwrap().apply_index_event(&event);
-                if !rx.has_changed().unwrap_or(false) {
-                    break;
-                }
-            }
-            tick.set(tick.get() + 1);
-        }
-    });
+    let snap: Snapshot = snapshot::build(store, tick, tw_raw);
 
-    // Tooling-resolve drain (plan 006 issue 02): the M-. workspace-miss
-    // fall-through publishes its result here (a `watch` channel, latest-
-    // value-wins, like the index bus). Applying the event lands the jump or
-    // reports the miss on the input path — the (slow) provider chain itself
-    // already ran off it via `spawn_blocking`.
-    let resolve_store = store.clone();
-    let resolve_rx = resolve_store.lock().unwrap().resolve_bus.subscribe();
-    hooks.use_future(async move {
-        let mut rx = resolve_rx;
-        while let Ok(()) = rx.changed().await {
-            // Coalesce: drain all immediately-available resolve events before
-            // one repaint (a superseded M-. request can burst two sends).
-            loop {
-                let event = rx.borrow_and_update().clone();
-                resolve_store.lock().unwrap().apply_resolve_event(&event);
-                if !rx.has_changed().unwrap_or(false) {
-                    break;
-                }
-            }
-            tick.set(tick.get() + 1);
-        }
-    });
-
-    // Crate-index drain (plan 006 issue 03): the background crate-index
-    // builds (registry sources, off the input path) publish their finished
-    // indexes here — same `watch` latest-value-wins pattern as the resolve
-    // bus above. A crate-index build can only start AFTER a tooling
-    // landing, so the drain's subscription (Root start-up) is always live
-    // before the first publish (no zero-receiver race).
-    let crate_store = store.clone();
-    let crate_rx = crate_store.lock().unwrap().crate_index_bus.subscribe();
-    hooks.use_future(async move {
-        let mut rx = crate_rx;
-        while let Ok(()) = rx.changed().await {
-            // Coalesce: drain all immediately-available crate-index events
-            // before one repaint (two crates can land in quick succession).
-            loop {
-                let event = rx.borrow_and_update().clone();
-                crate_store.lock().unwrap().apply_crate_index_event(&event);
-                if !rx.has_changed().unwrap_or(false) {
-                    break;
-                }
-            }
-            tick.set(tick.get() + 1);
-        }
-    });
-
-    // Search drain (issue 06): take the store's SearchBus receiver out of
-    // the store (exactly once; `UnboundedReceiver` is not cloneable, so no
-    // subscription is needed) and apply each event to the store. Because
-    // this runs as a hook task, each `recv().await` registers the
-    // component's waker — every streamed event (first hit, per-file count,
-    // the `searching…` → finished transition) wakes the render loop and
-    // repaints immediately, without a keypress.
-    let search_store = store.clone();
-    hooks.use_future(async move {
-        let Some(mut rx) = search_store.lock().unwrap().search_rx() else {
-            return; // already taken (e.g. by a test)
-        };
-        while let Some(event) = rx.recv().await {
-            search_store.lock().unwrap().apply_search_event(&event);
-            // Coalesce (PART A fix): a search streams many events (first hit,
-            // per-file counts, finished) in a burst — drain all queued events
-            // before bumping the tick once (one repaint per burst).
-            while let Ok(event) = rx.try_recv() {
-                search_store.lock().unwrap().apply_search_event(&event);
-            }
-            tick.set(tick.get() + 1);
-        }
-    });
-
-    let snap = {
-        // Establish the render's dependency on the revision tick: iocraft
-        // re-renders when a State read during the previous render changes.
-        // Without this read, tick bumps from the event handler / bus drains
-        // are invisible (written but never observed) and the UI stays on its
-        // first frame.
-        let _revision = tick.get();
-        let mut s = store.lock().unwrap();
-        let (top_line, total_lines, viewport_lines) = s.file_view_scroll_info();
-        let (search_rows, search_top_row, search_total_rows, search_selected_row) =
-            s.search_view_info();
-        let (magit_rows, magit_top_row, magit_total_rows) = s.magit_view_info();
-        // Issue 003-02 shared windowing: the log / blame / commit-diff panes
-        // render their pre-computed visible window (the store keeps the
-        // cursor row in view; paging resets the log window).
-        let (log_rows, _log_top, _log_total) = s.log_view_info();
-        let (blame_rows, _blame_top, _blame_total) = s.blame_view_info();
-        let (commit_diff_rows, commit_diff_top_row, commit_diff_total_rows) =
-            s.commit_diff_view_info();
-        Snapshot {
-            quit: s.quit,
-            project: s.project_display().to_string(),
-            view: s.render_view(),
-            view_name: s.view_name_display(),
-            pending: s.pending_display(),
-            activity: s.activity_display(),
-            message: s.message.clone(),
-            home_title: s.home_title(),
-            home_rows: s.home_body_rows(),
-            buffer_rows: s.buffer_rows(),
-            buffer_list_selected: s.buffer_list_selected(),
-            picker: s.picker_open(),
-            prompt: s.picker_prompt().to_string(),
-            query: s.picker_query().to_string(),
-            selected: s.picker_selected(),
-            candidates: s
-                .picker_filtered()
-                .iter()
-                .map(|(c, _)| c.clone())
-                .collect(),
-            total: s.picker_count().1,
-            preview: s.picker_preview().to_string(),
-            magit_rows,
-            magit_top_row,
-            magit_total_rows,
-            menu_open: s.menu_open(),
-            menu_rows: s.menu_rows(),
-            menu_height: s.menu_height(),
-            log_title: s.log_title(),
-            log_rows,
-            blame_title: s.blame_title(),
-            blame_rows,
-            commit_diff_title: s.commit_diff_title(),
-            commit_diff_rows,
-            commit_diff_top_row,
-            commit_diff_total_rows,
-            commit_editor_title: s.commit_editor_title(),
-            commit_editor_rows: s.commit_editor_rows(),
-            dirty: s.dirty_counts(),
-            file_view_rows: s.file_view_rows(),
-            file_view_total_rows: s.file_view_total_rows(),
-            file_view_title: s.view_name_display(),
-            file_view_top_line: top_line,
-            file_view_total_lines: total_lines,
-            file_view_viewport_lines: viewport_lines,
-            file_view_point_line: s.file_view_point().0,
-            file_view_point_col: s.file_view_point().1,
-            file_view_changed_on_disk: s.current_buffer_changed_on_disk(),
-            file_view_current_buffer_editable: s.current_buffer_editable(),
-            buffer_mode: s.buffer_mode_display(),
-            tree_visible: s.tree_visible(),
-            tree_rows: s.tree_rows(),
-            tree_selected: s.tree_selected(),
-            terminal_width: tw_raw,
-            which_function: s.which_function(),
-            indexing: s.indexing_display(),
-            resolving: s.resolving_display(),
-            crate_indexing: s.crate_indexing_display(),
-            search_title: s.search_title(),
-            search_rows,
-            search_top_row,
-            search_total_rows,
-            search_selected_row,
-            search_running: s.search_running(),
-            search_error: s.search_error(),
-            searching: s.search_display(),
-            position: s.file_view_position_display(),
-            annotations: s.annotation_count_display(),
-            region_lines: s.region_line_range(),
-            region_size: s.region_size_bytes(),
-        }
-    };
-
-    // issue 004-05 (hardware cursor): iocraft hides the cursor ONCE at startup
-    // (?25l), never re-shows it, and re-parks it at the status line after every
-    // frame's synchronized output (?2026h ... ?2026l). This effect (which fires
-    // after every render) re-shows the cursor and repositions it on the current
-    // view's cursor row — the blue-bar (selected) row for list views, the top
-    // visible line for the buffer view (emacs -nw parity: the terminal cursor
-    // sits on point).
-    //
-    // The write is deferred to a short-lived task: iocraft's own effect hook
-    // fires mid-frame (after ?2026h, before the content draw), so a direct
-    // write here would be clobbered by the frame's status-line park (24;1).
-    // Deferring ~12 ms (the measured frame flush is ~5 ms) lands the ?25h + CUP
-    // AFTER the frame's ?2026l, making it the last cursor position for that
-    // frame. Because the effect fires on every render (key, watcher, index,
-    // search, or resize), the cursor is re-asserted after every frame. Guarded
-    // to the live terminal (and not on quit): the static render path reports
-    // size 0 and must not emit raw cursor escapes.
     let revision = tick.get();
     let cursor_cell_opt = cursor_cell(&snap);
     let cursor_live = tw_raw > 0 && !snap.quit;
-    hooks.use_effect(
-        move || {
-            if !cursor_live {
-                return;
-            }
-            let cell = cursor_cell_opt;
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(12)).await;
-                if let Some((col, row)) = cell {
-                    use crossterm::cursor::{MoveTo, Show};
-                    let _ = crossterm::execute!(std::io::stdout(), Show, MoveTo(col, row));
-                }
-            });
-        },
-        (&revision,),
-    );
+    install_cursor_effect(&mut hooks, revision, cursor_cell_opt, cursor_live);
 
     if snap.quit {
         system.exit();
     }
 
-    let main_view: Option<AnyElement<'static>> = match snap.view {
-        ViewId::Home => Some(element! {
-            HomeView(
-                title: snap.home_title.clone(),
-                rows: snap.home_rows.clone(),
-                help: "C-x C-c quit · ? menu".to_string(),
-            )
-        }
-        .into()),
-        ViewId::Buffer => Some(element! {
-            FileView(
-                title: snap.file_view_title.clone(),
-                rows: snap.file_view_rows.clone(),
-                total_rows: snap.file_view_total_rows,
-                top_line: snap.file_view_top_line,
-                viewport_lines: snap.file_view_viewport_lines,
-                changed_on_disk: snap.file_view_changed_on_disk,
-                buffer_editable: snap.file_view_current_buffer_editable,
-                region_lines: snap.region_lines,
-            )
-        }
-        .into()),
-        ViewId::BufferList => Some(element! {
-            BufferListView(
-                rows: snap.buffer_rows.clone(),
-                selected: snap.buffer_list_selected,
-            )
-        }
-        .into()),
-        ViewId::MagitStatus => Some(element! {
-            MagitStatusView(
-                rows: snap.magit_rows.clone(),
-                top_row: snap.magit_top_row,
-                total_rows: snap.magit_total_rows,
-            )
-        }
-        .into()),
-        ViewId::Log => Some(element! {
-            LogView(title: snap.log_title.clone(), rows: snap.log_rows.clone())
-        }
-        .into()),
-        ViewId::Blame => Some(element! {
-            BlameView(title: snap.blame_title.clone(), rows: snap.blame_rows.clone())
-        }
-        .into()),
-        ViewId::CommitDiff => Some(element! {
-            MagitRowsView(
-                title: snap.commit_diff_title.clone(),
-                rows: snap.commit_diff_rows.clone(),
-                top_row: snap.commit_diff_top_row,
-                total_rows: snap.commit_diff_total_rows,
-                help: "commit diff (read-only) · C-n/C-p · C-v/M-v · M->/M-< · q back".to_string(),
-            )
-        }
-        .into()),
-        ViewId::CommitEditor => Some(element! {
-            CommitEditorView(
-                title: snap.commit_editor_title.clone(),
-                rows: snap.commit_editor_rows.clone(),
-            )
-        }
-        .into()),
-        ViewId::Search => Some(element! {
-            ResultsView(
-                title: snap.search_title.clone(),
-                rows: snap.search_rows.clone(),
-                top_row: snap.search_top_row,
-                total_rows: snap.search_total_rows,
-                selected_row: snap.search_selected_row,
-                running: snap.search_running,
-                error: snap.search_error.clone(),
-            )
-        }
-        .into()),
-    };
-
-    element! {
-        View(flex_direction: FlexDirection::Column, width: term_w, height: term_h) {
-            // The row and the inner column pin their width to the root's
-            // resolved width (100% each). Without this, a content-wide child
-            // (the home view's NoWrap command rows, which can run well past
-            // 80 cols) pins the column's width to its own content width and
-            // full-width children (the picker's right-aligned count line)
-            // render off-screen. In the static render path (root width Auto)
-            // 100% resolves to the same content width as before — no change.
-            View(flex_direction: FlexDirection::Row, flex_grow: 1.0f32, width: iocraft::Size::Percent(100.0)) {
-                #(if snap.tree_visible {
-                    Some(element! {
-                        TreeSidebar(
-                            rows: snap.tree_rows.clone(),
-                            selected: snap.tree_selected,
-                        )
-                    })
-                } else {
-                    None
-                })
-                View(flex_direction: FlexDirection::Column, flex_grow: 1.0f32, width: iocraft::Size::Percent(100.0)) {
-                    #(main_view)
-                    #(if snap.picker {
-                        Some(element! {
-                            Picker(
-                                prompt: snap.prompt,
-                                query: snap.query,
-                                selected: snap.selected,
-                                candidates: snap.candidates.clone(),
-                                total: snap.total,
-                                preview: snap.preview,
-                                viewport: snap.file_view_viewport_lines as u32,
-                            )
-                        })
-                    } else {
-                        None
-                    })
-                    #(if snap.menu_open && !snap.picker {
-                        Some(element! {
-                            TransientMenuView(
-                                rows: snap.menu_rows.clone(),
-                                height: snap.menu_height,
-                            )
-                        })
-                    } else {
-                        None
-                    })
-                }
-            }
-            Minibuffer(message: snap.message)
-            StatusLine(
-                project: snap.project,
-                view: snap.view_name,
-                mode: snap.buffer_mode,
-                pending: snap.pending,
-                activity: snap.activity,
-                dirty: snap.dirty,
-                which_function: snap.which_function,
-                indexing: snap.indexing,
-                resolving: snap.resolving,
-                crate_indexing: snap.crate_indexing,
-                searching: snap.searching,
-                position: snap.position,
-                annotations: snap.annotations,
-                region_size: snap.region_size,
-            )
-        }
-    }
+    let main_view = render::render_view(&snap);
+    render::render_frame(snap, main_view, term_w, term_h)
 }
 #[cfg(test)]
 mod tests {
