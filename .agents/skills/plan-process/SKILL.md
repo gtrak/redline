@@ -337,3 +337,31 @@ into a single short summary (~20-30 lines), write it to
 `.agents/plans/archive/NNN-short-name.md`, then remove the original folder.
 The archive is a flat list of `.md` files — one per completed plan. Full
 implementation details remain in git history.
+
+## A fixture must contain the property that triggers the bug
+
+**Learned twice in one session, from two different lanes, both times found by a gate.**
+A test whose fixture lacks the very property the bug depends on will pass on the broken code
+and keep passing after the fix — it is not evidence, it is decoration.
+
+- The **gitignore agreement test** (`finder_and_search_agree_on_gitignore`) used a fixture
+  with **no `.git`**. The walker branches on `root.join(".git").exists()`: without it the walk
+  and the incremental filter share the *same helper*, so the test asserted agreement that was
+  **structural** rather than behavioural — and could not see that in a real git repo the two
+  paths disagree (the walk honours `.git/info/exclude` and global excludes; the filter did not).
+- The **crate-source-files test** (`crate_source_files_node_modules_boundary`) used a non-git
+  tempdir. `ignore::Walk`'s defaults include `require_git: true`, so with no `.git` the
+  gitignore rules are inert; `node_modules` is also not hidden. So the test could not see that
+  in a real git repo the project's `node_modules/` rule excludes the landed dependency entirely
+  (via `parents: true`), nor that a hidden `.venv` is skipped by `hidden: true`.
+
+**The check to run before believing a passing test:** name the property the bug needs (a `.git`
+dir, a hidden component, a nested `.gitignore`, a non-ASCII byte, an ignored file that *changes*,
+a batch that coalesces) and confirm the fixture actually has it. If the fixture would pass with
+the bug present, say so and fix the fixture — **or write the test so it fails on the current
+code first and prove that**, which is the only way to know it discriminates.
+
+**Corollary for specs:** when a lane reports "N tests added", that is a count, not evidence.
+Ask what each test would do on the unfixed code. A lane that says "the test fails on the old
+code with `left: 0, right: 3`" has proved discrimination; a lane that says "5 new tests, all
+passing" has not.
