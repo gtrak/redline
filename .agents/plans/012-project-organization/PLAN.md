@@ -1,6 +1,10 @@
 # 012 — Redline: project organization & cleanup
 
-Status: planned
+Status: structurally complete — all nine issues landed (the store is split,
+the tests are split, the other oversized files are decomposed, incl. the A7
+navigation split); the § Success criteria line-bar exceptions are the
+recorded audit judgments; remainder is tracked in `00-worklist.md`
+§ What remains; archive pending (on request)
 Phases: 4 · Issues: 01–09 (staged; each stage lands gate-green)
 Depends on: nothing (behavior-preserving refactor + cleanup)
 

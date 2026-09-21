@@ -1,7 +1,8 @@
 # Plan 015 — two editing modes: annotation (coarse, default) and light cursor-accurate editing
 
-**Status:** design approved by the user; issue 01 (the annotations list) is independent
-of the rest. Nothing implemented yet.
+**Status:** design approved by the user; issue 01 (the annotations picker) is
+LANDED; issue 02 (honest `current_point_byte` + the per-buffer mode) is the
+open keystone and blocks 03 and 04.
 
 ## 1. Why
 

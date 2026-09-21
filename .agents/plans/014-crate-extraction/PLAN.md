@@ -1,7 +1,8 @@
 # Plan 014 — crate extraction (from the measured import graph)
 
-**Status:** analysis complete, nothing implemented. Stage 1 is high-confidence;
-stages 2–3 are viable and staged. Not a rewrite — each stage is a move.
+**Status:** stage 1 LANDED (`crates/redline-syntax`, `56efe19`); stage 2
+(`redline-git`) staged, not started; stage 3 (`redline-model`) contingent on
+the `sections.rs` decision (not specced yet).
 
 ## 1. Why
 

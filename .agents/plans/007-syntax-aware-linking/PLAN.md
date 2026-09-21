@@ -1,6 +1,6 @@
 # 007 — Redline: syntax-aware linking (tree-sitter beyond highlighting)
 
-Status: in progress — 01+02+03 PASS; 04 unscheduled (perf only)
+Status: complete — 01+02+03+04 all PASS (04 merged `825edae`, see the outcome record below)
 Phases: 1 · Issues: 01–04
 Depends on: plan 005 (annotations) for 02; plan 006 (resolver chain) for 03
 Origin: user question 2026-09-18 — "could our linking benefit from

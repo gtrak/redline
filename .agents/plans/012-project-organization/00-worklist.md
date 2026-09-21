@@ -68,7 +68,7 @@ worker measured); `flow_tests.rs` 3,624 lines / 88 twins ·
 
 | ID | Item | Design call | Risk |
 |----|------|-------------|------|
-| **S1** | `store.rs` split (plan 012 phase 2) | already decided; `012-01` inventory in flight | med |
+| **S1** | `store.rs` split (plan 012 phase 2) | done (`012-01` inventory landed; the split landed in the concern lanes) | med |
 | **S2** | `queries.rs`: 245 lines of per-language consts → `queries/lang.rs`; engine stays | none — pure move | low |
 | **S3** | `node.rs`: 3 parallel per-language dispatch tables (`is_*_identifier_kind`, `*_scope_path`, `is_path_segment`) → one table/trait | **D1** | med |
 | **S4** | `nav/index.rs` → `index.rs` (SymbolIndex) + `build.rs` (build/refresh/extract) + `progress.rs` (IndexProgress/IndexEvent/IndexBus) | none — pure move (2nd `impl SymbolIndex` block) | low |
@@ -443,7 +443,7 @@ as M4).
 
 ## Proposed staging (maps Tier 1–3 onto plan 012's phases)
 
-1. **012-01** inventory (in flight) → **012-02** store split pattern.
+1. **012-01** inventory (landed) → **012-02** store split pattern.
 2. **012-10 (new) "mechanical sweep"** — M1–M9 live in files the store split
    does NOT own (`nav/index.rs`, `syntax/registry.rs`, `src/git/*`, `ui/mod.rs`,
    `app/command.rs`) ⇒ **can run as a parallel lane**, except **M4 must wait
@@ -591,12 +591,12 @@ remainder:
 
 | Item | Kind | State |
 |---|---|---|
-| cleanup tail: inline `ui/views/` (F-5) · dedup the 10 `git_cli` + fixture family in `store/tests` · optional `Snapshot::from_store` (removes 67 `pub(super)`) | hygiene | **in flight** (`cleanup-tail`) |
+| cleanup tail: inline `ui/views/` (F-5) · dedup the 10 `git_cli` + fixture family in `store/tests` · optional `Snapshot::from_store` (removes 67 `pub(super)`) | hygiene | **LANDED** (`cleanup-tail`; the optional `Snapshot::from_store` is the CLOSED row below) |
 | iocraft post-canvas hook (the cursor race's only real fix) | decision + upstream PR / vendored patch | **open — user decision** |
 | clearing swap (`swapoff -a && swapon -a`) to stop load-induced flakes | ops | **open — user decision** |
 | plan 012 archival | mechanical | ready on request |
 | ~~`Snapshot::from_store`~~ | design | **CLOSED — recommendation SUPERSEDED.** The tail lane skipped it; the gate verified the skip and showed the earlier `root-split` suggestion ("a constructor would be materially better design") **under-counted the read sites**: the 66 fields are read from the render literal (~66 lines), ~20 `geometry.rs` reads, two full-literal test fixtures, **and post-construction field mutation in the geometry tests** (which a constructor cannot address without setters); the render path needs `&mut` store accessors so the signature cannot be `&AppStore`. Private fields would cost ~60 accessors + ~100 rewrites on the render hot path for zero behavioural gain. The 67 `pub(super)` are the correct end state (`a1c2e47`). |
-| **A7 — split `store/navigation.rs`** (2,394 lines, ONE impl, ~70 methods) | structural (pure move) | **NEW — the plan's own criterion is unmet, see below** |
+| **A7 — split `store/navigation.rs`** (2,394 lines, ONE impl, ~70 methods) | structural (pure move) | **LANDED** — `navigation/{mod,definitions,imports,xref}.rs`, all under the 1,500 line bar (the audit below is what produced the split) |
 | re-land input coalescing (`git revert 0ddaf46`) | UX (user asked to park it) | parked, recipe in the commit |
 | Shape B (rust-analyzer as a library) | architecture | only if written-down-types ever bites |
 
@@ -651,8 +651,8 @@ repo), so what remains is organization, not rot. Written up as:
 
 | Doc | Scope |
 |---|---|
-| `.agents/tasks/issue-match-highlight.md` | **match highlighting in the buffer view** — all visible matches one colour, the selected one another ("the cursor is hard to see when I jump to a search result"). No highlighting exists today, but `render_row` is segment-based and the store already pre-computes visible rows, so the overlay is a second pass over the segment list. Sources: isearch or the persisted search state after a jump. |
-| `.agents/tasks/issue-index-gitignore.md` | **the indexer's incremental path must respect `.gitignore`** — diagnosed precisely: the *full* build already does (it consumes the gitignore-filtered `FileList`), but `refresh_in_place` `set_file()`s **any** changed path the watcher reports, so ignored files enter the index after the fact. The fix extracts one `is_gitignored` helper for the ancestor `.gitignore` chain and makes the indexer the **third walker** in R3's agreement invariant. |
+| `.agents/tasks/issue-match-highlight.md` | **match highlighting in the buffer view** — all visible matches one colour, the selected one another ("the cursor is hard to see when I jump to a search result"). **LANDED** (the second-pass overlay is in `src/ui/file_view.rs`). `render_row` is segment-based and the store already pre-computes visible rows, so the overlay is a second pass over the segment list. Sources: isearch or the persisted search state after a jump. |
+| `.agents/tasks/issue-index-gitignore.md` | **the indexer's incremental path must respect `.gitignore`** — diagnosed precisely: the *full* build already does (it consumes the gitignore-filtered `FileList`), but `refresh_in_place` `set_file()`s **any** changed path the watcher reports, so ignored files enter the index after the fact. The fix extracts one `is_gitignored` helper for the ancestor `.gitignore` chain and makes the indexer the **third walker** in R3's agreement invariant. **SUPERSEDED — LANDED**: the core fix landed (`ca4e743`); the follow-up was re-specced as `issue-ignore-predicate.md` (also LANDED). |
 
 ## The logic-organization round (measured, per the user's criterion)
 
@@ -663,9 +663,9 @@ total, 40 over 80 lines, 8 over 150):
 
 | # | Target | Evidence | Verdict |
 |---|---|---|---|
-| A1 | **`Root`** | `src/ui/root/mod.rs:42` — **504 lines, nest 7**, six jobs in one fn (measured: contexts/size 42-83, event handler 84-143, five futures 152-266, the `Snapshot` literal 268-359, cursor effect 381-394, view dispatch 402-463, frame assembly 464-546) | **SPECD** (`issue-a1-root-decompose.md`) — named helpers; PTY-covered so low risk. Note: this is NOT the rejected `Snapshot::from_store` (fields stay `pub(super)`; only the literal-building *block* moves) |
-| A2 | **the keymap is data written as code** | `AppStore::at` (`store/mod.rs:1557`, **200 lines**, 22 binds) + `ViewId::keymap` (`:237`, **284 lines**, 120 binds) = **142 imperative binds** (79 distinct commands) inside *constructors* | **SPECD** (`issue-a2-keymap-table.md`) — a `(sequence, command)` table. The design is already decided by the codebase: `keymap::parse_sequence` (emacs notation, tested at `keymap.rs:457-514`) **already exists and is already used in production** by `config.rs:128`'s `Config::validate_bindings`, so the user-config path speaks `"C-x C-f"` while the built-in keymap uses `Key::ctrl_char('x')` |
-| B1 | `key_event` → **A3 candidate** | `store/keys.rs:16` — **345 lines, nest 5**. NOT a dispatch match: it is a **hand-rolled modal chain** — 7 early-return guards (`quit`, `quit_prompt_active`, `menu_open`, `discard_armed`, `toggle_ro_active`, `picker`, `top_view()==CommitEditor`) with the picker and editor blocks inline (~50 lines each), ending in `dispatch_key`. Some modals already route to named methods (`quit_prompt_key`, `menu_key_event`, `discard_key_event`) — so the pattern is half-applied | **SPECD** (`issue-a3-modal-chain.md`): 16 sequential guards, 5 already routing to named methods, **11 with inline bodies (~300 of the 345 lines)**. Step 1 (mandatory) extracts each inline body to a named method, leaving the chain explicit so `key_event` reads as a priority list of named modals. Step 2 (an ordered handler table) is explicitly OPTIONAL and must be argued — an `if` chain in priority order *is already* a readable priority list, unlike A2's ~480 lines of `bind()` data. **Behaviour-sensitive** — the PTY battery is mandatory |
+| A1 | **`Root`** | `src/ui/root/mod.rs:42` — **504 lines, nest 7**, six jobs in one fn (measured: contexts/size 42-83, event handler 84-143, five futures 152-266, the `Snapshot` literal 268-359, cursor effect 381-394, view dispatch 402-463, frame assembly 464-546) | **LANDED** (`issue-a1-root-decompose.md`) — named helpers; PTY-covered so low risk. Note: this is NOT the rejected `Snapshot::from_store` (fields stay `pub(super)`; only the literal-building *block* moves) |
+| A2 | **the keymap is data written as code** | `AppStore::at` (`store/mod.rs:1557`, **200 lines**, 22 binds) + `ViewId::keymap` (`:237`, **284 lines**, 120 binds) = **142 imperative binds** (79 distinct commands) inside *constructors* | **LANDED** (`issue-a2-keymap-table.md`) — a `(sequence, command)` table. The design is already decided by the codebase: `keymap::parse_sequence` (emacs notation, tested at `keymap.rs:457-514`) **already exists and is already used in production** by `config.rs:128`'s `Config::validate_bindings`, so the user-config path speaks `"C-x C-f"` while the built-in keymap uses `Key::ctrl_char('x')` |
+| B1 | `key_event` → **A3 candidate** | `store/keys.rs:16` — **345 lines, nest 5**. NOT a dispatch match: it is a **hand-rolled modal chain** — 7 early-return guards (`quit`, `quit_prompt_active`, `menu_open`, `discard_armed`, `toggle_ro_active`, `picker`, `top_view()==CommitEditor`) with the picker and editor blocks inline (~50 lines each), ending in `dispatch_key`. Some modals already route to named methods (`quit_prompt_key`, `menu_key_event`, `discard_key_event`) — so the pattern is half-applied | **LANDED** (`issue-a3-modal-chain.md`): 16 sequential guards, 5 already routing to named methods, **11 with inline bodies (~300 of the 345 lines)**. Step 1 (mandatory) extracts each inline body to a named method, leaving the chain explicit so `key_event` reads as a priority list of named modals. Step 2 (an ordered handler table) is explicitly OPTIONAL and must be argued — an `if` chain in priority order *is already* a readable priority list, unlike A2's ~480 lines of `bind()` data. **Behaviour-sensitive** — the PTY battery is mandatory |
 | B2 | `is_path_segment` | `syntax/node/paths.rs:23` — **151 lines for a predicate** | naming/scoping failure, not a size failure |
 | B3 | per-language logic | `resolve_go` 143, `resolve_js` 127, `extract_all` 139, `extract_rust_tables` 136 | the *config* is table-driven (`LanguageSpec`); ask whether the *logic* shares a shape worth a trait + per-language hooks |
 | B4 | tuple parameters | `crate_xref_outcome(..., at: Option<&(String, String)>)` (`navigation.rs:1897`) | a named struct carries the meaning; also a **measurement caveat**: my param counter miscounted this as 9 args — it is 6 (tuple commas) |
@@ -708,7 +708,7 @@ evidence of which function it is in".
 
 | Caller | Column source | Notes |
 |---|---|---|
-| `buffers.rs:458` `C-x C-x` `exchange_point_and_mark` | mark is a byte offset | **most emacs-visible of the four**; the new `try_byte_to_line_col` is exactly the seam it needs — **SPECD first** (`issue-column-landings.md`) |
+| `buffers.rs:458` `C-x C-x` `exchange_point_and_mark` | mark is a byte offset | **most emacs-visible of the four**; the new `try_byte_to_line_col` is exactly the seam it needs — **LANDED** (`issue-column-landings.md`) |
 | `search.rs:156` isearch **cancel** | not recorded — `IsearchState` stores only `pre_search_line` | needs a `pre_search_col` field to restore the original column on `C-g` |
 | `search.rs:329` project-search RET | `Hit.col: Option<u64>` (byte col; `None` for regex) | |
 | `definitions.rs:186` unique-def jump | `Symbol.start_byte` | derivable |

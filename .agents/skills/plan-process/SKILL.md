@@ -338,6 +338,24 @@ into a single short summary (~20-30 lines), write it to
 The archive is a flat list of `.md` files — one per completed plan. Full
 implementation details remain in git history.
 
+## Landing a lane includes updating the tracker
+
+Landing a lane includes flipping the lane's state everywhere it is recorded,
+in the same commit as the code: the plan's `Status:` line
+(`.agents/plans/*/PLAN.md`), the lane's worklist entry ("SPECD" / "in
+flight" becomes "LANDED" with the commit), and the row in
+`.agents/plans/STATUS.md` (the single authoritative status table, with its
+evidence citation). That is part of the landing, not an optional
+follow-up — an unflipped spec looks identical to an open one. This exact
+failure cost a whole session: a user-requested feature (`issue-jump-highlight`)
+sat unworked while its spec looked perfectly current, because nothing
+reliably recorded which specced plans were still open; and four lanes that
+had landed (A1, A2, A3/B1, `issue-column-landings`) kept reading as
+"SPECD" in the worklist, which is how both directions of the error —
+silently dropped work and re-duplicated work — happen. A tracker
+entry is a claim about the code, the same as a test: it must be updated
+when the code moves, or it is lying.
+
 ## A fixture must contain the property that triggers the bug
 
 **Learned twice in one session, from two different lanes, both times found by a gate.**

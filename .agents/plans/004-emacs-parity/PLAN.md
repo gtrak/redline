@@ -1,6 +1,6 @@
 # 004 — Redline: emacs-parity polish
 
-Status: planned
+Status: complete — all 16 issues (01–07, 05b–05h, 06/06a/06b) LANDED; archive pending (per plan-process, on request)
 Phases: 1 · Issues: 01–06
 
 ## Why

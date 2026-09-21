@@ -1,7 +1,8 @@
 # 010 — Redline: bundled static analysis (SPITBALL — no decisions made)
 
-Status: **DECIDED 2026-09-20 — Shape A chosen (user: "continue" on the
-drained queue); Rung 1 dispatched.** NO LSP (user ruled out 2026-09-18).
+Status: **SHAPE A COMPLETE** — Rung 1/3/4 landed, Rung 2 subsumed by 011,
+new languages + whole-path arms landed (see the outcome record below).
+NO LSP (user ruled out 2026-09-18).
 Two candidate shapes below; Shape A selected for the rung ladder's honest
 degradation (each rung degrades to None, no compiler dependency).
 Rung 2 (use-path + module-tree resolution) largely subsumed by plan 011's
