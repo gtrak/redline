@@ -194,7 +194,18 @@ where the missing 20 commands lived. The fix is procedural, not diligence:
    re-derivation *first*, before the lane acts on anything.
 4. Treat a spec's counts as claims even when the spec's *map* (which symbol is
    where) is exact — a correct map with wrong totals is the observed failure mode.
-5. **A baseline copied into a spec goes stale the moment another lane lands.** A spec
+5. **A measurement tool that strips code must preserve line numbers.** The first
+   version of the function survey stripped comments and string literals for brace
+   matching *and deleted the newlines inside them*, so every reported `file:line`
+   drifted earlier by that count — in `src/syntax/queries.rs` (test fixtures full of
+   multi-line raw strings, 227 newlines inside literals) by ~115 lines: it claimed
+   `extract_all` was at `:360` when it is at `:475`. The **sizes** were right
+   (brace-matched) and the **locations** were wrong, which is the worse half — a spec
+   that says "this function at file:line" must not be wrong about the line. Fixed and
+   promoted to a real tool: `tools/fn_survey.py` (newlines preserved, `#[cfg(test)]`
+   and `tests/` excluded, `--min`/`--nest` modes). Use the tool, not an ad-hoc heredoc;
+   it is the deterministic measurement behind the logic-organization agenda.
+6. **A baseline copied into a spec goes stale the moment another lane lands.** A spec
    written before lane X landed carries X's *pre*-X test counts; the next lane then
    reports a "delta" that is really the spec being out of date (observed: A2 added one
    test, so the A1 spec's "854" was already 855). Either quote the baseline as
