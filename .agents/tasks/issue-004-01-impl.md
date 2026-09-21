@@ -26,7 +26,7 @@ every printable extends the search string; `n` is just a letter.
 
 ## Read first
 
-1. `.agents/plans/004-emacs-parity/01-isearch-interception.md` — the issue.
+1. `.agents/plans/archive/004-emacs-parity.md` — the issue.
 2. `docs/emacs-parity-log.md` — battery 1, row 1 (the defect) and row 2-4
    (what must NOT regress).
 3. `src/app/store.rs` — the isearch interception branch in `key_event`

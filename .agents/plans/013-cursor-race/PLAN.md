@@ -209,7 +209,7 @@ reflowed"* rather than *"a cursor directive after it"*. So the proposal is an
 
 ## 7. Cross-references
 
-- `.agents/plans/012-project-organization/00-worklist.md` § **Gate reliability** — the
+- `.agents/plans/archive/012-project-organization.md` § **Gate reliability** — the
   four flake classes this belongs to (class 1), with the measurements.
 - Commits: `b47e03c` (harness gate — diagnosis, not a deflake), `5d25dc0` (re-measured,
   root-caused, "app-side fix impossible in-fence"), `daeac06` (three flake classes),

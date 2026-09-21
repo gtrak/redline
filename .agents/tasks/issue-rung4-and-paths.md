@@ -1,7 +1,7 @@
 # Task: plan 010 Rung 4 (find-implementations) + app-side whole-path enumeration for C/Cpp/Toml/Json
 
 You are the implementation worker. Repo root is your cwd. Self-contained.
-Read `.agents/plans/010-bundled-static-analysis/PLAN.md` (Shape A, Rung 4)
+Read `.agents/plans/archive/010-bundled-static-analysis.md` (Shape A, Rung 4)
 and the landed Rung 1 machinery (`.agents/tasks/issue-010-01-impl.md`,
 merged `53f0965` + review fixes).
 

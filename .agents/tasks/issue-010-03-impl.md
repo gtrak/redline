@@ -1,7 +1,7 @@
 # Task: plan 010 issue 03 — Shape A Rung 3 (local binding types)
 
 You are the implementation worker. Repo root is your cwd. Self-contained.
-Read `.agents/plans/010-bundled-static-analysis/PLAN.md` (Shape A) and
+Read `.agents/plans/archive/010-bundled-static-analysis.md` (Shape A) and
 `.agents/tasks/issue-010-01-impl.md` (Rung 1 — landed, the machinery you
 extend) + `.agents/skills/*.md` (tree-sitter skill is ground truth).
 

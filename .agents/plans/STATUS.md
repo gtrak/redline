@@ -188,7 +188,7 @@ These rows are NOT part of the sampled group below and carry no caveat.
 
 | Spec | State | Evidence | Notes |
 |---|---|---|---|
-| 004-01 isearch interception (task `issue-004-01-impl`; issue text in `archive/004-emacs-parity.md`) | LANDED | `isearch_key_event` (`src/app/store/keys.rs:75`), `register_isearch` (`src/app/command.rs:378`) | — |
+| 004-01 isearch interception (task `issue-004-01-impl`; issue text in `archive/004-emacs-parity.md`) | LANDED | `isearch_key_event` (`src/app/store/keys.rs:251` — defined; dispatched at `:62`), `register_isearch` (`src/app/command.rs:378`) | — |
 | 004-02 parity adopts batch 1 (`issue-004-02-impl`) | LANDED | `docs/emacs-parity-log.md` adopted rows; PLAN.md outcome record | C-v 2-line overlap also pinned by `scroll_page_down_keeps_two_line_overlap` (watchlist lane) |
 | 004-03 mark & kill/yank (`issue-004-03-impl`) | LANDED | `kill_ring` (`src/app/store/buffers.rs:493`), yank-pop (`:558`) | — |
 | 004-04 quit save-prompt (`issue-004-04-impl`) | LANDED | commit `0c5dfc6` (PLAN.md outcome record); `quit_prompt_key` (`src/app/store/keys.rs:540`) | — |
@@ -275,7 +275,7 @@ Post-012 cleanup/organization lanes (task specs):
 | `issue-store-concern-moves` | LANDED | 13 concern files under `src/app/store/` | 012-03+ |
 | `issue-store-test-split` | LANDED | `src/app/store/tests/` per concern | phase 3 |
 
-### Grouped rows — sampled at archiving (001, 002, 003, 005, 006, 008, 011)
+### Grouped rows — sampled at archiving (001, 002, 003, 005, 006, 008, 011), plus one 012 cross-reference (NOT sampled)
 
 Grouped as LANDED per plan-process archiving (the plan folders are in
 `.agents/plans/archive/` and the features are live on main).

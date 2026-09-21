@@ -2,7 +2,7 @@
 
 Plan 012's stated success criterion is **"No `src/` file over ~1,500 lines"**; an
 audit after the 17 landed lanes showed it is only PARTIALLY met
-(`.agents/plans/012-project-organization/00-worklist.md` § A7). The one genuine
+(`.agents/plans/archive/012-project-organization.md` § A7). The one genuine
 grab-bag is `src/app/store/navigation.rs`: **2,394 lines, ONE `impl AppStore`,
 48 methods** — three unrelated concerns sharing a vague label, plus a test file
 (`src/app/store/tests/navigation.rs`, **3,074 lines, 100 tests**) that mirrors it.
@@ -13,8 +13,8 @@ one for the production file, one for its test file.
 
 ## Read first
 
-- `.agents/plans/012-project-organization/00-worklist.md` § **A7** (the seam evidence).
-- `.agents/plans/012-project-organization/PLAN.md` § Success criteria.
+- `.agents/plans/archive/012-project-organization.md` § **A7** (the seam evidence).
+- `.agents/plans/archive/012-project-organization.md` § Success criteria.
 - `docs/architecture.md` (the module map the split must update).
 - `.agents/skills/plan-process/SKILL.md` § "Test authority".
 - The landed precedent: `git show 0bc74c3` (store-concerns) and `git show 7be095e`

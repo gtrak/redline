@@ -19,7 +19,7 @@ app is read-focused; the user wants emacs kill/yank + mark/region.
 
 ## Read first
 
-1. `.agents/plans/004-emacs-parity/03-mark-and-kill-yank.md` — the issue.
+1. `.agents/plans/archive/004-emacs-parity.md` — the issue.
 2. `docs/emacs-parity-log.md` — row 14 decision.
 3. `src/model/buffer.rs` — buffer state (ropey), editable/locally_modified
    semantics, insertion-point handling.

@@ -33,7 +33,7 @@ after 013-01/02.
 | File | Change |
 |---|---|
 | `tools/check_cursor_stream.py` | the pre-frame assertion / precondition |
-| `.agents/plans/012-project-organization/00-worklist.md` | § Gate reliability, class 1 — record the outcome |
+| `.agents/plans/archive/012-project-organization.md` | § Gate reliability, class 1 — record the outcome |
 
 ## Steps
 

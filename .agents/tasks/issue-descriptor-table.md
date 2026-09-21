@@ -1,7 +1,7 @@
 # Task: the per-language descriptor table (D1) — collapse 8 sync sites into 1
 
 ## Read this first
-`.agents/plans/012-project-organization/02-language-descriptor-design.md` is the
+`.agents/plans/archive/012-project-organization.md` is the
 **full design**: the 8 sync sites, the proposed `LanguageSpec` struct, the 19-row
 inventory (what every site currently says per language), which parts are mechanically
 collapsible vs. need real thought, and a 7-step migration order. Follow it. Where the

@@ -332,11 +332,30 @@ guardrails, carry-over review notes).
 
 ### Completion
 
-When a plan is fully implemented, consolidate `PLAN.md` + all issue files
-into a single short summary (~20-30 lines), write it to
-`.agents/plans/archive/NNN-short-name.md`, then remove the original folder.
-The archive is a flat list of `.md` files — one per completed plan. Full
-implementation details remain in git history.
+When a plan is fully implemented, write it to
+`.agents/plans/archive/NNN-short-name.md` as a **durable record**: the original
+`PLAN.md` and issue files, verbatim, in plan order, under a short completion
+header (what landed, when, and how it was verified). Then remove the original
+folder. The archive is a flat list of `.md` files — one per completed plan.
+
+**Why the full record and not a summary (settled 2026-09-21).** This section used
+to ask for a ~20-30 line summary, on the grounds that "full implementation details
+remain in git history". That reasoning does not survive contact with the tracker:
+`STATUS.md` cites archive files as its **evidence store** — an archived row's
+"PLAN.md outcome record" citation *means* the archive file, and an OPEN contingent
+decision can have its standing record *inside* an archive. A summary would delete
+that record and leave those citations pointing at a file that no longer contains
+the outcome, the verdict, or the test counts. Git history is not usable evidence
+from the current tree: **you cannot grep a deleted path.** Size is not a concern
+(~150 KB for four plans), and a *verbatim* copy is the safer artifact — it is a
+frozen snapshot that cannot misstate its source, whereas a summary is editorial
+and is exactly the thing that drifts.
+
+**Legacy archives.** `001`–`011` (archived before this change) are summaries
+(45–142 lines) and are labelled **sampled, not audited** in `STATUS.md`. They are
+not wrong, only thinner: treat their rows as a signpost into git history rather
+than as evidence. Do not rewrite them unless a row starts being relied on as
+evidence.
 
 ## Landing a lane includes updating the tracker
 

@@ -1,8 +1,11 @@
 # 004 — Redline: emacs-parity polish (ARCHIVED)
 
 Status: ARCHIVED 2026-09-21 — all 16 issues (01–07, 05b–05h, 06/06a/06b)
-LANDED, each verified at landing (gate + review + evidence row in the
-004 table in `.agents/plans/STATUS.md`).
+LANDED, each verified at landing (gate + the evidence citation in its
+`STATUS.md` row). One caveat on the word "review": **05h**'s own record says
+"review in flight" (`679c007`), so for that issue the evidence is the commit
+plus its test, not a concluded review — the gate flagged the blanket claim as
+overstating it.
 
 This file is the durable record: the full original folder, verbatim —
 `PLAN.md` plus all nine issue files, in plan order. No text was edited or

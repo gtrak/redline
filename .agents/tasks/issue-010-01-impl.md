@@ -1,7 +1,7 @@
 # Task: plan 010 issue 01 — Shape A Rung 1 (impl association + struct field tables)
 
 You are the implementation worker. Repo root is your cwd. Self-contained.
-Read `.agents/plans/010-bundled-static-analysis/PLAN.md` (Shape A, Rung 1)
+Read `.agents/plans/archive/010-bundled-static-analysis.md` (Shape A, Rung 1)
 and `.agents/skills/*.md` (tree-sitter skill is ground truth for the query
 work). Your cwd is the MAIN TREE — commit to main per the established
 style (no invented identity beyond the established one).

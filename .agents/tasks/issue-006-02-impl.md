@@ -56,7 +56,7 @@ chain (the plan's main goal).
 5. `.agents/plans/006-tooling-aware-jump/02-app-wiring.md` — the issue
    contract + the orchestrator pre-check (teardown, async pattern,
    `open_path` is project-relative).
-6. `.agents/plans/007-syntax-aware-linking/PLAN.md` — the roadmap context
+6. `.agents/plans/archive/007-syntax-aware-linking.md` — the roadmap context
    for why symbol extraction is currently text-splitting (007-01 will
    replace it with node-at-point; do NOT build that here, but do not make
    it harder either).

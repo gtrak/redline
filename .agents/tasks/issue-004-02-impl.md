@@ -19,7 +19,7 @@ parity rows from `docs/emacs-parity-log.md` (user decisions 2026-09-17:
 
 ## Read first
 
-1. `.agents/plans/004-emacs-parity/02-parity-adopts-1.md` — the issue.
+1. `.agents/plans/archive/004-emacs-parity.md` — the issue.
 2. `docs/emacs-parity-log.md` — battery 1 rows 6/8/9/11 (the decisions).
 3. `src/app/store.rs` — file-view scroll commands (C-v/M-v/M-</M-> paths),
    buffer-list picker opening, keymap bindings, status-line info fns.

@@ -27,7 +27,7 @@ the user's theme evidently does not. Hence "the cursor was still hidden."
 
 ## Read first
 
-1. `.agents/plans/004-emacs-parity/05-cursor-visibility.md` — the issue.
+1. `.agents/plans/archive/004-emacs-parity.md` — the issue.
 2. `.agents/skills/iocraft/SKILL.md` — render loop internals, alternate
    screen, synchronized output (`?2026`), any cursor-control API.
 3. `src/ui/root.rs` — render loop, the status-line, how views compose.
