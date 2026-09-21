@@ -657,6 +657,26 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
     }
 
+    /// Delete the record at `(path, line)` (015-01's annotations picker
+    /// `d`): the picker holds the location itself, so no current buffer
+    /// line is involved. A record no longer present (deleted elsewhere
+    /// while the list was open) gets a message, not a panic.
+    pub(super) fn delete_annotation_at_path_line(&mut self, path: &str, line: usize) {
+        // Like `annotate_delete`: the disk/buffer notes state is the
+        // source of truth, so load/re-parse before deleting (an external
+        // edit while the picker was open must not be clobbered).
+        self.ensure_notes_doc();
+        let idx = self
+            .notes_doc
+            .entries
+            .iter()
+            .position(|e| matches!(e, NotesEntry::Record(a) if a.path == path && a.line == line));
+        match idx {
+            Some(idx) => self.delete_annotation_at_index(idx),
+            None => self.minibuffer_message("annotation already deleted"),
+        }
+    }
+
     fn delete_annotation_at_index(&mut self, idx: usize) {
         let removed = match self.notes_doc.entries.get(idx) {
             Some(NotesEntry::Record(a)) => a.text.clone(),

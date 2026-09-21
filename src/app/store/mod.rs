@@ -227,7 +227,7 @@ pub enum ViewId {
 // against what is already bound, so a prefix conflict is caught at
 // construction (fail-loud, same as the old `.unwrap()`).
 
-/// Global bindings: 22 entries, shared by every view.
+/// Global bindings: 23 entries, shared by every view.
 pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("C-g", "cancel"),
     ("M-x", "open-palette"),
@@ -245,6 +245,11 @@ pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("C-x C-b", "list-buffers"),
     ("C-x k", "kill-buffer"),
     ("C-x n", "open-notes"),
+    // 015-01: the annotations picker (notes → annotations). `C-c n` is
+    // free; a `C-x n …` sequence is impossible — `C-x n` is already a
+    // complete binding (open-notes) and the engine forbids a command on
+    // a strict prefix of a longer binding.
+    ("C-c n a", "annotations-picker"),
     ("C-x C-s", "save-buffer"),
     // plan 005 issue 01: file edit mode (emacs `toggle-read-only`).
     ("C-x C-q", "toggle-read-only"),
@@ -585,6 +590,10 @@ pub enum PickerKind {
     /// `z` in the magit-status context (issue 08): stash list; RET pops, `x`
     /// drops the selected entry.
     Stash,
+    /// `C-c n a` (015-01): every annotation record in the notes document
+    /// (document order — file, then line); RET jumps to the selected
+    /// annotation's `(path, line)`, `d` deletes it.
+    Annotations,
 }
 
 /// The file view's point for one buffer (plan 004 issue 05b): the

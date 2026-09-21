@@ -100,6 +100,93 @@ impl AppStore {
             .collect()
     }
 
+    /// Candidates for the annotations picker (015-01): every annotation
+    /// record in the notes document, in document order (file, then line —
+    /// the notes document's own order, NOT recency). `NotesEntry::Raw`
+    /// blocks are verbatim non-annotation content (malformed records,
+    /// stray lines — kept verbatim, never interpreted) and are NEVER
+    /// candidates: the list is annotations only. Row shape (name-first):
+    /// name/label = the annotation text, detail = `path:line` (1-based
+    /// line, the location pickers' display convention).
+    fn annotations_candidates(&mut self) -> Vec<PickerCandidate> {
+        // The notes document (disk or open buffer) is the source of truth
+        // for the records, so load/re-parse it before building (plan 005
+        // issue 02).
+        self.ensure_notes_doc();
+        let mut rows: Vec<(String, usize, PickerCandidate)> = self
+            .notes_doc
+            .entries
+            .iter()
+            .filter_map(|e| e.as_record())
+            .map(|a| {
+                let detail = format!("{}:{}", a.path, a.line + 1);
+                (
+                    a.path.clone(),
+                    a.line,
+                    PickerCandidate {
+                        name: a.text.clone(),
+                        display: format!("{}  {}", a.text, detail),
+                        // picker-density: name-first — the annotation text
+                        // left, the location right-aligned.
+                        label: a.text.clone(),
+                        detail,
+                        docs: String::new(),
+                        category: "annotation".to_string(),
+                    },
+                )
+            })
+            .collect();
+        rows.sort_by(|(p1, l1, _), (p2, l2, _)| p1.cmp(p2).then(l1.cmp(l2)));
+        rows.into_iter().map(|(_, _, c)| c).collect()
+    }
+
+    /// `C-c n a` (015-01): open the annotations picker — a temporary,
+    /// filterable list of every annotation record in the notes document.
+    /// RET jumps to the selected annotation's `(path, line)`; editing
+    /// needs no command of its own — jump, then `A` on that line
+    /// pre-fills the existing note. With zero annotations the picker
+    /// opens with an empty list (the count row reads 0/0) rather than
+    /// erroring — an empty notes document is a normal state, not a
+    /// broken list.
+    pub fn open_annotations_picker(&mut self) {
+        if self.project.is_none() {
+            self.minibuffer_message("annotations: no project");
+            return;
+        }
+        let candidates = self.annotations_candidates();
+        self.open_picker(PickerKind::Annotations, "Annotations: ", candidates);
+    }
+
+    /// `d` in the annotations picker (015-01): delete the selected
+    /// annotation's record and recompute the list on the same query —
+    /// the buffer view's `d` reached from the picker (the Stash list's
+    /// `x` drop is the sibling precedent).
+    pub(super) fn annotations_picker_delete(&mut self) {
+        let Some((detail, query)) = self
+            .picker
+            .as_ref()
+            .and_then(|p| {
+                (p.kind == PickerKind::Annotations)
+                    .then(|| {
+                        p.filtered
+                            .get(p.selected)
+                            .map(|(cand, _)| (cand.detail.clone(), p.query.clone()))
+                    })
+                    .flatten()
+            })
+        else {
+            return;
+        };
+        // detail is "path:line" (1-based line number, as displayed).
+        if let Some((path, line_str)) = detail.rsplit_once(':')
+            && let Ok(line) = line_str.parse::<usize>()
+        {
+            self.delete_annotation_at_path_line(path, line - 1);
+            let candidates = self.annotations_candidates();
+            self.set_picker_query(PickerKind::Annotations, query, candidates);
+        }
+    }
+
     fn candidates_for(&mut self, kind: PickerKind) -> Vec<PickerCandidate> {
         match kind {
             PickerKind::Palette => self.palette_candidates(),
@@ -113,6 +200,7 @@ impl AppStore {
             PickerKind::Symbols => self.symbol_candidates(),
             PickerKind::Branch => self.branch_candidates(),
             PickerKind::Stash => self.stash_candidates(),
+            PickerKind::Annotations => self.annotations_candidates(),
         }
     }
 
@@ -499,6 +587,7 @@ impl AppStore {
             }
             Some(PickerKind::Imenu) => self.current_buffer_outline().len(),
             Some(PickerKind::Impls) => self.impls_candidates().len(),
+            Some(PickerKind::Annotations) => self.annotations_candidates().len(),
             Some(PickerKind::Symbols) => self.index.total(),
             Some(PickerKind::Branch) => self
                 .with_git(|g| g.branches())
@@ -537,9 +626,9 @@ impl AppStore {
             .and_then(|p| {
                 p.filtered
                     .get(p.selected)
-                    .map(|(c, _)| (p.kind, c.name.clone(), c.docs.clone()))
+                    .map(|(c, _)| (p.kind, c.name.clone(), c.docs.clone(), c.detail.clone()))
             });
-        let (kind, name, docs) = match choice {
+        let (kind, name, docs, detail) = match choice {
             Some(choice) => choice,
             None => {
                 if let Some(p) = self.picker.as_mut() {
@@ -566,6 +655,17 @@ impl AppStore {
             }
             // Imenu: preview the current file (the name is "symbol:line").
             PickerKind::Imenu => self.file_preview_current(),
+            // Annotations: preview the file at the annotation's line
+            // (like Xref — the detail is "path:line", 1-based).
+            PickerKind::Annotations => {
+                if let Some((file, line_str)) = detail.rsplit_once(':')
+                    && let Ok(line) = line_str.parse::<usize>()
+                {
+                    self.file_preview_at_line(file, line - 1)
+                } else {
+                    String::new()
+                }
+            }
             // Branch / Stash: no preview pane (the candidate display is
             // already self-describing).
             PickerKind::Branch | PickerKind::Stash => String::new(),
@@ -685,10 +785,10 @@ impl AppStore {
             .and_then(|p| {
                 p.filtered
                     .get(p.selected)
-                    .map(|(c, _)| (p.kind, c.name.clone()))
+                    .map(|(c, _)| (p.kind, c.name.clone(), c.detail.clone()))
             });
         self.picker = None;
-        let Some((kind, name)) = choice else {
+        let Some((kind, name, detail)) = choice else {
             self.minibuffer_message("no candidate selected");
             return;
         };
@@ -756,6 +856,23 @@ impl AppStore {
                     self.stash_pop(index);
                 } else {
                     self.minibuffer_message("no stash selected");
+                }
+            }
+            // 015-01: RET jumps to the selected annotation's (path, line)
+            // — the same project-relative landing sequence as the Xref
+            // picker (open, point to the line, recenter, record the jump).
+            PickerKind::Annotations => {
+                // detail is "path:line" (1-based line number, as shown).
+                if let Some((file, line_str)) = detail.rsplit_once(':')
+                    && let Ok(line) = line_str.parse::<usize>()
+                {
+                    let origin = self.current_jump_entry();
+                    self.open_path(file);
+                    self.set_point_line(line - 1);
+                    self.recenter_landing();
+                    self.ensure_highlight();
+                    self.record_jump(origin, "C-c n a");
+                    self.minibuffer_message(&format!("jumped to {file}:{line}"));
                 }
             }
         }

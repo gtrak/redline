@@ -827,6 +827,12 @@ impl CommandRegistry {
             "annotations",
             |store, _arg| store.annotate_toggle(),
         ));
+        self.register(Command::new(
+            "annotations-picker",
+            "Open the annotations picker (C-c n a): a filterable list of every annotation in the notes document (document order); RET jumps to the selected annotation's file and line, d deletes it — then A on that line pre-fills for edit",
+            "annotations",
+            |store, _arg| store.open_annotations_picker(),
+        ));
     }
 
     fn register_region(&mut self) {
@@ -885,7 +891,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 108, "expected 108 seed commands: {names:?}");
+        assert_eq!(names.len(), 109, "expected 109 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -986,6 +992,7 @@ mod tests {
             "annotate",
             "annotate-delete",
             "annotate-toggle",
+            "annotations-picker",
             "toggle-tree-follow",
             "set-mark",
             "kill-region",

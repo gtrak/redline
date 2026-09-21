@@ -653,7 +653,10 @@ mod tests {
     /// Equivalence test: the declarative binding tables produce the same
     /// keymap as the old imperative `bind()` calls. For every table entry,
     /// `km.lookup(parse_sequence(seq))` resolves to the named command, and
-    /// the total binding count matches the pre-change count (142).
+    /// the total binding count is the A2 pre-change count (142) plus the
+    /// bindings added since (143 today: the `C-c n a` annotations picker) —
+    /// restate the history, never renumber it, or a future lane can "fix"
+    /// drift by bumping this number again.
     #[test]
     fn load_bindings_equivalence() {
         use crate::app::store::{
@@ -662,9 +665,9 @@ mod tests {
             MAGIT_STATUS_BINDINGS, SEARCH_BINDINGS,
         };
 
-        // Global map: 22 bindings, every entry resolves correctly.
+        // Global map: 23 bindings, every entry resolves correctly.
         let global = load_bindings(GLOBAL_BINDINGS);
-        assert_eq!(global.command_pairs().len(), 22, "global binding count");
+        assert_eq!(global.command_pairs().len(), 23, "global binding count");
         for (seq_str, cmd) in GLOBAL_BINDINGS {
             let seq = parse_sequence(seq_str).unwrap();
             assert_eq!(

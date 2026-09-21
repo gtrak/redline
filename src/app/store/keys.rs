@@ -138,6 +138,13 @@ impl AppStore {
                 }
                 return true;
             }
+            // Annotations list (015-01): `d` deletes the selected
+            // annotation (the buffer view's `d` reached from the
+            // picker) instead of extending the filter query.
+            if self.picker_kind() == Some(PickerKind::Annotations) && c == 'd' {
+                self.annotations_picker_delete();
+                return true;
+            }
             self.picker_query_char(c);
             return true;
         }

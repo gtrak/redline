@@ -288,7 +288,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 108);
+        assert_eq!(store.picker_count().0, 109);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -306,11 +306,12 @@ use super::*;
         // Wrap at top: Up at index 0 lands on the last candidate.
         store.picker_select_prev(); // 1 -> 0
         store.picker_select_prev();
-        assert_eq!(store.picker_selected(), 107);
+        let total = store.picker_count().0;
+        assert_eq!(store.picker_selected(), total - 1);
 
         // C-p goes through the same wrap-decrement path as Up.
         store.key_event(key("C-p"));
-        assert_eq!(store.picker_selected(), 106);
+        assert_eq!(store.picker_selected(), total - 2);
 
         // RET runs the candidate at the selected index (the last command —
         // a no-op on *scratch*, so just a message).
@@ -345,7 +346,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 108);
+        assert_eq!(store.picker_count().0, 109);
 
         store.key_event(key("q"));
         store.key_event(key("u"));
@@ -467,6 +468,175 @@ use super::*;
         s.key_event(key("C-g"));
         assert!(!s.menu_open());
         assert_eq!(s.message, "cancel");
+    }
+
+    // ── 015-01: the annotations picker ────────────────────────────────
+
+    /// Fixture: a notes document with two valid records and TWO Raw
+    /// entries (a stray line INSIDE the structured section, before the
+    /// first record, and a malformed record block) — the Raw content
+    /// must never surface as a candidate. Records: `src/main.rs` line 2
+    /// (1-based) and `README.md` line 1.
+    fn project_with_annotations(dir: &std::path::Path) {
+        project_with_files(dir);
+        std::fs::write(
+            dir.join(".redline-notes.md"),
+            "# Notes\n\n<!-- redline-annotations:begin -->\nA stray line inside the section.\n[annotation]\npath: src/main.rs\nline: 1\nanchor:     println!(\"hi\");\nnote: fix the off-by-one\n[annotation]\npath: src/main.rs\nline: 9\n(not a record — the required fields are missing)\n[annotation]\npath: README.md\nline: 0\nanchor: # readme\nnote: top of the docs\norphaned: true\n<!-- redline-annotations:end -->\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn annotations_picker_lists_records_excluding_raw_in_document_order() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        assert!(store.picker_open());
+        assert_eq!(store.picker_kind(), Some(PickerKind::Annotations));
+        assert_eq!(store.picker_prompt(), "Annotations: ");
+        // The count row: 2 candidates, 2 total — the Raw entries (the
+        // stray line and the malformed block) contribute nothing.
+        assert_eq!(store.picker_count(), (2, 2));
+        // Row shape + document order: README.md:1, then src/main.rs:2
+        // (file, then line — not recency, not the notes doc's append
+        // order, which puts src/main.rs first).
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.name.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("top of the docs", "README.md:1"),
+                ("fix the off-by-one", "src/main.rs:2"),
+            ]
+        );
+        // Raw exclusion: neither the stray line nor the malformed block
+        // may surface as a candidate — in name, label, or detail.
+        for (c, _) in store.picker_filtered() {
+            assert!(!c.name.contains("stray"), "raw stray line surfaced: {c:?}");
+            assert!(
+                !c.name.contains("not a record"),
+                "malformed record surfaced: {c:?}"
+            );
+            assert!(!c.detail.contains("src/main.rs:10"), "the malformed record's line surfaced: {c:?}");
+            assert!(!c.label.contains("stray"), "raw stray line surfaced in the label: {c:?}");
+        }
+        // Row shape: name/label = the annotation text, detail = path:line
+        // (1-based, the location pickers' display convention), display
+        // carries both (the nucleo match target).
+        let fix = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == "fix the off-by-one")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(fix.label, "fix the off-by-one");
+        assert_eq!(fix.detail, "src/main.rs:2");
+        assert_eq!(fix.display, "fix the off-by-one  src/main.rs:2");
+        assert_eq!(fix.category, "annotation");
+        // Inherited filtering: the query narrows the list, the total
+        // stays the unfiltered count.
+        store.key_event(key("o"));
+        store.key_event(key("f"));
+        store.key_event(key("f"));
+        assert_eq!(store.picker_count(), (1, 2));
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["fix the off-by-one"], "{names:?}");
+    }
+
+    #[test]
+    fn annotations_picker_ret_lands_on_the_annotation_line() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        // Select "fix the off-by-one" (src/main.rs line 2, 1-based).
+        // (A bare `j` would extend the filter query; C-n is the nav key.)
+        store.key_event(key("C-n"));
+        assert_eq!(store.picker_selected(), 1);
+        // The preview shows the file around the annotation line.
+        assert!(
+            store.picker_preview().contains("println!"),
+            "preview: {}",
+            store.picker_preview()
+        );
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
+        assert_eq!(store.view_name_display(), "src/main.rs");
+        assert_eq!(
+            store.point_line(),
+            1,
+            "the point must land on the annotation's 0-based line"
+        );
+        assert!(
+            store.message.contains("jumped to src/main.rs:2"),
+            "{}",
+            store.message
+        );
+    }
+
+    #[test]
+    fn annotations_picker_d_deletes_the_selected_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        store.key_event(key("C-n")); // select "fix the off-by-one" (src/main.rs:2)
+        store.key_event(key("d"));
+        assert!(store.picker_open(), "d must not close the picker");
+        // The list recomputes on the same (empty) query: 1 of 1.
+        assert_eq!(store.picker_count(), (1, 1));
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["top of the docs"], "{names:?}");
+        assert!(
+            store.message.contains("deleted annotation"),
+            "{}",
+            store.message
+        );
+        // The record is gone; the Raw entries survive the round trip
+        // (2 Raw + the remaining record = 3 entries).
+        let entries = store.notes_doc.entries.clone();
+        assert_eq!(entries.len(), 3, "one record removed, Raw intact: {entries:?}");
+        let content = std::fs::read_to_string(dir.path().join(".redline-notes.md"))
+            .unwrap();
+        assert!(!content.contains("fix the off-by-one"));
+        assert!(content.contains("A stray line inside the section."));
+    }
+
+    #[test]
+    fn annotations_picker_without_project_explains_itself() {
+        let dir = tempfile::tempdir().unwrap(); // no markers → no project
+        let mut store = store(dir.path());
+        store.key_event(key("C-c"));
+        store.key_event(key("n"));
+        store.key_event(key("a"));
+        assert!(!store.picker_open());
+        assert!(store.message.contains("no project"), "{}", store.message);
+    }
+
+    #[test]
+    fn annotations_picker_empty_notes_document_opens_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path()); // no .redline-notes.md
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        // An empty list is acceptable (0/0) — the picker must not
+        // error, and RET on an empty list must stay safe.
+        assert!(store.picker_open());
+        assert_eq!(store.picker_count(), (0, 0));
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
     }
 
     #[test]
