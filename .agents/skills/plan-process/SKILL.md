@@ -172,6 +172,29 @@ brief also demanded an independent re-derivation. Corollary: a reviewer's
 *findings* (a missing assignment, a non-disjoint range, a broken `#[path]`) are
 high-value and should be relayed; its *arithmetic* must be re-measured.
 
+### The orchestrator's own counts are the most error-prone numbers of all
+
+Three times in one session a count in a task spec — *my* number, not a worker's —
+was wrong, and each time a lane caught it only because the spec ordered a
+re-derivation first:
+- "48 methods / 8 `js_ts_*` / 4 `go_*`" in the A7 brief → really **51 / 7 / 3**;
+- "79 distinct commands" in the A2 brief → really **99**;
+- a "no file over 1,500 lines" criterion applied to files the criterion never meant.
+
+The mechanism is always the same: an ad-hoc `grep`/`awk` scoped to a **line range**
+or a **single function** (`awk 'NR>=237 && NR<=521'`) silently excludes the rest of
+the artifact — in the A2 case `AppStore::at`'s 22 global binds, which is exactly
+where the missing 20 commands lived. The fix is procedural, not diligence:
+
+1. Measure the **whole artifact** (the file, the module, the tree) — never a line
+   range you chose by eye.
+2. Prefer a **deterministic tool** (`tools/cleanup_scan.py`) or a compiler over a
+   hand-rolled regex; brace-matching beats line windows.
+3. Always label spec numbers **"re-derive before relying on it"**, and require the
+   re-derivation *first*, before the lane acts on anything.
+4. Treat a spec's counts as claims even when the spec's *map* (which symbol is
+   where) is exact — a correct map with wrong totals is the observed failure mode.
+
 ### A pin must read the same source of truth as the code it guards
 
 A pin that asserts an invariant via a *copy* of the fact gives **false
