@@ -93,6 +93,42 @@ worker measured); `flow_tests.rs` 3,624 lines / 88 twins ·
 | **T7** | Strengthen non-discriminating tests: bare `.is_ok()` with no payload/state check (`store.rs:10577`, `:16949`, `:3645`); audit twins for vacuous absence-only assertions post `PTY_QUIET` shrink | strengthen, never delete | low |
 | **T8** | PTY battery drivers `drive_{emacs,redline}_battery2/3` → parameterized driver | lower priority than Rust duplication | low |
 
+## C5 RESOLVED — magit-consistent section movement (user directive: "be consistent with real magit")
+
+Authority: **magit 4.7.1** source (`lisp/magit-section.el:805-831`, cloned
+`github.com/magit/magit` @ `5059906`, 2026-09-20). Real magit **does not wrap**:
+
+- `magit-section-forward` (`n`): at `eobp` → `(user-error "No next section")`; when no
+  next sibling/parent-sibling exists → the same `user-error`. It **stays put and
+  reports**, it does not wrap.
+- `magit-section-backward` (`p`): at `bobp` → `(user-error "No previous section")`.
+- So the boundary behaviour is **symmetric: no wrap + an echo-area message**.
+
+Redline today is wrong in both halves (wraps on `n`, silently stops on `p`), and the
+stale doc accidentally described magit. **Required change**: drop the wrap branch in
+`move_down`, make both directions stop at the boundary, and emit the boundary
+message through the minibuffer (redline's echo area) — `"No next section"` /
+`"No previous section"` for parity. Pin with unit tests (no-wrap in both
+directions + the message), since nothing pins it today.
+
+**Deeper parity nuances found in the same source** (not part of C5; verify before
+claiming section-movement parity):
+
+1. `n` **descends into children**: if the current section is visible and point is not
+   at its end, the next section is its **first child** (lines 812-815) — i.e. document
+   order, not sibling-only.
+2. `p` goes to the **beginning of the current section first** when point is inside one
+   (lines 838-841), not straight to the previous row.
+3. Root-level special case: a section with no parent moves one **line**
+   (`magit-section-goto 1`, line 822).
+
+If redline's `StatusTree` rows are one-per-section these collapse to document order
+and C5 alone suffices; if sections span multiple rows, (1)-(2) are a real behavioural
+gap. Worth an empirical magit probe — the source clone makes a **runnable magit
+probe harness** feasible now (clone `transient`/`dash`/`s`/`compat`/`with-editor`,
+run `-L` from the clones), which would let us pin magit behaviour the way
+`tools/drive_emacs*.py` pins vanilla emacs.
+
 ## Round 2 structural deltas (read-verified, local model)
 
 Full design preserved in-repo: **`02-language-descriptor-design.md`** (19-row
@@ -287,7 +323,7 @@ rather than style debt. `fix-by` as before.
 | **C13** | `highlight::supports_reuse` vs `registry::build`'s locals-queries: the incremental path is byte-identical to the full path **only** for languages whose registry config passes an empty locals query (JS/TS/TSX, Ruby pass `LOCALS_QUERY`). Two hand-maintained lists; **no test** asserts `supports_reuse(id) ⟺ locals query is empty`, so adding a locals query to e.g. Python silently desyncs incremental vs full highlighting | `highlight.rs`, `registry.rs` | deterministic: expose `has_locals_queries(id)`, add the `LanguageId::ALL` test |
 | **C14** | **Four walks, no cross-pins**: file list (hidden+gitignore+`graft/` prune), `rg` (hidden+gitignore, no graft/target prune), `cargo::walk_rs_files` (target+dot dirs, no gitignore), `nav/index` (built from FileList). Differences are user-perceivable and documented, but untested; no "walk policy" table exists | all four read | deterministic: pin the documented asymmetry in one test each + a docs table |
 | **C15** | **`is_word_char` families disagree on Unicode**: `store.rs:5261` and `references.rs` are Unicode-aware; `rg.rs`'s sink and `cargo.rs::is_ident_char` are ASCII. So `café` splits differently between the two M-? paths. `rg.rs` even carries a branch that exists only because of this class of mismatch | 4 of 5 sites read | deterministic: one shared predicate in `model/` + a multibyte end-to-end test |
-| **C5** | `StatusTree::move_down` **wraps to the first section while its doc says "wraps nowhere"**, and `move_up` does not wrap — asymmetric `n`/`p`, doc contradicts code, no test pins either | `model/sections.rs` | **decision needed** (emacs stops at end; magit wraps): keep wrap → fix doc + add `move_down_wraps_to_first`; else delete the `else` branch |
+| **C5** | `StatusTree::move_down` **wraps to the first section while its doc says "wraps nowhere"**, and `move_up` does not wrap — asymmetric `n`/`p`, doc contradicts code, no test pins either | `model/sections.rs` | **RESOLVED — magit-consistent, see below** |
 | **C17c** | `Registry::save` / `Recents::save` write `projects.json`/`recents.json` non-atomically via `fs::write`; load tolerates corruption by returning empty ⇒ **a crash mid-write silently wipes the known-project list** | `model/project.rs` | deterministic: temp-file + rename |
 
 ### Dead API with wrong justifications (all read-verified)
