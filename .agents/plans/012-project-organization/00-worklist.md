@@ -529,6 +529,12 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
 
 ## Known follow-ups from gate findings (low priority)
 
+- **PTY flake, unattributed** (descriptor-table gate): the first `gate.sh full` run on a
+  frozen tree ended `GATE RESULT: FAIL` and an identical re-run was `21/21 OK`. The
+  flaking suite was not identifiable because the first run's output was tail-truncated.
+  The store-concerns gate was asked to re-run on failure and to capture the full log.
+  If it recurs, identify the suite from a complete log — a flaky PTY leg is a gate
+  reliability problem, not a cosmetic one.
 - **Stale `store.rs` references in source comments** (outside every landed lane's
   fence): `src/app/flow_tests.rs:50` ("`store_with_index` in store.rs"),
   `src/syntax/queries.rs:8` ("in `app/store.rs`"). Cosmetic; fold into whichever

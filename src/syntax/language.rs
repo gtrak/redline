@@ -693,8 +693,10 @@ mod tests {
         }
 
         // Extensions are unique across rows and round-trip through the
-        // resolver (a stale `ext_map` entry, a duplicate, or a missing
-        // extension fails here).
+        // resolver. The resolver is now built *from* this table, so the two
+        // failure modes left here are a duplicate extension and a row/resolver
+        // id mismatch (a "stale ext_map entry" or a "missing extension" is no
+        // longer expressible — that is the point of the table).
         let mut exts = HashSet::new();
         for row in &LANGUAGES {
             for ext in row.extensions {

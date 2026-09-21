@@ -62,11 +62,12 @@ src/
 
   syntax/
     cache.rs               407  HighlightCache (path/mtime/theme keyed)
-    highlight.rs          1,166  tree-sitter → theme highlight rows
-    node.rs              2,251  per-language tree walking (012/09 target)
-    queries.rs            1,697  per-language query consts (012/09 target)
-    registry.rs            502  GrammarRegistry (one tree-sitter API surface)
-    tokens.rs              308  token classification
+    highlight.rs          1,158  tree-sitter → theme highlight rows
+    language.rs             791  the LanguageSpec table — single source of truth
+    node.rs               2,038  per-language tree walking (012/09 target)
+    queries.rs            1,653  extraction engine (consts moved to language.rs)
+    registry.rs             284  GrammarRegistry, built from the table
+    tokens.rs               300  token classification
 
   ui/
     blame_view.rs · commit_editor.rs · diff_view.rs · home_view.rs · log_view.rs
