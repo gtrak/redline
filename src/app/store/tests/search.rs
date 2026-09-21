@@ -1152,8 +1152,10 @@ use super::*;
             s.match_context.ranges.is_empty(),
             "a different search clears the old highlight"
         );
-        // Drain the "bar" job so its (stale-generation) Finished event
-        // cannot make the step-7 drain return early.
+        // Consume the "bar" job's events so the results view is clean before the
+        // next search. (The stale-generation early-return hazard this used to
+        // guard against is gone: `drain_search_finished` now terminates only on
+        // the CURRENT generation's `Finished`.)
         drain_search_finished(&mut s, &mut rx);
         // 7. Leaving the results view (q / ESC) ends the session.
         s.start_project_search("foo".into());

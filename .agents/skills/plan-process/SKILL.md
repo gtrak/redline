@@ -478,3 +478,12 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    touched file still hashes to the expected blob and that `git status` and the
    diff stat are unchanged. Report it — a self-repaired index incident is worth
    knowing about, because the alternative is a silent wrong commit.
+5. **A scratch copy needs its OWN target dir, or a forced rebuild.** `git archive`
+   sets old mtimes, and a shared `CARGO_TARGET_DIR` then looks *fresh* to cargo —
+   so a "break it and see the test fail" run can silently execute the **base**
+   binary and report a green result for code it never compiled. This has caught
+   two different gates. Detect it by reading the test count in the output (a run
+   that says "N filtered out" with your new test absent is the tell), and prevent
+   it by `export CARGO_TARGET_DIR=<scratch>/target` or `touch`-ing every source
+   file before building. A discrimination run against a stale binary is not
+   evidence, and it fails in the *safe-looking* direction.

@@ -868,13 +868,28 @@ mod tests {
         assert_eq!(highlighted, "caf\u{e9}", "the highlighted chars are the landing symbol");
     }
 
-    /// jump-highlight: no landing highlight (None) is a pure pass-through
-    /// (the segments survive, nothing else moves).
+    /// jump-highlight: with no landing highlight (`None`), an in-range segment
+    /// is returned exactly as it came in.
     #[test]
-    fn overlay_jump_range_none_is_pass_through() {
+    fn overlay_jump_range_none_is_identity_for_in_range_segments() {
         let text = "abc";
         let base: Vec<(usize, usize, RowFace)> = vec![(0, 3, RowFace::Syntax(2))];
         assert_eq!(overlay_jump_range(text, &base, None), base);
+    }
+
+    /// jump-highlight: the `None` path is **not** a pass-through — it clamps
+    /// endpoints to the text length and drops zero-width segments (the same
+    /// clamping `draw_line` applies). Pinned separately from the identity case
+    /// above, because a doc that says "returns the input unchanged" is exactly
+    /// the claim this branch falsifies.
+    #[test]
+    fn overlay_jump_range_none_clamps_out_of_range_segments() {
+        let text = "abc";
+        let base: Vec<(usize, usize, RowFace)> = vec![(0, 9, RowFace::Syntax(2))];
+        assert_eq!(
+            overlay_jump_range(text, &base, None),
+            vec![(0, 3, RowFace::Syntax(2))]
+        );
     }
 
     /// plan 005 issue 02: the rendered-row map round-trips buffer_line ↔
