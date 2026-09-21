@@ -1,5 +1,16 @@
 use super::*;
 
+/// (M-., phase (1)) The point context the symbol-under-point candidate
+/// lookup is pure over: the point line's text, the buffer rope, and the
+/// point's (line, column). A parameter grouping (the lookup has nine
+/// inputs; clippy's argument cap is seven).
+struct XrefPointContext<'a> {
+    line_text: &'a str,
+    rope: &'a Rope,
+    line: usize,
+    col: usize,
+}
+
 impl AppStore {
     /// `M-.`: jump to the definition of the symbol UNDER THE POINT
     /// (plan 006 issue 02 selection rule).
@@ -86,59 +97,27 @@ impl AppStore {
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
         let at = Self::symbol_at_point(lang, &line_text, self.point_col());
 
-        let defs: Option<Vec<crate::nav::index::Location>> = at
+        // The candidate lookup below is pure over the index and the buffer
+        // (no `&mut self` inside), so the `buf` borrow still ends before
+        // the later `&mut self` work — the 006-03 rule above.
+        let defs = at
             .as_ref()
             .and_then(|(ident, path_token)| {
-                // 010-01 (plan 010 Shape A, rung 1): the Rust self-receiver
-                // pre-step — `self.<member>` resolves via the LEXICALLY
-                // ENCLOSING impl's type (field → the struct's field line,
-                // method → the impl method's line), same-file first. An
-                // empty result degrades to today's bare-`<member>` index
-                // lookup below (byte-for-byte; never a guess).
-                if lang == LanguageId::Rust
-                    && let Some(member) = path_token.strip_prefix("self.")
-                    && !member.is_empty()
-                {
-                    let source = buf.rope.to_string();
-                    if let Some(byte) = point_byte_offset(&buf.rope, line, self.point_col()) {
-                        let cands =
-                            Self::self_receiver_candidates(&self.index, &rel, &source, byte, member);
-                        if !cands.is_empty() {
-                            return Some(cands);
-                        }
-                    }
-                }
-                // 010-03 (plan 010 Shape A, rung 3): the local-binding
-                // pre-step — `x.<member>` / `x.<member>()` resolves via
-                // the binding's WRITTEN-DOWN type (a `let x: Type`
-                // annotation or a `let x = Type { … }` literal) recorded
-                // in an enclosing scope, through the same field / method
-                // tables as the self pre-step above. An empty result
-                // keeps today's bare-`<member>` behavior byte-for-byte
-                // (the extraction's path token never changed; never a
-                // guess — unannotated bindings are never inferred).
-                if lang == LanguageId::Rust
-                    && let Some((receiver, member_col)) =
-                        Self::rust_dotted_receiver(&line_text, self.point_col())
-                {
-                    let source = buf.rope.to_string();
-                    if let Some(byte) = point_byte_offset(&buf.rope, line, member_col) {
-                        let cands = Self::local_binding_candidates(
-                            &self.index,
-                            &rel,
-                            &source,
-                            byte,
-                            &receiver,
-                            ident,
-                        );
-                        if !cands.is_empty() {
-                            return Some(cands);
-                        }
-                    }
-                }
-                Self::xref_definition_candidates(&self.index, ident, path_token, &rel)
-            });
-        let defs = defs.unwrap_or_default();
+                Self::xref_symbol_at_point_candidates(
+                    &self.index,
+                    lang,
+                    &XrefPointContext {
+                        line_text: &line_text,
+                        rope: &buf.rope,
+                        line,
+                        col: self.point_col(),
+                    },
+                    &rel,
+                    ident,
+                    path_token,
+                )
+            })
+            .unwrap_or_default();
 
         let lookup_name: String;
         let defs: Vec<crate::nav::index::Location> = if !defs.is_empty() {
@@ -149,19 +128,22 @@ impl AppStore {
         } else {
             // (3) Enclosing-symbol fallback (unchanged: by line, not by the
             // point's column).
-            let outline = self.index.outline(&rel);
-            let Some(sym) = crate::nav::index::enclosing_symbol(outline, line) else {
-                // (4) Nothing the workspace knows about under/near the point:
-                // fall through to the tooling resolver when the point sits on
-                // a symbol (otherwise behave as before: no symbol under point).
-                match &at {
-                    Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
-                    None => self.minibuffer_message("no symbol under point"),
+            match self.xref_enclosing_symbol_fallback(&rel, line) {
+                Some((name, defs)) => {
+                    lookup_name = name;
+                    defs
                 }
-                return;
-            };
-            lookup_name = sym.name.clone();
-            self.index.definitions_of(&lookup_name)
+                None => {
+                    // (4) Nothing the workspace knows about under/near the point:
+                    // fall through to the tooling resolver when the point sits on
+                    // a symbol (otherwise behave as before: no symbol under point).
+                    match &at {
+                        Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
+                        None => self.minibuffer_message("no symbol under point"),
+                    }
+                    return;
+                }
+            }
         };
 
         if defs.is_empty() {
@@ -176,39 +158,136 @@ impl AppStore {
         }
 
         if defs.len() == 1 {
-            // Unique (same-file or cross-file): capture origin, navigate,
-            // record jump.
-            let origin = self.current_jump_entry();
-            let def = &defs[0];
-            self.open_path(&def.file);
-            // Move the point to the definition's line AND the name's
-            // column: `start_byte` is an absolute FILE byte offset
-            // (tree-sitter's name-node byte range), so land it via the
-            // byte→(line, char column) conversion — a line-only landing
-            // drops the name's column (a raw byte column is off-by-N on
-            // multibyte lines). The line stays `def.symbol.line` (the
-            // indexed line); `None` (out of bounds, e.g. a stale index
-            // after an external edit) keeps the old col-0 landing.
-            let def_col = self
-                .buffers
-                .current_buffer()
-                .and_then(|b| b.try_byte_to_line_col(def.symbol.start_byte))
-                .map(|(_, col)| col)
-                .unwrap_or(0);
-            self.set_point(def.symbol.line, def_col, def_col);
-            self.recenter_landing();
-            self.ensure_highlight();
-            self.record_jump(origin, "M-.");
-            self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
+            self.xref_jump_unique_definition(defs);
         } else {
-            // Ambiguous: open the Xref picker (same-file candidates first).
-            // The jump entry is recorded when the user selects a candidate
-            // (run_selected for Xref).
-            self.xref_crate_root = None;
-            self.xref_lookup_name = lookup_name;
-            let candidates: Vec<PickerCandidate> = defs
-                .iter()
-                .map(|d| PickerCandidate {
+            self.xref_open_ambiguous_picker(lookup_name, defs);
+        }
+    }
+
+    /// (M-., phase (1)) The definition candidates for the symbol AT THE
+    /// POINT: the 010-01 Rust self-receiver pre-step, then the 010-03
+    /// local-binding pre-step, then the name-keyed index lookup
+    /// (`xref_definition_candidates`). Pure over the index and the buffer
+    /// (no `&mut self`, so the caller's `buf` borrow never spans a
+    /// `&mut self` call — the 006-03 rule).
+    fn xref_symbol_at_point_candidates(
+        index: &SymbolIndex,
+        lang: LanguageId,
+        point: &XrefPointContext,
+        rel: &str,
+        ident: &str,
+        path_token: &str,
+    ) -> Option<Vec<crate::nav::index::Location>> {
+        // 010-01 (plan 010 Shape A, rung 1): the Rust self-receiver
+        // pre-step — `self.<member>` resolves via the LEXICALLY
+        // ENCLOSING impl's type (field → the struct's field line,
+        // method → the impl method's line), same-file first. An
+        // empty result degrades to today's bare-`<member>` index
+        // lookup below (byte-for-byte; never a guess).
+        if lang == LanguageId::Rust
+            && let Some(member) = path_token.strip_prefix("self.")
+            && !member.is_empty()
+        {
+            let source = point.rope.to_string();
+            if let Some(byte) = point_byte_offset(point.rope, point.line, point.col) {
+                let cands = Self::self_receiver_candidates(index, rel, &source, byte, member);
+                if !cands.is_empty() {
+                    return Some(cands);
+                }
+            }
+        }
+        // 010-03 (plan 010 Shape A, rung 3): the local-binding
+        // pre-step — `x.<member>` / `x.<member>()` resolves via
+        // the binding's WRITTEN-DOWN type (a `let x: Type`
+        // annotation or a `let x = Type { … }` literal) recorded
+        // in an enclosing scope, through the same field / method
+        // tables as the self pre-step above. An empty result
+        // keeps today's bare-`<member>` behavior byte-for-byte
+        // (the extraction's path token never changed; never a
+        // guess — unannotated bindings are never inferred).
+        if lang == LanguageId::Rust
+            && let Some((receiver, member_col)) =
+                Self::rust_dotted_receiver(point.line_text, point.col)
+        {
+            let source = point.rope.to_string();
+            if let Some(byte) = point_byte_offset(point.rope, point.line, member_col) {
+                let cands = Self::local_binding_candidates(
+                    index,
+                    rel,
+                    &source,
+                    byte,
+                    &receiver,
+                    ident,
+                );
+                if !cands.is_empty() {
+                    return Some(cands);
+                }
+            }
+        }
+        Self::xref_definition_candidates(index, ident, path_token, rel)
+    }
+
+    /// (M-., phase (3)) The enclosing-symbol fallback: the enclosing
+    /// symbol's definitions take over, and a workspace hit on THAT never
+    /// triggers the resolver (no resolver spam). `None` when the file has
+    /// no symbol at `line` — the caller takes the (4) tooling-resolver
+    /// seam.
+    fn xref_enclosing_symbol_fallback(
+        &self,
+        rel: &str,
+        line: usize,
+    ) -> Option<(String, Vec<crate::nav::index::Location>)> {
+        let outline = self.index.outline(rel);
+        let sym = crate::nav::index::enclosing_symbol(outline, line)?;
+        let lookup_name = sym.name.clone();
+        let defs = self.index.definitions_of(&lookup_name);
+        Some((lookup_name, defs))
+    }
+
+    /// (M-., dispatch) The single-definition jump (the
+    /// `defs.len() == 1` case).
+    fn xref_jump_unique_definition(&mut self, defs: Vec<crate::nav::index::Location>) {
+        // Unique (same-file or cross-file): capture origin, navigate,
+        // record jump.
+        let origin = self.current_jump_entry();
+        let def = &defs[0];
+        self.open_path(&def.file);
+        // Move the point to the definition's line AND the name's
+        // column: `start_byte` is an absolute FILE byte offset
+        // (tree-sitter's name-node byte range), so land it via the
+        // byte→(line, char column) conversion — a line-only landing
+        // drops the name's column (a raw byte column is off-by-N on
+        // multibyte lines). The line stays `def.symbol.line` (the
+        // indexed line); `None` (out of bounds, e.g. a stale index
+        // after an external edit) keeps the old col-0 landing.
+        let def_col = self
+            .buffers
+            .current_buffer()
+            .and_then(|b| b.try_byte_to_line_col(def.symbol.start_byte))
+            .map(|(_, col)| col)
+            .unwrap_or(0);
+        self.set_point(def.symbol.line, def_col, def_col);
+        self.recenter_landing();
+        self.ensure_highlight();
+        self.record_jump(origin, "M-.");
+        self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
+    }
+
+    /// (M-., dispatch) The ambiguous-definition picker (the
+    /// `defs.len() > 1` case).
+    fn xref_open_ambiguous_picker(
+        &mut self,
+        lookup_name: String,
+        defs: Vec<crate::nav::index::Location>,
+    ) {
+        // Ambiguous: open the Xref picker (same-file candidates first).
+        // The jump entry is recorded when the user selects a candidate
+        // (run_selected for Xref).
+        self.xref_crate_root = None;
+        self.xref_lookup_name = lookup_name;
+        let candidates: Vec<PickerCandidate> = defs
+            .iter()
+            .map(|d| PickerCandidate {
                     name: format!("{}:{}", d.file, d.symbol.line + 1),
                     display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
                     label: d.symbol.name.clone(),
@@ -216,9 +295,8 @@ impl AppStore {
                     docs: String::new(),
                     category: "xref".to_string(),
                 })
-                .collect();
-            self.open_picker(PickerKind::Xref, "Definition: ", candidates);
-        }
+            .collect();
+        self.open_picker(PickerKind::Xref, "Definition: ", candidates);
     }
 
     /// (010-04, plan 010 Shape A rung 4) find-implementations — the
