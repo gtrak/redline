@@ -381,3 +381,31 @@ two rules apply:
    and the downstream assertions (the landing, the screen contents) must survive the new step.
    The right shape is *stronger*: assert the new step **and** that it still reaches the old
    outcome. If a drive cannot be updated honestly, report the failure rather than loosen it.
+
+## Two green lanes can still break each other — verify on MAIN, not just on the branch
+
+A branch gate runs against **that branch's base**. When two lanes land in sequence and each
+base lacks the other's change, **neither gate can see the interaction** — and `main` can go red
+with both lanes reporting PASS.
+
+Observed: the `ignore-predicate` lane added an e2e test asserting `M-.` resolves *silently*
+into a landed dependency. The `jump-ambiguity` lane — branched before it — changed `M-.` to
+open a picker instead. Each passed its own **full battery**, because each base had only its own
+half of the pair. The combination failed on `main`: 756 passed, 1 failed.
+
+Mitigations, strongest first:
+
+1. **Verify on `main` immediately after landing** — at minimum `cargo test --bin redline`.
+   This is not ceremony; it is the only step that sees the combination, and it is cheap. Do it
+   **before releasing the slot**, so a repair can reuse the worktree.
+2. When two in-flight lanes touch **related behaviour**, either **sequence** them (land one,
+   then rebase the other) or tell the second lane that its base predates the first and to
+   account for the change. A lane whose base lacks a landed sibling will happily assert the
+   behaviour that sibling removed.
+3. Prefer giving a lane a base that **already includes** the landed sibling when the two are
+   behaviourally adjacent.
+
+**Repair pattern** when `main` goes red from an interaction: the **behaviour-changing** lane
+owns the test update (a test that pins the removed behaviour must move — test-authority
+policy). Fix it on `main` directly, then **steer any in-flight lane that shares the file** so it
+does not re-touch the same region and conflict at landing.
