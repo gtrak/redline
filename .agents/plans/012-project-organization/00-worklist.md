@@ -500,6 +500,29 @@ is called `git`") silently set the coverage ceiling. Pattern-free mechanical
 passes (this one) are the cross-check; LLM scans should be used for the
 judgment calls (e.g. T2's keep-or-merge per pair), not as the inventory.
 
+## Follow-ups from landed lanes (outside plan 012)
+
+- **picker-density — LANDED** (`6d01393`, lane `feaeaf2`+`a4ae0f9`, gate-reviewed
+twice with execution). Delivered: name-first rows where the **name owns the
+space** and the detail truncates tail-keeping (cell-aware `truncate_left`);
+canvas `min(candidates+2, viewport-1)`; no preview split when the preview is
+empty; contiguous selected-row bar (gap-only paint — iocraft's `invert` is SGR 7,
+so painting text cells too would be white-on-white). 6 new tests; 835/0/2; clippy
+clean; `gate.sh full` OK 15/15; zero deleted assertions.
+- **picker-density follow-up (new, needs a lane that may edit `flow_tests.rs`)**:
+  convert the remaining single-string pickers — **imenu, impls, palette,
+  find-file, recents, buffers, project, branch, stash** — to name-first +
+  right-aligned detail, and **re-pin** `src/app/flow_tests.rs:3531` (exact
+  `display == "  new  [fn]"`) and `:3536` (`frame.contains("  new  [fn]")`).
+  Both pins are **implementation-level** per the test-authority policy: they yield
+  to the requirement and get updated, and the requirement-level content they
+  protect (imenu shows kind tags; impl methods grouped/indented under the struct)
+  must be re-expressed in the new shape rather than dropped.
+- **Optional (gate observation, acceptable to omit)**: an ANSI/SGR-level assertion
+  for the selected-row bar, which would pin the cross-crate iocraft interaction
+  rather than the per-cell model. Justified as optional: iocraft is lock-pinned to
+  0.9.1 and its own suite pins its SGR emission.
+
 ## Start here
 
 `nav/index.rs:425–650` (M1+M2, one contiguous verified batch delete), then
