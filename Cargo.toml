@@ -29,7 +29,7 @@ ropey = "1.6.1"
 # The 19 grammar/highlight pins — with their ABI-pinning verdicts and the
 # "do NOT bump further" rules — moved to crates/redline-syntax/Cargo.toml
 # (plan 014 stage 1, src/syntax/ became the redline-syntax crate). The
-# runtime itself stays a direct bin dependency: 
+# runtime itself stays a direct bin dependency:
 # src/app/store/navigation/imports.rs and src/app/store/notes.rs parse with
 # `tree_sitter::` directly. The same exact pin as redline-syntax keeps the
 # one-runtime-in-the-lock rule (001/007) intact; the full compatibility

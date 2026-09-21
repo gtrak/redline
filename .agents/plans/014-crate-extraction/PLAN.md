@@ -110,10 +110,14 @@ view-model ownership question is answered first.
 - `cargo build --workspace`, `cargo test --workspace`, and
   `cargo clippy --workspace --all-targets -- -D warnings` stay green at every stage.
 - **Zero behaviour change** — each stage is a move plus `pub` surface; no logic edits.
-- The test count is unchanged at each stage (the bin's 854 + resolver 123 +
-  integration; a new crate's tests are the *same* tests, relocated, so the
-  workspace total must not drop).
-- `cargo tree` shows one `tree-sitter` runtime in the graph (the ABI rule).
+- The test count is unchanged at each stage — **and stage 1 measured it**: base 867
+  (bin) → 713 (bin) + 154 (`redline-syntax`) = 867, with a name-set diff of zero
+  vanished / zero new / zero remapped. Resolver 123 + integration 7,2,3,1,1 unchanged.
+  (This bullet previously said "the bin's 854" — stale before the extraction landed.)
+- `cargo tree` shows one `tree-sitter` runtime in the graph (the ABI rule) — **verified
+  after stage 1**: a single v0.25.10, with the 17 grammars hanging off `redline-syntax`
+  and the *runtime* a direct dep of **both** crates (`imports.rs`/`notes.rs` parse with
+  `tree_sitter::` directly — which the original leaf analysis missed).
 - `docs/architecture.md` reflects the new crate map.
 - A measurable compile win for an app-only edit (report `cargo build` wall time
   before/after for a touched `src/app` file — reasoning plus a number, not theater).
