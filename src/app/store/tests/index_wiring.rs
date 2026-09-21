@@ -730,11 +730,18 @@ use super::*;
         assert_eq!(files3, vec!["mod.py"], ".git must not be indexed");
     }
 
-    /// F5 end-to-end: a landed `node_modules/<pkg>` dependency inside a
-    /// git repo (the project `.gitignore`s `node_modules/`) indexes
-    /// through the full path and resolves M-. in-crate via the
-    /// external-buffer xref. Pre-F5 the walk saw zero files, so the
-    /// index was empty and M-. fell through.
+    /// F5 end-to-end regression guard: a landed `node_modules/<pkg>`
+    /// dependency inside a git repo (the project `.gitignore`s
+    /// `node_modules/`) indexes through the full path and resolves M-.
+    /// in-crate via the external-buffer xref.
+    ///
+    /// **NOT a discriminating test for F5**: a pattern matching an ancestor
+    /// ABOVE the walk root does not apply, so the pre-F5 walker already saw
+    /// these files (measured: `["index.js"]`, not zero). The pre-F5 failure
+    /// modes are hidden pruning, `.git/info/exclude` / global excludes, and
+    /// BELOW-root `.gitignore` patterns — covered by the two tests that DO
+    /// fail pre-fix (`crate_source_files_walks_gitignored_node_modules_dependency`,
+    /// `crate_source_files_walks_hidden_venv_dependency`).
     #[test]
     fn git_repo_node_modules_dependency_resolves_in_crate_via_m_dot() {
         let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
@@ -770,6 +777,16 @@ use super::*;
         s.open_external_path(&abs).unwrap();
         s.set_point(1, 4, 4); // line 1 = "    helper();" — `helper` at col 4.
         s.xref_find_definitions();
+        // jump-ambiguity: a unique definition now opens the picker rather
+        // than jumping silently — the best candidate is preselected, so
+        // accepting it lands exactly where the silent jump used to.
+        assert!(
+            s.picker_open(),
+            "the dependency's resolve must open the picker, got: {}",
+            s.message
+        );
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        s.run_selected();
         assert!(
             s.message.contains("jumped to src/helper.js:1"),
             "in-crate M-. must resolve in the landed dependency, got: {}",
