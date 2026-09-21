@@ -11,6 +11,7 @@
 
 mod app;
 mod git;
+mod index_profile;
 mod model;
 mod nav;
 mod search;
@@ -24,32 +25,95 @@ use app::config;
 use app::store::AppStore;
 use iocraft::prelude::*;
 use std::io::Write;
+use std::path::PathBuf;
 use ui::root::Root;
 
-/// The quit-dump format (plan 005 issue 03). The default is the
-/// agent-consumable block; `--notes=plain` switches to the grep/pipe
-/// `path:line: text` shape.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NotesFormat {
-    Block,
-    Plain,
+/// CLI args. `--notes=plain` switches the quit-dump shape (plan 005
+/// issue 03); `--index-profile[=PATH]` runs the headless index profiler
+/// (`src/index_profile.rs`) and exits before any terminal/TUI setup.
+/// Unknown args are a HARD ERROR (clear feedback beats silently
+/// ignoring them): usage on stderr, exit 2 — before the TUI starts.
+#[derive(Debug, PartialEq, Eq)]
+struct CliArgs {
+    /// `--notes=plain`: the quit-dump prints in the grep/pipe shape.
+    notes_plain: bool,
+    /// `--index-profile[=PATH]`: run the headless index profiler (None =
+    /// the normal TUI).
+    index_profile: Option<PathBuf>,
+    /// `--profile-top=N` (default 25): top-N rows in the report.
+    profile_top: usize,
+    /// `--profile-out=FILE`: write the per-file CSV.
+    profile_out: Option<PathBuf>,
+    /// `--profile-repeat=N` (default 1): repeat the run (warm page cache).
+    profile_repeat: usize,
+    /// `--profile-real-paths`: print real paths (default = anonymized).
+    profile_real_paths: bool,
 }
 
-/// CLI args (plan 005 issue 03). The only argument is `--notes=plain`.
-/// Unknown args are a HARD ERROR (clear feedback beats silently dumping in
-/// the wrong shape): usage on stderr, exit 2 — before the TUI starts.
-fn parse_notes_format() -> NotesFormat {
-    let mut format = NotesFormat::Block;
-    for arg in std::env::args().skip(1) {
+impl CliArgs {
+    const DEFAULT_TOP: usize = 25;
+}
+
+fn usage() {
+    eprintln!("usage: redline [--notes=plain]");
+    eprintln!("       redline --index-profile[=PATH] [--profile-top=N --profile-out=FILE --profile-repeat=N --profile-real-paths]");
+}
+
+/// Parse `args` (without the program name) into [`CliArgs`]. Errors are
+/// the user-facing message (the caller prints usage + exits 2).
+fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> {
+    let mut cli = CliArgs {
+        notes_plain: false,
+        index_profile: None,
+        profile_top: CliArgs::DEFAULT_TOP,
+        profile_out: None,
+        profile_repeat: 1,
+        profile_real_paths: false,
+    };
+    // `--profile-top` / `--profile-repeat` validate to a positive int.
+    let positive = |rest: &str, flag: &str| -> Result<usize, String> {
+        rest.parse::<usize>()
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or_else(|| format!("{flag} expects a positive integer, got `{rest}`"))
+    };
+    for arg in args {
         if arg == "--notes=plain" {
-            format = NotesFormat::Plain;
+            cli.notes_plain = true;
+        } else if arg == "--index-profile" {
+            cli.index_profile = Some(PathBuf::from("."));
+        } else if let Some(path) = arg.strip_prefix("--index-profile=") {
+            if path.is_empty() {
+                return Err("--index-profile= requires a path".into());
+            }
+            cli.index_profile = Some(PathBuf::from(path));
+        } else if let Some(n) = arg.strip_prefix("--profile-top=") {
+            cli.profile_top = positive(n, "--profile-top")?;
+        } else if let Some(path) = arg.strip_prefix("--profile-out=") {
+            if path.is_empty() {
+                return Err("--profile-out= requires a path".into());
+            }
+            cli.profile_out = Some(PathBuf::from(path));
+        } else if let Some(n) = arg.strip_prefix("--profile-repeat=") {
+            cli.profile_repeat = positive(n, "--profile-repeat")?;
+        } else if arg == "--profile-real-paths" {
+            cli.profile_real_paths = true;
         } else {
-            eprintln!("redline: unknown argument: {arg}");
-            eprintln!("usage: redline [--notes=plain]");
+            return Err(format!("unknown argument: {arg}"));
+        }
+    }
+    Ok(cli)
+}
+
+fn parse_args() -> CliArgs {
+    match parse_cli(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(msg) => {
+            eprintln!("redline: {msg}");
+            usage();
             std::process::exit(2);
         }
     }
-    format
 }
 
 #[cfg(unix)]
@@ -274,7 +338,21 @@ fn panic_message(info: &std::panic::PanicHookInfo) -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_panic_hook();
-    let notes_format = parse_notes_format();
+    let cli = parse_args();
+    // Headless index profiler (the issue-index-profiler task): run BEFORE
+    // any terminal/TUI setup (before the IsTerminal check and everything
+    // after it) and exit. Works with no tty. When the flag is absent this
+    // is a single branch miss.
+    if let Some(root) = cli.index_profile {
+        index_profile::run(&index_profile::Options {
+            root,
+            top: cli.profile_top,
+            out: cli.profile_out,
+            repeat: cli.profile_repeat,
+            real_paths: cli.profile_real_paths,
+        })?;
+        return Ok(());
+    }
     let log_path = init_tracing();
     tracing::info!(log = %log_path.display(), "redline starting");
 
@@ -354,9 +432,92 @@ async fn main() -> anyhow::Result<()> {
         let dump = app::store::format_notes_dump(
             &items,
             &root,
-            notes_format == NotesFormat::Plain,
+            cli.notes_plain,
         );
         emit_dump(&dump, &dump_sink);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    //! Arg parsing (plan 005 issue 03 extended by the index-profiler
+    //! task): `--notes=plain` still parses, the headless profiler flags
+    //! parse, and GENUINELY unknown args remain a hard error.
+    use super::*;
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_args_default_to_the_tui() {
+        let cli = parse_cli(strs(&[])).unwrap();
+        assert!(!cli.notes_plain);
+        assert!(cli.index_profile.is_none());
+        assert_eq!(cli.profile_top, CliArgs::DEFAULT_TOP);
+        assert_eq!(cli.profile_repeat, 1);
+        assert!(cli.profile_out.is_none());
+        assert!(!cli.profile_real_paths);
+    }
+
+    #[test]
+    fn notes_plain_still_accepted() {
+        let cli = parse_cli(strs(&["--notes=plain"])).unwrap();
+        assert!(cli.notes_plain);
+        assert!(cli.index_profile.is_none());
+    }
+
+    #[test]
+    fn index_profile_flag_and_path() {
+        assert_eq!(
+            parse_cli(strs(&["--index-profile"])).unwrap().index_profile,
+            Some(PathBuf::from("."))
+        );
+        assert_eq!(
+            parse_cli(strs(&["--index-profile=./big-project"]))
+                .unwrap()
+                .index_profile,
+            Some(PathBuf::from("./big-project"))
+        );
+        assert!(parse_cli(strs(&["--index-profile="])).is_err());
+    }
+
+    #[test]
+    fn profile_options_parse() {
+        let cli = parse_cli(strs(&[
+            "--index-profile",
+            "--profile-top=10",
+            "--profile-out=/tmp/index.csv",
+            "--profile-repeat=3",
+            "--profile-real-paths",
+        ]))
+        .unwrap();
+        assert_eq!(cli.profile_top, 10);
+        assert_eq!(cli.profile_repeat, 3);
+        assert_eq!(
+            cli.profile_out.as_deref(),
+            Some(std::path::Path::new("/tmp/index.csv"))
+        );
+        assert!(cli.profile_real_paths);
+    }
+
+    #[test]
+    fn profile_options_validate_values() {
+        assert!(parse_cli(strs(&["--profile-top=0"])).is_err());
+        assert!(parse_cli(strs(&["--profile-top=abc"])).is_err());
+        assert!(parse_cli(strs(&["--profile-repeat=0"])).is_err());
+        assert!(parse_cli(strs(&["--profile-out="])).is_err());
+        // Valid: top=1 is allowed (just one row).
+        assert_eq!(parse_cli(strs(&["--profile-top=1"])).unwrap().profile_top, 1);
+    }
+
+    #[test]
+    fn genuinely_unknown_args_still_hard_error() {
+        let err = parse_cli(strs(&["--bogus"])).unwrap_err();
+        assert!(err.contains("--bogus"), "error names the arg: {err}");
+        let err = parse_cli(strs(&["--notes=plain", "--nope"]))
+            .unwrap_err();
+        assert!(err.contains("--nope"), "error names the arg: {err}");
+    }
 }

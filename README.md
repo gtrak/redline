@@ -181,6 +181,21 @@ index = `start_indexing` to the final index event (includes the store's own
 walk, ~1–2 ms at 500 files); search first-hit = `start_project_search` to
 the first hit event.)
 
+Diagnostics: to profile indexing on YOUR project (headless, no TUI/tty
+needed, exits after printing the report): `redline --index-profile[=PATH]`
+with `--profile-top=N`, `--profile-out=FILE` (per-file CSV: `path,lang,
+bytes,read_ms,extract_ms,symbols`), `--profile-repeat=N` (a warm-cache
+run), and `--profile-real-paths`. It reports the walk/parse/assembly split
+of the production index build, the parallelism ratio (per-file CPU ÷ wall
+vs core count), per-file read/extract detail with top-N slowest and a
+p50/p90/p99 distribution, per-language and zero-symbol breakdowns, peak
+RSS, and `total − walk` as what a warm persisted index would still cost
+(on a debug build it warns loudly). Paths in the report and the CSV are
+anonymized by default (opaque `t<top>/d<depth>/f<id>.<ext>` pseudonyms);
+do not paste a `--profile-real-paths` report. Ids are stable across
+`--profile-repeat` runs on the same tree. Note: writing `--profile-out`
+inside the profiled root adds the CSV itself to the walked tree (a warm
+repeat run sees it), and the reported ms figures are load-sensitive.
 ## Architecture
 
 - `docs/language-coverage.md` — the language × capability grid (all 14 registry languages: what works live / unit-only / bails / is not implemented)

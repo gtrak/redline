@@ -24,7 +24,7 @@ mod builder;
 mod progress;
 mod symbol_index;
 
-pub use builder::{build_index, enclosing_symbol, refresh_in_place};
+pub use builder::{assemble_index, build_index, enclosing_symbol, refresh_in_place};
 pub use progress::{IndexBus, IndexEvent, IndexProgress};
 pub use symbol_index::{Location, SymbolIndex, TraitImplLocation};
 // Re-exported so every existing `nav::index::X` path keeps working, even

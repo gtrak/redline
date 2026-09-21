@@ -26,15 +26,21 @@ pub fn extract_file(root: &Path, rel: &str) -> (Vec<Symbol>, RustTables) {
     extract_all(lang, &text)
 }
 
-/// Build a full index for `root` over the (project-relative) `files` list
-/// using a rayon-parallel parse. **Blocking** — call from a background
-/// thread (the app wraps this in `spawn_blocking`). `progress` (if given) is
-/// advanced to the file count as each file finishes.
-pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgress>) -> SymbolIndex {
+/// The rayon-parallel parse phase of [`build_index`]: read + extract
+/// every file in parallel, returning the per-file results. Split out of
+/// `build_index` (behavior unchanged) so the headless index profiler
+/// (`src/index_profile.rs`) can time this phase separately from the
+/// serial assembly loop in [`assemble_index`]; `build_index` is the two
+/// pieces composed.
+pub fn extract_files(
+    root: &Path,
+    files: &[String],
+    progress: Option<&IndexProgress>,
+) -> Vec<(String, Vec<Symbol>, RustTables)> {
     // Rayon fan-in: parse every file in parallel. Each worker owns its own
     // thread-local parser (see `queries::extract_all`); `progress` is
     // shared and cheap to bump from any worker.
-    let entries: Vec<(String, Vec<Symbol>, RustTables)> = files
+    files
         .par_iter()
         .map(|rel| {
             let (syms, tables) = extract_file(root, rel);
@@ -43,8 +49,13 @@ pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgres
             }
             (rel.clone(), syms, tables)
         })
-        .collect();
+        .collect()
+}
 
+/// The serial assembly phase of [`build_index`]: fold the per-file
+/// results into the `SymbolIndex` (the serial `for` loop — a real phase
+/// the profiler times separately).
+pub fn assemble_index(entries: Vec<(String, Vec<Symbol>, RustTables)>) -> SymbolIndex {
     let mut index = SymbolIndex::new();
     for (rel, syms, tables) in entries {
         if !syms.is_empty() {
@@ -54,6 +65,16 @@ pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgres
         index.set_file_tables(&rel, tables);
     }
     index
+}
+
+/// Build a full index for `root` over the (project-relative) `files` list
+/// using a rayon-parallel parse. **Blocking** — call from a background
+/// thread (the app wraps this in `spawn_blocking`). `progress` (if given) is
+/// advanced to the file count as each file finishes.
+pub fn build_index(root: &Path, files: &[String], progress: Option<&IndexProgress>) -> SymbolIndex {
+    // The two production phases composed (the profiler drives the pieces
+    // directly so it can time them separately).
+    assemble_index(extract_files(root, files, progress))
 }
 
 /// Re-parse ONLY the `changed` (absolute) files and update `self` in place;

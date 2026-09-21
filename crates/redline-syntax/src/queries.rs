@@ -21,6 +21,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
@@ -468,13 +469,49 @@ impl ThreadLocal {
     }
 }
 
+/// The stage timings of one [`extract_all_timed`] call: the tree-sitter
+/// PARSE versus the QUERY execution on the parsed tree (the split the
+/// headless index profiler reports). `query_compile` is the one-time
+/// `Query::new` cost paid by the first file of each (language, rayon
+/// thread); it is cached afterwards and is NOT per-file steady state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExtractTimings {
+    /// `Parser::parse` time.
+    pub parse: Duration,
+    /// All query execution on the parsed tree (definition query + the
+    /// Rust tables query when present).
+    pub queries: Duration,
+    /// One-time `Query::new` compilation (see the struct doc).
+    pub query_compile: Duration,
+}
+
 /// Extract the definition symbols AND, for Rust, the 010-01 per-file
 /// tables (struct fields + impl methods) from `source`. One parse serves
 /// both (the table query runs on the same tree — zero extra parse cost).
 /// Plain text and an unparseable source yield the empty result. Runs on
 /// the calling thread (a rayon worker during indexing); the parser and
 /// query caches are thread-local so they are cheap to reuse.
+///
+/// The production hot path: `timings` is `None`, and the behavior is
+/// identical to before the profiler existed. The cost on that path is
+/// exactly one predictable branch set (the `if let Some(...)` timing
+/// blocks — the `Instant::now()` calls inside are skipped via
+/// `bool::then`) plus one hash lookup per file (`contains_key` for the
+/// query-cache compile check at the query stage). The timed sibling is
+/// [`extract_all_timed`].
 pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) {
+    extract_all_timed(lang, source, None)
+}
+
+/// The additive timed sibling of [`extract_all`]: identical behavior, but
+/// when `timings` is `Some` the parse stage and the query-execution stage
+/// are accumulated into it (the headless index profiler uses it; nothing
+/// else in production does).
+pub fn extract_all_timed(
+    lang: LanguageId,
+    source: &str,
+    mut timings: Option<&mut ExtractTimings>,
+) -> (Vec<Symbol>, RustTables) {
     let query_str = match query_for(lang) {
         Some(q) => q,
         None => return (Vec::new(), RustTables::default()),
@@ -494,18 +531,34 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         if tl.parser.set_language(&language).is_err() {
             return (Vec::new(), RustTables::default());
         }
+        // `None` when `timings` is `None` (the production call) — the
+        // `if let Some(...)` blocks below are then never entered.
+        let p0 = timings.is_some().then(Instant::now);
         let tree = match tl.parser.parse(source, None) {
             Some(t) => t,
             None => return (Vec::new(), RustTables::default()),
         };
+        if let Some(p0) = p0
+            && let Some(t) = timings.as_mut()
+        {
+            t.parse += p0.elapsed();
+        }
 
         // Build (and cache) the query for this language. `Query` is not
         // `Clone`, so it is stored by value and borrowed. Construct inside
         // the `or_insert_with` closure so the cache actually avoids
         // re-construction on subsequent calls.
+        let compiled = !tl.queries.contains_key(&lang);
+        let c0 = timings.is_some().then(Instant::now);
         let cached = tl.queries
             .entry(lang)
             .or_insert_with(|| Query::new(&language, query_str).ok());
+        if let Some(c0) = c0
+            && compiled
+            && let Some(t) = timings.as_mut()
+        {
+            t.query_compile += c0.elapsed();
+        }
         let query = match cached.as_ref() {
             Some(q) => q,
             None => return (Vec::new(), RustTables::default()),
@@ -529,6 +582,7 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         // `captures()` would yield one item per capture and double the result.
         // Both are `StreamingIterator`s; `QueryMatch` is `!Send`, so extract
         // owned fields per match here.
+        let q0 = timings.is_some().then(Instant::now);
         let mut matches = cursor.matches(query, tree.root_node(), bytes);
         while let Some(m) = matches.next() {
             let name_node = name_idx
@@ -595,18 +649,38 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         }
         // Deterministic order: by line, then byte, then name.
         out.sort_by(|a, b| (a.line, a.start_byte, &a.name).cmp(&(b.line, b.start_byte, &b.name)));
+        if let Some(q0) = q0
+            && let Some(t) = timings.as_mut()
+        {
+            t.queries += q0.elapsed();
+        }
 
         // 010-01: the Rust tables — the second query on the SAME tree (the
         // row's `rust_tables_query` column; the non-Rust rows contribute
         // no tables).
         let tables = if let Some(tables_query) = spec.rust_tables_query {
-            if tl.rust_tables.is_none() {
+            let tc0 = timings.is_some().then(Instant::now);
+            let compiled_now = tl.rust_tables.is_none();
+            if compiled_now {
                 tl.rust_tables = Query::new(&language, tables_query).ok();
             }
-            match tl.rust_tables.as_ref() {
+            if let Some(tc0) = tc0
+                && compiled_now
+                && let Some(t) = timings.as_mut()
+            {
+                t.query_compile += tc0.elapsed();
+            }
+            let t0 = timings.is_some().then(Instant::now);
+            let tables = match tl.rust_tables.as_ref() {
                 Some(q) => extract_rust_tables(q, tree.root_node(), bytes),
                 None => RustTables::default(),
+            };
+            if let Some(t0) = t0
+                && let Some(t) = timings.as_mut()
+            {
+                t.queries += t0.elapsed();
             }
+            tables
         } else {
             RustTables::default()
         };
