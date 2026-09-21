@@ -235,7 +235,11 @@ justified**. Recording this prevents a future lane from "improving" them.
 - **F-8**: the vendored highlight queries are pinned by "sha256 at copy time"
   **only in comments** — nothing verifies `third_party/*/highlights.scm` still
   matches, so a local edit to a vendored file is undetectable. Add a checksum test
-  (it should move with the consts into `language.rs`).
+  (it should move with the consts into `language.rs`). **PINNED** (lane
+  `invariant-pins`, `c0421c2`). The test shells out to `sha256sum`; the gate judged
+  that acceptable here (Linux gate box, no hash crate in the dep set, a hand-rolled
+  sha256 would be worse), with `sha2` as a dev-dependency the alternative if
+  cross-platform dev is ever anticipated. **Accepted as-is.**
 - Round-1 corrections: the fn is `code_to_app_code` (not `to_app_key`); `node.rs`
   has **16** kind-predicates (not 17) and **14** scope walkers (not 16); Scheme and
   Clojure have no scope walkers at all (flat grammars — a silent default today).
