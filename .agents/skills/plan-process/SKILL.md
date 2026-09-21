@@ -194,6 +194,12 @@ where the missing 20 commands lived. The fix is procedural, not diligence:
    re-derivation *first*, before the lane acts on anything.
 4. Treat a spec's counts as claims even when the spec's *map* (which symbol is
    where) is exact — a correct map with wrong totals is the observed failure mode.
+5. **A baseline copied into a spec goes stale the moment another lane lands.** A spec
+   written before lane X landed carries X's *pre*-X test counts; the next lane then
+   reports a "delta" that is really the spec being out of date (observed: A2 added one
+   test, so the A1 spec's "854" was already 855). Either quote the baseline as
+   "current at spec time" and tell the lane to re-read it, or leave the number out and
+   require the lane to state the baseline it measured.
 
 ### A pin must read the same source of truth as the code it guards
 
