@@ -65,9 +65,16 @@ Two facts decide the whole plan:
 ## 3. What a crate boundary actually buys (and costs)
 
 **Buys**
-- **Incremental compile isolation.** The app is 30,310 lines and is where all work
-  happens. Today an app-only edit recompiles the syntax module and relinks
-  everything. With `redline-syntax` extracted, app-only edits do not recompile it.
+- **Incremental compile isolation — MEASURED, and it is structural, not wall-clock.**
+  Stage 1 (`518bd94`) measured it: an app-touch rebuild now shows `Compiling redline`
+  only, with `redline-syntax` fingerprinted and skipped — the isolation is real. But
+  the **wall-clock win is nil on this machine**: local clean rebuild 4.90s → 4.62s,
+  and touching `src/app/store/mod.rs` 1.02s → 0.99s. The 51k-line bin compiles in
+  ~1s here, so 6.6k lines (13%) do not move the needle. **The honest case for the
+  extraction is therefore the other three bullets** (enforced layering, a home for the
+  ABI pins, a focused test loop) — plus isolation that would matter on a slower
+  machine or in CI, not a speedup you can feel locally. Do not sell stage 2/3 on
+  compile time without re-measuring on the target machine.
 - **Parallel codegen** — cargo builds independent crates concurrently.
 - **Enforced layering.** A crate cannot reach into another's internals; the
   "zero iocraft/tokio" claim becomes a compile error, not a comment.
