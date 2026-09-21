@@ -635,6 +635,24 @@ Suggested split: `navigation/{mod (jump history), resolver, imports, imenu}.rs`,
 `store/tests/navigation.rs` (3,074) split should follow the same seams, so it may be a
 separate stage.
 
+## The next tier (post-012 agenda, measured)
+
+After the 18 landed lanes the tree is clean (one `TODO`/`FIXME` in the whole
+repo), so what remains is organization, not rot. Written up as:
+
+| Doc | Scope |
+|---|---|
+| `.agents/plans/014-crate-extraction/PLAN.md` | **crate extraction** — measured from the import graph: `syntax` is a TRUE LEAF (its row is empty) and `git` is a production leaf whose only inbound edge is TEST-ONLY (`git/repo/tests.rs:8`), so both extract cleanly; `model` is contingent (it reads git types in production via `sections.rs`); **`ui` must NOT be extracted** (it depends on `app::store` — the edge is inverted). |
+| `.agents/tasks/issue-git-test-harness.md` | the **second git-harness cluster** the store dedup couldn't see: 4 × `git()` + 3 × `init_repo()` + 2 × `git_cli()` in `git/{blame,log,refs,repo/tests}.rs` and `ui/{magit_status,rows_view}.rs`, all `#[cfg(test)]`. Nine copies of the hermetic env block = nine chances to forget it. |
+| `.agents/tasks/issue-hygiene-sweep.md` | 4 dead `pub` constructors · the 46 `#[allow(dead_code)]` audit · stale refs (`queries.rs:8`, 2 insta `.snap` sources, `point_byte_offset`) · the `model::file()` twins. |
+
+Not yet specced (Tier 1, evidence already gathered): the **guardrails** —
+8 `unsafe` blocks with purpose comments but no per-block `// SAFETY:`, no
+`[lints]` table and no crate-level lint attributes, and **no CI or hook** at all
+(`gate.sh` runs clippy `-D warnings`, but nothing forces it to run). A pre-push
+hook for `gate.sh fast` (~30 s) plus `undocumented_unsafe_blocks` is the cheap
+version.
+
 ## Known follow-ups from gate findings (low priority)
 
 - **PTY flake, unattributed** (descriptor-table gate): the first `gate.sh full` run on a
