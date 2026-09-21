@@ -89,6 +89,12 @@ helpers (e.g. `truncate` exists in more than one ui module); stale comments
 ## Success criteria
 
 - No `src/` file over ~1,500 lines; `store.rs` concerns split as planned.
+  **PARTIALLY MET (audited after all 17 lanes landed)**: `store.rs`'s concerns ARE split
+  (403 methods into 13 concern files + an 18-method core), but six `src/` files still
+  exceed 1,500 — three are test files (cohesive), and the production misses are
+  `store/mod.rs` 2,445 (cohesive core), `syntax/queries.rs` 1,653 (cohesive), and
+  **`store/navigation.rs` 2,394, which is a grab-bag and is staged as A7** (see
+  `00-worklist.md` § A7).
 - **Zero behavior change**: the full workspace suite + PTY gate stay green
   at every stage (829+ tests, 12/12 pooled, `gate.sh full` OK) with no test
   assertion weakened — moves are `git mv`-shaped, not rewrites.

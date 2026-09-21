@@ -592,8 +592,44 @@ remainder:
 | clearing swap (`swapoff -a && swapon -a`) to stop load-induced flakes | ops | **open — user decision** |
 | plan 012 archival | mechanical | ready on request |
 | `Snapshot::from_store` if the tail lane skips it | design (small) | optional |
+| **A7 — split `store/navigation.rs`** (2,394 lines, ONE impl, ~70 methods) | structural (pure move) | **NEW — the plan's own criterion is unmet, see below** |
 | re-land input coalescing (`git revert 0ddaf46`) | UX (user asked to park it) | parked, recipe in the commit |
 | Shape B (rust-analyzer as a library) | architecture | only if written-down-types ever bites |
+
+## A7 — the criterion the plan set is NOT met (found by a post-landing audit)
+
+`PLAN.md` § Success criteria says: **"No `src/` file over ~1,500 lines"**. Measured after
+all 17 lanes landed, six `src/` files still exceed it — and the earlier claim that "every
+oversized file is decomposed, the rest are cohesive" was **too generous**. The audit:
+
+| File | Lines | Verdict |
+|---|---|---|
+| `src/app/flow_tests.rs` | 3,709 | test file, cohesive (long key-sequence flows) — twins deliberately kept |
+| `src/app/store/tests/navigation.rs` | 3,074 | test file, cohesive but further splittable |
+| `src/app/store/mod.rs` | 2,445 | struct + 18 core methods (the update/dispatch core) — cohesive, over the bar |
+| **`src/app/store/navigation.rs`** | **2,394** | **GRAB-BAG — three unrelated concerns under a vague label** |
+| `src/syntax/queries.rs` | 1,653 | cohesive (symbol extraction) — over the bar |
+| `src/app/store/tests/notes.rs` | 1,550 | test file, cohesive |
+
+`navigation.rs` is the real finding. It is one `impl AppStore` containing three concerns
+whose line ranges are already **contiguous**, so it splits by range exactly like the
+landed lanes (pure move, same multiset-partition proof):
+
+- **jump history** — `open_resolved_source` (34), `navigate_to_entry` (127), `jump_back`/
+  `jump_forward`, `record_jump`, `current_jump_entry`, `open_external_path`;
+- **resolver + language-specific import paths** (the bulk) — `resolver_scope_for` (860),
+  `use_path_for_symbol` (913), `use_decl_path` (985), the `js_ts_*`/`python_*`/`go_*`
+  families (through `go_string_content` at 1752), plus `xref_*`/`find_implementations`/
+  `start_symbol_resolution`/`apply_resolve_event`/`symbol_at_point`;
+- **imenu / outline** — `open_imenu` (2230), `open_imenu_picker` (2328),
+  `open_symbol_picker` (2341), `which_function` (2371).
+
+The middle concern is the strongest signal that the label was wrong: ~20 language-specific
+import-parsing free functions (js/ts/python/go/rust) are "navigation" only by accident.
+Suggested split: `navigation/{mod (jump history), resolver, imports, imenu}.rs`, or
+`navigation.rs` + `imports.rs` + `imenu.rs` if the resolver half stays whole. Note the
+`store/tests/navigation.rs` (3,074) split should follow the same seams, so it may be a
+separate stage.
 
 ## Known follow-ups from gate findings (low priority)
 
