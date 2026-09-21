@@ -527,6 +527,24 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
   rather than the per-cell model. Justified as optional: iocraft is lock-pinned to
   0.9.1 and its own suite pins its SGR emission.
 
+## Gate reliability (higher priority than the cosmetic items)
+
+- **Load-correlated timing flakes, characterised** (see
+  `.agents/tasks/issue-deflake-timing.md`): `check_cursor_stream.py`'s `M-b x5` leg
+  read a `None` cursor on the **first** press (first-frame timing), and
+  `git::repo::tests::unstage_hunk_on_no_trailing_newline_file_keeps_index_exact` failed
+  2 of ~11 full-suite runs **under peak load** with a self-contradictory shape (a
+  byte-exact assert passed while `git diff --cached` was still stale). Mechanism
+  hypothesis: three lanes building + driving PTY suites in parallel create the load
+  that exposes them. The deflake lane is specced; it must demonstrate ≥10× under load
+  and must not add blanket retries.
+- **The trade-off to manage**: parallel lanes buy throughput but raise the flake rate
+  in timing-sensitive legs. If a deflake does not stick, the fallback is to serialise
+  the PTY tier across lanes (the per-invocation fixture root already makes that safe,
+  just not automatic).
+- **Every lane's report omits gate numbers by default** — briefs must require the gate
+  to establish them, not the worker's summary.
+
 ## Known follow-ups from gate findings (low priority)
 
 - **PTY flake, unattributed** (descriptor-table gate): the first `gate.sh full` run on a
