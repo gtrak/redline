@@ -89,6 +89,58 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **T7** | Strengthen non-discriminating tests: bare `.is_ok()` with no payload/state check (`store.rs:10577`, `:16949`, `:3645`); audit twins for vacuous absence-only assertions post `PTY_QUIET` shrink | strengthen, never delete | low |
 | **T8** | PTY battery drivers `drive_{emacs,redline}_battery2/3` → parameterized driver | lower priority than Rust duplication | low |
 
+## Round 2 deltas (read-verified, local model)
+
+Round 2 *read the code*. It verified both ground-truth items and added seven
+semantic-duplication findings round 1 could not see. New IDs here supersede or
+extend the tiers above; `fix-by` records whether the fix is deterministic
+(mechanical, referee-checkable) or needs judgment.
+
+### Corrections to earlier rows
+
+- **M3 (git harness) — IMPROVED**: it is **19 helpers in 8 files**, and the
+  copies are **not all equivalent**:
+  - `git/commit.rs:68` has an extra `with_author: bool` and reordered env;
+  - **`app/flow_tests.rs:91` drops ALL SIX hermetic env vars**
+    (`GIT_CONFIG_GLOBAL=/dev/null` etc.) — that copy is *less* hermetic than the
+    rest, a latent host-identity flake, not a style difference;
+  - `store.rs:14593` and `store.rs:20102` use short env values (`"T"/"t@e.com"`).
+  Consolidation must therefore decide flow_tests' env shape explicitly
+  (aligning it is a **behavior change to a test**, allowed only with a stated reason).
+- **S3 (language tables) — WIDENED**: it is **six 18–19-arm dispatch tables
+  across 3 files** (`registry::{name, build, highlight_query_for}`,
+  `queries::{query_for, language_for}`, plus the supported-language gate in
+  `node::parse_source`) — **~110 hand-synced arms**. Adding a language means
+  touching >=6 match sites in 3 files.
+- **S10 (bus drains) — CONFIRMED as the highest-leverage *production* dedup**:
+  four ~12-line `watch` drain loops in `root.rs` are verbatim except identifiers,
+  plus a 5th structurally different mpsc variant for search.
+  *Tooling note*: `cleanup_scan.py dup`'s fn-level mode **cannot** see these (they
+  are closures inside `Root`, not `fn`s) — its window mode can. Recorded so nobody
+  reads "only 10 identical fn bodies" as "little duplication".
+
+### New findings
+
+| ID | Finding | Location | fix-by | Risk |
+|----|---------|----------|--------|------|
+| **R1** | UI-test fixture + "title not overprinted" assertion duplicated 4–5×, with **drift** (magit hardcodes `*magit-status*`, rows_view uses `store.log_title()`, buffer `*list-buffers*`) | `ui/{magit_status,rows_view,file_view,results_view,views/buffer}.rs` | deterministic (`ui/test_util.rs`: `render_app`, `fixture_project`, `assert_title_not_overprinted`) | low |
+| **R2** | `repo.rs` blob-newline twins (`head_`/`index_blob_ends_with_newline`, 10-line bodies differing only by `DiffSide`) + hunk-lookup sequence ×4 | `git/repo.rs:369-402`, `:297,:422,:521,:536` | deterministic | low |
+| **R3** | **`files.rs` vs `rg.rs`: gitignore ancestor-chain semantics implemented twice** — documented as intentional (threading), but they *must* agree (finder vs search disagreement is user-visible) and **no test asserts they agree** | `model/files.rs:108-147`, `search/rg.rs` | judgment: keep 2 engines, share the match helper, **add an agreement test** | med |
+| **R4** | Provider `walk_*_files` ×2 identical + locate/scan triad ×3 (`line_defines_*` predicates stay per-language) | `crates/redline-resolve/src/providers/*` | deterministic (`walk_files`, `find_def_line`) | low |
+| **R5** | `MagitStatusView` ≡ `MagitRowsView` minus props — 60 lines re-copied instead of reusing; log/blame/commit-editor already reuse `MagitRowsView` | `ui/magit_status.rs:114-174`, `ui/rows_view.rs:111-169` | judgment (small): delete the body, render `MagitRowsView(title:…)` | low |
+| **R6** | `store.rs`: **4 `*_view_info`** + **3 cursor/scroll families (~18 handlers)** clone the windowing *call pattern* (only the `window_slice`/`keep_cursor_visible` primitives are shared — the 003-02 "shared windowing" comment overstates what is shared); the 4 view_infos are not even uniform (`magit_window()` vs `pane_window()`) | `store.rs:6134,7237,7306,7388`, `:7245-7450` | judgment (state-shape refactor of the hottest file; pinned by windowing tests at `:20078+`) | med |
+| **R7** | `StatusLine` indicator chain: ~12× `if !props.X.is_empty() { push_str(&format!("  *{X}")) }` — fold over a `[(label, value)]` list | `ui/root.rs` | deterministic | low |
+
+Additional areas round 2 flags for a later pass: `store.rs` `apply_*_event` halves
+(the `&mut self` side of S10) may share a stale-generation-check + reset + message
+shape; `switch_project_root` vs `open_project_path` share a close/reset/re-walk/prime
+sequence; `model/sections.rs`/`tree_layout.rs` padding math vs the blame/log row
+formatters.
+
+**Sequencing note**: R7 and S10 both edit `ui/root.rs`, which the **live
+picker-density lane also edits** — both must wait for that lane to land (same rule
+as M4).
+
 ## Design decisions needed (supervisor)
 
 - **D1 — the per-language descriptor table (highest payoff).** `LanguageId`
