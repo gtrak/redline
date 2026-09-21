@@ -154,30 +154,46 @@ impl StatusTree {
         })
     }
 
-    /// Move the cursor to the next visible section (wraps nowhere; a no-op
-    /// at the last section).
-    pub fn move_down(&mut self) {
+    /// Move the cursor to the next visible section (magit's `n` /
+    /// `magit-section-forward`). Returns `true` when the cursor moved.
+    ///
+    /// Magit 4.7.1 does not wrap (`lisp/magit-section.el:805-831`): at the
+    /// last visible section the cursor stays put and the move reports
+    /// `false`, so the store's magit cursor handler can echo
+    /// `No next section`. With no cursor (`None`) the cursor stays `None`
+    /// and the move reports `false`.
+    pub fn move_down(&mut self) -> bool {
         let ids = self.visible_ids();
         let cur = self.cursor.clone();
-        if let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref())
-            && pos + 1 < ids.len()
-        {
-            self.cursor = Some(ids[pos + 1].clone());
-        } else if !ids.is_empty() {
-            self.cursor = Some(ids[0].clone());
+        let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref()) else {
+            return false; // no cursor: nothing to move from
+        };
+        if pos + 1 >= ids.len() {
+            return false; // last visible section: stay put (no wrap)
         }
+        self.cursor = Some(ids[pos + 1].clone());
+        true
     }
 
-    /// Move the cursor to the previous visible section (a no-op at the
-    /// first).
-    pub fn move_up(&mut self) {
+    /// Move the cursor to the previous visible section (magit's `p` /
+    /// `magit-section-backward`). Returns `true` when the cursor moved.
+    ///
+    /// Magit 4.7.1 does not wrap (`lisp/magit-section.el:805-831`): at the
+    /// first visible section the cursor stays put and the move reports
+    /// `false`, so the store's magit cursor handler can echo
+    /// `No previous section`. With no cursor (`None`) the cursor stays
+    /// `None` and the move reports `false`.
+    pub fn move_up(&mut self) -> bool {
         let ids = self.visible_ids();
         let cur = self.cursor.clone();
-        if let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref())
-            && pos > 0
-        {
-            self.cursor = Some(ids[pos - 1].clone());
+        let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref()) else {
+            return false; // no cursor: nothing to move from
+        };
+        if pos == 0 {
+            return false; // first visible section: stay put (no wrap)
         }
+        self.cursor = Some(ids[pos - 1].clone());
+        true
     }
 
     /// Toggle the fold state of the section under the cursor.
@@ -697,6 +713,71 @@ mod tests {
         assert_eq!(tree.cursor.as_deref(), Some("unstaged")); // group heading
         tree.move_up();
         assert_eq!(tree.cursor.as_deref(), Some("staged:src/renamed.rs"));
+    }
+
+    /// Magit 4.7.1 boundary behavior (`lisp/magit-section.el:805-831`): `n`
+    /// and `p` do not wrap. At the last/first visible section the cursor
+    /// stays put and the move reports `false`, which the store turns into
+    /// the `No next section` / `No previous section` echo-area message.
+    #[test]
+    fn move_down_at_last_section_stays_put_and_reports() {
+        let mut tree = build();
+        // The last visible section (all groups/files visible, files folded
+        // by default): the untracked group's only file.
+        tree.cursor = Some("untracked:new.txt".into());
+        assert!(!tree.move_down(), "at the last section: must report no move");
+        assert_eq!(
+            tree.cursor.as_deref(),
+            Some("untracked:new.txt"),
+            "no wrap: the cursor must not jump to the first section"
+        );
+    }
+
+    #[test]
+    fn move_up_at_first_section_stays_put_and_reports() {
+        let mut tree = build();
+        // The first visible section: the branch header.
+        tree.cursor = Some("header".into());
+        assert!(!tree.move_up(), "at the first section: must report no move");
+        assert_eq!(
+            tree.cursor.as_deref(),
+            Some("header"),
+            "no wrap: the cursor must not jump to the last section"
+        );
+    }
+
+    #[test]
+    fn move_down_up_mid_list_move_and_report() {
+        let mut tree = build();
+        assert!(
+            tree.move_down(),
+            "mid-list move_down must move and report true"
+        );
+        assert_eq!(tree.cursor.as_deref(), Some("staged:src/c.rs"));
+        assert!(
+            tree.move_up(),
+            "mid-list move_up must move and report true"
+        );
+        assert_eq!(tree.cursor.as_deref(), Some("staged:src/a.rs"));
+    }
+
+    #[test]
+    fn move_without_cursor_stays_none_and_reports_no_move() {
+        // An empty repo has no file/hunk sections, so build leaves the
+        // cursor at None (the header and empty groups render but are not
+        // the default landing spot). With no cursor, both directions leave
+        // it None and report `false` (the store echoes the boundary
+        // message, since nothing can move).
+        let status = RepoStatus {
+            branch: None,
+            files: Vec::new(),
+        };
+        let empty: HashMap<String, FileDiff> = HashMap::new();
+        let mut tree = StatusTree::build(&status, &empty, &empty, None);
+        assert_eq!(tree.cursor, None);
+        assert!(!tree.move_down());
+        assert!(!tree.move_up());
+        assert_eq!(tree.cursor, None);
     }
 
     /// Inline hunks (issue 002): unfolding a file reveals its hunk rows

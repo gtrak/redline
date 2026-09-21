@@ -6013,18 +6013,26 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.magit_keep_visible();
     }
 
-    /// `n` / `C-n`: move the cursor to the next visible section.
+    /// `n` / `C-n`: move the cursor to the next visible section. Magit
+    /// 4.7.1 does not wrap: at the last visible section the cursor stays
+    /// put and the echo area reports `No next section`.
     pub fn magit_cursor_down(&mut self) {
-        if let Some(t) = self.status_tree.as_mut() {
-            t.move_down();
+        if let Some(t) = self.status_tree.as_mut()
+            && !t.move_down()
+        {
+            self.minibuffer_message("No next section");
         }
         self.magit_keep_visible();
     }
 
-    /// `p` / `C-p`: move the cursor to the previous visible section.
+    /// `p` / `C-p`: move the cursor to the previous visible section. Magit
+    /// 4.7.1 does not wrap: at the first visible section the cursor stays
+    /// put and the echo area reports `No previous section`.
     pub fn magit_cursor_up(&mut self) {
-        if let Some(t) = self.status_tree.as_mut() {
-            t.move_up();
+        if let Some(t) = self.status_tree.as_mut()
+            && !t.move_up()
+        {
+            self.minibuffer_message("No previous section");
         }
         self.magit_keep_visible();
     }
@@ -20467,6 +20475,88 @@ mod tests {
             "got `{}`",
             s.message
         );
+    }
+
+    /// Magit 4.7.1 boundary messages (`lisp/magit-section.el:805-831`):
+    /// `n` at the last visible section and `p` at the first stay put and
+    /// echo `No next section` / `No previous section` through the
+    /// minibuffer, while mid-list moves stay silent.
+    #[test]
+    fn magit_cursor_boundaries_echo_magit_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = git_store(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        s.open_magit_status();
+        // Visible sections: header, staged (empty), unstaged, unstaged:a.txt,
+        // untracked (empty). The cursor starts on the first addressable
+        // section: unstaged:a.txt.
+        assert_eq!(
+            s.status_tree
+                .as_ref()
+                .unwrap()
+                .cursor_section()
+                .unwrap()
+                .id,
+            "unstaged:a.txt"
+        );
+        // Mid-list `n`: moves to the last visible section, no message.
+        s.message.clear();
+        s.magit_cursor_down();
+        assert_eq!(
+            s.status_tree
+                .as_ref()
+                .unwrap()
+                .cursor_section()
+                .unwrap()
+                .id,
+            "untracked"
+        );
+        assert!(
+            s.message != "No next section",
+            "mid-list move must not report a boundary: `{}`",
+            s.message
+        );
+        // `n` at the last visible section: stays put, `No next section`.
+        s.message.clear();
+        s.magit_cursor_down();
+        assert_eq!(
+            s.status_tree
+                .as_ref()
+                .unwrap()
+                .cursor_section()
+                .unwrap()
+                .id,
+            "untracked",
+            "no wrap: the cursor must not jump to the first section"
+        );
+        assert_eq!(s.message, "No next section");
+        // `p` back to the first visible section (header), step by step.
+        s.magit_cursor_up();
+        s.magit_cursor_up();
+        s.magit_cursor_up();
+        s.magit_cursor_up();
+        assert_eq!(
+            s.status_tree
+                .as_ref()
+                .unwrap()
+                .cursor_section()
+                .unwrap()
+                .id,
+            "header"
+        );
+        // `p` at the first visible section: stays put, `No previous section`.
+        s.message.clear();
+        s.magit_cursor_up();
+        assert_eq!(
+            s.status_tree
+                .as_ref()
+                .unwrap()
+                .cursor_section()
+                .unwrap()
+                .id,
+            "header"
+        );
+        assert_eq!(s.message, "No previous section");
     }
 
     #[test]
