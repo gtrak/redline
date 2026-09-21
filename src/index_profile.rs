@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use redline_syntax::queries::{extract_all_timed, ExtractTimings, RustTables, Symbol};
+use redline_syntax::queries::{
+    extract_all_timed, ExtractTimings, RustTables, Symbol, FILE_BUDGET_BASE, FILE_BUDGET_PER_KB,
+};
 use redline_syntax::registry::{resolve_language, file_extension, LanguageId};
 
 use crate::model::files::FileList;
@@ -91,6 +93,11 @@ struct Run {
     plain: u64,
     unreadable: u64,
     zero_symbol: u64,
+    /// Files whose extraction was CANCELLED by the per-file deadline
+    /// (the `aborted` outcome — distinct from a plain zero-symbol file:
+    /// an aborted file's symbols are missing because the budget fired,
+    /// not because the file has no outline).
+    aborted: u64,
     raws: Vec<Raw>,
 }
 
@@ -189,7 +196,11 @@ fn parse_files(root: &Path, files: &[String]) -> (Duration, Vec<Raw>) {
             let read = rt.elapsed();
             let et = Instant::now();
             let mut stages = ExtractTimings::default();
-            let (syms, tables) = extract_all_timed(lang, &text, Some(&mut stages));
+            // The production call shape: the size-aware per-file deadline
+            // (base + rate * size_kb, shared across parse + queries) is
+            // the extractor's own default — the profiler measures it, not
+            // around it.
+            let (syms, tables) = extract_all_timed(lang, &text, None, Some(&mut stages));
             let extract = et.elapsed();
             Raw {
                 rel: rel.clone(),
@@ -243,6 +254,7 @@ fn run_once(root: &Path) -> anyhow::Result<Run> {
     let mut plain = 0u64;
     let mut unreadable = 0u64;
     let mut zero_symbol = 0u64;
+    let mut aborted = 0u64;
     for r in &raws {
         cpu_sum += r.read + r.extract;
         total_bytes += r.bytes;
@@ -258,6 +270,9 @@ fn run_once(root: &Path) -> anyhow::Result<Run> {
         }
         if r.symbols == 0 {
             zero_symbol += 1;
+        }
+        if r.stages.aborted {
+            aborted += 1;
         }
     }
 
@@ -276,6 +291,7 @@ fn run_once(root: &Path) -> anyhow::Result<Run> {
         plain,
         unreadable,
         zero_symbol,
+        aborted,
         raws,
     })
 }
@@ -400,6 +416,22 @@ fn print_phases(out: &mut String, run: &Run, cores: usize) {
     let n = run.raws.len() as u64;
     let total = run.walk + run.parse_wall + run.assembly;
     let warm = run.parse_wall + run.assembly;
+    // The dominance figure (item: diagnostics that localize the next
+    // fix): the max single-file extract_ms as a share of total wall. A
+    // few dominant files make the parallelism verdict an Amdahl effect,
+    // not a fan-out bug — so the LOW verdict below names it.
+    let dominant = run
+        .raws
+        .iter()
+        .max_by(|a, b| a.extract.cmp(&b.extract))
+        .filter(|r| r.extract > Duration::ZERO);
+    let max_extract = dominant.map(|r| r.extract).unwrap_or(Duration::ZERO);
+    let dom_pct = if total > Duration::ZERO {
+        max_extract.as_secs_f64() / total.as_secs_f64() * 100.0
+    } else {
+        0.0
+    };
+    let dom_label = dominant.map(|r| r.label.as_str()).unwrap_or("-");
     out.push_str("phases (wall clock):\n");
     out.push_str(&format!(
         "  walk      FileList::build (gitignore-filtered)     {:>10.3} ms  {n} files\n",
@@ -419,8 +451,12 @@ fn print_phases(out: &mut String, run: &Run, cores: usize) {
     ));
     out.push_str(&format!("  total                                           {:>10.3} ms\n", ms(total)));
     out.push_str(&format!(
-        "  total - walk  (parse + assembly)                {:>10.3} ms   <- what a WARM PERSISTED INDEX would cost to start (the number that decides whether persistence is worth building)\n",
+        "  total - walk  (parse + assembly)                {:>10.3} ms   <- the size of the prize: a WARM PERSISTED INDEX would SAVE this (a warm start pays only walk + load, not parse + assembly)\n",
         ms(warm)
+    ));
+    out.push_str(&format!(
+        "dominance:   max single-file extract {:>10.3} ms = {dom_pct:.1}% of total wall ({dom_label})\n",
+        ms(max_extract)
     ));
     if run.parse_wall > Duration::ZERO {
         let ratio = run.cpu_sum.as_secs_f64() / run.parse_wall.as_secs_f64();
@@ -429,13 +465,19 @@ fn print_phases(out: &mut String, run: &Run, cores: usize) {
         } else {
             0.0
         };
-        let verdict = if cores > 0
+        let low = cores > 0
             && ratio < cores as f64 * 0.75
-            && run.cpu_sum > Duration::from_millis(200)
-        {
-            " — LOW: the fan-out is not filling the pool (I/O contention, a few dominant files, or thread-count ceiling)"
+            && run.cpu_sum > Duration::from_millis(200);
+        let verdict = if low {
+            if dom_pct >= 50.0 {
+                format!(
+                    " — LOW: the fan-out is not filling the pool — but dominance says why: {dom_label} alone owns {dom_pct:.0}% of the wall (Amdahl, not a fan-out bug)"
+                )
+            } else {
+                " — LOW: the fan-out is not filling the pool (I/O contention, a few dominant files, or thread-count ceiling)".to_string()
+            }
         } else {
-            ""
+            String::new()
         };
         out.push_str(&format!(
             "parallelism:  CPU/wall = {ratio:.1}x (of {cores} cores, {pct:.0}% of the pool){verdict}\n"
@@ -489,15 +531,26 @@ fn print_per_file(out: &mut String, run: &Run, opts: &Options) {
             .then_with(|| a.cmp(b))
     });
     let top = opts.top.min(n);
-    out.push_str(&format!("\ntop {top} slowest by extract_ms (a few dominant files = a size cap would help):\n"));
+    // The per-file parse-vs-query split for the top-N (item: diagnostics
+    // that localize the next fix): the pathological file needs these to
+    // know WHICH half owns its wall time (a query-dominated file points
+    // at a smarter skip; a parse-dominated one at the budget itself).
+    out.push_str(&format!(
+        "\ntop {top} slowest by extract_ms (parse = tree-sitter parse, query = query execution; ABORTED = the per-file deadline {base:.0} ms + {rate:.1} ms/KB fired):\n",
+        base = ms(FILE_BUDGET_BASE),
+        rate = ms(FILE_BUDGET_PER_KB)
+    ));
     for (i, &idx) in order.iter().take(top).enumerate() {
         let r = &run.raws[idx];
+        let aborted = if r.stages.aborted { "  ABORTED" } else { "" };
         out.push_str(&format!(
-            "  {:>3}. {}  extract {:>9.3} ms  read {:>7.3} ms  {:>8}  {:>8} syms  {}\n",
+            "  {:>3}. {}  extract {:>9.3} ms  read {:>7.3} ms  parse {:>9.3} ms  query {:>9.3} ms  {:>8}  {:>8} syms  {}{aborted}\n",
             i + 1,
             r.label,
             ms(r.extract),
             ms(r.read),
+            ms(r.stages.parse),
+            ms(r.stages.queries),
             human_bytes(r.bytes as f64),
             r.symbols,
             r.lang.name()
@@ -558,9 +611,12 @@ fn print_breakdowns(out: &mut String, run: &Run) {
     }
     let n = run.raws.len();
     out.push_str(&format!(
-        "\ncounts: total symbols {} | zero-symbol files {z}/{n} | unresolved language (plain, skipped) {p}/{n} | unreadable (read failed) {u}/{n}\n",
+        "\ncounts: total symbols {} | zero-symbol files {z}/{n} | aborted by per-file deadline {a}/{n} (the budget that fired: base {base:.0} ms + {rate:.1} ms/KB, one deadline shared across parse + queries) | unresolved language (plain, skipped) {p}/{n} | unreadable (read failed) {u}/{n}\n",
         run.total_symbols,
         z = run.zero_symbol,
+        a = run.aborted,
+        base = ms(FILE_BUDGET_BASE),
+        rate = ms(FILE_BUDGET_PER_KB),
         p = run.plain,
         u = run.unreadable
     ));
@@ -783,9 +839,120 @@ mod tests {
         assert_eq!(raws.len(), 3);
         let rust = raws.iter().find(|r| r.rel == "src/main.rs").unwrap();
         assert_eq!(rust.syms.len(), 2, "main + other");
+        assert!(!rust.stages.aborted, "a 30-byte file must fit the per-file deadline");
         assert!(rust.extract > Duration::ZERO);
         let plain = raws.iter().find(|r| r.rel == "notes.txt").unwrap();
         assert_eq!(plain.lang, LanguageId::Plain);
         assert!(plain.syms.is_empty());
+    }
+
+    /// The report's new lines, pinned against a hand-built run: one file
+    /// owns ~98% of the wall and was ABORTED by the per-file deadline —
+    /// the report must say so itself (the prize label, the dominance
+    /// figure that explains the LOW verdict, the top-N parse/query split
+    /// with the ABORTED marker, and the aborted count next to the
+    /// budget that fired).
+    #[test]
+    fn report_shows_prize_dominance_and_aborted_count() {
+        let ms = |m: u64| Duration::from_millis(m);
+        // File 1: the pathological outlier — 55 s of extract, query-
+        // dominated, aborted by its deadline (the shape of the user's
+        // 11.3 MB .cpp).
+        let big = Raw {
+            rel: "src/big.cpp".into(),
+            lang: LanguageId::Cpp,
+            bytes: 11_800_000,
+            read: ms(1),
+            extract: ms(55_000),
+            stages: ExtractTimings {
+                parse: ms(3_000),
+                queries: ms(51_900),
+                query_compile: ms(0),
+                aborted: true,
+                budget: default_budget_for(11_800_000),
+            },
+            unreadable: false,
+            symbols: 0,
+            label: "t01/d2/f0001.cpp".into(),
+            syms: Vec::new(),
+            tables: RustTables::default(),
+        };
+        // File 2: a healthy small file.
+        let small = Raw {
+            rel: "src/main.rs".into(),
+            lang: LanguageId::Rust,
+            bytes: 5_000,
+            read: ms(0),
+            extract: ms(8),
+            stages: ExtractTimings {
+                parse: ms(5),
+                queries: ms(2),
+                query_compile: ms(0),
+                aborted: false,
+                budget: default_budget_for(5_000),
+            },
+            unreadable: false,
+            symbols: 12,
+            label: "t01/d2/f0002.rs".into(),
+            syms: Vec::new(),
+            tables: RustTables::default(),
+        };
+        let raws = vec![big, small];
+        let run = Run {
+            walk: ms(20),
+            parse_wall: ms(56_000),
+            assembly: ms(5),
+            cpu_sum: ms(55_014),
+            total_bytes: 11_805_000,
+            total_symbols: 12,
+            parse_sum: ms(3_005),
+            queries_sum: ms(51_902),
+            compile_sum: ms(0),
+            plain: 0,
+            unreadable: 0,
+            zero_symbol: 1,
+            aborted: 1,
+            raws,
+        };
+        let mut out = String::new();
+        print_phases(&mut out, &run, 32);
+        print_per_file(&mut out, &run, &Options {
+            root: PathBuf::new(),
+            top: 5,
+            out: None,
+            repeat: 1,
+            real_paths: false,
+        });
+        print_breakdowns(&mut out, &run);
+        // The prize label: total - walk is what a warm persisted index
+        // would SAVE (the backwards "would cost to start" wording is gone).
+        assert!(out.contains("the size of the prize: a WARM PERSISTED INDEX would SAVE"), "prize label: {out}");
+        assert!(!out.contains("would cost to start"), "old backwards label still present: {out}");
+        // The dominance figure, naming the dominant file and explaining
+        // the LOW parallelism verdict as Amdahl, not a fan-out bug.
+        assert!(out.contains("dominance:   max single-file extract"), "dominance line: {out}");
+        assert!(out.contains("98.2% of total wall (t01/d2/f0001.cpp)"), "dominance figure: {out}");
+        assert!(out.contains("Amdahl, not a fan-out bug"), "LOW verdict explanation: {out}");
+        // The top-N parse-vs-query split + the ABORTED marker.
+        assert!(out.contains("t01/d2/f0001.cpp  extract 55000.000 ms"), "top-N row: {out}");
+        assert!(out.contains("ABORTED"), "aborted marker: {out}");
+        let row = out
+            .lines()
+            .find(|l| l.contains("t01/d2/f0001.cpp  extract 55000.000 ms"))
+            .unwrap();
+        assert!(
+            row.contains("parse  3000.000 ms") && row.contains("query 51900.000 ms"),
+            "parse/query columns: {row}"
+        );
+        // The aborted count alongside the budget that produced it.
+        assert!(out.contains("aborted by per-file deadline 1/2"), "aborted count: {out}");
+        assert!(out.contains("base 500 ms + 2.0 ms/KB"), "the effective budget: {out}");
+    }
+
+    /// The size-aware deadline the report prints (500 ms + 2.0 ms/KB, KB
+    /// counted up) — computed through the extractor's own formula so the
+    /// report's numbers and the engine's numbers cannot drift.
+    fn default_budget_for(bytes: u64) -> Duration {
+        redline_syntax::queries::default_file_budget(bytes as usize)
     }
 }

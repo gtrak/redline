@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Language, Parser, Query, QueryCursor};
+use tree_sitter::{
+    Language, ParseOptions, Parser, Point, Query, QueryCursor, QueryCursorOptions,
+};
 
 use crate::registry::LanguageId;
 
@@ -469,6 +471,64 @@ impl ThreadLocal {
     }
 }
 
+// ── per-file deadline (the file budget) ─────────────────────────────────
+// A single deadline per file, SHARED across the parse and every query run
+// on its tree, so a file cannot spend its allowance twice (per-phase
+// budgets would hand a file 2x its allowance). The budget is a SAFETY NET
+// that must never fire on a legitimate file: the goal is bounding the
+// worst case, not optimising any particular project.
+//
+// Derivation of the constants (RESOLVED CONTEXT — the user's real
+// 10,150-file project, release, 32 cores, with the non-gitignored
+// `node_modules` dependency tree EXCLUDED): 3,596 files index in 368 ms;
+// the legitimate per-file distribution is extract_ms p50 = 0.541, p90 =
+// 5.512, p99 = 32.686, max = 98.049 ms, with the largest legitimate file
+// at 1.5 MB (the earlier "pathological" 11.3 MB .cpp at 55,351 ms / 4.9
+// ms/KB turned out to be a generated dependency-tree blob inside
+// `node_modules` — that is a separate issue, `issue-dependency-dir-guard`;
+// the 8.7 MB JavaScript file at 0.12 ms/KB and the ~0.4 ms/KB cpp ceiling
+// remain the worst OBSERVED legitimate rates). So a legitimate ~10 MB
+// source file at the worst observed rate takes ~4 s; the budget must
+// keep a 5x-class margin above that while still bounding a 4.9 ms/KB
+// outlier at ~10-11 MB (55 s) well below what it would otherwise take:
+// * base 500 ms ≈ 15x the observed small-file p99 (32.7 ms) — a generous
+//   floor that covers machine variance for small files and is a rounding
+//   error for anything above ~250 KB;
+// * rate 2.0 ms/KB is 5x ABOVE the worst observed legitimate rate
+//   (0.4 ms/KB — a 10 MB legitimate cpp file gets a ~21 s budget against
+//   a ~4 s cost; the 1.5 MB / 98 ms largest legitimate file gets ~3.4 s
+//   against its 98 ms) and 2.5x BELOW the pathological 4.9 ms/KB: an
+//   11.3 MB outlier at that rate gets ~23.6 s instead of 55.4 s — the
+//   startup is bounded, and every legitimate file measured keeps a
+//   5-35x margin (in doubt, err generous: a budget that fires on a
+//   legitimate file is a regression).
+pub const FILE_BUDGET_BASE: Duration = Duration::from_millis(500);
+pub const FILE_BUDGET_PER_KB: Duration = Duration::from_millis(2);
+
+/// The default per-file deadline for `size_bytes` of source:
+/// `base + rate * size_kb` (KB counted up — a 1-byte file pays one KB).
+pub fn default_file_budget(size_bytes: usize) -> Duration {
+    let kb = u32::try_from(size_bytes.saturating_add(1023) / 1024).unwrap_or(u32::MAX);
+    FILE_BUDGET_BASE + FILE_BUDGET_PER_KB.checked_mul(kb).unwrap_or(Duration::MAX)
+}
+
+/// The ONE deadline a file's extraction is held to, shared by the parse
+/// and every query run on its tree: both progress callbacks ask the same
+/// question (`expired`), so the budget is per-file, not per-phase.
+struct FileDeadline {
+    start: Instant,
+    limit: Duration,
+}
+
+impl FileDeadline {
+    fn new(limit: Duration) -> Self {
+        Self { start: Instant::now(), limit }
+    }
+    fn expired(&self) -> bool {
+        self.start.elapsed() >= self.limit
+    }
+}
+
 /// The stage timings of one [`extract_all_timed`] call: the tree-sitter
 /// PARSE versus the QUERY execution on the parsed tree (the split the
 /// headless index profiler reports). `query_compile` is the one-time
@@ -483,6 +543,15 @@ pub struct ExtractTimings {
     pub queries: Duration,
     /// One-time `Query::new` compilation (see the struct doc).
     pub query_compile: Duration,
+    /// True when the per-file deadline fired (the parse or a query run
+    /// was cancelled): the symbols/tables are INCOMPLETE — a first-class
+    /// "aborted" outcome that the report must distinguish from a plain
+    /// zero-symbol file (never a silent one).
+    pub aborted: bool,
+    /// The per-file deadline that governed this call (the size-aware
+    /// default or the caller's override). 0 on a defaulted instance that
+    /// never ran an extraction (e.g. the profiler's unreadable rows).
+    pub budget: Duration,
 }
 
 /// Extract the definition symbols AND, for Rust, the 010-01 per-file
@@ -492,24 +561,40 @@ pub struct ExtractTimings {
 /// the calling thread (a rayon worker during indexing); the parser and
 /// query caches are thread-local so they are cheap to reuse.
 ///
+/// Every file is held to a per-file deadline — `base + rate * size_kb`
+/// (the constants and their derivation: [`FILE_BUDGET_BASE`],
+/// [`FILE_BUDGET_PER_KB`], [`default_file_budget`]) — shared across the
+/// parse and every query run, so no single file can own the startup. An
+/// expired deadline CANCELS the extraction (a first-class "aborted"
+/// outcome — an incomplete, possibly empty result — not a silent
+/// zero-symbol file). The deadline governs the INDEX extraction path
+/// only: the interactive highlight/token paths parse through their own
+/// `Highlighter`/parser calls and are deliberately unbounded.
+///
 /// The production hot path: `timings` is `None`, and the behavior is
-/// identical to before the profiler existed. The cost on that path is
-/// exactly one predictable branch set (the `if let Some(...)` timing
-/// blocks — the `Instant::now()` calls inside are skipped via
-/// `bool::then`) plus one hash lookup per file (`contains_key` for the
-/// query-cache compile check at the query stage). The timed sibling is
-/// [`extract_all_timed`].
+/// identical to before the profiler existed (the deadline still applies
+/// — that is the point). The cost on that path is exactly one
+/// predictable branch set (the `if let Some(...)` timing blocks — the
+/// `Instant::now()` calls inside are skipped via `bool::then`) plus one
+/// hash lookup per file (`contains_key` for the query-cache compile check
+/// at the query stage). The timed sibling is [`extract_all_timed`].
 pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) {
-    extract_all_timed(lang, source, None)
+    extract_all_timed(lang, source, None, None)
 }
 
-/// The additive timed sibling of [`extract_all`]: identical behavior, but
-/// when `timings` is `Some` the parse stage and the query-execution stage
-/// are accumulated into it (the headless index profiler uses it; nothing
-/// else in production does).
+/// The additive timed sibling of [`extract_all`]: identical behavior,
+/// but when `timings` is `Some` the parse stage and the query-execution
+/// stage are accumulated into it (the headless index profiler uses it;
+/// nothing else in production does).
+///
+/// `budget` overrides the per-file deadline (the `None` default is the
+/// size-aware default, [`default_file_budget(source.len())`]) and is
+/// recorded in [`ExtractTimings::budget`]; cancellation sets
+/// [`ExtractTimings::aborted`].
 pub fn extract_all_timed(
     lang: LanguageId,
     source: &str,
+    budget: Option<Duration>,
     mut timings: Option<&mut ExtractTimings>,
 ) -> (Vec<Symbol>, RustTables) {
     let query_str = match query_for(lang) {
@@ -525,6 +610,14 @@ pub fn extract_all_timed(
         Some(l) => l,
         None => return (Vec::new(), RustTables::default()),
     };
+    // The ONE deadline this file's parse + queries are held to (shared —
+    // a file cannot spend its allowance twice). `None` budget applies the
+    // size-aware default.
+    let deadline = FileDeadline::new(budget.unwrap_or_else(|| default_file_budget(source.len())));
+    if let Some(t) = timings.as_mut() {
+        t.budget = deadline.limit;
+    }
+    let bytes = source.as_bytes();
 
     TL.with(|tl| {
         let mut tl = tl.borrow_mut();
@@ -534,9 +627,31 @@ pub fn extract_all_timed(
         // `None` when `timings` is `None` (the production call) — the
         // `if let Some(...)` blocks below are then never entered.
         let p0 = timings.is_some().then(Instant::now);
-        let tree = match tl.parser.parse(source, None) {
+        // The chunked input the parser reads (`parse_with_options` takes a
+        // byte-offset chunker, like `parse`'s own full-text chunker);
+        // offset >= EOF yields the empty slice.
+        let mut input = |offset: usize, _point: Point| {
+            &bytes[offset.min(bytes.len())..]
+        };
+        // The deadline's progress callback: returning `true` cancels the
+        // parse and `parse` yields `None` (tree-sitter 0.25.10).
+        let mut parse_cb = |_state: &tree_sitter::ParseState| deadline.expired();
+        let tree = match tl.parser.parse_with_options(
+            &mut input,
+            None,
+            Some(ParseOptions::new().progress_callback(&mut parse_cb)),
+        ) {
             Some(t) => t,
-            None => return (Vec::new(), RustTables::default()),
+            // The language IS set, so `None` can only mean the deadline
+            // cancelled the parse: an ABORTED file (a first-class
+            // outcome — the report must distinguish it from a plain
+            // zero-symbol file).
+            None => {
+                if let Some(t) = timings.as_mut() {
+                    t.aborted = true;
+                }
+                return (Vec::new(), RustTables::default());
+            }
         };
         if let Some(p0) = p0
             && let Some(t) = timings.as_mut()
@@ -564,7 +679,6 @@ pub fn extract_all_timed(
             None => return (Vec::new(), RustTables::default()),
         };
 
-        let bytes = source.as_bytes();
         let name_idx = query.capture_index_for_name("name");
         let item_idx = query.capture_index_for_name("item");
         // Flat S-expression grammars (Scheme + Clojure): the head-symbol
@@ -581,9 +695,18 @@ pub fn extract_all_timed(
         // `matches()` yields one item per definition (with all its captures);
         // `captures()` would yield one item per capture and double the result.
         // Both are `StreamingIterator`s; `QueryMatch` is `!Send`, so extract
-        // owned fields per match here.
+        // owned fields per match here. The progress callback holds the query
+        // run to the SAME shared deadline the parse already spent part of —
+        // query execution (the larger half in aggregate) was the exposure a
+        // parse-only budget would have left open.
         let q0 = timings.is_some().then(Instant::now);
-        let mut matches = cursor.matches(query, tree.root_node(), bytes);
+        let mut query_cb = |_state: &tree_sitter::QueryCursorState| deadline.expired();
+        let mut matches = cursor.matches_with_options(
+            query,
+            tree.root_node(),
+            bytes,
+            QueryCursorOptions::new().progress_callback(&mut query_cb),
+        );
         while let Some(m) = matches.next() {
             let name_node = name_idx
                 .and_then(|i| m.captures.iter().find(|c| c.index == i))
@@ -672,7 +795,7 @@ pub fn extract_all_timed(
             }
             let t0 = timings.is_some().then(Instant::now);
             let tables = match tl.rust_tables.as_ref() {
-                Some(q) => extract_rust_tables(q, tree.root_node(), bytes),
+                Some(q) => extract_rust_tables(q, tree.root_node(), bytes, &deadline),
                 None => RustTables::default(),
             };
             if let Some(t0) = t0
@@ -684,6 +807,14 @@ pub fn extract_all_timed(
         } else {
             RustTables::default()
         };
+
+        // The deadline expired during the query runs (a loop ended early
+        // by cancellation): the symbols/tables are incomplete. Checked
+        // AFTER the runs, so the parse-side cancellation (returned above)
+        // is the only other abort path.
+        if deadline.expired() && let Some(t) = timings.as_mut() {
+            t.aborted = true;
+        }
 
         (out, tables)
     })
@@ -709,7 +840,12 @@ pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
 /// contributes nothing (honest degradation, never a guess). A `let`
 /// matching BOTH 010-03 patterns (`let x: T = T { … }`) is deduped per
 /// `let` (the annotation pattern is listed first, so the annotation wins).
-fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> RustTables {
+fn extract_rust_tables(
+    query: &Query,
+    root: tree_sitter::Node,
+    bytes: &[u8],
+    deadline: &FileDeadline,
+) -> RustTables {
     // The capture for `name` in this match (`None` when the pattern lacks
     // it — the two impl patterns differ exactly in `impl_trait`).
     fn cap<'t>(
@@ -726,7 +862,13 @@ fn extract_rust_tables(query: &Query, root: tree_sitter::Node, bytes: &[u8]) -> 
     let mut impls: HashMap<usize, ImplAcc> = HashMap::new();
     let mut bindings: Vec<LocalBinding> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, root, bytes);
+    let mut query_cb = |_state: &tree_sitter::QueryCursorState| deadline.expired();
+    let mut matches = cursor.matches_with_options(
+        query,
+        root,
+        bytes,
+        QueryCursorOptions::new().progress_callback(&mut query_cb),
+    );
     while let Some(m) = matches.next() {
         // The 010-03 local-binding patterns (annotation or struct
         // literal) — captured by the shared `bnd_let` capture.
@@ -1724,6 +1866,178 @@ mod tests {
         // is empty. This is the documented empty fallback.
         assert!(query_for(LanguageId::Plain).is_none());
         assert!(extract_symbols(LanguageId::Plain, "some text\nfn fake() {}\n").is_empty());
+    }
+
+    // ── Per-file deadline (the file budget) ─────────────────────────────
+    /// A ~330 KB source with ONE definition: the body is 15_000 plain
+    /// `let`s (no written-down types — the Rust tables query matches
+    /// nothing), so the extraction is PARSE-dominated: the C-level parse
+    /// scales with bytes (~0.5 ms/KB even in a debug build), while the
+    /// query work is a single symbol plus a 0-match tables walk. The
+    /// fixture the default-budget and tiny-budget tests need — the parse
+    /// alone takes far longer than a 1 ms budget (so a tiny-budget run is
+    /// a real cancellation, not a file that merely finished before the
+    /// deadline), yet the whole extraction sits comfortably inside its
+    /// `base + rate * size_kb` deadline with margin even in a debug
+    /// build under test-suite contention.
+    fn one_big_function(lets: usize) -> String {
+        let mut s = String::from("fn big() {\n");
+        for i in 0..lets {
+            s.push_str(&format!("    let _x{i} = {i};\n"));
+        }
+        s.push_str("}\n");
+        s
+    }
+
+    /// A ~300 KB source with `n` top-level functions, each carrying a
+    /// small multi-statement body: in a debug build the parse and the
+    /// 4_000-match definition-query run are BOTH large (same order of
+    /// magnitude — the query loop is far slower per symbol in an
+    /// unoptimized build), which is the shape the shared-deadline probe
+    /// needs: parse time ≥ query/2, so a `parse + query/2` probe aborts
+    /// the file as a whole while every single phase fits it on its own.
+    fn many_fat_functions(n: usize) -> String {
+        let mut s = String::with_capacity(n * 76);
+        for i in 0..n {
+            s.push_str(&format!(
+                "fn f{{}}() {{\n    let _a = {i};\n    let _b = {i};\n    let _c = {i};\n    let _d = {i};\n    let _e = {i};\n}}\n"
+            ));
+        }
+        s
+    }
+
+    /// End-to-end cancellation with a TINY budget: a 1 ms deadline on a
+    /// ~330 KB source must yield an aborted file (no tree / 0 symbols /
+    /// 0 tables), must not panic or hang, and the surrounding extraction
+    /// must complete normally. Discriminating: on the unfixed code there
+    /// is no budget seam at all — this call would run the full parse and
+    /// return the file's one symbol, so `syms.is_empty() && t.aborted`
+    /// fails on the pre-fix behavior.
+    #[test]
+    fn tiny_budget_cancels_end_to_end() {
+        let src = one_big_function(15_000);
+        let mut t = ExtractTimings::default();
+        let (syms, tables) = extract_all_timed(
+            LanguageId::Rust,
+            &src,
+            Some(Duration::from_millis(1)),
+            Some(&mut t),
+        );
+        assert!(
+            syms.is_empty(),
+            "a 1 ms budget on a ~330 KB source must cancel before any symbol lands, got {}",
+            syms.len()
+        );
+        assert!(
+            tables.fields.is_empty() && tables.impls.is_empty() && tables.bindings.is_empty(),
+            "an aborted file carries no tables: {tables:?}"
+        );
+        assert!(
+            t.aborted,
+            "the 1 ms deadline must mark the file aborted (parse elapsed {:?})",
+            t.parse
+        );
+        assert_eq!(t.budget, Duration::from_millis(1), "the injected budget is recorded");
+        // The surrounding extraction completes normally (the thread-local
+        // parser is not poisoned by the cancellation, nothing hung).
+        let (small, _) = extract_all(LanguageId::Rust, "fn a() {}\nfn b() {}\n");
+        assert_eq!(small.len(), 2, "the file right after an aborted one extracts fully");
+    }
+
+    /// A NORMAL file is unaffected by the DEFAULT budget: a ~330 KB
+    /// parse-dominated source under the size-aware default (500 ms +
+    /// 2.0 ms/KB ≈ 1150 ms here) yields its one symbol and does not trip
+    /// the deadline — the default must keep legitimate files and abort
+    /// none (with margin even in a debug build, where the Rust query
+    /// loop is far slower than release).
+    #[test]
+    fn default_budget_does_not_abort_a_normal_file() {
+        let src = one_big_function(15_000);
+        let mut t = ExtractTimings::default();
+        let (syms, _) = extract_all_timed(LanguageId::Rust, &src, None, Some(&mut t));
+        assert!(
+            !t.aborted,
+            "a ~330 KB file (parse {:?} + query {:?}) must fit the default budget {:?}",
+            t.parse, t.queries, t.budget
+        );
+        assert_eq!(syms.len(), 1, "the file's one definition lands: {syms:?}");
+        assert_eq!(syms[0].name, "big");
+        assert_eq!(syms[0].kind, SymbolKind::Function);
+    }
+
+    /// The budget is ONE deadline per file, not per phase: a file cannot
+    /// get 2x its allowance by splitting across parse and queries.
+    /// Sharedness is STRUCTURAL here (one `FileDeadline` feeds every
+    /// progress callback of the file's extraction — parse and both query
+    /// runs — there is no per-phase allocation in the code), so per the
+    /// spec this is pinned the cheapest way that actually discriminates:
+    /// a probe budget of `parse + query/2` (measured warm on the same
+    /// thread) that the WHOLE file cannot fit — but under a per-phase
+    /// budget every phase would fit its own fresh `parse + query/2`
+    /// allowance (measured on this fixture: parse time ≥ query/2, and
+    /// query ≤ parse + query/2), completing without aborting. So
+    /// consumed. The probe is re-drawn up to three times, each time from a
+    /// FRESH same-thread measurement of this very file (the estimate must
+    /// stay seconds old, not minutes); which half of the query phase an
+    /// abort lands in is load-dependent (the pinned cursor checks the
+    /// deadline every 1,000 operations), so the abort is asserted, not
+    /// the outline's exact length.
+    #[test]
+    fn the_budget_is_one_shared_deadline_not_per_phase() {
+        let src = many_fat_functions(4_000);
+        // Each attempt: a fresh same-thread warm run of THIS file measures
+        // its parse (p) and query (q) right now; the probe budget is p +
+        // q/2. The warm run uses an explicit large budget (not the
+        // default): the probe pins sharedness, and a debug-build
+        // query-heavy source has no room for the default's margin here
+        // (that margin is pinned by
+        // `default_budget_does_not_abort_a_normal_file` on the
+        // parse-dominated fixture).
+        // The probe: the whole file exceeds it (shared: parse + query >
+        // parse + query/2 — it aborts), but a per-phase budget would let
+        // every phase fit its own fresh allowance (parse ≤ probe since
+        // probe ≥ parse; query ≤ parse + query/2 since parse ≥ query/2 on
+        // this fixture) and complete without aborting. One probe aborts
+        // unless it is ≥ 50% faster in TOTAL than the warm run measured
+        // seconds earlier on the same thread; under a per-phase
+        // implementation NO attempt ever aborts (each phase fits its own
+        // fresh allowance), so the retry cannot mask that bug.
+        let mut aborted = false;
+        let mut last = ExtractTimings::default();
+        let mut last_syms = 0usize;
+        for _ in 0..3 {
+            let mut warm = ExtractTimings::default();
+            let (full, _) = extract_all_timed(
+                LanguageId::Rust,
+                &src,
+                Some(Duration::from_secs(120)),
+                Some(&mut warm),
+            );
+            assert!(
+                !warm.aborted,
+                "precondition: the warm run completes under the 120 s budget"
+            );
+            assert_eq!(full.len(), 4_000, "precondition: the warm run is the full outline");
+            let (p, q) = (warm.parse, warm.queries);
+            assert!(
+                p > Duration::ZERO && q > Duration::ZERO,
+                "precondition: both phases actually ran (p={p:?}, q={q:?})"
+            );
+            let probe = p + q / 2;
+            let mut t = ExtractTimings::default();
+            let (syms, _) = extract_all_timed(LanguageId::Rust, &src, Some(probe), Some(&mut t));
+            last = t;
+            last_syms = syms.len();
+            if t.aborted {
+                aborted = true;
+                break;
+            }
+        }
+        assert!(
+            aborted,
+            "the file's parse+query exceeds its probe budget — under the SHARED deadline the query must run out of what the parse already consumed; a per-phase budget would let every phase fit its own fresh allowance (last attempt: parse={:?}, queries={:?}, symbols={} of 4000)",
+            last.parse, last.queries, last_syms
+        );
     }
 
 }
