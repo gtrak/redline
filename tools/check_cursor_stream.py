@@ -33,6 +33,16 @@ reconstruction:
     columns with a visible gutter at 80 cols (no two-cell collision) and
     falls back to one full-width column at narrow widths.
 
+Read-window policy (deflake-timing, item 2): a raw read whose assertion is
+the surviving CUP stays OPEN until a CUP after the final `?2026l` is
+observed (`Session.cup_settle`), with a hard deadline (`CUP_WAIT_CAP`) as
+backstop — a missing CUP is then a real protocol failure, not a scheduling
+artifact (the old behavior closed on a quiet window alone, so a CUP starved
+past the window read as `None` under load). Reads that assert nothing about
+the CUP (and views that emit no cursor — Home/picker frames carry only the
+frame's in-region park, never a post-`?2026l` CUP) keep the quiet close; the
+gate is applied at the assertion site, never by raising the sleep.
+
 Exit 0 = all assertions pass; 1 = any failed.
 """
 import os, pty, fcntl, termios, struct, time, select, signal, re
@@ -45,6 +55,25 @@ from fixture import repo
 BIN = os.environ.get("REDLINE_BIN", os.path.join(os.path.dirname(__file__), "..", "target", "debug", "redline"))
 REPO = os.environ.get("REDLINE_REPO") or repo("redline_pyte_repo")
 COLS, ROWS = 80, 24
+
+# deflake-timing: hard-deadline backstop for the CUP-after-final-?2026l gate
+# (cup_settle). Only reads whose assertion IS the CUP pay this, and only while
+# the CUP is still missing — the common path closes on quiet exactly as before.
+CUP_WAIT_CAP = 5.0
+
+# deflake-timing: the frame's synchronized-update close + a CUP (CUP/CHA: the
+# `ESC[r;c H`/`f` position report the drive's `last_cup_after_sync` matches).
+_SYNC_END_RE = re.compile(rb"\x1b\[\?2026l")
+_CUP_RE = re.compile(rb"\x1b\[\d+;\d+[Hf]")
+
+
+def _cup_settled(buf):
+    """Protocol-complete: no synchronized frame in this chunk, or a CUP was
+    issued after its final `?2026l`."""
+    ends = [m.end() for m in _SYNC_END_RE.finditer(buf)]
+    if not ends:
+        return True
+    return bool(_CUP_RE.search(buf[ends[-1]:]))
 
 
 def _set_winsize(fd, rows, cols):
@@ -101,6 +130,36 @@ class Session:
                 self.stream.feed(data)
             if (time.time() - last) >= quiet:
                 break
+        return buf
+
+    def cup_settle(self, buf, cap=CUP_WAIT_CAP):
+        """deflake-timing item 2: keep the read window open until a CUP after
+        the final `?2026l` is observed (hard deadline as backstop), instead of
+        closing on quiet alone — so a missing CUP is a real protocol failure
+        (a finding), not a scheduling artifact. The quiet window alone used to
+        end the chunk at the frame's `?2026l` with a starved CUP still owed;
+        under load the deferred CUP then read as `None`. Only called on reads
+        whose assertion IS the CUP: frames of cursor-less views (Home/picker)
+        never emit a post-`?2026l` CUP, so gating every read would wait the
+        full cap for no reason. Common path: CUP already present → closes on
+        quiet exactly as before."""
+        deadline = time.time() + cap
+        last = time.time()
+        while not _cup_settled(buf):
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
+            r, _, _ = select.select([self.master], [], [], min(remain, 0.05))
+            if r:
+                try:
+                    data = os.read(self.master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                buf += data
+                last = time.time()
+                self.stream.feed(data)
         return buf
 
     def _wait_ready(self):
@@ -170,7 +229,7 @@ def last_cup_after_sync(buf):
 
 def show_after_sync(buf):
     """Whether a ?25h (show) is issued after the final ?2026l of this chunk."""
-    ends = [m.end() for m in re.finditer(rb"\x1b\[\?2026l", buf)]
+    ends = [m.end() for m in _SYNC_END_RE.finditer(buf)]
     return any(b"\x1b[?25h" in buf[e:e + 64] for e in ends) if ends else False
 
 
@@ -185,7 +244,7 @@ def check(colorterm):
         print(f"  {'PASS' if ok else 'FAIL'}  {name:34s} {detail}")
 
     # Open magit and navigate; capture the raw stream for each step.
-    open_buf = s.key("C-x g", 1.2)
+    open_buf = s.cup_settle(s.key("C-x g", 1.2))
     # startup hide is countered + a show+reposition follows the first frame
     rec("?25l countered (a ?25h follows the first frame)", show_after_sync(open_buf),
         f"?25l={open_buf.count(b'\x1b[?25l')} ?25h={open_buf.count(b'\x1b[?25h')}")
@@ -194,7 +253,7 @@ def check(colorterm):
     track_ok = True
     track_detail = []
     for i in range(5):
-        buf = s.key("n" if i % 2 == 0 else "p", 0.7)
+        buf = s.cup_settle(s.key("n" if i % 2 == 0 else "p", 0.7))
         cup_row = last_cup_row_after_sync(buf)   # 1-based
         blues = s.bar_rows()                     # 0-based
         if blues:
@@ -270,12 +329,12 @@ def mouse_recenter_word_checks():
 
     def do(key, settle=0.6):
         """Press `key` and return the surviving CUP (row, col) after settle."""
-        return last_cup_after_sync(s.key(key, settle))
+        return last_cup_after_sync(s.cup_settle(s.key(key, settle)))
 
     def feed_mouse(data, settle=0.6):
         """Send raw SGR mouse bytes and return the surviving CUP."""
         os.write(s.master, data)
-        buf = s._read(settle, quiet=0.15)
+        buf = s.cup_settle(s._read(settle, quiet=0.15))
         return last_cup_after_sync(buf)
 
     # ── click at a non-zero column (leg.rs: window top 0) ──────────────────
@@ -298,7 +357,7 @@ def mouse_recenter_word_checks():
     # Reset the point to (0,0) at window top 0.
     s.key("M-<", 0.8)
     top_line_before = s.row_text(1)        # content row 0 (terminal row 1)
-    r0, c0 = last_cup_after_sync(s.key("C-a", 0.6))
+    r0, c0 = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
     r, c = feed_mouse(b"\x1b[<65;1;1M")   # wheel down (3-line step)
     top_line_after = s.row_text(1)
     rec("wheel down: top line changed, screen row pinned",
@@ -337,7 +396,7 @@ def mouse_recenter_word_checks():
     for ch in "wordleg":
         s.key(ch, 0.25)
     s.key("RET", 1.0)
-    r0, c0 = last_cup_after_sync(s.key("C-a", 0.6))
+    r0, c0 = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
     rec("wordleg open: cursor at (line 1, col 1)", (r0, c0) == (2, 1),
         f"cup=({r0},{c0}) want (2,1)")
     fw = [
@@ -404,13 +463,13 @@ def file_view_checks():
     def do(key, settle=0.6):
         """Press `key` (possibly a multi-token sequence) and return the
         surviving CUP (row, col) after the frame settles."""
-        return last_cup_after_sync(s.key(key, settle))
+        return last_cup_after_sync(s.cup_settle(s.key(key, settle)))
 
     # Open cursorleg.rs: the cursor lands on the first content line, col 1.
     s.key("C-x C-f", 1.0)
     for ch in "cursorleg":
         s.key(ch, 0.25)
-    buf = s.key("RET", 1.0)
+    buf = s.cup_settle(s.key("RET", 1.0))
     row, col = last_cup_after_sync(buf)
     rec("open file: cursor at (line 1, col 1)", (row, col) == (2, 1),
         f"cup=({row},{col}) want (2,1)")
@@ -517,17 +576,17 @@ def wide_char_checks():
 
     def do(key, settle=0.6):
         """Press `key` and return the surviving CUP (row, col)."""
-        return last_cup_after_sync(s.key(key, settle))
+        return last_cup_after_sync(s.cup_settle(s.key(key, settle)))
 
     def click(col0, row0):
         """Left-click at 0-based terminal (col, row) via SGR (1-based)."""
         os.write(s.master, b"\x1b[<0;%d;%dM" % (col0 + 1, row0 + 1))
-        return last_cup_after_sync(s._read(0.6, quiet=0.15))
+        return last_cup_after_sync(s.cup_settle(s._read(0.6, quiet=0.15)))
 
     s.key("C-x C-f", 1.0)
     for ch in "wideleg":
         s.key(ch, 0.2)
-    s.key("RET", 1.2)
+    s.cup_settle(s.key("RET", 1.2))
     # Line 0: 中 is char 9 and occupies display cols 9-10, so 'g' (char 13)
     # sits at display col 14 (0-based).
     s.key("C-a", 0.5)
@@ -584,13 +643,13 @@ def tree_click_checks():
     def click(col0, row0):
         """Left-click at 0-based terminal (col, row) via SGR (1-based)."""
         os.write(s.master, b"\x1b[<0;%d;%dM" % (col0 + 1, row0 + 1))
-        return last_cup_after_sync(s._read(0.6, quiet=0.15))
+        return last_cup_after_sync(s.cup_settle(s._read(0.6, quiet=0.15)))
 
     # Open leg.rs (line 0 = 20 A's) and show the tree sidebar.
     s.key("C-x C-f", 1.0)
     for ch in "leg.rs":
         s.key(ch, 0.25)
-    s.key("RET", 1.0)
+    s.cup_settle(s.key("RET", 1.0))
     s.key("C-c p t", 0.9)
     if "*tree*" not in s.text():
         rec("tree visible (C-c p t)", False, "*tree* missing")
@@ -658,7 +717,7 @@ def tree_cursor_offset_checks():
 
     def do(key, settle=0.6):
         """Press `key` and return the surviving CUP (row, col)."""
-        return last_cup_after_sync(s.key(key, settle))
+        return last_cup_after_sync(s.cup_settle(s.key(key, settle)))
 
     def pane_start_col():
         """0-based terminal column where the code pane's line 0 text starts
@@ -674,7 +733,7 @@ def tree_cursor_offset_checks():
     s.key("C-x C-f", 1.0)
     for ch in "leg.rs":
         s.key(ch, 0.25)
-    s.key("RET", 1.0)
+    s.cup_settle(s.key("RET", 1.0))
     s.key("C-c p t", 0.9)
     if "*tree*" not in s.text():
         rec("tree visible (C-c p t)", False, "*tree* missing")
@@ -816,7 +875,7 @@ def list_view_cup_checks():
         print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
 
     s.key("C-x g", 1.2)
-    buf = s.key("C-c p t", 0.9)
+    buf = s.cup_settle(s.key("C-c p t", 0.9))
     if "*tree*" not in s.text():
         rec("list view: tree visible (C-c p t)", False, "*tree* missing")
         s.kill()
@@ -871,7 +930,7 @@ def annotation_gutter_checks():
         print(f"  {'PASS' if ok else 'FAIL'}  {name:52s} {detail}")
 
     def do(key, settle=0.6):
-        return last_cup_after_sync(s.key(key, settle))
+        return last_cup_after_sync(s.cup_settle(s.key(key, settle)))
 
     # Open ann_gutter.rs.
     s.key("C-x C-f", 1.0)
@@ -885,7 +944,7 @@ def annotation_gutter_checks():
     s.key("A", 0.5)
     # Type the note text and commit with RET.
     os.write(s.master, b"regression check\r")
-    s._read(0.8, quiet=0.15)
+    s.cup_settle(s._read(0.8, quiet=0.15))
     # Find the row with the marker and verify the full text after the gutter.
     row_text = None
     for r in range(1, s.rows - 2):
@@ -925,7 +984,7 @@ def annotation_gutter_checks():
     for _ in range(20):
         s.key("C-n", 0.15)
     s._read(0.5, quiet=0.15)
-    r, c = last_cup_after_sync(s.key("C-a", 0.6))
+    r, c = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
     # The cursor row must be within the canvas: the title occupies CUP row
     # 1, so the 21 content rows are CUP rows 2..=22 (1-based).
     cursor_in_canvas = r is not None and 2 <= r <= 22
@@ -968,7 +1027,7 @@ def annotation_gutter_checks():
             break
     code_unchanged_hidden = row_hidden is not None and "fn target_one() {}" in row_hidden
     s.key("C-c a", 0.6)
-    s._read(0.4, quiet=0.15)
+    s.cup_settle(s._read(0.4, quiet=0.15))
     row_shown = None
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
@@ -1006,7 +1065,7 @@ def annotation_gutter_checks():
     s.key("C-x C-f", 1.0)
     for ch in "ann_dense":
         s.key(ch, 0.25)
-    s.key("RET", 1.5)
+    s.cup_settle(s.key("RET", 1.5))
     s._read(0.5, quiet=0.15)
     # Content rows are CUP 2..=22 (1-based) = screen rows 1..=21 (0-based).
     canvas_rows = [s.row_text(r) for r in range(1, s.rows - 2)]
