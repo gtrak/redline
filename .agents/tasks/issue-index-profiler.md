@@ -33,6 +33,29 @@ redline --index-profile[=PATH]      # PATH defaults to cwd
 redline --index-profile --profile-top=25 --profile-out=/tmp/index.csv
 ```
 
+## Anonymized by default (HARD requirement — user, mid-lane)
+
+The output must contain **no real file paths** — only **anonymized structure** — because
+the user runs it on a private project and pastes the artifact back. **Anonymization is the
+DEFAULT**; `--profile-real-paths` is the explicit opt-out for local use only.
+
+- Every path — in the report, in the `--profile-out` CSV, and in **any error/panic text** —
+  becomes a stable pseudonym that **preserves structure and hides identity**: keep the file
+  **extension**, the **depth** (component count), and a **stable sequential id assigned in
+  first-seen order**. **Do not hash the path** — a hash is dictionary-reversible against a
+  known candidate set. Suggested form: `t<top>/d<depth>/f<id>.<ext>` (e.g. `t3/d4/f0042.rs`),
+  where the top-level component also gets an id so per-tree grouping survives.
+- **The root path is hidden too**: print `<root>` or an anonymized label, and **never echo
+  the `--index-profile=PATH` argument**.
+- **Keep** (this is the "structure" that matters): extension/language, bytes, all timings,
+  symbol counts, the per-language breakdown, p50/p90/p99, the top-N rankings, the
+  walk/parse/assembly split, the parallelism ratio, RSS, and the zero-symbol /
+  unresolved-language counts.
+- The report prints one line stating that paths are anonymized and the ids are opaque.
+- Audit **every** error path: a read failure must not print the real path.
+- Note deliberately: the **extension distribution** still reveals the tech stack. That is
+  structure, not identity, and is accepted.
+
 - It must run **before** any terminal/TUI setup (`src/main.rs:161`'s `IsTerminal` check and
   everything after it) and must not require a tty.
 - `src/main.rs:43` currently accepts only `--notes=plain` and **hard-errors on unknown
@@ -107,7 +130,7 @@ diagnostics line). Optionally `crates/redline-syntax/src/queries.rs` for the str
 - `cargo build`; `cargo test --workspace` — reconcile against the **current** baseline
   (measure it) and account for every change.
 - `cargo clippy --workspace --all-targets -- -D warnings` (`${PIPESTATUS[0]}`).
-- **Run it for real and paste the actual output**:
+- **Run it for real and paste the actual output** (anonymized — verify no real path appears):
   (a) on a small fixture (a tempdir with a couple of files) to prove the plumbing;
   (b) **on this repo itself** (`cargo run --release -- --index-profile=.`) — it is a real
       multi-crate tree and the report must be self-consistent (files ≈ what `git ls-files`
