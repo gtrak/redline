@@ -309,7 +309,7 @@ deliberately invented none)
   `cpp_member_path_comes_back_whole`,
   `cpp_qualified_path_comes_back_whole`,
   `c_scope_chain_struct_in_struct_and_function`,
-  `cpp_scope_chain_namespace_class_method` — `src/syntax/node.rs`) are
+  `cpp_scope_chain_namespace_class_method` — `crates/redline-syntax/src/node/`) are
   now consumed by the app: `store.rs::dotted_path_container` enumerates
   C's `field_expression` and Cpp's `field_expression`, so M-. extraction
   carries the whole dotted path (`o.x`) from a project buffer — the

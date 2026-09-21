@@ -260,7 +260,7 @@ impl AppStore {
     pub(super) fn imenu_candidate(
         s: &crate::nav::index::Symbol,
         outline: &[crate::nav::index::Symbol],
-        tables: Option<&crate::syntax::queries::RustTables>,
+        tables: Option<&redline_syntax::queries::RustTables>,
     ) -> PickerCandidate {
         let depth = Self::imenu_depth(s, outline, tables);
         let indent = "  ".repeat(depth);
@@ -285,7 +285,7 @@ impl AppStore {
     fn imenu_depth(
         s: &crate::nav::index::Symbol,
         outline: &[crate::nav::index::Symbol],
-        tables: Option<&crate::syntax::queries::RustTables>,
+        tables: Option<&redline_syntax::queries::RustTables>,
     ) -> usize {
         let enclosing = |t: &crate::nav::index::Symbol| {
             outline

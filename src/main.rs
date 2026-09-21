@@ -14,7 +14,6 @@ mod git;
 mod model;
 mod nav;
 mod search;
-mod syntax;
 mod theme;
 mod ui;
 

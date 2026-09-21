@@ -17,8 +17,8 @@ impl AppStore {
     /// `crate`-prefixed paths never name an external item → `None`
     /// (never guess).
     pub(super) fn use_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
-        let language = crate::syntax::queries::language_for(
-            crate::syntax::registry::LanguageId::Rust,
+        let language = redline_syntax::queries::language_for(
+            redline_syntax::registry::LanguageId::Rust,
         )?;
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).ok()?;
@@ -253,14 +253,14 @@ impl AppStore {
     /// (`lodash.map`) → EMPTY (it carries its own package — the provider's
     /// path wins, never treated as bare).
     pub(super) fn js_ts_scope_for(
-        lang: crate::syntax::registry::LanguageId,
+        lang: redline_syntax::registry::LanguageId,
         source: &str,
         byte: usize,
         symbol: &str,
     ) -> Vec<String> {
         // One parse per miss (the 007-03 discipline): a parse failure or an
         // out-of-range offset degrades to the empty hint.
-        let Some(language) = crate::syntax::queries::language_for(lang) else {
+        let Some(language) = redline_syntax::queries::language_for(lang) else {
             return Vec::new();
         };
         let mut parser = tree_sitter::Parser::new();
@@ -604,8 +604,8 @@ impl AppStore {
     /// Within a block the LAST matching statement at/before `byte` wins
     /// (a re-import shadows the earlier one).
     fn python_import_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
-        let language = crate::syntax::queries::language_for(
-            crate::syntax::registry::LanguageId::Python,
+        let language = redline_syntax::queries::language_for(
+            redline_syntax::registry::LanguageId::Python,
         )?;
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).ok()?;
@@ -798,8 +798,8 @@ impl AppStore {
     /// zero dot imports → `None`; SEVERAL → `None` (the origin of a bare
     /// item is ambiguous — never guessed).
     fn go_import_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
-        let language = crate::syntax::queries::language_for(
-            crate::syntax::registry::LanguageId::Go,
+        let language = redline_syntax::queries::language_for(
+            redline_syntax::registry::LanguageId::Go,
         )?;
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).ok()?;

@@ -227,7 +227,7 @@ impl AppStore {
     /// container, the path token becomes the WHOLE dotted path
     /// (`json.dumps`, `ns.member`, `pkg.Fn`) so the providers' already-
     /// unit-tested dotted handling is reachable from M-.: ONE parse
-    /// (`syntax::node::node_at` — 011-03's whole-path machinery, 007-01's
+    /// (`redline_syntax::node::node_at` — 011-03's whole-path machinery, 007-01's
     /// one-parse discipline). When `node_at` returns `None` (no tree / a
     /// shape it does not cover / the identifier is not a full
     /// dot-delimited segment of the container, e.g. a computed member
@@ -338,7 +338,7 @@ impl AppStore {
         // Rust shape; `.` never extends it).
         let path_token = if lang != LanguageId::Rust
             && let Some(byte) = text.char_indices().nth(end - 1).map(|(b, _)| b)
-            && let Some(info) = crate::syntax::node::node_at(lang, text, byte)
+            && let Some(info) = redline_syntax::node::node_at(lang, text, byte)
             && Self::dotted_path_container(lang, &info.kind)
             && info.text.split('.').any(|seg| seg == identifier)
             // 011-06 review P1: EVERY dot-delimited segment must be a bare
@@ -510,7 +510,7 @@ impl AppStore {
     /// (scratch / out-of-project non-external, or a non-Rust file — the
     /// tables only exist for Rust). The imenu impl-parent grouping's data
     /// source (watchlist item).
-    pub(in crate::app::store) fn current_buffer_rust_tables(&mut self) -> Option<crate::syntax::queries::RustTables> {
+    pub(in crate::app::store) fn current_buffer_rust_tables(&mut self) -> Option<redline_syntax::queries::RustTables> {
         let key = self.buffers.current().map(String::from)?;
         let path = self.buffers.get(&key).and_then(|b| b.path.clone())?;
         let project = self.project.as_ref()?;
@@ -535,7 +535,7 @@ impl AppStore {
     fn open_imenu_picker(
         &mut self,
         outline: Vec<crate::nav::index::Symbol>,
-        tables: Option<crate::syntax::queries::RustTables>,
+        tables: Option<redline_syntax::queries::RustTables>,
     ) {
         let candidates: Vec<PickerCandidate> = outline
             .iter()

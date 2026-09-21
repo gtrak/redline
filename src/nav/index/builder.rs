@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
-use crate::syntax::queries::{extract_all, ImplKind, RustTables, Symbol};
-use crate::syntax::registry::resolve_language;
+use redline_syntax::queries::{extract_all, ImplKind, RustTables, Symbol};
+use redline_syntax::registry::resolve_language;
 
 use super::progress::IndexProgress;
 use super::symbol_index::{SymbolIndex, TraitImpl};

@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 /// The category of a definition symbol (drives imenu indentation, the
 /// short status-line tag, and which-function preference).
@@ -398,11 +398,11 @@ pub(crate) const SCHEME_QUERY: &str = r#"
 /// the query. `None` = the captured candidate is not a define form
 /// (rejected by the extraction loop).
 fn flat_define_kind(
-    gate: crate::syntax::language::FlatDefineGate,
+    gate: crate::language::FlatDefineGate,
     pattern_index: usize,
     head: &str,
 ) -> Option<SymbolKind> {
-    use crate::syntax::language::FlatDefineGate;
+    use crate::language::FlatDefineGate;
     match gate {
         FlatDefineGate::Scheme => match (head, pattern_index) {
             ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
@@ -428,15 +428,17 @@ fn flat_define_kind(
 /// Thin wrapper over the descriptor table (the old 18-arm match, which
 /// duplicated the table's `definition_query` column, is gone).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
-    crate::syntax::language::spec(lang).definition_query
+    crate::language::spec(lang).definition_query
 }
 
 /// The `Language` (grammar) for a language id — the thin wrapper the
 /// app layer and `node.rs` call; the grammar pin itself lives in the
 /// descriptor table (the old 18-arm match, the second copy of the pin,
-/// is gone). `None` for plain text.
-pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
-    crate::syntax::language::spec(lang).grammar.map(|grammar| grammar())
+/// is gone). `None` for plain text. Part of the crate contract: the bin
+/// drives parsers for import/notes extraction directly (plan 014 stage 1
+/// widened it from `pub(crate)`).
+pub fn language_for(lang: LanguageId) -> Option<Language> {
+    crate::language::spec(lang).grammar.map(|grammar| grammar())
 }
 
 // One parser + a per-language query cache, thread-confined. A rayon worker
@@ -481,7 +483,7 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
     // flat-S-expression gate are per-language DATA (the old
     // `lang == LanguageId::Rust` / `matches!(lang, Scheme | Clojure)`
     // special-casing is gone).
-    let spec = crate::syntax::language::spec(lang);
+    let spec = crate::language::spec(lang);
     let language = match language_for(lang) {
         Some(l) => l,
         None => return (Vec::new(), RustTables::default()),

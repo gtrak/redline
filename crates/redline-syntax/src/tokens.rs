@@ -21,9 +21,9 @@ use std::ops::Range;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-use crate::syntax::language::{spec, TokenClass};
-use crate::syntax::queries::language_for;
-use crate::syntax::registry::LanguageId;
+use crate::language::{spec, TokenClass};
+use crate::queries::language_for;
+use crate::registry::LanguageId;
 
 /// The token-class (comment/string) query for `lang` — a field read
 /// over the descriptor table (the old match, which re-pinned the TS/TSX

@@ -170,7 +170,7 @@ fn draw_line(
     x_start: usize,
     width: usize,
     text: &str,
-    spans: &[crate::syntax::highlight::LineSpan],
+    spans: &[redline_syntax::highlight::LineSpan],
     t: &theme::Theme,
 ) {
     if text.is_empty() || width == 0 {

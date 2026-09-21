@@ -3,7 +3,7 @@
 The single "what's covered, per language" record. Sibling of
 `docs/provider-matrix.md` (which is provider-resolution-centric): this
 file is the **language × capability** grid over ALL 19 languages
-(`src/syntax/language.rs`'s descriptor table — one row per `LanguageId`):
+(`crates/redline-syntax/src/language.rs`'s descriptor table — one row per `LanguageId`):
 Rust, TypeScript, Tsx, JavaScript, Python, Go, C, Cpp, Toml, Json,
 Yaml, Bash, Markdown, Java, CSharp, Ruby, Scheme, Clojure, Plain.
 
@@ -61,11 +61,11 @@ pinned by `registry.rs` tests: `ext_map_covers_all_19_languages`,
 Capability columns, in the code's terms:
 
 - **outline** — symbol extraction / definition query exists
-  (`src/syntax/queries.rs::query_for`); the project index is built
+  (`crates/redline-syntax/src/queries.rs::query_for`); the project index is built
   from these queries (the project walk has no extension filter).
 - **M-. path-shaped** — M-. on a qualified use (`pkg.member`):
   011-06 language-aware extraction requires 011-03's `node_at`
-  path-container machinery (`src/syntax/node.rs`).
+  path-container machinery (`crates/redline-syntax/src/node/`).
 - **M-. bare via import** — M-. on a bare identifier an import in the
   buffer binds: 011-02 scope hints
   (`store.rs::resolver_scope_for` — provider-chain languages only).

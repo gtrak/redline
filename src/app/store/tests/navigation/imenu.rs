@@ -56,7 +56,7 @@ use super::*;
         // depth calculation: a symbol at depth N has N strictly-enclosing
         // extents. This is tested via the index's outline structure.
         use crate::nav::index::SymbolIndex;
-        use crate::syntax::queries::{Symbol, SymbolKind};
+        use redline_syntax::queries::{Symbol, SymbolKind};
         let mut idx = SymbolIndex::new();
         // A file with nested symbols: fn outer { struct Inner { fn method } }
         // The inner struct is depth 1 (enclosed by outer), method is depth 2.

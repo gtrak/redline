@@ -4,7 +4,7 @@
 
 use tree_sitter::Node;
 
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 
 /// Whether `node` is a part of a larger dotted path rather than a complete

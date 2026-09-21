@@ -248,12 +248,12 @@ impl AppStore {
             (path.to_string_lossy().into_owned(), buf.text())
         };
         let lang = self.grammar_registry.language_for(&path_str);
-        if lang != crate::syntax::registry::LanguageId::Rust {
+        if lang != redline_syntax::registry::LanguageId::Rust {
             return None;
         }
         // One fresh parse of the buffer's rope (the 007-02 contract: tree
         // reuse / incremental reparse is 007-04's job, not this one's).
-        let language = crate::syntax::queries::language_for(lang)?;
+        let language = redline_syntax::queries::language_for(lang)?;
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).ok()?;
         let tree = parser.parse(source.as_bytes(), None)?;
@@ -614,10 +614,10 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             )
         };
         let lang = self.grammar_registry.language_for(&path_str);
-        if lang != crate::syntax::registry::LanguageId::Rust {
+        if lang != redline_syntax::registry::LanguageId::Rust {
             return None;
         }
-        let info = crate::syntax::node::node_at(lang, &source, byte)?;
+        let info = redline_syntax::node::node_at(lang, &source, byte)?;
         Some(SyntaxAnchor {
             kind: info.kind,
             name: info.text,

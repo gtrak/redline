@@ -6,13 +6,13 @@
 //!
 //! The ripgrep layer supplies candidates only: the filtering is the
 //! per-file [`references_filter`] hook (comment/string byte ranges from
-//! `syntax::tokens`), which the pipeline's sink applies to each hit.
+//! `redline_syntax::tokens`), which the pipeline's sink applies to each hit.
 
 use std::ops::Range;
 use std::path::Path;
 
-use crate::syntax::registry::{resolve_language, LanguageId};
-use crate::syntax::tokens::comment_string_ranges;
+use redline_syntax::registry::{resolve_language, LanguageId};
+use redline_syntax::tokens::comment_string_ranges;
 use crate::search::rg::{SearchConfig, SearchBus};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

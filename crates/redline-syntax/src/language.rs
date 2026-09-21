@@ -25,12 +25,12 @@
 
 use tree_sitter::Language;
 
-use crate::syntax::queries::{
+use crate::queries::{
     BASH_QUERY, C_SHARP_QUERY, CLOJURE_QUERY, C_QUERY, CPP_QUERY, GO_QUERY, JAVA_QUERY,
     JAVASCRIPT_QUERY, JSON_QUERY, MARKDOWN_QUERY, PYTHON_QUERY, RUBY_QUERY, RUST_QUERY,
     RUST_TABLES_QUERY, SCHEME_QUERY, TOML_QUERY, TYPESCRIPT_QUERY, YAML_QUERY,
 };
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 /// The token-class (comment/string) query strategy for a row. Most rows
 /// derive the token-class query from their own highlight query; a few
@@ -616,7 +616,7 @@ pub fn parseable(lang: LanguageId) -> bool {
 /// the only content change vs the 0.23.1 copy); keep it in lockstep with
 /// the pinned crate version — do not edit or re-flow.
 pub const C_SHARP_HIGHLIGHTS: &str =
-    include_str!("../../third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
+    include_str!("../../../third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
 
 /// The Clojure highlight query — vendored VERBATIM from
 /// `tree-sitter-clojure` 0.1.0's `grammar-src/queries/highlights.scm`
@@ -627,7 +627,7 @@ pub const C_SHARP_HIGHLIGHTS: &str =
 /// keep it in lockstep with the pinned crate version — do not edit or
 /// re-flow.
 pub const CLOJURE_HIGHLIGHTS: &str =
-    include_str!("../../third_party/tree-sitter-clojure-0.1.0/highlights.scm");
+    include_str!("../../../third_party/tree-sitter-clojure-0.1.0/highlights.scm");
 
 #[cfg(test)]
 mod tests {
@@ -705,7 +705,7 @@ mod tests {
                     "extension `{ext}` claimed by more than one row"
                 );
                 assert_eq!(
-                    crate::syntax::registry::resolve_language(&format!("f.{ext}")),
+                    crate::registry::resolve_language(&format!("f.{ext}")),
                     row.id,
                     "resolver does not map `{ext}` back to {id:?}",
                     id = row.id
@@ -759,10 +759,10 @@ mod tests {
         let clojure_expected =
             "424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de";
 
-        let c_sharp_path =
-            manifest_dir.join("third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
+        let c_sharp_path = manifest_dir
+            .join("../../third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
         let clojure_path =
-            manifest_dir.join("third_party/tree-sitter-clojure-0.1.0/highlights.scm");
+            manifest_dir.join("../../third_party/tree-sitter-clojure-0.1.0/highlights.scm");
 
         let hash_file = |path: &std::path::Path| -> String {
             let out = Command::new("sha256sum")

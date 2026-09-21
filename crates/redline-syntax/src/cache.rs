@@ -9,8 +9,8 @@ use std::time::SystemTime;
 
 use tree_sitter::InputEdit;
 
-use crate::syntax::highlight::RetainedTree;
-use crate::syntax::highlight::HighlightResult;
+use crate::highlight::RetainedTree;
+use crate::highlight::HighlightResult;
 
 /// Maximum number of entries before the cache is cleared.
 /// Each entry holds a `HighlightResult` (one `HighlightedLine` per line,
@@ -154,7 +154,7 @@ impl HighlightCache {
         // Store-construction warmup (before any render): build the reuse
         // engines now so the first highlight is a map lookup, not a
         // lazy ~188ms debug-build build on the render critical path.
-        crate::syntax::highlight::warm_reuse_engines();
+        crate::highlight::warm_reuse_engines();
         Self::default()
     }
 
@@ -250,7 +250,7 @@ mod tests {
 
     fn dummy_result(n_lines: usize) -> HighlightResult {
         HighlightResult {
-            lines: vec![crate::syntax::highlight::HighlightedLine::default(); n_lines],
+            lines: vec![crate::highlight::HighlightedLine::default(); n_lines],
         }
     }
 

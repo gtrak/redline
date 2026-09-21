@@ -466,7 +466,7 @@ impl AppStore {
         byte: usize,
         member: &str,
     ) -> Vec<crate::nav::index::Location> {
-        let Some(type_name) = crate::syntax::queries::rust_self_type_at(source, byte) else {
+        let Some(type_name) = redline_syntax::queries::rust_self_type_at(source, byte) else {
             return Vec::new();
         };
         Self::type_member_candidates(index, rel, &type_name, member)
@@ -500,7 +500,7 @@ impl AppStore {
             return Vec::new();
         };
         let Some(type_name) =
-            crate::syntax::queries::rust_binding_type_at(tables, source, byte, receiver)
+            redline_syntax::queries::rust_binding_type_at(tables, source, byte, receiver)
         else {
             return Vec::new();
         };
@@ -520,7 +520,7 @@ impl AppStore {
         type_name: &str,
         member: &str,
     ) -> Vec<crate::nav::index::Location> {
-        let mk = |file: String, kind: crate::syntax::queries::SymbolKind, line: usize| {
+        let mk = |file: String, kind: redline_syntax::queries::SymbolKind, line: usize| {
             crate::nav::index::Location {
                 file,
                 symbol: crate::nav::index::Symbol {
@@ -539,7 +539,7 @@ impl AppStore {
         for (file, line) in index.field_locations(type_name, member) {
             out.push(mk(
                 file,
-                crate::syntax::queries::SymbolKind::Constant,
+                redline_syntax::queries::SymbolKind::Constant,
                 line,
             ));
         }
@@ -551,7 +551,7 @@ impl AppStore {
             for m in methods.iter().filter(|m| m.method == member) {
                 out.push(mk(
                     rel.to_string(),
-                    crate::syntax::queries::SymbolKind::Function,
+                    redline_syntax::queries::SymbolKind::Function,
                     m.line,
                 ));
             }
@@ -749,7 +749,7 @@ impl AppStore {
     /// order (byte-for-byte today's behavior for unknown files).
     pub(in crate::app::store) fn resolution_language(&self, from_file: &str) -> Option<String> {
         let lang = self.grammar_registry.language_for(from_file);
-        (lang != crate::syntax::registry::LanguageId::Plain).then(|| lang.name().to_string())
+        (lang != redline_syntax::registry::LanguageId::Plain).then(|| lang.name().to_string())
     }
 
     /// (007-03 / 011-02) The `SymbolContext.scope` hint for `symbol`, from
@@ -795,7 +795,7 @@ impl AppStore {
         col: usize,
         symbol: &str,
     ) -> Vec<String> {
-        let lang = crate::syntax::registry::resolve_language(&path.display().to_string());
+        let lang = redline_syntax::registry::resolve_language(&path.display().to_string());
         let source = rope.to_string();
         let Some(byte) = point_byte_offset(rope, line, col) else {
             return Vec::new();
@@ -803,23 +803,23 @@ impl AppStore {
         match lang {
             // 007-03 (Rust): bare → the `use` declaration's path; path-
             // shaped → the enclosing item chain (carried, not consumed).
-            crate::syntax::registry::LanguageId::Rust => {
+            redline_syntax::registry::LanguageId::Rust => {
                 if !symbol.contains("::") {
                     return Self::use_path_for_symbol(&source, byte, symbol).unwrap_or_default();
                 }
-                crate::syntax::node::scope_path_at(lang, &source, byte)
+                redline_syntax::node::scope_path_at(lang, &source, byte)
             }
             // 011-02: the per-language import walks (bare symbols), plus
             // the JS/TS namespace-member rewrite for path-shaped symbols.
-            crate::syntax::registry::LanguageId::JavaScript
-            | crate::syntax::registry::LanguageId::TypeScript
-            | crate::syntax::registry::LanguageId::Tsx => {
+            redline_syntax::registry::LanguageId::JavaScript
+            | redline_syntax::registry::LanguageId::TypeScript
+            | redline_syntax::registry::LanguageId::Tsx => {
                 Self::js_ts_scope_for(lang, &source, byte, symbol)
             }
-            crate::syntax::registry::LanguageId::Python => {
+            redline_syntax::registry::LanguageId::Python => {
                 Self::python_scope_for(&source, byte, symbol)
             }
-            crate::syntax::registry::LanguageId::Go => Self::go_scope_for(&source, byte, symbol),
+            redline_syntax::registry::LanguageId::Go => Self::go_scope_for(&source, byte, symbol),
             // Every other language (and Plain): no hint — the providers
             // keep their exact no-hint behavior.
             _ => Vec::new(),

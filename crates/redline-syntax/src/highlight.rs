@@ -15,7 +15,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{InputEdit, Language, Node, Parser, Point, Query, QueryCursor, Tree};
 use tree_sitter_highlight::{HighlightEvent, Highlighter};
 
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 /// The face names configured on every `HighlightConfiguration`.
 /// `Highlight(i)` from the highlighter is an index into this list;
@@ -88,6 +88,10 @@ struct FullSpan {
 /// Returns `Ok(HighlightResult)` on success; `Err(())` when the
 /// highlighter fails (e.g. parse error that the highlighter surfaces
 /// as a hard error rather than a missing node).
+// The `Result<_, ()>` API is the existing contract (callers treat any
+// Err as "no highlight"); the unit error predates this crate. `result_unit_err`
+// fires only for lib crates, so the allow lives here (plan 014 stage 1).
+#[allow(clippy::result_unit_err)]
 pub fn highlight(
     rope: &Rope,
     config: &tree_sitter_highlight::HighlightConfiguration,
@@ -252,7 +256,7 @@ impl RetainedTree {
 /// the policy itself lives in `language.rs` (the old 10-arm `matches!`
 /// and the third grammar pin, `reuse_language`, are both deleted).
 pub fn supports_reuse(lang: LanguageId) -> bool {
-    crate::syntax::language::spec(lang).supports_reuse
+    crate::language::spec(lang).supports_reuse
 }
 
 /// Per-language reuse-pipeline state: the grammar `Language` and the
@@ -305,7 +309,7 @@ pub fn warm_reuse_engines() {
 }
 
 fn build_reuse_engines() -> HashMap<LanguageId, Option<ReuseEngine>> {
-    use crate::syntax::language;
+    use crate::language;
     language::LANGUAGES
         .iter()
         .map(|spec| {
@@ -432,6 +436,9 @@ fn spans_from_tree(tree: &Tree, bytes: &[u8], engine: &ReuseEngine) -> Vec<FullS
 /// Parse a rope (no hint) through the reuse pipeline. `lang` must
 /// `supports_reuse`. Returns the per-line spans and the parsed tree, so
 /// the caller can retain it as the next incremental baseline.
+// `Result<_, ()>` is the existing contract; see the sibling allow on
+// `highlight` above (the lint fires only for lib crates, plan 014 stage 1).
+#[allow(clippy::result_unit_err)]
 pub fn highlight_reusable(rope: &Rope, lang: LanguageId) -> Result<(HighlightResult, Tree), ()> {
     let engine = engine_for(lang).ok_or(())?;
     let source: String = rope.into();
@@ -525,7 +532,7 @@ pub fn rope_edit_to_input_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::registry::GrammarRegistry;
+    use crate::registry::GrammarRegistry;
 
     fn highlight_source(source: &str, lang_id: LanguageId) -> Option<HighlightResult> {
         let reg = GrammarRegistry::build();
@@ -727,10 +734,10 @@ mod tests {
     /// (or removing one without updating `supports_reuse`) fails here.
     #[test]
     fn supports_reuse_agrees_with_registry_locals_queries() {
-        for spec in &crate::syntax::language::LANGUAGES {
+        for spec in &crate::language::LANGUAGES {
             let id = spec.id;
             let reuse = supports_reuse(id);
-            let locals = crate::syntax::registry::has_locals_queries(id);
+            let locals = crate::registry::has_locals_queries(id);
             assert!(
                 !reuse || !locals,
                 "{id:?}: supports_reuse but the registry passes a non-empty locals query — the incremental path would desync from the full path"
@@ -1041,9 +1048,9 @@ mod tests {
     /// ten warmed map lookups take microseconds.
     #[test]
     fn reuse_engines_are_warm_after_cache_construction() {
-        let _cache = crate::syntax::cache::HighlightCache::new();
+        let _cache = crate::cache::HighlightCache::new();
         let t = std::time::Instant::now();
-        for spec in &crate::syntax::language::LANGUAGES {
+        for spec in &crate::language::LANGUAGES {
             let lang = spec.id;
             if supports_reuse(lang) {
                 assert!(engine_for(lang).is_some(), "{lang:?} engine missing");

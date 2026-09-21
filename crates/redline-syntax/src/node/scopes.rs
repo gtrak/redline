@@ -3,7 +3,7 @@
 
 use tree_sitter::Node;
 
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 
 /// Walk ancestors of `leaf` and capture each enclosing scope item's name

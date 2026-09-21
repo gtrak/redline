@@ -903,16 +903,37 @@ dependencies = [
  "nucleo-matcher",
  "rayon",
  "redline-resolve",
+ "redline-syntax",
  "ropey",
  "serde",
  "serde_json",
- "streaming-iterator",
  "tempfile",
  "thiserror",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "unicode-width",
+]
+
+[[package]]
+name = "redline-resolve"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "redline-syntax"
+version = "0.1.0"
+dependencies = [
+ "ropey",
+ "streaming-iterator",
+ "tracing",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -932,17 +953,6 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
- "unicode-width",
-]
-
-[[package]]
-name = "redline-resolve"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ read from the local crates.io registry index cache
 empirical confirmation is the ABI guard
 `all_grammars_set_language_succeeds` (registry.rs), run over every
 grammar-bearing row of the descriptor table's `grammar` column
-(`src/syntax/language.rs`) — the single grammar pin every consumer
+(`crates/redline-syntax/src/language.rs`) — the single grammar pin every consumer
 reads — against the bumped lock.
 
 ## The mechanism (why the matrix looks the way it does)
@@ -159,7 +159,7 @@ corpus goldens, and the `all_grammars_set_language_succeeds` ABI guard):
   `third_party/tree-sitter-c-sharp-0.23.5/highlights.scm` (sha256
   `ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f`,
   byte-verified) and `C_SHARP_HIGHLIGHTS` re-pinned (doc comment +
-  `include_str!`, `src/syntax/queries.rs`); the stale 0.23.1 copy was
+  `include_str!`, `crates/redline-syntax/src/queries.rs`); the stale 0.23.1 copy was
   removed and the `language-coverage.md` CSharp row path updated. No C#
   extraction/predicate/golden flipped — no fixture exercises `..`, so the
   query content change is latent (a highlight-face gain, not observed

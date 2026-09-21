@@ -4,9 +4,9 @@
 //!
 //! Issue 03 extends the face map with **syntax faces**: one `Face`
 //! per tree-sitter token category. The index into `syntax_faces`
-//! matches the index into `syntax::highlight::HIGHLIGHT_FACES`.
+//! matches the index into `redline_syntax::highlight::HIGHLIGHT_FACES`.
 
-use crate::syntax::highlight::HIGHLIGHT_FACES;
+use redline_syntax::highlight::HIGHLIGHT_FACES;
 
 /// Stub palette of terminal colors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

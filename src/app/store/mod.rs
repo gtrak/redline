@@ -40,9 +40,9 @@ use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, Ind
 use crate::search::occur;
 use crate::search::references;
 use crate::search::rg::{self, Hit, SearchBus, SearchConfig, SearchEvent};
-use crate::syntax::cache::{CacheKey, HighlightCache, TreeKey};
-use crate::syntax::highlight::{self, HighlightResult, RetainedTree};
-use crate::syntax::registry::{GrammarRegistry, LanguageId};
+use redline_syntax::cache::{CacheKey, HighlightCache, TreeKey};
+use redline_syntax::highlight::{self, HighlightResult, RetainedTree};
+use redline_syntax::registry::{GrammarRegistry, LanguageId};
 use crate::theme::Theme;
 
 mod helpers;
@@ -852,7 +852,7 @@ pub struct FileViewRow {
     pub text: String,
     /// Highlight spans (code rows only; byte offsets relative to the line
     /// start). Empty for note rows.
-    pub spans: Vec<crate::syntax::highlight::LineSpan>,
+    pub spans: Vec<redline_syntax::highlight::LineSpan>,
 }
 
 impl FileViewRow {

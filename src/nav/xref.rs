@@ -17,7 +17,7 @@ mod tests {
         let mut idx = SymbolIndex::new();
         let sym = Symbol {
             name: "foo".into(),
-            kind: crate::syntax::queries::SymbolKind::Function,
+            kind: redline_syntax::queries::SymbolKind::Function,
             line: 3,
             start_byte: 0,
             end_byte: 10,

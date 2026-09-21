@@ -18,7 +18,7 @@
 
 use tree_sitter::{Node, Parser};
 
-use crate::syntax::registry::LanguageId;
+use crate::registry::LanguageId;
 
 mod paths;
 mod scopes;
@@ -103,14 +103,14 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
 /// carries no identifier kinds and no scope walker, so `node_at` /
 /// `scope_path_at` still degrade to `None` / `[]` exactly as before.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
-    if !crate::syntax::language::parseable(lang) {
+    if !crate::language::parseable(lang) {
         return None;
     }
     // The grammar itself comes from the shared `queries::language_for`
     // wrapper over the descriptor table so the tree-sitter grammar
     // versions live in exactly one place (no second registry, no
     // duplicated pin); `Plain` never reaches the grammar lookup.
-    let language = crate::syntax::queries::language_for(lang)?;
+    let language = crate::queries::language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
     parser.parse(source.as_bytes(), None)
@@ -199,7 +199,7 @@ fn in_identifier_position(lang: LanguageId, node: Node) -> bool {
 /// list is the honest N/A, the same as the old default arm's
 /// `false`.)
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
-    crate::syntax::language::spec(lang).identifier_kinds.contains(&kind)
+    crate::language::spec(lang).identifier_kinds.contains(&kind)
 }
 
 #[cfg(test)]

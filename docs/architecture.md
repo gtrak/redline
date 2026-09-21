@@ -22,6 +22,7 @@ stage and for reviewers.
 ```
 crates/
   redline-resolve/        1,426  background M-. workspace fall-through (cargo metadata, lockfile)
+  redline-syntax/         6,663  tree-sitter grammar registry, highlight pipeline, cache (moved from src/syntax/, plan 014 stage 1)
 
 src/
   main.rs                  363  entrypoint: config, watcher startup, bus drain tasks, event loop
@@ -59,15 +60,6 @@ src/
     occur.rs               178  in-buffer occur
     references.rs          257  cross-file reference search
     rg.rs                 1,039  ripgrep process wrapper + SearchBus
-
-  syntax/
-    cache.rs               407  HighlightCache (path/mtime/theme keyed)
-    highlight.rs          1,158  tree-sitter → theme highlight rows
-    language.rs             791  the LanguageSpec table — single source of truth
-    node.rs               2,038  per-language tree walking (012/09 target)
-    queries.rs            1,653  extraction engine (consts moved to language.rs)
-    registry.rs             284  GrammarRegistry, built from the table
-    tokens.rs               300  token classification
 
   ui/
     blame_view.rs · commit_editor.rs · diff_view.rs · home_view.rs · log_view.rs
@@ -493,5 +485,5 @@ field would need `pub(crate)` — not required by this plan.
 | project / files / recents / tree sidebar | `src/app/store/project.rs`; walk in `src/model/files.rs` |
 | background jobs & their buses | `src/app/store/index_wiring.rs`; bus types defined at the top of the same module family |
 | rendering / drain loops | `src/ui/root.rs` (owns the event loop, bus drains) |
-| syntax / highlighting | `src/syntax/` (registry = the only tree-sitter API surface) |
+| syntax / highlighting | `crates/redline-syntax` (registry = the only tree-sitter API surface) |
 | PTY behavior tests | `src/app/flow_tests.rs` (hung off `store/mod.rs`) + `tools/sweep_flows.py` |

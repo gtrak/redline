@@ -836,7 +836,7 @@ impl AppStore {
         }
         let path = buf.path.as_ref()?;
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
-        if lang == crate::syntax::registry::LanguageId::Plain {
+        if lang == redline_syntax::registry::LanguageId::Plain {
             return None;
         }
         let cache_key = CacheKey::new(path, buf.mtime, self.theme.name());

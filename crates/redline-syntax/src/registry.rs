@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use tree_sitter::Language;
 use tree_sitter_highlight::HighlightConfiguration;
 
-use crate::syntax::highlight::HIGHLIGHT_FACES;
+use crate::highlight::HIGHLIGHT_FACES;
 
 /// Identifies a supported language.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,7 +41,7 @@ impl LanguageId {
     /// debugging) — read from the descriptor table (`language.rs`), the
     /// single source of truth for the per-language facts.
     pub fn name(self) -> &'static str {
-        crate::syntax::language::spec(self).name
+        crate::language::spec(self).name
     }
 }
 
@@ -50,7 +50,7 @@ impl LanguageId {
 /// `resolve_language`). The hand-synced per-language insert list is
 /// gone — a new language row brings its extensions with it.
 fn ext_map() -> HashMap<&'static str, LanguageId> {
-    crate::syntax::language::LANGUAGES
+    crate::language::LANGUAGES
         .iter()
         .flat_map(|spec| spec.extensions.iter().map(|ext| (*ext, spec.id)))
         .collect()
@@ -116,7 +116,7 @@ impl GrammarRegistry {
         let exts = ext_map();
         let mut configs = HashMap::new();
 
-        for spec in &crate::syntax::language::LANGUAGES {
+        for spec in &crate::language::LANGUAGES {
             let id = spec.id;
             // Single source of truth for the locals fact: `build` reads
             // the row's `locals_query`, and `has_locals_queries` reads
@@ -179,7 +179,7 @@ impl GrammarRegistry {
 /// against `highlight::supports_reuse`.
 #[allow(dead_code)] // used by the C13 agreement test in highlight.rs
 pub(crate) fn has_locals_queries(id: LanguageId) -> bool {
-    !crate::syntax::language::spec(id).locals_query.is_empty()
+    !crate::language::spec(id).locals_query.is_empty()
 }
 
 #[cfg(test)]
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn all_grammars_have_configs() {
         let reg = GrammarRegistry::build();
-        for spec in &crate::syntax::language::LANGUAGES {
+        for spec in &crate::language::LANGUAGES {
             if spec.grammar.is_some() {
                 assert!(
                     reg.config(spec.id).is_some(),
@@ -253,7 +253,7 @@ mod tests {
         // (registry build, extraction, reuse) reads — pinning it here
         // covers all of them (the old guard only covered
         // `queries::language_for`'s copy of the pin).
-        for spec in &crate::syntax::language::LANGUAGES {
+        for spec in &crate::language::LANGUAGES {
             let Some(grammar) = spec.grammar else { continue };
             let lang = grammar();
             assert!(

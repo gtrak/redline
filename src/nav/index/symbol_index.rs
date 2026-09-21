@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::syntax::queries::{ImplKind, RustTables, Symbol};
+use redline_syntax::queries::{ImplKind, RustTables, Symbol};
 
 /// A definition's location in the project: the (project-relative) file and
 /// the symbol itself. The tree-sitter backend's `definitions_of` returns

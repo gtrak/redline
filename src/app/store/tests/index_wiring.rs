@@ -465,7 +465,7 @@ use super::*;
     /// family.
     #[test]
     fn source_extensions_round_trip_through_registry_map() {
-        use crate::syntax::registry::resolve_language;
+        use redline_syntax::registry::resolve_language;
         for lang in [
             LanguageId::Rust,
             LanguageId::JavaScript,
@@ -1066,13 +1066,13 @@ use super::*;
     /// extract; paragraphs and links do not).
     #[test]
     fn setext_markdown_file_contributes_heading_symbols() {
-        let syms = crate::syntax::queries::extract_symbols(
+        let syms = redline_syntax::queries::extract_symbols(
             LanguageId::Markdown,
             "Delta\n====\n",
         );
         assert_eq!(syms.len(), 1, "exactly the setext heading: {syms:?}");
         assert_eq!(syms[0].name, "Delta");
-        assert_eq!(syms[0].kind, crate::syntax::queries::SymbolKind::Heading);
+        assert_eq!(syms[0].kind, redline_syntax::queries::SymbolKind::Heading);
     }
 
     /// 011-04: the walk is the OWNING language's, never a global "index
@@ -1130,9 +1130,9 @@ use super::*;
         let mut new_index = SymbolIndex::new();
         new_index.set_file(
             "src/b.rs",
-            vec![crate::syntax::queries::Symbol {
+            vec![redline_syntax::queries::Symbol {
                 name: "b".into(),
-                kind: crate::syntax::queries::SymbolKind::Function,
+                kind: redline_syntax::queries::SymbolKind::Function,
                 line: 0,
                 start_byte: 3,
                 end_byte: 4,
@@ -1246,9 +1246,9 @@ use super::*;
         let mut a_index = SymbolIndex::new();
         a_index.set_file(
             "src/a.rs",
-            vec![crate::syntax::queries::Symbol {
+            vec![redline_syntax::queries::Symbol {
                 name: "a".into(),
-                kind: crate::syntax::queries::SymbolKind::Function,
+                kind: redline_syntax::queries::SymbolKind::Function,
                 line: 0,
                 start_byte: 3,
                 end_byte: 4,
@@ -1274,9 +1274,9 @@ use super::*;
         let mut b_index = SymbolIndex::new();
         b_index.set_file(
             "src/b.rs",
-            vec![crate::syntax::queries::Symbol {
+            vec![redline_syntax::queries::Symbol {
                 name: "b".into(),
-                kind: crate::syntax::queries::SymbolKind::Function,
+                kind: redline_syntax::queries::SymbolKind::Function,
                 line: 0,
                 start_byte: 3,
                 end_byte: 4,

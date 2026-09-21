@@ -38,13 +38,13 @@ pub use progress::PROGRESS_STEP;
 pub use symbol_index::TraitImpl;
 
 // Re-exported so the public index/xref API can name the symbol type.
-pub use crate::syntax::queries::Symbol;
+pub use redline_syntax::queries::Symbol;
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
-    use crate::syntax::queries::extract_all;
+    use redline_syntax::queries::extract_all;
     use std::fs;
 
     fn make_project() -> tempfile::TempDir {
@@ -156,7 +156,7 @@ mod tests {
         // mod > fn; a cursor inside the function body resolves to the fn,
         // and a cursor inside the mod but outside the fn resolves to the mod.
         let src = "mod outer {\n    fn f() {\n        g()\n    }\n}\n";
-        let syms = extract_all(crate::syntax::registry::LanguageId::Rust, src).0;
+        let syms = extract_all(redline_syntax::registry::LanguageId::Rust, src).0;
         // mod outer: line 0..4 ; fn f: line 1..3
         let f_line = 2; // "g()"
         let enc = enclosing_symbol(&syms, f_line).expect("enclosing at line 2");
@@ -186,7 +186,7 @@ mod tests {
         // Two same-named functions in different mods of one file:
         // `by_name` must keep both (not last-wins).
         let src = "mod a { pub fn target() {} }\nmod b { pub fn target() {} }\n";
-        let syms = extract_all(crate::syntax::registry::LanguageId::Rust, src).0;
+        let syms = extract_all(redline_syntax::registry::LanguageId::Rust, src).0;
         // Two `target` functions + two `mod` items = 4 symbols total.
         let targets: Vec<_> = syms.iter().filter(|s| s.name == "target").collect();
         assert_eq!(targets.len(), 2, "two `target` definitions: {syms:?}");
@@ -226,11 +226,11 @@ mod tests {
         let ops = index.tables("src/ops.rs").expect("ops.rs has tables");
         assert_eq!(
             ops.impls.get("Point"),
-            Some(&vec![crate::syntax::queries::ImplMethod {
+            Some(&vec![redline_syntax::queries::ImplMethod {
                 method: "x".into(),
                 line: 2,
                 impl_line: 1,
-                kind: crate::syntax::queries::ImplKind::Inherent,
+                kind: redline_syntax::queries::ImplKind::Inherent,
             }]),
             "ops.rs impl table: {ops:?}"
         );
@@ -240,8 +240,8 @@ mod tests {
         assert_eq!(
             point.fields.get("Point"),
             Some(&vec![
-                crate::syntax::queries::StructField { field: "x".into(), line: 0 },
-                crate::syntax::queries::StructField { field: "y".into(), line: 0 },
+                redline_syntax::queries::StructField { field: "x".into(), line: 0 },
+                redline_syntax::queries::StructField { field: "y".into(), line: 0 },
             ])
         );
         // Cross-file seam: the field `x` of struct `Point` lives in point.rs
