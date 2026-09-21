@@ -653,6 +653,29 @@ Not yet specced (Tier 1, evidence already gathered): the **guardrails** —
 hook for `gate.sh fast` (~30 s) plus `undocumented_unsafe_blocks` is the cheap
 version.
 
+## The logic-organization round (measured, per the user's criterion)
+
+Test file size is not a criterion; **production logic organization is**
+(`.agents/skills/plan-process/SKILL.md` § Maintainability criterion). Measured with a
+brace-matching survey of production functions (test modules excluded; 1,633 fns
+total, 40 over 80 lines, 8 over 150):
+
+| # | Target | Evidence | Verdict |
+|---|---|---|---|
+| A1 | **`Root`** | `src/ui/root/mod.rs:42` — **504 lines, nest 7**, four jobs in one fn: snapshot extraction (~60), the cursor effect (~30), view dispatch (9 `ViewId` branches, ~60), frame assembly (~250 of `Minibuffer`/`StatusLine` props) | **clear win** — split into named helpers; PTY-covered so low risk |
+| A2 | **the keymap is data written as code** | `AppStore::at` (`store/mod.rs:1557`, **200 lines**) + `keymap` (`:237`, **284 lines**) = ~480 lines of imperative `global.bind(&[...], "cmd").unwrap()` inside *constructors*. Adding one binding means editing a giant function | **clear win** — a declarative table (the `LanguageSpec` precedent), preserving the conflict-detecting `unwrap` |
+| B1 | `key_event` | `store/keys.rs:16` — **345 lines, nest 5** | examine: is the dispatch a match that wants a handler table? |
+| B2 | `is_path_segment` | `syntax/node/paths.rs:23` — **151 lines for a predicate** | naming/scoping failure, not a size failure |
+| B3 | per-language logic | `resolve_go` 143, `resolve_js` 127, `extract_all` 139, `extract_rust_tables` 136 | the *config* is table-driven (`LanguageSpec`); ask whether the *logic* shares a shape worth a trait + per-language hooks |
+| B4 | tuple parameters | `crate_xref_outcome(..., at: Option<&(String, String)>)` (`navigation.rs:1897`) | a named struct carries the meaning; also a **measurement caveat**: my param counter miscounted this as 9 args — it is 6 (tuple commas) |
+| B5 | deep hand-written nesting | `js_ts_require_path` nest 8, `start_watch` nest 8, `set_file_tables` nest 7 | examine individually |
+
+**NOT findings** (state these so nobody "fixes" them): the iocraft components report
+nest 8–9 (`ResultsView` 9, `MagitStatusView`/`MagitRowsView`/`HomeView` 8) — that is
+`element!` macro nesting, not tangled logic; `register_magit` (135) and
+`register_motion` (125) are long but **nest 1** (flat registration data); and test
+functions are excluded by the criterion above.
+
 ## Known follow-ups from gate findings (low priority)
 
 - **PTY flake, unattributed** (descriptor-table gate): the first `gate.sh full` run on a
