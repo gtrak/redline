@@ -1,0 +1,561 @@
+use super::*;
+
+impl AppStore {
+    /// Feed one keypress from the terminal. While the picker is open,
+    /// printable characters extend the query, Backspace/C-h edit it,
+    /// a small set of keys drives the picker (RET runs, C-g cancels,
+    /// arrows / C-n / C-p move); everything else goes to the keymap
+    /// engine. While isearch is active, printable characters (including
+    /// letters bound to view commands) extend the query, C-s/C-r navigate,
+    /// RET confirms, C-g cancels. While goto-line
+    /// is active, digits build the line number, RET confirms, C-g
+    /// cancels. While the search-query prompt is active, printable
+    /// characters extend the query, RET confirms, C-g/ESC cancel. With
+    /// the results view on top (no picker), C-g cancels the in-flight
+    /// search without closing the view.
+    pub fn key_event(&mut self, key: Key) {
+        if self.quit {
+            return;
+        }
+        // Quit save-prompt (plan 004 issue 04): modal — it swallows every
+        // key (y / n / ! / C-g; anything else is a no-op, no "unbound key"
+        // echo mid-prompt) and routes to the state machine.
+        if self.quit_prompt_active() {
+            self.quit_prompt_key(key);
+            return;
+        }
+        // Transient menu (issue 002): topmost overlay. When open it swallows
+        // every key except C-g: a listed leaf closes the menu and runs its
+        // command, a listed prefix descends, and non-listed keys are ignored.
+        if self.menu_open() {
+            self.menu_key_event(key);
+            return;
+        }
+        // Armed discard confirmation (issue 002): `y` executes, `n`/C-g/ESC
+        // cancel; other keys are swallowed.
+        if self.discard_armed() {
+            self.discard_key_event(key);
+            return;
+        }
+        // Toggle-read-only discard confirm (plan 005 issue 01): `y` discards
+        // the unsaved edits and makes the buffer read-only, `n`/C-g/ESC
+        // cancel and keep edit mode; every other key is swallowed (no
+        // "unbound key" echo mid-prompt).
+        if self.toggle_ro_active() {
+            self.toggle_ro_key(key);
+            return;
+        }
+        if self.picker.is_some() {
+            if let Some(c) = key.char_value() {
+                // Stash list: `x` drops the selected entry (magit's drop
+                // key) instead of extending the filter query.
+                if self.picker_kind() == Some(PickerKind::Stash) && c == 'x' {
+                    let idx = self
+                        .picker_filtered()
+                        .get(self.picker_selected())
+                        .map(|(cand, _)| cand.name.clone())
+                        .and_then(|n| n.parse::<usize>().ok());
+                    if let Some(idx) = idx {
+                        self.stash_drop(idx);
+                    }
+                    return;
+                }
+                self.picker_query_char(c);
+                return;
+            }
+            // Query editing: Backspace (and C-h, the control-h byte some
+            // terminals emit for it) removes the last query character.
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.picker_query_backspace();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.run_selected();
+                return;
+            }
+            if key.code == KeyCode::Down || key == Key::ctrl_char('n') {
+                self.picker_select_next();
+                return;
+            }
+            if key.code == KeyCode::Up || key == Key::ctrl_char('p') {
+                self.picker_select_prev();
+                return;
+            }
+            // Other keys fall through to the keymap engine; the
+            // unbound-key echo is suppressed while the picker is open
+            // (see dispatch_key).
+        }
+        // Commit editor (issue 08): printable / backspace / RET / arrow keys
+        // edit the message; ESC aborts, and that is intercepted here,
+        // before the keymap engine. C-g clears an armed prefix only (Emacs
+        // convention), not the whole buffer. Only the C-c C-c / C-c C-k
+        // bindings reach the engine, so the `C-c` prefix pending state is
+        // visible in the status line. A bare q types "q" (it is not a
+        // command here). Edits clear any armed prefix; a bare `C-c` arms the
+        // prefix via the engine.
+        if self.top_view() == ViewId::CommitEditor {
+            if let Some(c) = key.char_value() {
+                self.commit_editor_insert(c);
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.commit_editor_backspace();
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.commit_editor_newline();
+                self.pending.clear();
+                return;
+            }
+            match key.code {
+                KeyCode::Left => self.commit_editor_move(EditorMove::Left),
+                KeyCode::Right => self.commit_editor_move(EditorMove::Right),
+                KeyCode::Up => self.commit_editor_move(EditorMove::Up),
+                KeyCode::Down => self.commit_editor_move(EditorMove::Down),
+                _ => {}
+            }
+            if key.code == KeyCode::Left || key.code == KeyCode::Right {
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Up || key.code == KeyCode::Down {
+                self.pending.clear();
+                return;
+            }
+            if key.code == KeyCode::Escape {
+                self.commit_editor_abort();
+                return;
+            }
+            if key == Key::ctrl_char('g') {
+                self.pending.clear();
+                return;
+            }
+            // C-c … (and any other unintercepted key) goes through the engine.
+            self.dispatch_key(key);
+            return;
+        }
+        // Branch-create name prompt (issue 08): printable chars extend the
+        // name, RET creates, C-g / ESC cancels.
+        if self.branch_create.is_some() {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.branch_create_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.branch_create_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.branch_create_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.branch_create_char(c);
+                return;
+            }
+            // Other keys: swallow (no "unbound key" echo mid-prompt).
+            return;
+        }
+        // Isearch mode: every printable self-inserts into the query (run
+        // before any keymap dispatch, the isearch analogue of the notes
+        // editable branch in plan-002 issue 05). Chords keep their isearch
+        // semantics: C-s next, C-r reverse, RET end, C-g cancel, DEL rubout.
+        if self.isearch.active {
+            if key == Key::ctrl_char('g') {
+                self.isearch_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.isearch_confirm();
+                return;
+            }
+            // PART A fix (item 5): C-s / C-r while isearch is active repeat
+            // the search (next / previous match) instead of being swallowed.
+            if key == Key::ctrl_char('s') {
+                self.isearch_next();
+                return;
+            }
+            if key == Key::ctrl_char('r') {
+                self.isearch_prev();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.isearch_query_char(c);
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.isearch_backspace();
+                return;
+            }
+            // Other keys: swallow (don't echo "unbound key" mid-search).
+            return;
+        }
+        // Goto-line mode: digits build the line number, RET confirms,
+        // C-g cancels.
+        if self.goto_line_active {
+            if key == Key::ctrl_char('g') {
+                self.goto_line_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.goto_line_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace {
+                self.goto_line_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value()
+                && c.is_ascii_digit()
+            {
+                self.goto_line_digit(c);
+                return;
+            }
+            // Other keys: swallow.
+            return;
+        }
+        // Annotation prompt (plan 005 issue 02): printable chars build the
+        // note text, Backspace edits it, RET commits (record written to
+        // the notes file; the cue appears immediately), C-g/ESC cancel.
+        if self.note_prompt_active {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.note_prompt_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.note_prompt_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.note_prompt_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.note_prompt_char(c);
+                return;
+            }
+            // Other keys: swallow (no "unbound key" echo mid-prompt).
+            return;
+        }
+        // Search-query prompt mode (C-c p s s / M-s o): printable chars
+        // extend the query, Backspace/C-h edit it, RET starts the search,
+        // C-g/ESC cancel.
+        if self.search_prompt.is_some() {
+            if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+                self.search_prompt_cancel();
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.search_prompt_confirm();
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.search_prompt_backspace();
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.search_prompt_char(c);
+                return;
+            }
+            // Other keys: swallow (don't echo "unbound key" mid-prompt).
+            return;
+        }
+        // Notes / editable buffer editing (issue 09): when the current
+        // buffer is editable (the notes buffer or any locally-owned file),
+        // printable chars append and Backspace deletes. Bounded editing
+        // (commit-editor precedent): no cursor movement in v1.
+        //
+        // Interception order (issue 05, finding 1): a key that completes or
+        // extends a bound sequence reaches the keymap engine FIRST (so
+        // `C-x g` / `C-c p f` dispatch while editing), mirroring the commit
+        // editor's careful order. Only a printable that binds nothing
+        // self-inserts; C-g keeps its global cancel (clears pending, does
+        // not close the notes buffer).
+        if self.top_view() == ViewId::Buffer
+            && self.buffers.current().and_then(|k| self.buffers.get(k).map(|b| b.editable && b.path.is_some())).unwrap_or(false)
+        {
+            // C-g cancels pending / closes overlays from any state,
+            // including while editing (the advertised C-g matrix).
+            if key == Key::ctrl_char('g') {
+                self.cancel();
+                return;
+            }
+            let mut seq = self.pending.clone();
+            seq.push(key);
+            let extends_sequence = matches!(
+                self.engine.resolve(&seq),
+                Some(Lookup::Command(_)) | Some(Lookup::Pending)
+            );
+            // A printable that is a DEPTH-1 leaf command (g/j/k/q/G/n/p...)
+            // self-inserts while typing: firing view commands on plain
+            // letters destroyed unsaved notes text (g -> reload-buffer).
+            // Only chords (C-x, C-c, M-...) and prefix continuations reach
+            // the engine.
+            let printable_leaf_command = key.char_value().is_some()
+                && self.pending.is_empty()
+                && matches!(self.engine.resolve(&seq), Some(Lookup::Command(_)))
+                && !self.engine.prefix_exists(&seq);
+            if !self.pending.is_empty() || (extends_sequence && !printable_leaf_command) {
+                // A pending prefix (or a key that starts/continues a bound
+                // sequence) must reach the engine before any self-insert.
+                self.dispatch_key(key);
+                return;
+            }
+            if let Some(c) = key.char_value() {
+                self.notes_insert_char(c);
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.notes_backspace();
+                return;
+            }
+            // Other keys fall through to the keymap engine (motion, view
+            // commands, C-x C-s save, etc.).
+        }
+        // Tree sidebar (issue 09): when the tree is visible and the main view
+        // is the buffer view, arrows / page keys move the tree cursor and RET
+        // opens the selected file. The emacs motion keys (C-n/C-p/j/k) still
+        // scroll the file, so arrows and file-motion are cleanly split.
+        // 06a: home renders in the buffer slot, so the tree stays fully
+        // usable on top of it — RET opens the file and replaces home.
+        if self.tree_visible()
+            && matches!(self.top_view(), ViewId::Buffer | ViewId::Home)
+        {
+            match key.code {
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.tree_move_down();
+                    return;
+                }
+                KeyCode::Up | KeyCode::PageUp => {
+                    self.tree_move_up();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.tree_open_selected();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // C-g in the results view cancels the in-flight search (the view
+        // stays open on the partial results) — intercepted before the
+        // global C-g so the advertised `C-g cancel search` works. The
+        // picker guard keeps C-g closing an open palette (the global
+        // intercept) instead of cancelling the search underneath it.
+        if key == Key::ctrl_char('g')
+            && self.top_view() == ViewId::Search
+            && self.picker.is_none()
+        {
+            self.search_cancel();
+            return;
+        }
+        // C-g aborts from any state: it clears the pending sequence and
+        // closes the picker before the keymap engine can start one.
+        if key == Key::ctrl_char('g') {
+            self.cancel();
+            return;
+        }
+        self.dispatch_key(key);
+    }
+
+    fn dispatch_key(&mut self, key: Key) {
+        let mut seq = self.pending.clone();
+        seq.push(key);
+        match self.engine.resolve(&seq) {
+            Some(Lookup::Command(cmd)) => {
+                let cmd = cmd.to_string();
+                self.pending.clear();
+                let _ = self.dispatch(&cmd, None);
+            }
+            Some(Lookup::Pending) => {
+                self.pending = seq;
+            }
+            None => {
+                self.pending.clear();
+                if self.picker.is_none() {
+                    self.minibuffer_message(&format!("unbound key: {key}"));
+                }
+            }
+        }
+    }
+
+    /// Dispatch-by-name through the store's own registry: clone the
+    /// command out (the registry is a field of this store, so the
+    /// handler may not borrow it while running), then run it here.
+    pub fn dispatch(&mut self, name: &str, arg: Option<String>) -> Result<(), RegistryError> {
+        let command = self
+            .registry
+            .get(name)
+            .cloned()
+            .ok_or_else(|| RegistryError::UnknownCommand(name.to_string()))?;
+        // emacs `recenter-top-bottom`: the position only advances when the
+        // immediately-preceding command was also recenter; any other
+        // command resets the cycle (emacs `recenter-last-op`), so a fresh
+        // C-l starts at the first position (middle).
+        if name != "recenter" {
+            self.recenter_cycle = 0;
+        }
+        command.run(self, arg);
+        Ok(())
+    }
+
+    /// Quit interception (plan 004 issue 04): `C-x C-c` (and the palette
+    /// `quit`) no longer flips `quit` directly. With NO locally-modified
+    /// buffer the quit proceeds immediately (existing behavior); with ≥1
+    /// modified buffer the save-prompt state machine starts over the
+    /// modified set snapshotted at interception time (oldest-first).
+    pub fn begin_quit(&mut self) {
+        self.clear_pending();
+        let modified: Vec<String> = self
+            .buffers
+            .list()
+            .into_iter()
+            .rev() // MRU order reversed → oldest-first
+            .filter(|(_, b)| b.locally_modified)
+            .map(|(k, _)| k.to_string())
+            .collect();
+        if modified.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.quit_prompt = Some(QuitPrompt { pending: modified });
+        self.quit_prompt_show();
+    }
+
+    /// Whether the quit save-prompt is active (a modified buffer is being
+    /// offered to save/skip).
+    pub fn quit_prompt_active(&self) -> bool {
+        self.quit_prompt.is_some()
+    }
+
+    /// The display name of the buffer currently offered by the quit
+    /// save-prompt (its path, or the `*scratch*` sentinel when pathless).
+    pub fn quit_prompt_buffer(&self) -> Option<String> {
+        let key = self
+            .quit_prompt
+            .as_ref()
+            .and_then(|p| p.pending.first())?;
+        match self.buffers.get(key).and_then(|b| b.path.as_ref()) {
+            Some(p) => Some(p.display().to_string()),
+            None => Some(key.clone()),
+        }
+    }
+
+    /// Render the prompt for the head of the snapshot in the minibuffer row.
+    fn quit_prompt_show(&mut self) {
+        let Some(name) = self.quit_prompt_buffer() else {
+            return;
+        };
+        self.minibuffer_message(&format!(
+            "Save this buffer: {name}? (y, n, !, C-g)"
+        ));
+    }
+
+    /// Re-render the prompt AFTER a failed save left an error message in
+    /// the minibuffer: compose the prompt with the error so the decision
+    /// line stays visible alongside it (plan 004 issue 05d, carried 004-04
+    /// review P2). The prompt comes FIRST: the composed line wraps at the
+    /// pane width, leaving the error (e.g. `save failed: ...`) on its own
+    /// continuation row. A no-op when the prompt is not active.
+    fn quit_prompt_show_with_error(&mut self) {
+        let Some(name) = self.quit_prompt_buffer() else {
+            return;
+        };
+        self.minibuffer_message(&format!(
+            "Save this buffer: {name}? (y, n, !, C-g) — {}",
+            self.message
+        ));
+    }
+
+    /// Answer one key of the quit save-prompt. `y` saves the offered buffer
+    /// (a failed save reports the error and re-prompts the SAME buffer),
+    /// `n` skips it, `!` saves this and ALL remaining snapshotted buffers
+    /// then quits, `C-g` cancels the whole quit. Every other key is
+    /// swallowed (no "unbound key" echo mid-prompt).
+    pub fn quit_prompt_key(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') {
+            self.quit_prompt_cancel();
+            return;
+        }
+        let Some(c) = key.char_value() else { return };
+        match c {
+            'y' => {
+                let Some(p) = self.quit_prompt.as_mut() else {
+                    return;
+                };
+                let Some(asked) = p.pending.first().cloned() else {
+                    return;
+                };
+                if self.save_buffer_key(&asked) {
+                    self.quit_prompt_advance();
+                } else {
+                    // A failed save already reported the error in the
+                    // minibuffer; the snapshot head is untouched, so the
+                    // same buffer is re-offered on the next y/n/!/C-g —
+                    // redisplay the prompt alongside the error so the
+                    // decision line stays visible.
+                    self.quit_prompt_show_with_error();
+                }
+            }
+            'n' => {
+                self.quit_prompt_advance();
+            }
+            '!' => {
+                let mut rest = self
+                    .quit_prompt
+                    .take()
+                    .map(|p| p.pending)
+                    .unwrap_or_default();
+                for (i, k) in rest.iter().enumerate() {
+                    if !self.save_buffer_key(k) {
+                        // Report the failure and re-prompt from the FAILED
+                        // buffer (the already-saved ones drop off), with the
+                        // prompt redisplayed alongside the error.
+                        self.quit_prompt = Some(QuitPrompt {
+                            pending: rest.split_off(i),
+                        });
+                        self.quit_prompt_show_with_error();
+                        return;
+                    }
+                }
+                // Every snapshotted buffer saved: clear the prompt and quit.
+                self.quit_prompt = None;
+                self.quit = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop the answered buffer from the snapshot; the last answer quits.
+    fn quit_prompt_advance(&mut self) {
+        let answered = self
+            .quit_prompt
+            .as_mut()
+            .and_then(|p| p.pending.drain(0..1).next());
+        if answered.is_none() {
+            return;
+        }
+        if self
+            .quit_prompt
+            .as_ref()
+            .is_some_and(|p| p.pending.is_empty())
+        {
+            self.quit_prompt = None;
+            self.quit = true;
+        } else {
+            self.quit_prompt_show();
+        }
+    }
+
+    /// C-g: cancel the whole quit. Buffers already answered `y` are kept
+    /// saved; the rest are untouched. 004-03 cancel discipline applies to
+    /// the rest of the state (pending / picker / mark), and the cancel is
+    /// echoed like the other prompt cancels.
+    fn quit_prompt_cancel(&mut self) {
+        self.quit_prompt = None;
+        self.cancel();
+        self.minibuffer_message("cancel");
+    }
+}
