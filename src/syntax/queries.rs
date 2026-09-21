@@ -1693,5 +1693,54 @@ mod tests {
         assert!(query_for(LanguageId::Plain).is_none());
         assert!(extract_symbols(LanguageId::Plain, "some text\nfn fake() {}\n").is_empty());
     }
+
+    // ── F-8: vendored highlight query integrity ─────────────────────────
+    /// The vendored `include_str!` files must not have been locally edited.
+    /// This test hashes both `third_party/*/highlights.scm` files and
+    /// compares against the sha256 recorded at copy time (the same hashes
+    /// in the doc comments on `C_SHARP_HIGHLIGHTS` and
+    /// `CLOJURE_HIGHLIGHTS`). A local edit to either file fails here.
+    #[test]
+    fn vendored_highlight_queries_match_copy_time_sha256() {
+        use std::process::Command;
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Copy-time sha256 (recorded at vendor time — do not update these
+        // without re-verifying the source crate version).
+        let c_sharp_expected =
+            "ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f";
+        let clojure_expected =
+            "424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de";
+
+        let c_sharp_path =
+            manifest_dir.join("third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
+        let clojure_path =
+            manifest_dir.join("third_party/tree-sitter-clojure-0.1.0/highlights.scm");
+
+        let hash_file = |path: &std::path::Path| -> String {
+            let out = Command::new("sha256sum")
+                .arg(path)
+                .output()
+                .expect("sha256sum failed");
+            String::from_utf8(out.stdout)
+                .expect("sha256sum output is not UTF-8")
+                .split_whitespace()
+                .next()
+                .expect("no hash in sha256sum output")
+                .to_string()
+        };
+
+        assert_eq!(
+            hash_file(&c_sharp_path),
+            c_sharp_expected,
+            "C# highlights.scm has been modified since vendor time"
+        );
+        assert_eq!(
+            hash_file(&clojure_path),
+            clojure_expected,
+            "Clojure highlights.scm has been modified since vendor time"
+        );
+    }
 }
 

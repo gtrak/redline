@@ -747,6 +747,23 @@ mod tests {
         assert_eq!(reg.language_for("foo.xyz"), LanguageId::Plain);
     }
 
+    /// C13: the reuse pipeline is byte-identical to the full Highlighter
+    /// ONLY when the locals query is empty. Pin the agreement: every
+    /// language that `supports_reuse` covers must have an empty locals
+    /// query in the registry. Adding a locals query to a reuse language
+    /// (or removing one without updating `supports_reuse`) fails here.
+    #[test]
+    fn supports_reuse_agrees_with_registry_locals_queries() {
+        for id in LanguageId::ALL {
+            let reuse = supports_reuse(*id);
+            let locals = crate::syntax::registry::has_locals_queries(*id);
+            assert!(
+                !reuse || !locals,
+                "{id:?}: supports_reuse but the registry passes a non-empty locals query — the incremental path would desync from the full path"
+            );
+        }
+    }
+
     // ── incremental reparse (plan 007 issue 04) ────────────────────
 
     /// The reusable pipeline (single-layer captures) must be byte-

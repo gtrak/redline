@@ -32,6 +32,8 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use tokio::sync::mpsc;
 
+use crate::model::files::{gitignore_matches, load_gitignore};
+
 /// One match found by the pipeline: the (project-relative) file, the
 /// 1-based line number, the line's text (terminator stripped, UTF-8
 /// lossy), and the match's byte column within the line when it is
@@ -425,20 +427,14 @@ fn attach_entry_filters(
     });
 }
 
-/// Loads `path` as a gitignore matcher; `None` when absent or invalid.
-fn load_gitignore(path: &Path) -> Option<Gitignore> {
-    match Gitignore::new(path) {
-        (gi, None) => Some(gi),
-        _ => None,
-    }
-}
-
 /// True when any ancestor directory's `.gitignore` — the entry's own
 /// directory (a directory entry) or its parent (a file entry), up to and
-/// including the project root — ignores the entry.
+/// including the project root — ignores the entry. Uses the shared
+/// `load_gitignore` + `gitignore_matches` helpers (R3: both walkers must
+/// agree on gitignore semantics).
 fn git_ignored_by_ancestors(
     root: &Path,
-    cache: &Mutex<HashMap<PathBuf, Option<Gitignore>>>,
+    cache: &Mutex<std::collections::HashMap<PathBuf, Option<ignore::gitignore::Gitignore>>>,
     path: &Path,
     is_dir: bool,
 ) -> bool {
@@ -451,8 +447,8 @@ fn git_ignored_by_ancestors(
     while let Some(d) = dir {
         let matcher = cache
             .entry(d.clone())
-            .or_insert_with(|| load_gitignore(&d.join(".gitignore")));
-        if matcher.as_ref().is_some_and(|gi| gi.matched(path, is_dir).is_ignore()) {
+            .or_insert_with(|| load_gitignore(&d));
+        if matcher.as_ref().is_some_and(|gi| gitignore_matches(gi, path, is_dir)) {
             return true;
         }
         if d == root {
@@ -1033,6 +1029,38 @@ mod tests {
                 .any(|e| matches!(e, SearchEvent::Error { .. })),
             "an Error event must arrive: {events:?}"
         );
+        drop(bus);
+    }
+
+    /// Item 2 (C14): pin the user-visible asymmetry — a file under
+    /// `graft/` IS found by the search pipeline (the search pipeline does
+    /// not prune `graft/`), while the file-list walk does prune it
+    /// (`files.rs::walk_prunes_graft_cache_directory` pins the other side).
+    /// Same fixture layout as that test: `src/main.rs` + `graft/` cards.
+    #[test]
+    fn search_finds_graft_files_unlike_file_list() {
+        let dir = project();
+        fs::write(dir.path().join("src/main.rs"), "needle\n").unwrap();
+        fs::create_dir_all(dir.path().join("graft/src")).unwrap();
+        fs::write(dir.path().join("graft/src/main.md"), "needle\n").unwrap();
+        fs::create_dir_all(dir.path().join("graft/cache")).unwrap();
+        fs::write(dir.path().join("graft/cache/other.md"), "needle\n").unwrap();
+
+        let (bus, mut rx, _cancel) = start(
+            dir.path().to_path_buf(),
+            base_cfg(dir.path().to_path_buf(), "needle"),
+        );
+        let events = drain_until_finished(&mut rx, std::time::Duration::from_secs(5));
+        let hits = hits(&events);
+        // The search pipeline finds ALL three files (including graft/).
+        assert_eq!(hits.len(), 3, "search must find graft/ files: {hits:?}");
+        let files: Vec<&str> = hits.iter().map(|h| h.file.as_str()).collect();
+        assert!(files.contains(&"src/main.rs"));
+        assert!(
+            files.contains(&"graft/src/main.md"),
+            "graft/ content must be found by search (the documented asymmetry vs FileList)"
+        );
+        assert!(files.contains(&"graft/cache/other.md"));
         drop(bus);
     }
 

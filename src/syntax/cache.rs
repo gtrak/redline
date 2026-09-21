@@ -1,7 +1,7 @@
 //! Highlight cache: keyed by (path, mtime, theme), bounded memory.
 //! Cache invalidation happens on reopen (mtime change) and theme switch
-//! (theme name change). Live invalidation via a file watcher arrives in
-//! issue 04.
+//! (theme name change). Live invalidation via a file watcher ships in
+//! `src/app/watcher.rs`.
 
 use std::collections::HashMap;
 use std::path::Path;

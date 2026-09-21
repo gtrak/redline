@@ -37,8 +37,8 @@ pub enum LanguageId {
 }
 
 impl LanguageId {
-    /// Display name (used in the cache key and for debugging).
-    #[allow(dead_code)] // public API: debugging / cache key
+    /// Display name (used in the store for language identification and
+    /// debugging).
     pub fn name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
@@ -209,104 +209,109 @@ impl GrammarRegistry {
         let mut configs = HashMap::new();
 
         for id in LanguageId::ALL {
+            // Single source of truth for the locals fact: `build` no
+            // longer carries it positionally per arm, so a drift between
+            // what the registry uses and what `has_locals_queries`
+            // reports is impossible (C13).
+            let locals = locals_query(*id);
             let cfg = match id {
                 LanguageId::Rust => Self::build_config(
                     Language::from(tree_sitter_rust::LANGUAGE),
                     "rust",
                     tree_sitter_rust::HIGHLIGHTS_QUERY,
                     tree_sitter_rust::INJECTIONS_QUERY,
-                    "",
+                    locals,
                 ),
                 LanguageId::TypeScript => Self::build_config(
                     Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
                     "typescript",
                     tree_sitter_typescript::HIGHLIGHTS_QUERY,
                     "",
-                    tree_sitter_typescript::LOCALS_QUERY,
+                    locals,
                 ),
                 LanguageId::Tsx => Self::build_config(
                     Language::from(tree_sitter_typescript::LANGUAGE_TSX),
                     "tsx",
                     tree_sitter_typescript::HIGHLIGHTS_QUERY,
                     "",
-                    tree_sitter_typescript::LOCALS_QUERY,
+                    locals,
                 ),
                 LanguageId::JavaScript => Self::build_config(
                     Language::from(tree_sitter_javascript::LANGUAGE),
                     "javascript",
                     tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_javascript::INJECTIONS_QUERY,
-                    tree_sitter_javascript::LOCALS_QUERY,
+                    locals,
                 ),
                 LanguageId::Python => Self::build_config(
                     Language::from(tree_sitter_python::LANGUAGE),
                     "python",
                     tree_sitter_python::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Go => Self::build_config(
                     Language::from(tree_sitter_go::LANGUAGE),
                     "go",
                     tree_sitter_go::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::C => Self::build_config(
                     Language::from(tree_sitter_c::LANGUAGE),
                     "c",
                     tree_sitter_c::HIGHLIGHT_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Cpp => Self::build_config(
                     Language::from(tree_sitter_cpp::LANGUAGE),
                     "cpp",
                     tree_sitter_cpp::HIGHLIGHT_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Toml => Self::build_config(
                     Language::from(tree_sitter_toml_ng::LANGUAGE),
                     "toml",
                     tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Json => Self::build_config(
                     Language::from(tree_sitter_json::LANGUAGE),
                     "json",
                     tree_sitter_json::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Yaml => Self::build_config(
                     Language::from(tree_sitter_yaml::LANGUAGE),
                     "yaml",
                     tree_sitter_yaml::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Bash => Self::build_config(
                     Language::from(tree_sitter_bash::LANGUAGE),
                     "bash",
                     tree_sitter_bash::HIGHLIGHT_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Markdown => Self::build_config(
                     Language::from(tree_sitter_md::LANGUAGE),
                     "markdown",
                     tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
                     tree_sitter_md::INJECTION_QUERY_BLOCK,
-                    "",
+                    locals,
                 ),
                 LanguageId::Java => Self::build_config(
                     Language::from(tree_sitter_java::LANGUAGE),
                     "java",
                     tree_sitter_java::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::CSharp => Self::build_config(
                     Language::from(tree_sitter_c_sharp::LANGUAGE),
@@ -317,21 +322,21 @@ impl GrammarRegistry {
                     // time) and `include_str!`ed from `queries.rs`.
                     crate::syntax::queries::C_SHARP_HIGHLIGHTS,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Ruby => Self::build_config(
                     Language::from(tree_sitter_ruby::LANGUAGE),
                     "ruby",
                     tree_sitter_ruby::HIGHLIGHTS_QUERY,
                     "",
-                    tree_sitter_ruby::LOCALS_QUERY,
+                    locals,
                 ),
                 LanguageId::Scheme => Self::build_config(
                     Language::from(tree_sitter_scheme::LANGUAGE),
                     "scheme",
                     tree_sitter_scheme::HIGHLIGHTS_QUERY,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Clojure => Self::build_config(
                     Language::from(tree_sitter_clojure::LANGUAGE),
@@ -343,7 +348,7 @@ impl GrammarRegistry {
                     // the same pattern as C#.
                     crate::syntax::queries::CLOJURE_HIGHLIGHTS,
                     "",
-                    "",
+                    locals,
                 ),
                 LanguageId::Plain => None,
             };
@@ -382,6 +387,34 @@ impl GrammarRegistry {
     pub fn config(&self, id: LanguageId) -> Option<&HighlightConfiguration> {
         self.configs.get(&id).and_then(|c| c.as_ref())
     }
+}
+
+/// The locals query string `build()` passes to `build_config` for `id`
+/// — the single source of truth for which languages track local
+/// variable scopes (TypeScript, TSX, JavaScript, Ruby pass their crate's
+/// `LOCALS_QUERY`; every other language passes `""`). `build()` and
+/// `has_locals_queries` both read this, so the C13 pin and the registry
+/// cannot drift apart: a locals query added here fails the pin.
+fn locals_query(id: LanguageId) -> &'static str {
+    match id {
+        LanguageId::TypeScript => tree_sitter_typescript::LOCALS_QUERY,
+        LanguageId::Tsx => tree_sitter_typescript::LOCALS_QUERY,
+        LanguageId::JavaScript => tree_sitter_javascript::LOCALS_QUERY,
+        LanguageId::Ruby => tree_sitter_ruby::LOCALS_QUERY,
+        _ => "",
+    }
+}
+
+/// True when the registry's `build_config` for `id` passes a non-empty
+/// locals query. Reads the exact fact `build()` uses (via
+/// `locals_query`), so the pin guarantees agreement by construction:
+/// the incremental reuse pipeline is byte-identical to the full
+/// `Highlighter` **only** when the locals query is empty, and adding a
+/// locals query to a reuse language (or changing one for any language)
+/// fails the C13 test against `highlight::supports_reuse`.
+#[allow(dead_code)] // used by the C13 agreement test in highlight.rs
+pub(crate) fn has_locals_queries(id: LanguageId) -> bool {
+    !locals_query(id).is_empty()
 }
 
 /// The highlight query string for a language (the same `&'static str`
