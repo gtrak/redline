@@ -13,16 +13,31 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 `allow|expect(dead_code)` **50 occurrences** · `seed()` 694 lines ·
 `tempfile::tempdir()` 205 sites · `Cargo.toml` scaffolds 69 sites.
 
-## Verification notes (corrections to the raw scan output)
+## Verification notes (supervisor re-verified every headline claim)
 
-- Attribute inventory is **50**, not 52.
-- `store.rs` holds **349** `#[test]`, not 371.
+- Attribute inventory: **50** `allow|expect(dead_code)` attributes; 52 lines
+  mention `dead_code` (2 are prose). Both scan numbers were defensible; the
+  attribute count is 50.
+- `store.rs` test count: **371 test attributes** = 349 `#[test]` + 22
+  `#[tokio::test]`. (My first re-count said 349 — that was the narrower count;
+  the scan was right.)
+- **Scan-methodology caveat**: `.agents/worktrees/{1,2}` are full-tree copies;
+  a repo-root `grep -r` sees 3× every hit (verified: `fn git(` = 18 root-wide vs
+  6 in `src`). Future scans must exclude `.agents/`. The four scans below did
+  not appear to double-count (their totals match main-only counts).
 - `LanguageId::name` has no `LanguageId::name(` call site but IS live via
   `.name()` (11 hits, incl. `store.rs:8562`) — the stale attribute holds.
 - Findings the supervisor REFUTED or downgraded: none (all headline claims held).
 - Layer audit came back **clean** (no `app→ui`, `syntax→app`, `nav→app`; the
   resolver crate is app-free). The debt is module-mixing + duplication + docs,
   **not** architectural violation — so almost everything here is safe mechanical work.
+- **Coverage caveat (measured, not assumed)**: the four scans each ran 21–37
+  repo-wide `bash` greps and **0–1 `read` calls**, i.e. they are whole-tree
+  *textual* scans with sampled reading, not end-to-end file review. Findings
+  are reliable where a grep can prove them (all headline claims re-verified by
+  the supervisor); they can miss duplication that requires reading a file to
+  notice. A deterministic block-duplication pass is the cross-check (see
+  §Deterministic cross-check).
 
 ---
 
@@ -32,7 +47,7 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 |----|------|-------|------|
 | **M1** | Delete **7 stale `#[allow(dead_code)]`** + obsolete "future wiring" comments (6 in `nav/index.rs:425–650`: `IndexProgress`, `with_publisher`, `extract_file`, `build_index`, `refresh_in_place`, `IndexBus::send`; + `syntax/registry.rs:41` `LanguageId::name`). Prod callers verified. | 7 | low |
 | **M2** | Delete `IndexProgress::mark_done` (`nav/index.rs:458`) — **zero callers** (verified) | 1 | low |
-| **M3** | Shared `src/git/test_support.rs`: 6 `git()` copies (`repo/log/blame/commit/refs/flow_tests`) + 5 `init_repo` | 11 | low |
+| **M3** | Shared `src/git/test_support.rs` for the hermetic-git test harness. **Corrected by deterministic pass: ~19 helpers in 8 files**, not 6 (the scans grepped `fn git(` and missed the rest): 6× `fn git() -> String`, 1× `git_out()`, 11× `fn git_cli()` (`store.rs` ×9, `ui/magit_status.rs`, `ui/rows_view.rs`), 1× `git_test_cli()`; plus 5 `init_repo` copies | ~19 in 8 files | low |
 | **M4** | Shared `ui::text_style(fg, invert, bold)` (+ bold/italic wrappers) next to `color()`; unify `picker.rs:140`, `transient_menu.rs:144`, `file_view.rs:256` | 3 | low |
 | **M5** | One `is_word_char(c: char)` helper (`store.rs:5261`, `rg.rs:593`, 3 inline closures) | 5 | low |
 | **M6** | Split `command.rs::seed()` (694 lines, 108 commands) into `register_{navigation,region,git,search,…}`; keep the 108-count assertion | 1 fn | low |
@@ -40,6 +55,7 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **M8** | Delete genuinely-dead serde-only fields (`cargo.rs` `workspace_root`, `Target.name`/`kind`; `js_provider` `types`) — **check `deny_unknown_fields` first** | 4 | med |
 | **M9** | Narrow `pub`→`pub(crate)` where no `crates/*` consumer (binary crate ⇒ safe); incl. `command.rs:95 dispatch_by_name` (test-only) | ~many | low |
 | **M10** | `current_key()` (24 sites) + `project_root()` (10 sites) guard helpers — **but both live in `store.rs`; fold into the store split stage, don't do as a separate pass** | 34 | low |
+| **M11** | Shared render preamble for the `element! { … }` block repeated in `ui/{file_view,magit_status,results_view,rows_view,views/buffer}.rs` (found by the deterministic pass; not in any scan) | 5 | low-med |
 
 ## Tier 2 — Structural (each needs one stated design call)
 
@@ -114,6 +130,32 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 4. **012-12 (new) "test consolidation"** — T1 first (cheap, proven byte-identical),
    then T4/T2, then T3/T5/T6.
 5. **012-09** other oversized files + docs index (S4–S9, S11).
+
+## Deterministic cross-check (no LLM)
+
+A normalized 6-line-window hash pass over every `.rs` file in `src/` +
+`crates/` (comments/whitespace stripped, cross-file repeats only, 78 files
+scanned): **176 cross-file duplicate windows** (77 prod-involving across 22
+files, 99 test-only).
+
+What it corroborated (scan was right): the golden-suite helper duplication
+(`golden_go`↔`golden_js`↔`golden_python`↔`golden_rust`, 3+ files) and the
+hermetic-git harness.
+
+What it **corrected or added** (scan missed it):
+
+1. **The git harness is ~19 copies in 8 files, not 6.** The scans grepped
+   `fn git(` and so missed `git_out`/`git_cli`/`git_test_cli` (11+ sites) and
+   the two UI files. `GIT_AUTHOR_NAME` appears in `store.rs`,
+   `ui/magit_status.rs`, `ui/rows_view.rs` + all 5 `git/*.rs`.
+2. **`element! { … }` render preamble duplicated across 5 UI files**
+   (`file_view`, `magit_status`, `results_view`, `rows_view`, `views/buffer`)
+   — a duplication class no scan reported.
+
+**Methodology lesson for future scans**: grep-shape assumptions ("the helper
+is called `git`") silently set the coverage ceiling. Pattern-free mechanical
+passes (this one) are the cross-check; LLM scans should be used for the
+judgment calls (e.g. T2's keep-or-merge per pair), not as the inventory.
 
 ## Start here
 
