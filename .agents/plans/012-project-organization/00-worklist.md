@@ -707,7 +707,7 @@ evidence of which function it is in".
 
 | Caller | Column source | Notes |
 |---|---|---|
-| `buffers.rs:458` `C-x C-x` `exchange_point_and_mark` | mark is a byte offset | **most emacs-visible of the four**; the new `try_byte_to_line_col` is exactly the seam it needs |
+| `buffers.rs:458` `C-x C-x` `exchange_point_and_mark` | mark is a byte offset | **most emacs-visible of the four**; the new `try_byte_to_line_col` is exactly the seam it needs — **SPECD first** (`issue-column-landings.md`) |
 | `search.rs:156` isearch **cancel** | not recorded — `IsearchState` stores only `pre_search_line` | needs a `pre_search_col` field to restore the original column on `C-g` |
 | `search.rs:329` project-search RET | `Hit.col: Option<u64>` (byte col; `None` for regex) | |
 | `definitions.rs:186` unique-def jump | `Symbol.start_byte` | derivable |
@@ -717,6 +717,13 @@ evidence of which function it is in".
 `point_col()`, consumed by `set_point`). Zero behaviour impact; wrong doc.
 
 **Still out of scope:** a match beyond the pane width clamps at the edge (no hscroll).
+
+**The four are now specced as one lane** (`.agents/tasks/issue-column-landings.md`,
+`C-x C-x` first), together with the two doc fixes (`set_point_line`'s caller list,
+`JumpEntry.col`'s byte-vs-char claim) and — folded in because that file is already in
+scope — the `try_byte_to_line` `#[allow(dead_code)]` that the isearch gate flagged as
+suppressing a *standing* warning with an inaccurate reason (it was routed here from the
+hygiene sweep; the hygiene sweep's allow-audit will simply find one fewer).
 
 ## Known follow-ups from gate findings (low priority)
 
