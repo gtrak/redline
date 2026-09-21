@@ -15,7 +15,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{InputEdit, Language, Node, Parser, Point, Query, QueryCursor, Tree};
 use tree_sitter_highlight::{HighlightEvent, Highlighter};
 
-use crate::syntax::registry::{self, LanguageId};
+use crate::syntax::registry::LanguageId;
 
 /// The face names configured on every `HighlightConfiguration`.
 /// `Highlight(i)` from the highlighter is an index into this list;
@@ -243,24 +243,16 @@ impl RetainedTree {
 }
 
 /// The languages the reuse pipeline covers: every one of them has an
-/// empty locals query in the registry, and redline's `|_| None` injection
-/// callback means the `Highlighter` never adds an injected-language layer
-/// for them — so `spans_from_tree` reproduces its event stream exactly.
-/// (JS/TS/TSX track locals; `Plain` has no grammar.)
+/// empty locals query in the descriptor table, and redline's `|_| None`
+/// injection callback means the `Highlighter` never adds an injected-
+/// language layer for them — so `spans_from_tree` reproduces its event
+/// stream exactly. (JS/TS/TSX track locals; Java/C#/Ruby/Scheme/
+/// Clojure ride the Highlighter path deliberately; `Plain` has no
+/// grammar.) Thin wrapper over the table row's `supports_reuse` field —
+/// the policy itself lives in `language.rs` (the old 10-arm `matches!`
+/// and the third grammar pin, `reuse_language`, are both deleted).
 pub fn supports_reuse(lang: LanguageId) -> bool {
-    matches!(
-        lang,
-        LanguageId::Rust
-            | LanguageId::Python
-            | LanguageId::Go
-            | LanguageId::C
-            | LanguageId::Cpp
-            | LanguageId::Toml
-            | LanguageId::Json
-            | LanguageId::Yaml
-            | LanguageId::Bash
-            | LanguageId::Markdown
-    )
+    crate::syntax::language::spec(lang).supports_reuse
 }
 
 /// Per-language reuse-pipeline state: the grammar `Language` and the
@@ -269,31 +261,6 @@ pub fn supports_reuse(lang: LanguageId) -> bool {
 struct ReuseEngine {
     language: Language,
     query: Query,
-}
-
-fn reuse_language(lang: LanguageId) -> Option<Language> {
-    use LanguageId::*;
-    Some(match lang {
-        Rust => Language::from(tree_sitter_rust::LANGUAGE),
-        Python => Language::from(tree_sitter_python::LANGUAGE),
-        Go => Language::from(tree_sitter_go::LANGUAGE),
-        C => Language::from(tree_sitter_c::LANGUAGE),
-        Cpp => Language::from(tree_sitter_cpp::LANGUAGE),
-        Toml => Language::from(tree_sitter_toml_ng::LANGUAGE),
-        Json => Language::from(tree_sitter_json::LANGUAGE),
-        Yaml => Language::from(tree_sitter_yaml::LANGUAGE),
-        Bash => Language::from(tree_sitter_bash::LANGUAGE),
-        Markdown => Language::from(tree_sitter_md::LANGUAGE),
-        // JS/TS/TSX keep the Highlighter path (local-variable tracking);
-        // Java (new-languages lane; the later C#/Ruby/Scheme/Clojure
-        // variants slot into this arm as they land) rides it too — the Highlighter
-        // path is the safe default for any grammar, and this match is
-        // exhaustive over `LanguageId` (a new variant must land here to
-        // compile); Plain has no grammar.
-        TypeScript | Tsx | JavaScript | Java | CSharp | Ruby | Scheme | Clojure | Plain => {
-            return None
-        }
-    })
 }
 
 /// The face index for a capture name — a replica of
@@ -338,19 +305,25 @@ pub fn warm_reuse_engines() {
 }
 
 fn build_reuse_engines() -> HashMap<LanguageId, Option<ReuseEngine>> {
-    LanguageId::ALL
+    use crate::syntax::language;
+    language::LANGUAGES
         .iter()
-        .copied()
-        .map(|lang| {
-            let engine = reuse_language(lang).and_then(|language| {
-                registry::highlight_query_for(lang).and_then(|query_str| {
-                    Query::new(&language, query_str).ok().map(|query| ReuseEngine {
-                        language,
-                        query,
+        .map(|spec| {
+            // The row's supports_reuse + grammar + highlight_query are
+            // the whole fact: the reuse pipeline no longer carries its
+            // own grammar pin.
+            let engine = spec
+                .supports_reuse
+                .then_some(spec.grammar)
+                .flatten()
+                .and_then(|grammar| {
+                    spec.highlight_query.and_then(|query_str| {
+                        Query::new(&grammar(), query_str)
+                            .ok()
+                            .map(|query| ReuseEngine { language: grammar(), query })
                     })
-                })
-            });
-            (lang, engine)
+                });
+            (spec.id, engine)
         })
         .collect()
 }
@@ -754,9 +727,10 @@ mod tests {
     /// (or removing one without updating `supports_reuse`) fails here.
     #[test]
     fn supports_reuse_agrees_with_registry_locals_queries() {
-        for id in LanguageId::ALL {
-            let reuse = supports_reuse(*id);
-            let locals = crate::syntax::registry::has_locals_queries(*id);
+        for spec in &crate::syntax::language::LANGUAGES {
+            let id = spec.id;
+            let reuse = supports_reuse(id);
+            let locals = crate::syntax::registry::has_locals_queries(id);
             assert!(
                 !reuse || !locals,
                 "{id:?}: supports_reuse but the registry passes a non-empty locals query — the incremental path would desync from the full path"
@@ -1069,11 +1043,12 @@ mod tests {
     fn reuse_engines_are_warm_after_cache_construction() {
         let _cache = crate::syntax::cache::HighlightCache::new();
         let t = std::time::Instant::now();
-        for lang in LanguageId::ALL {
-            if supports_reuse(*lang) {
-                assert!(engine_for(*lang).is_some(), "{lang:?} engine missing");
+        for spec in &crate::syntax::language::LANGUAGES {
+            let lang = spec.id;
+            if supports_reuse(lang) {
+                assert!(engine_for(lang).is_some(), "{lang:?} engine missing");
             } else {
-                assert!(engine_for(*lang).is_none(), "{lang:?} must have no engine");
+                assert!(engine_for(lang).is_none(), "{lang:?} must have no engine");
             }
         }
         assert!(

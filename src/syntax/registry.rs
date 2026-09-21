@@ -38,118 +38,22 @@ pub enum LanguageId {
 
 impl LanguageId {
     /// Display name (used in the store for language identification and
-    /// debugging).
+    /// debugging) — read from the descriptor table (`language.rs`), the
+    /// single source of truth for the per-language facts.
     pub fn name(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::TypeScript => "typescript",
-            Self::Tsx => "tsx",
-            Self::JavaScript => "javascript",
-            Self::Python => "python",
-            Self::Go => "go",
-            Self::C => "c",
-            Self::Cpp => "cpp",
-            Self::Toml => "toml",
-            Self::Json => "json",
-            Self::Yaml => "yaml",
-            Self::Bash => "bash",
-            Self::Markdown => "markdown",
-            Self::Java => "java",
-            Self::CSharp => "csharp",
-            Self::Ruby => "ruby",
-            Self::Scheme => "scheme",
-            Self::Clojure => "clojure",
-            Self::Plain => "plain",
-        }
+        crate::syntax::language::spec(self).name
     }
-
-    /// All non-plain languages (used to build the registry).
-    pub const ALL: &[LanguageId] = &[
-        Self::Rust,
-        Self::TypeScript,
-        Self::Tsx,
-        Self::JavaScript,
-        Self::Python,
-        Self::Go,
-        Self::C,
-        Self::Cpp,
-        Self::Toml,
-        Self::Json,
-        Self::Yaml,
-        Self::Bash,
-        Self::Markdown,
-        Self::Java,
-        Self::CSharp,
-        Self::Ruby,
-        Self::Scheme,
-        Self::Clojure,
-    ];
 }
 
-/// Extension → language mapping (not exhaustive; unknown → Plain).
+/// Extension → language mapping, built from the descriptor table's
+/// `extensions` rows (not exhaustive; unknown → Plain via
+/// `resolve_language`). The hand-synced per-language insert list is
+/// gone — a new language row brings its extensions with it.
 fn ext_map() -> HashMap<&'static str, LanguageId> {
-    let mut m = HashMap::new();
-    // Rust
-    m.insert("rs", LanguageId::Rust);
-    m.insert("rsi", LanguageId::Rust);
-    // TypeScript / TSX
-    m.insert("ts", LanguageId::TypeScript);
-    m.insert("tsx", LanguageId::Tsx);
-    // JavaScript
-    m.insert("js", LanguageId::JavaScript);
-    m.insert("jsx", LanguageId::JavaScript);
-    m.insert("mjs", LanguageId::JavaScript);
-    m.insert("cjs", LanguageId::JavaScript);
-    // Python
-    m.insert("py", LanguageId::Python);
-    m.insert("pyi", LanguageId::Python);
-    // Go
-    m.insert("go", LanguageId::Go);
-    // C
-    m.insert("c", LanguageId::C);
-    m.insert("h", LanguageId::C);
-    // C++
-    m.insert("cpp", LanguageId::Cpp);
-    m.insert("cc", LanguageId::Cpp);
-    m.insert("cxx", LanguageId::Cpp);
-    m.insert("hpp", LanguageId::Cpp);
-    m.insert("hh", LanguageId::Cpp);
-    m.insert("hxx", LanguageId::Cpp);
-    // TOML
-    m.insert("toml", LanguageId::Toml);
-    m.insert("ini", LanguageId::Toml);
-    m.insert("conf", LanguageId::Toml);
-    // JSON
-    m.insert("json", LanguageId::Json);
-    m.insert("jsonc", LanguageId::Json);
-    // YAML
-    m.insert("yaml", LanguageId::Yaml);
-    m.insert("yml", LanguageId::Yaml);
-    // Bash
-    m.insert("sh", LanguageId::Bash);
-    m.insert("bash", LanguageId::Bash);
-    m.insert("zsh", LanguageId::Bash);
-    // Markdown
-    m.insert("md", LanguageId::Markdown);
-    m.insert("markdown", LanguageId::Markdown);
-    m.insert("mdx", LanguageId::Markdown);
-    // Java
-    m.insert("java", LanguageId::Java);
-    // C#
-    m.insert("cs", LanguageId::CSharp);
-    // Ruby
-    m.insert("rb", LanguageId::Ruby);
-    // Scheme (the lisp-family landing — see docs/language-coverage.md
-    // gap 8 for the family choice rationale)
-    m.insert("scm", LanguageId::Scheme);
-    m.insert("ss", LanguageId::Scheme);
-    m.insert("sls", LanguageId::Scheme);
-    m.insert("sld", LanguageId::Scheme);
-    // Clojure (the runtime-bump lane — the first 0.25-generation grammar)
-    m.insert("clj", LanguageId::Clojure);
-    m.insert("cljs", LanguageId::Clojure);
-    m.insert("cljc", LanguageId::Clojure);
-    m
+    crate::syntax::language::LANGUAGES
+        .iter()
+        .flat_map(|spec| spec.extensions.iter().map(|ext| (*ext, spec.id)))
+        .collect()
 }
 
 /// Extract the file extension (without the dot) from a path.
@@ -201,161 +105,38 @@ pub struct GrammarRegistry {
 }
 
 impl GrammarRegistry {
-    /// Build the registry: one `HighlightConfiguration` per language in
-    /// `LanguageId::ALL`. Failures are logged and the language falls
-    /// back to plain text at render time.
+    /// Build the registry: one `HighlightConfiguration` per grammar-
+    /// bearing row of the descriptor table (`language.rs`). The table
+    /// row carries the grammar + highlight/injections/locals queries —
+    /// the old 18-arm match (and its hand-synced `highlight_query_for`
+    /// twin, now deleted) are gone: a grammar re-pin touches exactly one
+    /// row, and every consumer reads it. Failures are logged and the
+    /// language falls back to plain text at render time.
     pub fn build() -> Self {
         let exts = ext_map();
         let mut configs = HashMap::new();
 
-        for id in LanguageId::ALL {
-            // Single source of truth for the locals fact: `build` no
-            // longer carries it positionally per arm, so a drift between
-            // what the registry uses and what `has_locals_queries`
-            // reports is impossible (C13).
-            let locals = locals_query(*id);
-            let cfg = match id {
-                LanguageId::Rust => Self::build_config(
-                    Language::from(tree_sitter_rust::LANGUAGE),
-                    "rust",
-                    tree_sitter_rust::HIGHLIGHTS_QUERY,
-                    tree_sitter_rust::INJECTIONS_QUERY,
-                    locals,
-                ),
-                LanguageId::TypeScript => Self::build_config(
-                    Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
-                    "typescript",
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Tsx => Self::build_config(
-                    Language::from(tree_sitter_typescript::LANGUAGE_TSX),
-                    "tsx",
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::JavaScript => Self::build_config(
-                    Language::from(tree_sitter_javascript::LANGUAGE),
-                    "javascript",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::INJECTIONS_QUERY,
-                    locals,
-                ),
-                LanguageId::Python => Self::build_config(
-                    Language::from(tree_sitter_python::LANGUAGE),
-                    "python",
-                    tree_sitter_python::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Go => Self::build_config(
-                    Language::from(tree_sitter_go::LANGUAGE),
-                    "go",
-                    tree_sitter_go::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::C => Self::build_config(
-                    Language::from(tree_sitter_c::LANGUAGE),
-                    "c",
-                    tree_sitter_c::HIGHLIGHT_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Cpp => Self::build_config(
-                    Language::from(tree_sitter_cpp::LANGUAGE),
-                    "cpp",
-                    tree_sitter_cpp::HIGHLIGHT_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Toml => Self::build_config(
-                    Language::from(tree_sitter_toml_ng::LANGUAGE),
-                    "toml",
-                    tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Json => Self::build_config(
-                    Language::from(tree_sitter_json::LANGUAGE),
-                    "json",
-                    tree_sitter_json::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Yaml => Self::build_config(
-                    Language::from(tree_sitter_yaml::LANGUAGE),
-                    "yaml",
-                    tree_sitter_yaml::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Bash => Self::build_config(
-                    Language::from(tree_sitter_bash::LANGUAGE),
-                    "bash",
-                    tree_sitter_bash::HIGHLIGHT_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Markdown => Self::build_config(
-                    Language::from(tree_sitter_md::LANGUAGE),
-                    "markdown",
-                    tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-                    tree_sitter_md::INJECTION_QUERY_BLOCK,
-                    locals,
-                ),
-                LanguageId::Java => Self::build_config(
-                    Language::from(tree_sitter_java::LANGUAGE),
-                    "java",
-                    tree_sitter_java::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::CSharp => Self::build_config(
-                    Language::from(tree_sitter_c_sharp::LANGUAGE),
-                    "csharp",
-                    // The pinned crate ships `queries/highlights.scm` but
-                    // does not export a `HIGHLIGHTS_QUERY` constant, so the
-                    // query is vendored verbatim (checksum-pinned at copy
-                    // time) and `include_str!`ed from `queries.rs`.
-                    crate::syntax::queries::C_SHARP_HIGHLIGHTS,
-                    "",
-                    locals,
-                ),
-                LanguageId::Ruby => Self::build_config(
-                    Language::from(tree_sitter_ruby::LANGUAGE),
-                    "ruby",
-                    tree_sitter_ruby::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Scheme => Self::build_config(
-                    Language::from(tree_sitter_scheme::LANGUAGE),
-                    "scheme",
-                    tree_sitter_scheme::HIGHLIGHTS_QUERY,
-                    "",
-                    locals,
-                ),
-                LanguageId::Clojure => Self::build_config(
-                    Language::from(tree_sitter_clojure::LANGUAGE),
-                    "clojure",
-                    // The pinned crate ships `grammar-src/queries/
-                    // highlights.scm` but exports no highlights constant,
-                    // so the query is vendored verbatim (sha256-pinned at
-                    // copy time) and `include_str!`ed from `queries.rs` —
-                    // the same pattern as C#.
-                    crate::syntax::queries::CLOJURE_HIGHLIGHTS,
-                    "",
-                    locals,
-                ),
-                LanguageId::Plain => None,
-            };
-            if cfg.is_none() && *id != LanguageId::Plain {
+        for spec in &crate::syntax::language::LANGUAGES {
+            let id = spec.id;
+            // Single source of truth for the locals fact: `build` reads
+            // the row's `locals_query`, and `has_locals_queries` reads
+            // the same row, so a drift between what the registry uses
+            // and what `has_locals_queries` reports is impossible (C13).
+            let cfg = spec.grammar.and_then(|grammar| {
+                Self::build_config(
+                    grammar(),
+                    spec.name,
+                    spec
+                        .highlight_query
+                        .expect("grammar-bearing rows carry a highlight query (sync test)"),
+                    spec.injections_query,
+                    spec.locals_query,
+                )
+            });
+            if cfg.is_none() && spec.grammar.is_some() {
                 tracing::warn!("highlight config failed for {id:?}");
             }
-            configs.insert(*id, cfg);
+            configs.insert(id, cfg);
         }
 
         Self { exts, configs }
@@ -389,61 +170,16 @@ impl GrammarRegistry {
     }
 }
 
-/// The locals query string `build()` passes to `build_config` for `id`
-/// — the single source of truth for which languages track local
-/// variable scopes (TypeScript, TSX, JavaScript, Ruby pass their crate's
-/// `LOCALS_QUERY`; every other language passes `""`). `build()` and
-/// `has_locals_queries` both read this, so the C13 pin and the registry
-/// cannot drift apart: a locals query added here fails the pin.
-fn locals_query(id: LanguageId) -> &'static str {
-    match id {
-        LanguageId::TypeScript => tree_sitter_typescript::LOCALS_QUERY,
-        LanguageId::Tsx => tree_sitter_typescript::LOCALS_QUERY,
-        LanguageId::JavaScript => tree_sitter_javascript::LOCALS_QUERY,
-        LanguageId::Ruby => tree_sitter_ruby::LOCALS_QUERY,
-        _ => "",
-    }
-}
-
 /// True when the registry's `build_config` for `id` passes a non-empty
-/// locals query. Reads the exact fact `build()` uses (via
-/// `locals_query`), so the pin guarantees agreement by construction:
-/// the incremental reuse pipeline is byte-identical to the full
-/// `Highlighter` **only** when the locals query is empty, and adding a
-/// locals query to a reuse language (or changing one for any language)
-/// fails the C13 test against `highlight::supports_reuse`.
+/// locals query. Reads the descriptor-table row `build()` uses, so the
+/// C13 pin guarantees agreement by construction: the incremental reuse
+/// pipeline is byte-identical to the full `Highlighter` **only** when
+/// the locals query is empty, and adding a locals query to a reuse
+/// language (or changing one for any language) fails the C13 test
+/// against `highlight::supports_reuse`.
 #[allow(dead_code)] // used by the C13 agreement test in highlight.rs
 pub(crate) fn has_locals_queries(id: LanguageId) -> bool {
-    !locals_query(id).is_empty()
-}
-
-/// The highlight query string for a language (the same `&'static str`
-/// constants `build` uses for the `HighlightConfiguration`s); `None` for
-/// plain text. Used by issue 06's reference filtering to build a
-/// token-class (comment/string) byte-range query without re-pinning the
-/// grammar constants a second time.
-pub fn highlight_query_for(lang: LanguageId) -> Option<&'static str> {
-    Some(match lang {
-        LanguageId::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY,
-        LanguageId::TypeScript => tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        LanguageId::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
-        LanguageId::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
-        LanguageId::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
-        LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
-        LanguageId::Cpp => tree_sitter_cpp::HIGHLIGHT_QUERY,
-        LanguageId::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-        LanguageId::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
-        LanguageId::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
-        LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
-        LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-        LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
-        LanguageId::CSharp => crate::syntax::queries::C_SHARP_HIGHLIGHTS,
-        LanguageId::Ruby => tree_sitter_ruby::HIGHLIGHTS_QUERY,
-        LanguageId::Scheme => tree_sitter_scheme::HIGHLIGHTS_QUERY,
-        LanguageId::Clojure => crate::syntax::queries::CLOJURE_HIGHLIGHTS,
-        LanguageId::Plain => return None,
-    })
+    !crate::syntax::language::spec(id).locals_query.is_empty()
 }
 
 #[cfg(test)]
@@ -487,13 +223,21 @@ mod tests {
     #[test]
     fn all_grammars_have_configs() {
         let reg = GrammarRegistry::build();
-        for id in LanguageId::ALL {
-            assert!(
-                reg.config(*id).is_some(),
-                "{id:?} should have a highlight config"
-            );
+        for spec in &crate::syntax::language::LANGUAGES {
+            if spec.grammar.is_some() {
+                assert!(
+                    reg.config(spec.id).is_some(),
+                    "{id:?} should have a highlight config",
+                    id = spec.id
+                );
+            } else {
+                assert!(
+                    reg.config(spec.id).is_none(),
+                    "{id:?} has no grammar and no config",
+                    id = spec.id
+                );
+            }
         }
-        assert!(reg.config(LanguageId::Plain).is_none());
     }
 
     /// ABI-pinning guard (001/007 lesson): every registry language's
@@ -505,12 +249,17 @@ mod tests {
     #[test]
     fn all_grammars_set_language_succeeds() {
         let mut parser = tree_sitter::Parser::new();
-        for id in LanguageId::ALL {
-            let lang =
-                crate::syntax::queries::language_for(*id).expect("grammar for {id:?}");
+        // The table's grammar column is the single pin every consumer
+        // (registry build, extraction, reuse) reads — pinning it here
+        // covers all of them (the old guard only covered
+        // `queries::language_for`'s copy of the pin).
+        for spec in &crate::syntax::language::LANGUAGES {
+            let Some(grammar) = spec.grammar else { continue };
+            let lang = grammar();
             assert!(
                 parser.set_language(&lang).is_ok(),
-                "{id:?}: grammar ABI incompatible with the pinned runtime"
+                "{id:?}: grammar ABI incompatible with the pinned runtime",
+                id = spec.id
             );
         }
     }

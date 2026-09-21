@@ -2,8 +2,8 @@
 
 The single "what's covered, per language" record. Sibling of
 `docs/provider-matrix.md` (which is provider-resolution-centric): this
-file is the **language × capability** grid over ALL 19 registry
-languages (`LanguageId::ALL` + `Plain`, `src/syntax/registry.rs`):
+file is the **language × capability** grid over ALL 19 languages
+(`src/syntax/language.rs`'s descriptor table — one row per `LanguageId`):
 Rust, TypeScript, Tsx, JavaScript, Python, Go, C, Cpp, Toml, Json,
 Yaml, Bash, Markdown, Java, CSharp, Ruby, Scheme, Clojure, Plain.
 

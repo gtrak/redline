@@ -5,8 +5,10 @@ Decision-free evidence for the runtime bump task
 read from the local crates.io registry index cache
 (`~/.cargo/registry/index/…/.cache/tr/ee/<crate>`) — no network. The
 empirical confirmation is the ABI guard
-`all_grammars_set_language_succeeds` (registry.rs), run over ALL
-`LanguageId::ALL` against the bumped lock.
+`all_grammars_set_language_succeeds` (registry.rs), run over every
+grammar-bearing row of the descriptor table's `grammar` column
+(`src/syntax/language.rs`) — the single grammar pin every consumer
+reads — against the bumped lock.
 
 ## The mechanism (why the matrix looks the way it does)
 

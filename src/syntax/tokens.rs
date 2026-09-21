@@ -21,34 +21,26 @@ use std::ops::Range;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
+use crate::syntax::language::{spec, TokenClass};
 use crate::syntax::queries::language_for;
-use crate::syntax::registry::{highlight_query_for, LanguageId};
+use crate::syntax::registry::LanguageId;
 
-/// The token-class (comment/string) query for `lang`.
-///
-/// Most pinned highlight queries already capture `comment` and `string*`
-/// faces, so the highlight query itself is the token-class query. Three
-/// pinned highlight queries (TypeScript, TSX, C++) are minimal and capture
-/// neither — for those, a dedicated query targets the grammar's
-/// comment/string node kinds directly (verified against the pinned
-/// grammars: `comment` + `string_fragment` for TS/TSX, which covers
-/// template-string content; `comment` + `string_literal` + `char_literal`
-/// for C++). Markdown has no comment or string node kinds at all: the
-/// filter is inactive there (documented exception — hits are kept, the
-/// plain-search fallback behavior).
+/// The token-class (comment/string) query for `lang` — a field read
+/// over the descriptor table (the old match, which re-pinned the TS/TSX
+/// and C++ dedicated queries and the Markdown exception alongside a
+/// second copy of the highlight-query pin, is gone):
+/// `Dedicated` targets the grammar's comment/string node kinds directly
+/// (the pinned highlight query captures no such face); `Inactive` is
+/// Markdown's documented exception (no comment or string node kinds
+/// at all — the filter stays inactive, hits are kept);
+/// `FromHighlight` uses the row's own highlight query (most pinned
+/// highlight queries already capture the `comment`/`string*` faces).
 fn token_class_query_for(lang: LanguageId) -> Option<&'static str> {
-    Some(match lang {
-        LanguageId::TypeScript | LanguageId::Tsx => {
-            // The pinned highlight query captures no comment/string faces.
-            "(comment) @comment\n(string_fragment) @string"
-        }
-        LanguageId::Cpp => {
-            // The pinned highlight query captures no comment/string faces.
-            "(comment) @comment\n(string_literal) @string\n(char_literal) @string"
-        }
-        LanguageId::Markdown => return None, // documented exception
-        _ => highlight_query_for(lang)?,
-    })
+    match spec(lang).token_class {
+        TokenClass::FromHighlight => spec(lang).highlight_query,
+        TokenClass::Dedicated(query) => Some(query),
+        TokenClass::Inactive => None, // documented exception
+    }
 }
 
 /// The comment/string byte ranges in `source` for `lang`, sorted and

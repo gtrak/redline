@@ -11,11 +11,13 @@
 //! same tables with the per-file local binding map (written-down types
 //! only) consumed by the M-. local-binding pre-step.
 //!
-//! All tree-sitter churn lives here (plan layering rule): the grammar
-//! crates, the `Language`, and the query strings are touched only in
-//! this module + `registry.rs`. `nav/` and the app layer consume the
-//! opaque `Symbol` records this module produces and never touch
-//! tree-sitter directly.
+//! All tree-sitter churn lives here (plan layering rule): the query
+//! strings are touched only in this module; the per-language facts that
+//! are DATA (grammar pin, highlight/injections/locals queries, which
+//! query each language uses) live in the descriptor table
+//! (`language.rs`), which names the consts defined here. `nav/` and the
+//! app layer consume the opaque `Symbol` records this module produces
+//! and never touch tree-sitter directly.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -170,7 +172,7 @@ struct ImplAcc {
 // against the pinned grammar versions (see the dump tests in issue 05's
 // history); `@item`'s node kind drives the `SymbolKind` via `kind_of`.
 
-const RUST_QUERY: &str = r#"
+pub(crate) const RUST_QUERY: &str = r#"
 (function_item name: (identifier) @name) @item
 (struct_item name: (type_identifier) @name) @item
 (enum_item name: (type_identifier) @name) @item
@@ -192,7 +194,7 @@ const RUST_QUERY: &str = r#"
 // `function_item`s under `body: (declaration_list …)`, struct fields are
 // `field_declaration`s under `body: (field_declaration_list …)`. The table
 // query runs on the SAME tree as `RUST_QUERY` (zero extra parse cost).
-const RUST_TABLES_QUERY: &str = r#"
+pub(crate) const RUST_TABLES_QUERY: &str = r#"
 (impl_item
   trait: (_) @impl_trait
   type: (_) @impl_type
@@ -223,7 +225,7 @@ const RUST_TABLES_QUERY: &str = r#"
 (let_declaration pattern: (identifier) @bnd_name value: (struct_expression name: (type_identifier) @bnd_lit)) @bnd_let
 "#;
 
-const TYPESCRIPT_QUERY: &str = r#"
+pub(crate) const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration name: (identifier) @name) @item
 (class_declaration name: (type_identifier) @name) @item
 (interface_declaration name: (type_identifier) @name) @item
@@ -235,7 +237,7 @@ const TYPESCRIPT_QUERY: &str = r#"
 (export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @name)) @item)
 "#;
 
-const JAVASCRIPT_QUERY: &str = r#"
+pub(crate) const JAVASCRIPT_QUERY: &str = r#"
 (function_declaration name: (identifier) @name) @item
 (class_declaration name: (identifier) @name) @item
 (method_definition name: (property_identifier) @name) @item
@@ -245,12 +247,12 @@ const JAVASCRIPT_QUERY: &str = r#"
 (export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @name)) @item)
 "#;
 
-const PYTHON_QUERY: &str = r#"
+pub(crate) const PYTHON_QUERY: &str = r#"
 (function_definition name: (identifier) @name) @item
 (class_definition name: (identifier) @name) @item
 "#;
 
-const GO_QUERY: &str = r#"
+pub(crate) const GO_QUERY: &str = r#"
 (function_declaration name: (identifier) @name) @item
 (method_declaration name: (field_identifier) @name) @item
 (type_declaration (type_spec name: (type_identifier) @name)) @item
@@ -258,38 +260,38 @@ const GO_QUERY: &str = r#"
 (var_spec name: (identifier) @name) @item
 "#;
 
-const C_QUERY: &str = r#"
+pub(crate) const C_QUERY: &str = r#"
 (function_definition (function_declarator (identifier) @name)) @item
 (struct_specifier name: (type_identifier) @name) @item
 (preproc_def name: (identifier) @name) @item
 "#;
 
-const CPP_QUERY: &str = r#"
+pub(crate) const CPP_QUERY: &str = r#"
 (function_definition (function_declarator (identifier) @name)) @item
 (class_specifier name: (type_identifier) @name) @item
 (struct_specifier name: (type_identifier) @name) @item
 "#;
 
-const TOML_QUERY: &str = r#"
+pub(crate) const TOML_QUERY: &str = r#"
 (table (bare_key) @name) @item
 (table (dotted_key) @name) @item
 (pair (bare_key) @name) @item
 (pair (dotted_key) @name) @item
 "#;
 
-const JSON_QUERY: &str = r#"
+pub(crate) const JSON_QUERY: &str = r#"
 (pair key: (string (string_content) @name)) @item
 "#;
 
-const YAML_QUERY: &str = r#"
+pub(crate) const YAML_QUERY: &str = r#"
 (block_mapping_pair key: (flow_node) @name) @item
 "#;
 
-const BASH_QUERY: &str = r#"
+pub(crate) const BASH_QUERY: &str = r#"
 (function_definition (word) @name) @item
 "#;
 
-const MARKDOWN_QUERY: &str = r#"
+pub(crate) const MARKDOWN_QUERY: &str = r#"
 (atx_heading (inline) @name) @item
 (setext_heading (paragraph (inline) @name)) @item
 "#;
@@ -302,7 +304,7 @@ const MARKDOWN_QUERY: &str = r#"
 // are deliberately not in the outline either (a `static final` filter
 // is not expressible in the query; honest minimal classes/methods
 // outline).
-const JAVA_QUERY: &str = r#"
+pub(crate) const JAVA_QUERY: &str = r#"
 (class_declaration name: (identifier) @name) @item
 (interface_declaration name: (identifier) @name) @item
 (enum_declaration name: (identifier) @name) @item
@@ -318,7 +320,7 @@ const JAVA_QUERY: &str = r#"
 // deliberately out of the outline (honest minimal classes/methods/
 // properties set). `this.X` parse errors in this grammar version
 // (probe-verified) — do not build fixtures around it.
-const C_SHARP_QUERY: &str = r#"
+pub(crate) const C_SHARP_QUERY: &str = r#"
 (namespace_declaration name: (_) @name) @item
 (class_declaration name: (identifier) @name) @item
 (interface_declaration name: (identifier) @name) @item
@@ -345,32 +347,9 @@ const C_SHARP_QUERY: &str = r#"
 // `clojure.core/defn` never matches, the honest minimal set). Application
 // forms (`(+ a b)`, `map f coll`), literals, and `ns` forms are captured
 // as candidates and then rejected — their head is not a define form.
-const CLOJURE_QUERY: &str = r#"
+pub(crate) const CLOJURE_QUERY: &str = r#"
 (list_lit . (sym_lit) @head . (sym_lit name: (sym_name) @name)) @item
 "#;
-
-/// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
-/// 0.23.5's `queries/highlights.scm` (the crate ships the file but does
-/// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
-/// out in `bindings/rust/lib.rs`). Copy lives in
-/// `third_party/tree-sitter-c-sharp-0.23.5/highlights.scm` (sha256 at
-/// vendor time: ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f;
-/// the 0.23.5 copy adds the `..` range operator to the operator list —
-/// the only content change vs the 0.23.1 copy); keep it in lockstep with
-/// the pinned crate version — do not edit or re-flow.
-pub const C_SHARP_HIGHLIGHTS: &str =
-    include_str!("../../third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
-
-/// The Clojure highlight query — vendored VERBATIM from
-/// `tree-sitter-clojure` 0.1.0's `grammar-src/queries/highlights.scm`
-/// (the crate exports only `LANGUAGE` / `NODE_TYPES` — no highlights
-/// constant). Copy lives in
-/// `third_party/tree-sitter-clojure-0.1.0/highlights.scm` (sha256 at
-/// vendor time: 424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de);
-/// keep it in lockstep with the pinned crate version — do not edit or
-/// re-flow.
-pub const CLOJURE_HIGHLIGHTS: &str =
-    include_str!("../../third_party/tree-sitter-clojure-0.1.0/highlights.scm");
 
 // New-languages lane: Ruby. Node shapes verified against the pinned
 // tree-sitter-ruby 0.23.1 NODE_TYPES + S-expr probe: `module` /
@@ -380,7 +359,7 @@ pub const CLOJURE_HIGHLIGHTS: &str =
 // `@x = …` instance-variable assignment does NOT match — its `left`
 // is an `instance_variable`). Local variables and methods with
 // default/blocked bodies stay out (honest minimal outline).
-const RUBY_QUERY: &str = r#"
+pub(crate) const RUBY_QUERY: &str = r#"
 (module name: (constant) @name) @item
 (class name: (constant) @name) @item
 (method name: (identifier) @name) @item
@@ -404,22 +383,28 @@ const RUBY_QUERY: &str = r#"
 // (`map name=lambda`, …), `export`, `set!`, and record accessors are
 // captured as candidates and then rejected (their head is not a define
 // form) — the honest minimal outline.
-const SCHEME_QUERY: &str = r#"
+pub(crate) const SCHEME_QUERY: &str = r#"
 (list . (symbol) @head . (list . (symbol) @name)) @item
 (list . (symbol) @head . (symbol) @name) @item
 "#;
 
 /// The symbol category of a flat-S-expression-grammar match (SCHEME or
-/// CLOJURE) — keyed by the language, the query pattern's SOURCE ORDER
+/// CLOJURE) — keyed by the descriptor-table row's gate
+/// (`language::FlatDefineGate`), the query pattern's SOURCE ORDER
 /// (`QueryMatch::pattern_index`), and the captured head symbol's text.
 /// The flat grammars give every definition the same item node kind
 /// (`list` in Scheme, `list_lit` in Clojure) and their symbol kinds
 /// refuse literal content matches, so the gating happens here, not in
 /// the query. `None` = the captured candidate is not a define form
 /// (rejected by the extraction loop).
-fn flat_define_kind(lang: LanguageId, pattern_index: usize, head: &str) -> Option<SymbolKind> {
-    match lang {
-        LanguageId::Scheme => match (head, pattern_index) {
+fn flat_define_kind(
+    gate: crate::syntax::language::FlatDefineGate,
+    pattern_index: usize,
+    head: &str,
+) -> Option<SymbolKind> {
+    use crate::syntax::language::FlatDefineGate;
+    match gate {
+        FlatDefineGate::Scheme => match (head, pattern_index) {
             ("define", 0) => Some(SymbolKind::Function), // (define (f .) …)
             ("define", 1) => Some(SymbolKind::Constant), // (define x …)
             ("define-library", 0) => Some(SymbolKind::Type), // (define-library (name .) …)
@@ -427,7 +412,7 @@ fn flat_define_kind(lang: LanguageId, pattern_index: usize, head: &str) -> Optio
             ("define-macro", 0) => Some(SymbolKind::Macro), // (define-macro (m .) …)
             _ => None,
         },
-        LanguageId::Clojure => match head {
+        FlatDefineGate::Clojure => match head {
             "defn" | "defn-" => Some(SymbolKind::Function), // (defn name [args] …)
             "def" => Some(SymbolKind::Constant), // (def name …) — fn-or-value undecidable, honest Constant
             "defmacro" | "defmulti" => Some(SymbolKind::Macro), // (defmacro name …) / (defmulti name …)
@@ -435,59 +420,23 @@ fn flat_define_kind(lang: LanguageId, pattern_index: usize, head: &str) -> Optio
             "defrecord" | "deftype" | "defprotocol" => Some(SymbolKind::Type), // (defrecord Name [fields]) / (deftype Name …) / (defprotocol Name …)
             _ => None,
         },
-        _ => None,
     }
 }
 
 /// The definition query for a language; `None` for plain text (the
 /// documented empty fallback — plain files contribute no outline).
+/// Thin wrapper over the descriptor table (the old 18-arm match, which
+/// duplicated the table's `definition_query` column, is gone).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
-    match lang {
-        LanguageId::Rust => Some(RUST_QUERY),
-        LanguageId::TypeScript => Some(TYPESCRIPT_QUERY),
-        LanguageId::Tsx => Some(TYPESCRIPT_QUERY),
-        LanguageId::JavaScript => Some(JAVASCRIPT_QUERY),
-        LanguageId::Python => Some(PYTHON_QUERY),
-        LanguageId::Go => Some(GO_QUERY),
-        LanguageId::C => Some(C_QUERY),
-        LanguageId::Cpp => Some(CPP_QUERY),
-        LanguageId::Toml => Some(TOML_QUERY),
-        LanguageId::Json => Some(JSON_QUERY),
-        LanguageId::Yaml => Some(YAML_QUERY),
-        LanguageId::Bash => Some(BASH_QUERY),
-        LanguageId::Markdown => Some(MARKDOWN_QUERY),
-        LanguageId::Java => Some(JAVA_QUERY),
-        LanguageId::CSharp => Some(C_SHARP_QUERY),
-        LanguageId::Ruby => Some(RUBY_QUERY),
-        LanguageId::Scheme => Some(SCHEME_QUERY),
-        LanguageId::Clojure => Some(CLOJURE_QUERY),
-        LanguageId::Plain => None,
-    }
+    crate::syntax::language::spec(lang).definition_query
 }
 
-/// The `Language` (grammar) for a language id.
+/// The `Language` (grammar) for a language id — the thin wrapper the
+/// app layer and `node.rs` call; the grammar pin itself lives in the
+/// descriptor table (the old 18-arm match, the second copy of the pin,
+/// is gone). `None` for plain text.
 pub(crate) fn language_for(lang: LanguageId) -> Option<Language> {
-    Some(match lang {
-        LanguageId::Rust => Language::from(tree_sitter_rust::LANGUAGE),
-        LanguageId::TypeScript => Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
-        LanguageId::Tsx => Language::from(tree_sitter_typescript::LANGUAGE_TSX),
-        LanguageId::JavaScript => Language::from(tree_sitter_javascript::LANGUAGE),
-        LanguageId::Python => Language::from(tree_sitter_python::LANGUAGE),
-        LanguageId::Go => Language::from(tree_sitter_go::LANGUAGE),
-        LanguageId::C => Language::from(tree_sitter_c::LANGUAGE),
-        LanguageId::Cpp => Language::from(tree_sitter_cpp::LANGUAGE),
-        LanguageId::Toml => Language::from(tree_sitter_toml_ng::LANGUAGE),
-        LanguageId::Json => Language::from(tree_sitter_json::LANGUAGE),
-        LanguageId::Yaml => Language::from(tree_sitter_yaml::LANGUAGE),
-        LanguageId::Bash => Language::from(tree_sitter_bash::LANGUAGE),
-        LanguageId::Markdown => Language::from(tree_sitter_md::LANGUAGE),
-        LanguageId::Java => Language::from(tree_sitter_java::LANGUAGE),
-        LanguageId::CSharp => Language::from(tree_sitter_c_sharp::LANGUAGE),
-        LanguageId::Ruby => Language::from(tree_sitter_ruby::LANGUAGE),
-        LanguageId::Scheme => Language::from(tree_sitter_scheme::LANGUAGE),
-        LanguageId::Clojure => Language::from(tree_sitter_clojure::LANGUAGE),
-        LanguageId::Plain => return None,
-    })
+    crate::syntax::language::spec(lang).grammar.map(|grammar| grammar())
 }
 
 // One parser + a per-language query cache, thread-confined. A rayon worker
@@ -528,6 +477,11 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         Some(q) => q,
         None => return (Vec::new(), RustTables::default()),
     };
+    // The descriptor-table row: the Rust-only tables query and the
+    // flat-S-expression gate are per-language DATA (the old
+    // `lang == LanguageId::Rust` / `matches!(lang, Scheme | Clojure)`
+    // special-casing is gone).
+    let spec = crate::syntax::language::spec(lang);
     let language = match language_for(lang) {
         Some(l) => l,
         None => return (Vec::new(), RustTables::default()),
@@ -560,7 +514,8 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         let item_idx = query.capture_index_for_name("item");
         // Flat S-expression grammars (Scheme + Clojure): the head-symbol
         // capture the define-form gate reads (see `flat_define_kind`).
-        let gated = matches!(lang, LanguageId::Scheme | LanguageId::Clojure);
+        let gate = spec.flat_define;
+        let gated = gate.is_some();
         let head_idx = if gated {
             query.capture_index_for_name("head")
         } else {
@@ -609,7 +564,7 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
             let gate_reject = gated
                 && head_text
                     .as_deref()
-                    .and_then(|h| flat_define_kind(lang, m.pattern_index, h))
+                    .and_then(|h| flat_define_kind(gate.unwrap(), m.pattern_index, h))
                     .is_none();
             if gate_reject {
                 continue;
@@ -618,11 +573,11 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
             out.push(Symbol {
                 name,
                 kind: if gated {
-                    // The flat S-expression grammars: the (lang, pattern,
+                    // The flat S-expression grammars: the (gate, pattern,
                     // head) triple carries the category (see
                     // `flat_define_kind`).
                     flat_define_kind(
-                        lang,
+                        gate.unwrap(),
                         m.pattern_index,
                         head_text.as_deref().unwrap_or("")
                     )
@@ -640,10 +595,11 @@ pub fn extract_all(lang: LanguageId, source: &str) -> (Vec<Symbol>, RustTables) 
         out.sort_by(|a, b| (a.line, a.start_byte, &a.name).cmp(&(b.line, b.start_byte, &b.name)));
 
         // 010-01: the Rust tables — the second query on the SAME tree (the
-        // non-Rust languages contribute no tables).
-        let tables = if lang == LanguageId::Rust {
+        // row's `rust_tables_query` column; the non-Rust rows contribute
+        // no tables).
+        let tables = if let Some(tables_query) = spec.rust_tables_query {
             if tl.rust_tables.is_none() {
-                tl.rust_tables = Query::new(&language, RUST_TABLES_QUERY).ok();
+                tl.rust_tables = Query::new(&language, tables_query).ok();
             }
             match tl.rust_tables.as_ref() {
                 Some(q) => extract_rust_tables(q, tree.root_node(), bytes),
@@ -1694,53 +1650,4 @@ mod tests {
         assert!(extract_symbols(LanguageId::Plain, "some text\nfn fake() {}\n").is_empty());
     }
 
-    // ── F-8: vendored highlight query integrity ─────────────────────────
-    /// The vendored `include_str!` files must not have been locally edited.
-    /// This test hashes both `third_party/*/highlights.scm` files and
-    /// compares against the sha256 recorded at copy time (the same hashes
-    /// in the doc comments on `C_SHARP_HIGHLIGHTS` and
-    /// `CLOJURE_HIGHLIGHTS`). A local edit to either file fails here.
-    #[test]
-    fn vendored_highlight_queries_match_copy_time_sha256() {
-        use std::process::Command;
-
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-
-        // Copy-time sha256 (recorded at vendor time — do not update these
-        // without re-verifying the source crate version).
-        let c_sharp_expected =
-            "ab8a9930aeeee70fa2dbfde82e4763170b7e826bc642338ad0683772c20c060f";
-        let clojure_expected =
-            "424b3b60f43cbb008c8d87730845855e0c1dde657f1a6f2e1408caf4f16914de";
-
-        let c_sharp_path =
-            manifest_dir.join("third_party/tree-sitter-c-sharp-0.23.5/highlights.scm");
-        let clojure_path =
-            manifest_dir.join("third_party/tree-sitter-clojure-0.1.0/highlights.scm");
-
-        let hash_file = |path: &std::path::Path| -> String {
-            let out = Command::new("sha256sum")
-                .arg(path)
-                .output()
-                .expect("sha256sum failed");
-            String::from_utf8(out.stdout)
-                .expect("sha256sum output is not UTF-8")
-                .split_whitespace()
-                .next()
-                .expect("no hash in sha256sum output")
-                .to_string()
-        };
-
-        assert_eq!(
-            hash_file(&c_sharp_path),
-            c_sharp_expected,
-            "C# highlights.scm has been modified since vendor time"
-        );
-        assert_eq!(
-            hash_file(&clojure_path),
-            clojure_expected,
-            "Clojure highlights.scm has been modified since vendor time"
-        );
-    }
 }
-

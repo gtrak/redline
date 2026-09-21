@@ -86,26 +86,22 @@ pub fn scope_path_at(lang: LanguageId, source: &str, byte: usize) -> Vec<String>
     scope_path_for(lang, leaf, source.as_bytes())
 }
 
-/// Parse `source` for `lang`: Rust, JavaScript, TypeScript, TSX, Python,
-/// Go, C, C++, Bash, TOML, JSON, Markdown, Java, C#, Ruby, Scheme, and
-/// Clojure are implemented; every other `LanguageId` (Yaml —
-/// intentionally unadopted for node-at, and `Plain`) degrades to `None`.
-/// Future languages slot in here without restructuring the public
-/// surface.
+/// Parse `source` for `lang`: every grammar-bearing language in the
+/// descriptor table parses (the old hand-synced 17-language whitelist —
+/// a fourth identity list that could silently disable M-. for a new
+/// language with zero compile error — is gone; `language::parseable`
+/// derives the set from the table's grammar column). `Plain` (no
+/// grammar) degrades to `None`; `Yaml` now parses here too, but its row
+/// carries no identifier kinds and no scope walker, so `node_at` /
+/// `scope_path_at` still degrade to `None` / `[]` exactly as before.
 fn parse_source(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
-    match lang {
-        LanguageId::Rust | LanguageId::JavaScript | LanguageId::TypeScript
-        | LanguageId::Tsx | LanguageId::Python | LanguageId::Go
-        | LanguageId::C | LanguageId::Cpp | LanguageId::Bash | LanguageId::Toml
-        | LanguageId::Json | LanguageId::Markdown | LanguageId::Java
-        | LanguageId::CSharp | LanguageId::Ruby | LanguageId::Scheme
-        | LanguageId::Clojure => {}
-        _ => return None,
+    if !crate::syntax::language::parseable(lang) {
+        return None;
     }
-    // The grammar itself comes from the shared `queries::language_for` pin
-    // so the tree-sitter grammar versions live in exactly one place (no
-    // second registry, no duplicated pin); `Plain` and unimplemented ids
-    // never reach the grammar lookup.
+    // The grammar itself comes from the shared `queries::language_for`
+    // wrapper over the descriptor table so the tree-sitter grammar
+    // versions live in exactly one place (no second registry, no
+    // duplicated pin); `Plain` never reaches the grammar lookup.
     let language = crate::syntax::queries::language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -351,226 +347,17 @@ fn is_path_segment(node: Node, lang: LanguageId) -> bool {
     }
 }
 
-/// The Rust identifier-ish node-kind predicate (per-language extension
-/// point — other languages add their own predicate and slot into
-/// `nearest_identifier`/`parse_source` later).
-fn is_rust_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "field_identifier"
-            | "type_identifier"
-            | "scoped_identifier"
-            | "scoped_type_identifier"
-            | "primitive_type"
-    )
-}
-
-/// JavaScript identifier-ish node kinds (verified against the pinned
-/// tree-sitter-javascript `NODE_TYPES`: `property_identifier` is JS's
-/// name-leaf kind; `type_identifier` / `nested_type_identifier` do NOT
-/// exist in the JS grammar — they are TypeScript-only kinds).
-fn is_js_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier" | "property_identifier" | "member_expression"
-    )
-}
-
-/// TypeScript/TSX identifier-ish node kinds (verified against the pinned
-/// tree-sitter-typescript `NODE_TYPES` for both the TS and TSX grammars).
-fn is_ts_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "property_identifier"
-            | "type_identifier"
-            | "member_expression"
-            | "nested_type_identifier"
-    )
-}
-
-/// Python identifier-ish node kinds (verified against the pinned
-/// tree-sitter-python `NODE_TYPES`).
-fn is_python_identifier_kind(kind: &str) -> bool {
-    matches!(kind, "identifier" | "attribute")
-}
-
-/// Go identifier-ish node kinds (verified against the pinned
-/// tree-sitter-go `NODE_TYPES`).
-fn is_go_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "field_identifier"
-            | "type_identifier"
-            | "selector_expression"
-            | "qualified_type"
-    )
-}
-
-/// C identifier-ish node kinds (verified against the pinned
-/// tree-sitter-c `NODE_TYPES`): `identifier` (values), `field_identifier`
-/// (struct members), `type_identifier` (struct/enum/typedef names),
-/// `primitive_type` (`int`, …), and `field_expression` (the whole
-/// `a.b` / `p->x` member access).
-fn is_c_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "field_identifier"
-            | "type_identifier"
-            | "primitive_type"
-            | "field_expression"
-    )
-}
-
-/// C++ identifier-ish node kinds (verified against the pinned
-/// tree-sitter-cpp `NODE_TYPES`): the C set plus `namespace_identifier`
-/// (a `ns::` scope name) and `qualified_identifier` (the whole `A::x` /
-/// `ns::A::x` path).
-fn is_cpp_identifier_kind(kind: &str) -> bool {
-    is_c_identifier_kind(kind)
-        || matches!(kind, "namespace_identifier" | "qualified_identifier")
-}
-
-/// Bash identifier-ish node kinds (verified against the pinned
-/// tree-sitter-bash `NODE_TYPES`: there is no `identifier` kind —
-/// `command_name` for command names and `variable_name` for variables
-/// are the identifier-ish kinds). Plain `word`s (arguments, function
-/// names) are deliberately NOT identifier-ish — a bare M-. context on
-/// an arbitrary word is noise; function names still contribute to the
-/// scope chain via `function_definition`.
-fn is_bash_identifier_kind(kind: &str) -> bool {
-    matches!(kind, "command_name" | "variable_name")
-}
-
-/// TOML identifier-ish node kinds (verified against the pinned
-/// tree-sitter-toml-ng `NODE_TYPES`): `bare_key`, `quoted_key` (the
-/// key leaves), and `dotted_key` (the whole `a.b.c` path).
-fn is_toml_identifier_kind(kind: &str) -> bool {
-    matches!(kind, "bare_key" | "quoted_key" | "dotted_key")
-}
-
-/// JSON identifier-ish node kinds (verified against the pinned
-/// tree-sitter-json `NODE_TYPES`): `string` — but ONLY in a `pair`'s
-/// `key` field (see `in_identifier_position`); a value `string` is data.
-/// JSON has no dotted-key syntax, so there is no whole-path rule here —
-/// a key is always a single `string` node; JSON "paths" are structural
-/// (nesting), which `scope_path` reports as the key chain.
-fn is_json_identifier_kind(kind: &str) -> bool {
-    kind == "string"
-}
-
-/// Java identifier-ish node kinds (verified against the pinned
-/// tree-sitter-java 0.23.5 `NODE_TYPES`): `identifier` (values),
-/// `type_identifier` (type names), `scoped_identifier` / `scoped_type_
-/// identifier` (the whole `a.b.c` path in value / type position), and
-/// `field_access` (the whole `o.x` member access). There is no
-/// `field_identifier` kind in this grammar — the accessed member is a
-/// plain `identifier` in the `field` field.
-fn is_java_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "type_identifier"
-            | "scoped_identifier"
-            | "scoped_type_identifier"
-            | "field_access"
-    )
-}
-
-/// C# identifier-ish node kinds (verified against the pinned
-/// tree-sitter-c-sharp 0.23.5 `NODE_TYPES` — re-pinned by the
-/// grammar-bumps suite): `identifier` (this grammar has no
-/// `type_identifier` — type names are plain `identifier`s),
-/// `predefined_type` (`int`, `string`, … — C's `primitive_type` analog),
-/// `member_access_expression` (the whole `a.b.c` chain), and
-/// `qualified_name` (the whole `N.Inner` / `A.B` name path).
-fn is_csharp_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier" | "predefined_type" | "member_access_expression" | "qualified_name"
-    )
-}
-
-/// Ruby identifier-ish node kinds (verified against the pinned
-/// tree-sitter-ruby 0.23.1 `NODE_TYPES`): `constant` (type / class
-/// names, bare or in a `scope_resolution` chain), `identifier` (method
-/// names, local variables, bare calls), `instance_variable` (`@x`),
-/// `call` (the whole `a.b` member chain — position-gated by
-/// `in_identifier_position`), and
-/// `scope_resolution` (the whole `Foo::Bar` path).
-fn is_ruby_identifier_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "constant" | "identifier" | "instance_variable" | "call" | "scope_resolution"
-    )
-}
-
-/// Scheme identifier-ish node kinds (verified against the pinned
-/// tree-sitter-scheme 0.24.7 `NODE_TYPES`): `symbol` — the flat
-/// S-expression grammar's ONLY name kind. There is no path-shaped
-/// construct in the grammar (Lisp has no dotted paths; module paths
-/// like `(foo core)` are `list`s, not path containers), so
-/// `is_path_segment` has no Scheme arm (its default returns `false`) —
-/// the honest N/A, pinned by `scheme_has_no_path_or_scope`. `node_at`
-/// resolves any symbol to itself; `scope_path_at` stays `[]` (no named
-/// definition containers exist to walk — the same honest N/A).
-fn is_scheme_identifier_kind(kind: &str) -> bool {
-    kind == "symbol"
-}
-
-/// Clojure identifier-ish node kinds (verified against the pinned
-/// tree-sitter-clojure 0.1.0 `NODE_TYPES`): `sym_lit` — the flat
-/// S-expression grammar's name kind (a bare `foo`, a namespaced
-/// `ns.var/foo` — the `.` and `/` are INSIDE the single `sym_name` leaf,
-/// probe-verified — and a meta-prefixed name all parse as one `sym_lit`).
-/// Keywords (`kwd_lit`) are deliberately not identifier-ish: a keyword
-/// names a key, not a var. There is no path-shaped construct beyond the
-/// namespaced symbol itself (it is ONE token, not a container), so
-/// `is_path_segment` has no Clojure arm (its default returns `false`) —
-/// the honest N/A, pinned by `clojure_has_no_scope`. `node_at` resolves
-/// a symbol to its whole `sym_lit` (a namespaced name comes back whole);
-/// `scope_path_at` stays `[]` (no named definition containers exist to
-/// walk — the same honest N/A as Scheme).
-fn is_clojure_identifier_kind(kind: &str) -> bool {
-    kind == "sym_lit"
-}
-
-// Markdown has NO identifier-ish node kind (probed against the pinned
-// tree-sitter-md 0.5.1 block grammar (re-pinned by the grammar-bumps
-// suite): the title text of a heading is an
-// `inline` node, and `inline` spans whole paragraphs and code spans
-// alike — treating it identifier-ish would make `node_at` resolve on
-// arbitrary prose). There is also no path-shaped construct. So
-// `is_identifier_kind` has no `Markdown` arm (its default arm returns
-// `false`) and `node_at` stays `None` — the honest N/A, pinned by
-// `markdown_heading_text_is_not_identifier_ish`. What IS meaningful is
-// the outline: `markdown_scope_path` reports the enclosing heading
-// chain (the block tree nests `section` nodes by heading level).
-
-/// The identifier-kind predicate for `lang` — the per-language extension
-/// point used by `nearest_identifier`.
+/// Whether `kind` is an identifier-ish node kind for `lang` — the
+/// per-language kind LISTS are DATA and live in the descriptor table
+/// (`language.rs` rows' `identifier_kinds` columns, with the probe
+/// rationales on each row); the per-language ALGORITHMS that stay here
+/// are the position gate (`in_identifier_position`), the path-segment
+/// rules (`is_path_segment`), and the scope walkers. (The old 15
+/// hand-synced `is_*_identifier_kind` predicates are gone — an empty
+/// list is the honest N/A, the same as the old default arm's
+/// `false`.)
 fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
-    match lang {
-        LanguageId::Rust => is_rust_identifier_kind(kind),
-        LanguageId::JavaScript => is_js_identifier_kind(kind),
-        LanguageId::TypeScript | LanguageId::Tsx => is_ts_identifier_kind(kind),
-        LanguageId::Python => is_python_identifier_kind(kind),
-        LanguageId::Go => is_go_identifier_kind(kind),
-        LanguageId::C => is_c_identifier_kind(kind),
-        LanguageId::Cpp => is_cpp_identifier_kind(kind),
-        LanguageId::Bash => is_bash_identifier_kind(kind),
-        LanguageId::Toml => is_toml_identifier_kind(kind),
-        LanguageId::Json => is_json_identifier_kind(kind),
-        LanguageId::Java => is_java_identifier_kind(kind),
-        LanguageId::CSharp => is_csharp_identifier_kind(kind),
-        LanguageId::Ruby => is_ruby_identifier_kind(kind),
-        LanguageId::Scheme => is_scheme_identifier_kind(kind),
-        LanguageId::Clojure => is_clojure_identifier_kind(kind),
-        _ => false,
-    }
+    crate::syntax::language::spec(lang).identifier_kinds.contains(&kind)
 }
 
 /// Walk ancestors of `leaf` and capture each enclosing scope item's name
@@ -1683,7 +1470,7 @@ mod tests {
         assert_eq!(info.start_byte, at);
         assert_eq!(info.end_byte, at + 3);
         // A plain word argument is NOT identifier-ish (deliberate — see
-        // `is_bash_identifier_kind`).
+        // the Bash row's `identifier_kinds` note in `language.rs`).
         assert!(node_at(LanguageId::Bash, src, src.find("other").expect("fixture")).is_none());
     }
 

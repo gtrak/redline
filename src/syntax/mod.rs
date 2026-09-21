@@ -3,6 +3,7 @@
 
 pub mod cache;
 pub mod highlight;
+pub mod language;
 pub mod node;
 pub mod queries;
 pub mod registry;
