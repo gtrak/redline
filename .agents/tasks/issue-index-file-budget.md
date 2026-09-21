@@ -20,6 +20,23 @@ Two consequences follow, and both were misleading on first reading:
 Per-file timings are otherwise healthy: `extract_ms` p50 = 0.653 ms,
 p90 = 5.412 ms, p99 = 28.507 ms.
 
+## RESOLVED CONTEXT (do not be misled by the paragraph above)
+
+The pathological file was **not a legitimate project file**. The user's
+`node_modules` was not in the project's `.gitignore`, so the walk indexed the
+entire dependency tree (3,664 `.cpp`/`.hpp`, 698 `.c`/`.h`, one generated
+11.3 MB C++ blob). With `node_modules` excluded, the same project indexes in
+**368 ms** — 153x faster — walking 3,596 files, and its **legitimate** per-file
+distribution is: `extract_ms` p50 = 0.541, p90 = 5.512, p99 = 32.686,
+**max = 98.049 ms** (largest file 1.5 MB), with parallelism 29.4x of 32 cores.
+
+So the constants in item 2 must be sized as a **safety net that never fires on
+a legitimate file** — generously, such that a legitimate ~10 MB source file
+passes — with the goal of bounding the worst case, not of optimising any
+particular project. Do NOT tune them to the 55-second outlier. The disclosure
+of the *cause* of that outlier is a separate issue
+(`issue-dependency-dir-guard.md`).
+
 ## Required
 
 1. **A per-file deadline covering BOTH parse and query execution.** Query
