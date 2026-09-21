@@ -136,6 +136,17 @@ Practical consequences for lanes:
   the *requirement* (the minibuffer message, the invariant), never on a screen
   substring the fixture itself contains.
 
+### Numbers in briefs are claims, not facts
+
+When relaying a reviewer's arithmetic (counts, line spans, test totals) into a
+worker's brief, label it **"reviewer-reported — re-derive before relying on it"**.
+A propagated wrong number is worse than no number: it becomes the spec. Observed
+in 012-01, where a review's method/test/line figures were passed into a fix brief
+as fact and **six of them were wrong** — the fixer caught them only because the
+brief also demanded an independent re-derivation. Corollary: a reviewer's
+*findings* (a missing assignment, a non-disjoint range, a broken `#[path]`) are
+high-value and should be relayed; its *arithmetic* must be re-measured.
+
 ## Pattern
 
 ### Active plan
