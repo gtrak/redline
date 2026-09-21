@@ -89,7 +89,7 @@ src/
 | 11813–11817 | 5 | `impl Default for AppStore` (delegates to `new`) |
 | 11819–11843 | 25 | `impl Picker` (`recompute`) |
 | 11844–11854 | 11 | free fn `point_byte_offset` (→ navigation, §3) |
-| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 top-level items = 379 plain `fn` + 22 `async fn`**, plus **11 nested** (9 `fn git_cli` variants + 2 nested `main`s) = 412 total fns. Earlier figures here (389, 401, 379) were different denominators for the same set — this is the reconciled census, re-derived by the store-tests lane and its gate. **LANDED**: the block is now `src/app/store/tests/*.rs` (15 files) with `tests/mod.rs` holding the shared fixtures; `mod.rs` dropped from 13,701 to 2,439 lines. |
+| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 top-level items = 379 plain `fn` + 22 `async fn`**, plus **11 nested** (9 `fn git_cli` variants + 2 nested `main`s) = 412 total fns. Earlier figures here (389, 401, 379) were different denominators for the same set — this is the reconciled census, re-derived by the store-tests lane and its gate. **LANDED**: the block is now `src/app/store/tests/*.rs` (14 top-level files + `navigation/`, 7 files after A7) with `tests/mod.rs` holding the shared fixtures; `mod.rs` dropped from 13,701 to 2,439 lines. |
 | 23121–23126 | 6 | loop-03 comment (23121–23123) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` (23124–23126) |
 
 Helper items in lines 1–1444 (move with their concern in Phase 2):
@@ -337,7 +337,11 @@ src/app/store/
   search.rs       39  LANDED
   magit.rs        24  LANDED
   commit.rs       56  LANDED
-  navigation.rs   51  LANDED
+  navigation/     51  LANDED (A7: split by contiguous range — `mod.rs` jump history (7)
+                 + `definitions.rs` (13, definitions + resolution lifecycle) +
+                 `imports.rs` (21, use-path extraction + js_ts/python/go import
+                 parsing) + `xref.rs` (10, external/crate xref + symbol-at-point +
+                 imenu/outline))
   index_wiring.rs 34  LANDED
   picker.rs       41  LANDED
   project.rs      17  LANDED
@@ -350,7 +354,15 @@ unreferenced, no `pub`/`pub(crate)` added, no field visibility changed). The ori
 estimate was 168 private methods — most are called from within their own concern.
 Per-file sizes after 012-03: navigation 2,392 · file_view 999 · commit 797 · notes 761 ·
 picker 746 · search 737 · buffers 733 · index_wiring 718 · keys 561 · magit 419 ·
-views 335 · project 321 · minibuffer 7.
+views 335 · project 321 · minibuffer 7. After A7 (navigation split): navigation
+2,392 → `navigation/` mod 166 · definitions 738 · imports 902 · xref 601 (one
+`impl AppStore` wrapper per file; 6 new `pub(super)` for cross-file calls + 9
+`pub(super)`→`pub(in crate::app::store)` to preserve the exact original effective
+visibility of store-visible methods — 0 `pub`/`pub(crate)` added, no
+field-visibility change); the test file (3,074) splits along the same seams
+into `tests/navigation/` mod 8 · jump 180 (8) · definitions 1,548 (46) ·
+resolver 392 (18) · xref 406 (8) · imenu 94 (3) · imports 458 (17) = 100 tests
+(each concern file does `use super::*`, fixtures stay in `tests/mod.rs`).
 
 Fields needed per module (all are private fields of `AppStore`, defined in
 `mod.rs` — see §5 for why that makes them reachable as-is):
@@ -475,7 +487,7 @@ field would need `pub(crate)` — not required by this plan.
 | log/blame/commit-editor | `src/app/store/commit.rs`; raw git in `src/git/{log,blame,commit,diff}.rs` |
 | cursor/scroll in the file view | `src/app/store/file_view.rs`; rendering in `src/ui/file_view.rs` |
 | search (C-s, project, occur) | `src/app/store/search.rs`; engines in `src/search/` |
-| M-. / imenu / jump | `src/app/store/navigation.rs`; index in `src/nav/index.rs`; fall-through in `crates/redline-resolve` |
+| M-. / imenu / jump | `src/app/store/navigation/`; index in `src/nav/index.rs`; fall-through in `crates/redline-resolve` |
 | pickers of any flavor | `src/app/store/picker.rs`; rendering in `src/ui/picker.rs` |
 | annotations / notes | `src/app/store/notes.rs` (format: `NOTES_*` consts + `parse_notes`) |
 | project / files / recents / tree sidebar | `src/app/store/project.rs`; walk in `src/model/files.rs` |
