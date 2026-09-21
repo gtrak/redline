@@ -98,6 +98,71 @@ after the full build excluded it. That divergence is pre-existing and outside th
   shallower `.gitignore`) is **not** real git semantics — but it is pre-existing in all three
   walkers, so they still agree with each other. Note it; do not fix it here.
 
+## F5 (user-reported, pre-existing) — a library-dependency jump must index the dependency's own tree
+
+**User report (verbatim):** *"once i enter a lib dep jump, that might be inside .venv or
+node_modules, which are gitignored, but I still want to jump within it"*. **Treat this as the
+highest-priority item if you have not already finished verification** — it is small (a walker
+config plus two discriminating tests), it is in the same file you are already editing, and it
+is a user-facing bug.
+
+**The bug — verified from the crate source, and PRE-EXISTING** (the previous lane never
+touched `crate_source_files`; the walker dates to a mechanical split):
+`crate_source_files(root, exts)` (`src/app/store/index_wiring.rs:542`) uses
+`ignore::Walk::new(root)`, i.e. plain `WalkBuilder` **defaults**. From
+`ignore-0.4.33/src/dir.rs:790-801` those are:
+
+```
+hidden: true, ignore: true, parents: true, git_global: true,
+git_ignore: true, git_exclude: true, require_git: true
+```
+
+So for a landed dependency:
+- **`.venv/...`** is a *hidden* directory → `hidden(true)` skips it → **zero indexed files**;
+- **`node_modules/<pkg>` inside a git repo** → `parents(true)` + `git_ignore(true)` +
+  `require_git(true)` makes the **project's** `.gitignore` (`node_modules/`) apply to the
+  dependency walk → **zero indexed files**.
+
+Either way `M-.` inside the landed dependency has nothing to find — exactly the reported case.
+The existing test cannot catch it: `crate_source_files_node_modules_boundary` uses a **non-git
+tempdir**, where `require_git(true)` disables gitignore and `node_modules` is not hidden. That
+is the same "the fixture lacks the property that triggers the bug" pattern as the agreement
+test's missing `.git` — check both while you are here.
+
+**The design decision (state it in the code and the report):** the external index is a
+**deliberate exception** to project ignore rules. A dependency's source tree is not part of the
+project — the reason it is excluded from the *project* index is that we do not want its symbols
+polluting the project's — but once the user lands in it, navigating *inside* it is the whole
+point. So `crate_source_files` must walk the dependency's own tree **without the project's
+ignore rules**:
+
+- `hidden(false)` — so `.venv` and other dot-directories are walked;
+- all gitignore sources off — `parents(false)`, `git_ignore(false)`, `git_global(false)`,
+  `git_exclude(false)`, `require_git(false)`;
+- **keep** the existing explicit rules: the `under_node_modules` nested-boundary filter, the
+  owning language's extension set, and `EXT_INDEX_FILE_CAP`;
+- consider defensively skipping a `.git` directory **inside** the dependency (with
+  `hidden(false)` it would now be walked; the extension filter makes it a no-op but the walk
+  costs time).
+
+**Should the dependency's OWN `.gitignore` be honoured?** Recommend **no**, and say so: the
+point is to navigate the dependency's source, and honouring its own ignores only shrinks what
+you can jump to. (A vendored crate that ignores `tests/` would become unnavigable there.)
+
+**Required tests — each must FAIL on the current code (that is the discrimination):**
+(a) a **git-repo** fixture with `.gitignore` containing `node_modules/`, landing in
+    `node_modules/<pkg>`, asserting the package's source files **are** listed (currently empty);
+(b) a **hidden**-directory fixture (`.venv/lib/python3/site-packages/<pkg>/__init__.py`)
+    asserting its files **are** listed (currently empty);
+(c) a **nested** `node_modules` inside the landed package is still excluded (the existing
+    boundary test must keep passing);
+(d) the extension filter and the cap still apply.
+
+Also verify the end-to-end claim, not just the walker: a store-level test that lands in the
+dependency (`apply_crate_index_event` + the `M-.` path via `xref_in_external_buffer`) resolves
+to a symbol inside it. If an existing flow test covers part of this, extend it rather than
+adding a parallel one.
+
 ## Files
 
 `src/model/files.rs` (the predicate + the memo + the doc claims),
