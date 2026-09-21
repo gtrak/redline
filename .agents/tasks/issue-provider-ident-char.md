@@ -7,7 +7,7 @@ But the resolver is **still internally mixed**:
 
 | file | predicate | rule |
 |---|---|---|
-| `crates/redline-resolve/src/lib.rs` | `is_ident_char` | Unicode |
+| `crates/redline-resolve/src/lib.rs:193` | *inlines* the predicate (no named fn) | Unicode |
 | `crates/redline-resolve/src/providers/python_provider.rs` | `is_ident_char` | Unicode |
 | `crates/redline-resolve/src/cargo.rs` | `is_ident_char` | Unicode (converted by C15) |
 | `crates/redline-resolve/src/providers/js_provider.rs:793` | `is_ident_char` | **ASCII** |
