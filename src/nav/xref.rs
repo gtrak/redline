@@ -1,54 +1,19 @@
-//! Navigation behind an [`Xref`] trait (issue 05): find a definition's
-//! location(s), a file's outline, and all project symbols. The tree-sitter
-//! backend is [`SymbolIndex`]; an LSP backend can implement the same trait
-//! later without touching the app's command handlers.
-
-use super::index::{Location, Symbol, SymbolIndex};
-
-/// Cross-reference for symbol navigation. Methods are read-only (the backend
-/// owns the index); the tree-sitter backend is in-memory and synchronous.
-#[allow(dead_code)] // used by tests; LSP backend will use it later
-pub trait Xref {
-    /// Every definition location for `name` (all files, all symbols of that
-    /// name), in a deterministic (file, line, name) order.
-    fn find_definition(&self, name: &str) -> Vec<Location>;
-
-    /// The outline (symbols) for a project-relative file.
-    fn outline(&self, file: &str) -> Vec<Symbol>;
-
-    /// Every definition location in the index (all files).
-    fn all_symbols(&self) -> Vec<Location>;
-
-    /// How many files contribute symbols.
-    fn file_count(&self) -> usize;
-}
-
-impl Xref for SymbolIndex {
-    fn find_definition(&self, name: &str) -> Vec<Location> {
-        SymbolIndex::definitions_of(self, name)
-    }
-
-    fn outline(&self, file: &str) -> Vec<Symbol> {
-        SymbolIndex::outline(self, file).to_vec()
-    }
-
-    fn all_symbols(&self) -> Vec<Location> {
-        SymbolIndex::all_locations(self)
-    }
-
-    fn file_count(&self) -> usize {
-        SymbolIndex::file_count(self)
-    }
-}
+//! Tests for `SymbolIndex`'s cross-reference methods (issue 05): a
+//! definition's location(s), a file's outline, and all project symbols.
+//! These are inherent methods on `SymbolIndex` (defined in
+//! [`crate::nav::index`]); the app's command handlers call them directly.
+//! There is no `Xref` trait / LSP seam — none is planned, so the earlier
+//! trait indirection was a pass-through to itself and has been removed.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::nav::index::{Symbol, SymbolIndex};
 
     /// Build a tiny in-memory index by hand (no filesystem) and confirm the
-    /// Xref trait routes to the tree-sitter backend correctly.
+    /// cross-reference methods return the expected definition locations,
+    /// outline, and file count.
     #[test]
-    fn xref_trait_finds_definitions() {
+    fn symbol_index_finds_definitions() {
         let mut idx = SymbolIndex::new();
         let sym = Symbol {
             name: "foo".into(),
@@ -61,22 +26,13 @@ mod tests {
         idx.set_file("a.rs", vec![sym.clone()]);
         idx.set_file("b.rs", vec![sym.clone()]);
 
-        let xref: &dyn Xref = &idx;
-        let defs = xref.find_definition("foo");
+        let defs = idx.definitions_of("foo");
         assert_eq!(defs.len(), 2, "foo defined in a.rs and b.rs");
         assert_eq!(defs[0].file, "a.rs");
         assert_eq!(defs[1].file, "b.rs");
-        assert_eq!(xref.outline("a.rs").len(), 1);
-        assert_eq!(xref.all_symbols().len(), 2);
-        assert_eq!(xref.file_count(), 2);
-        assert!(xref.find_definition("missing").is_empty());
-    }
-
-    // (Kept as a smoke test that the trait is object-safe.)
-    #[test]
-    fn xref_is_object_safe() {
-        let idx = SymbolIndex::new();
-        let boxed: Box<dyn Xref> = Box::new(idx);
-        assert!(boxed.find_definition("x").is_empty());
+        assert_eq!(idx.outline("a.rs").len(), 1);
+        assert_eq!(idx.all_locations().len(), 2);
+        assert_eq!(idx.file_count(), 2);
+        assert!(idx.definitions_of("missing").is_empty());
     }
 }

@@ -612,13 +612,22 @@ fn item_at_start(s: &str, item: &str) -> bool {
     if !s.starts_with(item) {
         return false;
     }
-    match s.get(item.len()..item.len() + 1) {
+    // The boundary is the first char AFTER `item`, read whole so a multi-byte
+    // char is not truncated to a single byte (the old `get(len..len+1)` slice
+    // bailed on non-ASCII and treated it as a boundary).
+    match s.get(item.len()..).and_then(|r| r.chars().next()) {
         None => true, // item extends to end of string
-        Some(next) => {
-            let c = next.chars().next().unwrap();
-            !c.is_ascii_alphanumeric() && c != '_'
-        }
+        Some(c) => !is_ident_char(c),
     }
+}
+
+fn is_ident_char(c: char) -> bool {
+    // C15: mirrors the redline crate's single word-char rule —
+    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
+    // redline-resolve has no dependency on redline, so the rule is
+    // duplicated here rather than imported; keep the two in sync (the
+    // sibling `crate::cargo::is_ident_char` does the same).
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Find the index of the matching closing `)` for the opening `(` at
@@ -1002,6 +1011,26 @@ exclude (
             go_line_defines_item("type Config struct { Timeout int }", "Timeout"),
             None
         );
+    }
+
+    /// C15: identifier-constituency mirrors the redline crate's Unicode
+    /// word-char rule (`redline::model::buffer::is_word_char`) — a non-ASCII
+    /// letter is an identifier character, so it blocks a whole-word boundary
+    /// just like an ASCII one (the sibling `crate::cargo` copy is pinned the
+    /// same way). Under the old ASCII rule the `é` in `greeté` was not an
+    /// identifier char, so `greet` was mis-detected as a definition.
+    #[test]
+    fn go_line_defines_ident_char_is_unicode_aware() {
+        assert!(is_ident_char('é'), "accented letter");
+        assert!(is_ident_char('漢'), "CJK letter");
+        assert!(is_ident_char('_'));
+        assert!(!is_ident_char('-'));
+        assert!(!is_ident_char(' '));
+        // Whole-word pin: `greet` inside `greeté` is NOT a definition of
+        // `greet` (the `é` is an identifier char, not a boundary).
+        assert_eq!(go_line_defines_item("func greeté() {", "greet"), None);
+        // And the full Unicode identifier IS a definition of itself.
+        assert_eq!(go_line_defines_item("func greeté() {", "greeté"), Some("func"));
     }
 
     // ── locate_go_item ───────────────────────────────────────────────────────

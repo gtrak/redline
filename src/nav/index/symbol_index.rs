@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use crate::syntax::queries::{ImplKind, RustTables, Symbol};
 
 /// A definition's location in the project: the (project-relative) file and
-/// the symbol itself. The tree-sitter `Xref` backend's `find_definition`
-/// returns these.
+/// the symbol itself. The tree-sitter backend's `definitions_of` returns
+/// these.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
     pub file: String,

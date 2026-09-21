@@ -790,7 +790,12 @@ fn char_at(s: &str, i: usize) -> Option<char> {
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    // C15: mirrors the redline crate's single word-char rule —
+    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
+    // redline-resolve has no dependency on redline, so the rule is
+    // duplicated here rather than imported; keep the two in sync (the
+    // sibling `crate::cargo::is_ident_char` does the same).
+    c.is_alphanumeric() || c == '_'
 }
 
 /// The first non-whitespace character at or after byte offset `from`.
@@ -904,6 +909,29 @@ mod tests {
         // usage, not definition
         assert_eq!(line_defines_item("const y = obj.add(1, 2);", "add"), None);
         assert_eq!(line_defines_item("new Foo();", "Foo"), None);
+    }
+
+    /// C15: identifier-constituency mirrors the redline crate's Unicode
+    /// word-char rule (`redline::model::buffer::is_word_char`) — a non-ASCII
+    /// letter is an identifier character, so it blocks a whole-word boundary
+    /// just like an ASCII one (the sibling `crate::cargo` copy is pinned the
+    /// same way). Under the old ASCII rule the `é` in `greeté` was not an
+    /// identifier char, so `greet` was mis-detected as a definition.
+    #[test]
+    fn line_defines_ident_char_is_unicode_aware() {
+        assert!(is_ident_char('é'), "accented letter");
+        assert!(is_ident_char('漢'), "CJK letter");
+        assert!(is_ident_char('_'));
+        assert!(!is_ident_char('-'));
+        assert!(!is_ident_char(' '));
+        // Whole-word pin: `greet` inside `greeté` is NOT a definition of
+        // `greet` (the `é` is an identifier char, not a boundary).
+        assert_eq!(line_defines_item("export function greeté() {", "greet"), None);
+        // And the full Unicode identifier IS a definition of itself.
+        assert_eq!(
+            line_defines_item("export function greeté() {", "greeté"),
+            Some("function")
+        );
     }
 
     // ── end-to-end: local path dependency (external = false) ───────────────
