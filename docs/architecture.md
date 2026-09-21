@@ -35,7 +35,7 @@ src/
     flow_tests.rs         3,624  PTY-style flow tests, hung off store/mod.rs via #[path = "../flow_tests.rs"]
     keymap.rs              628  KeymapEngine, KeySeq, C-x/C-c prefixes
     store/
-      mod.rs            23,000  AppStore — the impl this plan splits (see §2–5)
+      mod.rs            13,701  struct + 18 core methods + the test module (see §3)
       helpers.rs           172  free fns extracted in 012-02 Stage A
       notes_doc.rs          ~  NotesDoc parse/serialize, 012-02 Stage B
     watcher.rs             656  ActiveWatcher (notify-based, debounced)
@@ -89,7 +89,7 @@ src/
 | 11813–11817 | 5 | `impl Default for AppStore` (delegates to `new`) |
 | 11819–11843 | 25 | `impl Picker` (`recompute`) |
 | 11844–11854 | 11 | free fn `point_byte_offset` (→ navigation, §3) |
-| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 top-level fns (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers)**, plus **9 helper fns nested inside test bodies** (`fn git_cli`/`fn git_cli(d:…)` at the old 14645/19059/19096/19333/19702/19737/20404/20566/20092) — the test-split lane must carry those 9 too, or they are lost |
+| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **379 top-level fns + 9 `fn git_cli` variants nested inside test bodies + 2 nested `main`s** (the census was re-derived by the store-concerns gate and is identical pre/post-012-03). The test-split lane must carry the **nested** fns too, or they are lost. Earlier figures in this map (389, 401) were top-level-only counts. |
 | 23121–23126 | 6 | loop-03 comment (23121–23123) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` (23124–23126) |
 
 Helper items in lines 1–1444 (move with their concern in Phase 2):
@@ -321,30 +321,36 @@ quit_prompt_active quit_prompt_buffer quit_prompt_show
 quit_prompt_show_with_error quit_prompt_key quit_prompt_advance
 quit_prompt_cancel`
 
-## 4. Target layout
+## 4. Target layout — **LANDED in 012-03** (all 13 concerns)
 
 ```
 src/app/store/
-  mod.rs         struct AppStore + its 83 fields, Default impl,
-                 `pub use` re-exports for UI-imported items, core (23)
-                 → ~1,444 + 271 (struct) + 670 (core) lines (helpers + struct + core)
+  mod.rs         struct AppStore + its 83 fields (byte-identical), Default impl,
+                 `pub use` re-exports, core (18) + the test module (see §3)
   helpers.rs     12 free fns — LANDED in 012-02 Stage A (11 moved; `point_byte_offset`
                  stayed in mod.rs because its 4 call sites are in-impl)
   notes_doc.rs   NotesDoc + parse/serialize — LANDED in 012-02 Stage B
-  views.rs        18
-  buffers.rs      29
-  notes.rs        30
-  file_view.rs    52
-  search.rs       39
-  magit.rs        24
-  commit.rs       61
-  navigation.rs   52
-  index_wiring.rs 34
-  picker.rs       42
-  project.rs      17
-  minibuffer.rs   1
-  keys.rs         11
+  views.rs        18  LANDED
+  buffers.rs      29  LANDED
+  notes.rs        30  LANDED
+  file_view.rs    52  LANDED
+  search.rs       39  LANDED
+  magit.rs        24  LANDED
+  commit.rs       56  LANDED
+  navigation.rs   51  LANDED
+  index_wiring.rs 34  LANDED
+  picker.rs       41  LANDED
+  project.rs      17  LANDED
+  minibuffer.rs    1  LANDED
+  keys.rs         11  LANDED
 ```
+
+`pub(super)` added by the moves: **73** (each demanded by a cross-concern call; 0
+unreferenced, no `pub`/`pub(crate)` added, no field visibility changed). The original
+estimate was 168 private methods — most are called from within their own concern.
+Per-file sizes after 012-03: navigation 2,392 · file_view 999 · commit 797 · notes 761 ·
+picker 746 · search 737 · buffers 733 · index_wiring 718 · keys 561 · magit 419 ·
+views 335 · project 321 · minibuffer 7.
 
 Fields needed per module (all are private fields of `AppStore`, defined in
 `mod.rs` — see §5 for why that makes them reachable as-is):
