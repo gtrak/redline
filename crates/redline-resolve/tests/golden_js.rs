@@ -41,6 +41,19 @@ use redline_resolve::{SymbolContext, ToolingProvider};
 const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/js");
 const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus/js/golden");
 
+// NOTE: the js suite deliberately does NOT share from `tests/common/mod.rs`
+// (unlike go/python/rust). Its helpers are genuinely different, and folding
+// them into the shared module would collapse real differences:
+//   - probes come from a `probes.toml` manifest, not `*.golden` files;
+//   - bail messages normalize the workspace to `<ws>` via a raw
+//     `.replace(ws_canon, …)` — not `common::sub_path`'s raw+canonicalized
+//     substitution (which would also substitute the non-canonical root);
+//   - `assert_bless_stopped` here is a whitespace variant (the original
+//     `run          the suite` spacing) and uses fully-qualified
+//     `std::sync::atomic::Ordering`; `check_golden` renders + creates the
+//     golden dir itself.
+// Each of these is preserved byte-for-byte below.
+
 // ── probe spec (checked-in manifest: a strict, known subset of TOML) ─────────
 
 #[derive(Debug, Clone)]

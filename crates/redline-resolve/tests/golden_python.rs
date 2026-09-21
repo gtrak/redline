@@ -44,7 +44,8 @@
 //! sorted (byte) order, one provider resolve per probe.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+mod common;
 
 use redline_resolve::providers::python_provider::PythonProvider;
 use redline_resolve::{ResolvedSource, SymbolContext, ToolingProvider};
@@ -52,21 +53,6 @@ use redline_resolve::{ResolvedSource, SymbolContext, ToolingProvider};
 /// The checked-in corpus, relative to the crate manifest dir.
 fn corpus_src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/python")
-}
-
-/// Recursively copy `src` into `dst` (plain fs; the corpus is small).
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dst.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }
 
 /// One parsed probe: the spec AND the expected outcome.
@@ -161,39 +147,13 @@ fn parse_golden(path: &Path) -> Probe {
     }
 }
 
-/// Replace a path (raw and canonicalized form) with its placeholder.
-fn sub_path(mut out: String, p: &Path, placeholder: &str) -> String {
-    out = out.replacen(p.to_string_lossy().as_ref(), placeholder, usize::MAX);
-    if let Ok(canonical) = std::fs::canonicalize(p) {
-        out = out.replacen(
-            canonical.to_string_lossy().as_ref(),
-            placeholder,
-            usize::MAX,
-        );
-    }
-    out
-}
-
-/// Normalize an actual outcome string: the probe's workspace root becomes
-/// `{root}`, the corpus copy root becomes `{corpus}`. Everything else must
-/// match byte-for-byte.
-fn normalize(msg: &str, corpus: &Path, probe_root: &Path) -> String {
-    let s = sub_path(msg.to_string(), probe_root, "{root}");
-    sub_path(s, corpus, "{corpus}")
-}
-
-/// `p` relative to `base` (raw or canonicalized base prefix).
-fn rel_to(base: &Path, p: &Path) -> Option<String> {
-    if let Ok(r) = p.strip_prefix(base) {
-        return Some(r.to_string_lossy().into_owned());
-    }
-    if let Ok(c) = std::fs::canonicalize(base)
-        && let Ok(r) = p.strip_prefix(&c)
-    {
-        return Some(r.to_string_lossy().into_owned());
-    }
-    None
-}
+// The hand-authored-golden bless (byte-preserving re-write + the
+// GOLDEN_BLESS stop-gate statics / `assert_bless_stopped`) is shared with the
+// rust suite in `common`: see `common::bless_handauthored_golden` and
+// `common::assert_bless_stopped`. The python goldens are hand-authored and
+// authoritative — the bytes a green run compares against ARE the checked-in
+// file's own bytes, so bless rewrites every golden back UNCHANGED and
+// records the bless so the end-of-test gate fails the run.
 
 /// The live stdlib root of the ambient `python3`
 /// (`sysconfig.get_path('stdlib')` — e.g. `/usr/lib/python3.14`).
@@ -216,61 +176,6 @@ fn stdlib_root() -> PathBuf {
     PathBuf::from(out)
 }
 
-// ── golden bless bookkeeping (011-08 follow-up P2-1, python lane) ──────────
-//
-// The python goldens are hand-authored and authoritative: the bytes a green
-// run compares against ARE the checked-in file's own bytes. So bless does
-// not re-render; it rewrites every golden back UNCHANGED and records the
-// bless so the end-of-test gate fails the run. A no-op re-bless is always a
-// no-change; a deliberate hand-edit round-trips byte-identically.
-static BLESSED_RUN: AtomicBool = AtomicBool::new(false);
-static BLESSED_CHANGED: AtomicUsize = AtomicUsize::new(0);
-
-/// End-of-test gate: a bless run writes EVERY golden back first, then fails
-/// exactly once per test (never per file — a per-file panic would abort the
-/// loop and leave later goldens unwritten). An accidental GOLDEN_BLESS can
-/// therefore never end green.
-fn assert_bless_stopped(test_name: &str) {
-    if !BLESSED_RUN.load(Ordering::SeqCst) {
-        return;
-    }
-    let changed = BLESSED_CHANGED.load(Ordering::SeqCst);
-    panic!(
-        "GOLDEN_BLESS run of {test_name} rewrote {changed} golden(s) — \
-         run the suite again WITHOUT GOLDEN_BLESS to verify the new goldens pass"
-    );
-}
-
-/// Bless-mode write (no-ops unless `GOLDEN_BLESS` is set): a python golden is
-/// hand-authored, so bless writes the CHECKED-IN golden back with the exact
-/// bytes a green run compares against (byte-preserving — writes to the
-/// checked-in corpus, not the tempdir copy, so `git diff` reflects it) and
-/// eprintlns a no-change line. `changed` is the js/go-compatible bookkeeping
-/// (always false here: there is no independent live-derived rendering that
-/// could differ from the checked-in file).
-fn bless_python_golden(corpus_src: &Path, tmp_golden: &Path) {
-    if std::env::var_os("GOLDEN_BLESS").is_none() {
-        return;
-    }
-    let checkin = corpus_src.join(tmp_golden.file_name().unwrap());
-    let old = std::fs::read(&checkin)
-        .unwrap_or_else(|e| panic!("cannot read golden {}: {e}", checkin.display()));
-    let rendered = old.clone();
-    let changed = old != rendered;
-    std::fs::write(&checkin, &rendered)
-        .unwrap_or_else(|e| panic!("cannot bless {}: {e}", checkin.display()));
-    eprintln!(
-        "GOLDEN_BLESS: {} {} — review `git diff` before committing; \
-         this run FAILS so the bless cannot slip through green",
-        if changed { "REWROTE" } else { "no change to" },
-        checkin.display()
-    );
-    if changed {
-        BLESSED_CHANGED.fetch_add(1, Ordering::SeqCst);
-    }
-    BLESSED_RUN.store(true, Ordering::SeqCst);
-}
-
 /// Check an actual `ResolvedSource` against a resolved golden; returns the
 /// list of field mismatches (empty = exact match).
 fn check_resolved(
@@ -284,12 +189,12 @@ fn check_resolved(
         bad.push(format!("external: expected {}, got {}", exp.external, src.external));
     }
     let base = if exp.stdlib { stdlib } else { corpus };
-    let file_rel = rel_to(base, &src.file)
+    let file_rel = common::rel_to(base, &src.file)
         .unwrap_or_else(|| format!("<outside base: {}>", src.file.display()));
     if file_rel != exp.file {
         bad.push(format!("file: expected {}, got {file_rel}", exp.file));
     }
-    let root_rel = rel_to(base, &src.source_root)
+    let root_rel = common::rel_to(base, &src.source_root)
         .unwrap_or_else(|| format!("<outside base: {}>", src.source_root.display()));
     let expected_root = if exp.source_root == "." {
         String::new()
@@ -334,7 +239,7 @@ fn python_golden_corpus() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let corpus = tmp.path().join("corpus");
     let corpus_src = corpus_src_dir();
-    copy_tree(&corpus_src, &corpus).expect("copy corpus");
+    common::copy_tree(&corpus_src, &corpus).expect("copy corpus");
 
     // OFFLINE provider: every LIVE leg in the suite is the python3
     // interpreter itself (find_spec, is_stdlib, frozen __file__ fallback,
@@ -365,7 +270,7 @@ fn python_golden_corpus() {
         // Bless bookkeeping: a byte-preserving re-bless writes the checked-in
         // golden back unchanged and records the bless (no-op unless
         // GOLDEN_BLESS is set).
-        bless_python_golden(&corpus_src, path);
+        common::bless_handauthored_golden(&corpus_src, path);
         // An empty root (none of the goldens use one) would make
         // `Path::join("")` append a trailing slash and skew normalization.
         let probe_root = if probe.root.is_empty() {
@@ -413,7 +318,10 @@ fn python_golden_corpus() {
                         continue;
                     }
                 };
-                let got = normalize(&e.to_string(), &corpus, &probe_root);
+                let got = common::normalize_roots(
+                    &e.to_string(),
+                    &[(probe_root.as_path(), "{root}"), (corpus.as_path(), "{corpus}")],
+                );
                 if got != *exp {
                     failures.push(format!(
                         "{} ({}): bail mismatch\n  expected: {exp}\n  got:      {got}",
@@ -424,7 +332,7 @@ fn python_golden_corpus() {
         }
     }
 
-    assert_bless_stopped("python_golden_corpus");
+    common::assert_bless_stopped("python_golden_corpus");
     assert!(
         failures.is_empty(),
         "{} golden mismatch(es) out of {} probes:\n\n{}",

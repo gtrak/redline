@@ -34,7 +34,8 @@
 //! sorted (byte) order, one provider resolve per probe.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+mod common;
 
 use redline_resolve::providers::go_provider::GoProvider;
 use redline_resolve::{SymbolContext, ToolingProvider};
@@ -167,27 +168,6 @@ fn parse_golden(path: &Path) -> Probe {
     }
 }
 
-/// Replace a path (raw and canonicalized form) with its placeholder.
-fn sub_path(mut out: String, p: &Path, placeholder: &str) -> String {
-    out = out.replacen(p.to_string_lossy().as_ref(), placeholder, usize::MAX);
-    if let Ok(canonical) = std::fs::canonicalize(p) {
-        out = out.replacen(
-            canonical.to_string_lossy().as_ref(),
-            placeholder,
-            usize::MAX,
-        );
-    }
-    out
-}
-
-/// Normalize an actual outcome string: the probe's workspace root becomes
-/// `{root}`, the injected modcache becomes `{cache}`. Everything else
-/// must match byte-for-byte.
-fn normalize(msg: &str, probe_root: &Path, cache: &Path) -> String {
-    let s = sub_path(msg.to_string(), probe_root, "{root}");
-    sub_path(s, cache, "{cache}")
-}
-
 /// `p` relative to `base` (canonicalized when both exist, so joined
 /// `./` segments — as `resolve_local_path` leaves them — normalize out).
 fn rel_to(base: &Path, p: &Path) -> String {
@@ -234,7 +214,10 @@ fn capture(probe: &Probe, probe_root: &Path, cache: &Path, provider: &GoProvider
                 line,
             }
         }
-        Err(e) => Outcome::Bail(normalize(&e.to_string(), probe_root, cache)),
+        Err(e) => Outcome::Bail(common::normalize_roots(
+            &e.to_string(),
+            &[(probe_root, "{root}"), (cache, "{cache}")],
+        )),
     }
 }
 
@@ -286,26 +269,6 @@ fn render_golden(probe: &Probe, outcome: &Outcome) -> String {
     s
 }
 
-/// 011-08 js review P2-1: bless-mode bookkeeping — every probe test
-/// asserts at its end that a bless run STOPS (writes all goldens, then
-/// fails once), so an accidental GOLDEN_BLESS can never end green.
-static BLESSED_RUN: AtomicBool = AtomicBool::new(false);
-static BLESSED_CHANGED: AtomicUsize = AtomicUsize::new(0);
-
-/// End-of-test gate: a bless run writes EVERY golden first, then fails
-/// exactly once per test (never per file — a per-file panic would abort
-/// the loop and leave later goldens unwritten).
-fn assert_bless_stopped(test_name: &str) {
-    if !BLESSED_RUN.load(Ordering::SeqCst) {
-        return;
-    }
-    let changed = BLESSED_CHANGED.load(Ordering::SeqCst);
-    panic!(
-        "GOLDEN_BLESS run of {test_name} rewrote {changed} golden(s) — \
-         run the suite again WITHOUT GOLDEN_BLESS to verify the new goldens pass"
-    );
-}
-
 fn check_golden(probe: &Probe, rendered: &str, path: &Path, failures: &mut Vec<String>) {
     if std::env::var_os("GOLDEN_BLESS").is_some() {
         // 011-08 js review P2-1: an accidentally-set GOLDEN_BLESS would
@@ -325,10 +288,7 @@ fn check_golden(probe: &Probe, rendered: &str, path: &Path, failures: &mut Vec<S
             if changed { "REWROTE" } else { "no change to" },
             path.display()
         );
-        if changed {
-            BLESSED_CHANGED.fetch_add(1, Ordering::SeqCst);
-        }
-        BLESSED_RUN.store(true, Ordering::SeqCst);
+        common::record_bless(changed);
     }
     let expected = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!(
@@ -400,7 +360,7 @@ fn go_golden_corpus() {
         println!("probe `{}`: {}", probe.name, summarize(&outcome));
     }
 
-    assert_bless_stopped("go_golden_corpus");
+    common::assert_bless_stopped("go_golden_corpus");
     assert!(
         failures.is_empty(),
         "{} golden mismatch(es) out of {} probes:\n\n{}",
