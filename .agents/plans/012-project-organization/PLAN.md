@@ -71,6 +71,22 @@ splitting `syntax/node.rs`: **a `pub use` re-export cannot re-export an item les
 visible than itself** (`pub use` of a `pub(super)`/private item → **E0364**); for
 internal-only items use `pub(crate) use` (or widen the item to `pub(crate)`), which
 keeps the visibility narrowing rather than adding public API.
+A **fourth** rule came from A7 (`store/navigation.rs`, 2,394 lines → 4 files):
+**`pub(super)` is not always the narrowest correct answer.** A child module's
+`pub(super)` reaches only its *parent*, so an item that was visible at the
+`app::store` level — called from `picker.rs` or `store::tests`, i.e. the parent's
+*siblings* — needs **`pub(in crate::app::store)`** instead. A7 needed exactly **9**
+of those plus **6** plain `pub(super)`; the task spec had asserted `pub(super)`
+would suffice, which is wrong for any item the store itself exposes. `pub(in path)`
+is *narrower* than `pub(crate)`, so it is the right tool rather than a fallback.
+Also verified: **one `impl` block cannot span files** (the parse fails with an
+unclosed delimiter), so each file carries its own `impl AppStore { … }` wrapper —
+the same shape the 13 concern moves used.
+**A numbers lesson from the same lane**: the A7 brief stated 48 methods, 8
+`js_ts_*`, 4 `go_*`; the re-derivation found **51, 7, 3**. The brief's
+method→line *map* was exactly right, but its *counts* were not — which is the
+"numbers in briefs are claims" rule applied to the orchestrator. It was caught
+only because the spec ordered an independent re-derivation first.
 **Each stage is behavior-preserving and lands gate-green**; no stage mixes a
 behavior change with a move. Warm-up stages first (`00-worklist.md` §Round-2
 structural deltas): free helpers · notes doc · test module, then per-concern
