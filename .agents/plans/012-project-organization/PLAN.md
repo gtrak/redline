@@ -6,12 +6,13 @@ Depends on: nothing (behavior-preserving refactor + cleanup)
 
 ## Why
 
-`src/app/store.rs` is **22,992 lines** — roughly 40% of the 56 k-line codebase —
-with an `impl AppStore` of **~420–430 methods** (the frequently-quoted "869" was a
-bad grep that swept the 11 k-line test module in; `012-01` measured 432 and the
-review gate is settling the exact figure). One impl block holds every concern:
+`src/app/store.rs` is **22,993 lines** — roughly 40% of the 56 k-line codebase —
+with an `impl AppStore` of **421 methods** (253 `pub` / 168 private) spanning lines
+1701–11588, plus 11 associated free functions. One impl block holds every concern:
 buffers, views, file-view cursor/scroll, search, magit, log/blame/commit, notes,
-navigation, index wiring, pickers, minibuffer, project/files, key dispatch. It mixes
+navigation, index wiring, pickers, minibuffer, project/files, key dispatch.
+(Two count corrections on the way here: the widely-quoted "869" was a bad grep
+that swept in the 11 k-line test module, and "432" counted methods + free fns.) It mixes
 buffers, views, the view stack, file-view cursor/scroll, search, magit
 status/staging, log/blame/commit/diff, notes, annotations, navigation
 (M-., jump stack, xref/imenu/impls pickers), index wiring, crate indexes,
@@ -49,8 +50,14 @@ and mutates private *fields* with no visibility change. **But** a private
 with `E0624: method is private`; `pub(super)` on it compiles. So the split needs:
 files placed under `app::store::*` (**children** of the module defining
 `AppStore`, not siblings like `app::store_buffers`), **no field-visibility pass**,
-and a **`pub(super)` pass on the private methods that cross concern boundaries**
-(`012-01` counted 178 private methods → an additive, non-breaking change).
+and a **`pub(super)` pass on the 168 private methods that cross concern
+boundaries** (the 10 private *free* fns need none). Two further facts the review
+established, both easy to get wrong: `#[path = "flow_tests.rs"]` must become
+**`"../flow_tests.rs"`** (the attribute resolves relative to the containing
+file's directory, so it would otherwise point at a nonexistent
+`src/app/store/flow_tests.rs` → E0583), and `collect_syntax_anchor_nodes` (2602)
++ `is_syntax_anchor_kind` (2627) are **impl methods formatted at column 0**, so
+indent-based tooling must not move them out of the impl.
 **Each stage is behavior-preserving and lands gate-green**; no stage mixes a
 behavior change with a move. Warm-up stages first (`00-worklist.md` §Round-2
 structural deltas): free helpers · notes doc · test module, then per-concern
