@@ -89,6 +89,52 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **T7** | Strengthen non-discriminating tests: bare `.is_ok()` with no payload/state check (`store.rs:10577`, `:16949`, `:3645`); audit twins for vacuous absence-only assertions post `PTY_QUIET` shrink | strengthen, never delete | low |
 | **T8** | PTY battery drivers `drive_{emacs,redline}_battery2/3` → parameterized driver | lower priority than Rust duplication | low |
 
+## Round 2 coverage-gap deltas (read-verified, local model)
+
+This lane read every module round 1 skipped. Its most valuable output is a class
+the other lanes could not reach: **invariants that two sites must agree on, with
+no test pinning the agreement** (C8, C13, C14, C15) — silent-divergence risks
+rather than style debt. `fix-by` as before.
+
+### Correctness / silent-divergence (highest value)
+
+| ID | Finding | Evidence | fix-by |
+|----|---------|----------|--------|
+| **C8** | `model/files.rs` header claims the watcher is unshipped (it shipped) **and** that search uses a `.ignore`-based walk — `search/rg.rs` is **gitignore**-based and never reads `.ignore`. Worse: the file-list walk **prunes `graft/`** while the search walk **does not**; documented as intentional but **nothing tests it** | `files.rs:1-10`, `rg.rs` (read in full) | deterministic (fix comments) + **add 2 asymmetry tests** |
+| **C13** | `highlight::supports_reuse` vs `registry::build`'s locals-queries: the incremental path is byte-identical to the full path **only** for languages whose registry config passes an empty locals query (JS/TS/TSX, Ruby pass `LOCALS_QUERY`). Two hand-maintained lists; **no test** asserts `supports_reuse(id) ⟺ locals query is empty`, so adding a locals query to e.g. Python silently desyncs incremental vs full highlighting | `highlight.rs`, `registry.rs` | deterministic: expose `has_locals_queries(id)`, add the `LanguageId::ALL` test |
+| **C14** | **Four walks, no cross-pins**: file list (hidden+gitignore+`graft/` prune), `rg` (hidden+gitignore, no graft/target prune), `cargo::walk_rs_files` (target+dot dirs, no gitignore), `nav/index` (built from FileList). Differences are user-perceivable and documented, but untested; no "walk policy" table exists | all four read | deterministic: pin the documented asymmetry in one test each + a docs table |
+| **C15** | **`is_word_char` families disagree on Unicode**: `store.rs:5261` and `references.rs` are Unicode-aware; `rg.rs`'s sink and `cargo.rs::is_ident_char` are ASCII. So `café` splits differently between the two M-? paths. `rg.rs` even carries a branch that exists only because of this class of mismatch | 4 of 5 sites read | deterministic: one shared predicate in `model/` + a multibyte end-to-end test |
+| **C5** | `StatusTree::move_down` **wraps to the first section while its doc says "wraps nowhere"**, and `move_up` does not wrap — asymmetric `n`/`p`, doc contradicts code, no test pins either | `model/sections.rs` | **decision needed** (emacs stops at end; magit wraps): keep wrap → fix doc + add `move_down_wraps_to_first`; else delete the `else` branch |
+| **C17c** | `Registry::save` / `Recents::save` write `projects.json`/`recents.json` non-atomically via `fs::write`; load tolerates corruption by returning empty ⇒ **a crash mid-write silently wipes the known-project list** | `model/project.rs` | deterministic: temp-file + rename |
+
+### Dead API with wrong justifications (all read-verified)
+
+| ID | Finding | fix-by |
+|----|---------|--------|
+| **C9** | `Buffer::{byte_count,line_to_byte,byte_to_line}` — 3 `#[allow(dead_code)] // spec-required byte↔line conversion`; **zero non-test callers**, and the codebase deliberately uses the `try_*` variants instead | delete all three (or link the spec) |
+| **C10** | `nav/xref.rs`'s `Xref` trait: `#[allow(dead_code)] // …LSP backend will use it later`; no non-test use (`dyn Xref` only inside its own file); the store calls `SymbolIndex` directly | **supervisor decision** (see D2) |
+| **C11** | `highlight.rs::highlight(rope, config, _lang_id)` — parameter never read | drop it |
+| **C12** | `LanguageId::name`'s allow is unneeded (it IS used at `store.rs:8562`) **and** its justification is wrong (cache key is `(path,mtime,theme)`); `FileList::len` has no non-test caller | fix comment / delete `len` |
+| **C17a** | `StatusTree::visible_ids()` and free `collect_all_visible()` are the same DFS twice | merge |
+| **C17b** | `buffer.rs::is_locally_owned`'s `path.is_some()` disjunct is redundant | simplify |
+| **C17d** | `cargo.rs` error text "…not yet provided by the app" — the app HAS provided scope hints since 007-03 | reword |
+
+### Stale docs/comments (one batch sweep)
+
+**C6** `keymap.rs` says "C-SPC is NUL"; its own test pins `Char(' ')`+ctrl (NUL only via `^@`) · **C7** `ui/tree.rs` says "reverse-video cursor" but implements the shared no-invert bar · **C8-claims** above · **C17e** `events.rs` subscriber doc attributes the index refresh to "issue 05's" consumer instead of `AppStore`. Round-1/2 already found the `(future wiring)` family; the coverage lane confirms **6 sites in `nav/index.rs`** plus **~13 more suspected in `store.rs`** needing a per-item caller check.
+
+### Test-suite hygiene (C16, all read)
+
+- `syntax/highlight.rs::measure_full_vs_incremental` runs a **3.2 MB corpus with a wall-clock `incr*3 <= full` assertion inside the normal unit suite** → `#[ignore]`/`perf` (it admits the margin is for "a loaded shared box").
+- `watcher.rs`'s two "must not publish" tests assert absence after a fixed settle sleep — the flakiest asserts in the file; keep the control-write pattern, document the 500 ms assumption.
+- `drain_until_finished` duplicated ×3 (`rg.rs`, `references.rs`, `occur.rs`) → one `search/mod.rs` test helper.
+- `pipeline_cancel_stops_promptly` creates **2,000 dirs + files per run** — the battery's heaviest I/O test.
+- `command.rs::new_store()` builds `AppStore::at(dir, base)` with a tempdir that drops at function end (comment admits writes are no-ops) — any future persisted-state assertion here will fail confusingly.
+
+### Confirmed from earlier rows
+
+C1 = M1 (the `nav/index.rs` stale-allow cluster, now with the production callers spelled out: `store.rs:41,7837-7840,1592`, `main.rs`) · C2 = R5 (`MagitStatusView` ≈ `MagitRowsView`, **both live**: `root.rs:691` vs `:707`) · C3 = M4/the truncate trio, now with the concrete bug (`PickerCanvas::draw` passes **cell** widths into a **char**-counting truncate ⇒ CJK overflow, unpinned by any test) · C4 = M4 + cursor-bar ×5 + scroll-indicator ×4.
+
 ## Round 2 deltas (read-verified, local model)
 
 Round 2 *read the code*. It verified both ground-truth items and added seven
