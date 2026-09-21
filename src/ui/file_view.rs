@@ -380,8 +380,10 @@ fn overlay_match_ranges(
 /// landing after a multibyte character highlights the right cells, the
 /// same byte/char discipline as the match overlay). The jump face wins on
 /// overlap (the landing pulse is the newest information); a range running
-/// past the text's end clips instead of panicking. Returns the input
-/// unchanged (a face rewrite only) when no landing highlight applies.
+/// past the text's end clips instead of panicking. When no landing
+/// highlight applies (`jump` is `None`), clamps segment endpoints to the
+/// text length and drops zero-width segments (the same clamping `draw_line`
+/// applies — not a pass-through).
 fn overlay_jump_range(
     text: &str,
     segments: &[(usize, usize, RowFace)],

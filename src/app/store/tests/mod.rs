@@ -253,7 +253,12 @@ use crate::git::log::LogEntry;
         (dir, store)
     }
 
-    /// Drain the search bus into the store until `Finished` (bounded).
+    /// Drain the search bus into the store until the CURRENT generation's
+    /// `Finished` (bounded). Stale-generation events (superseded jobs) are
+    /// applied (and discarded by `apply_search_event`) but do NOT terminate
+    /// the drain — only the current generation's `Finished` means the
+    /// current job is done (order-independent: an undrained prior job's
+    /// `Finished` cannot make the drain return early).
     fn drain_search_finished(
         store: &mut AppStore,
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::search::rg::SearchEvent>,
@@ -262,7 +267,9 @@ use crate::git::log::LogEntry;
         loop {
             let mut finished = false;
             while let Ok(ev) = rx.try_recv() {
-                if matches!(ev, crate::search::rg::SearchEvent::Finished { .. }) {
+                if matches!(&ev, crate::search::rg::SearchEvent::Finished { generation, .. }
+                    if *generation == store.search.generation)
+                {
                     store.apply_search_event(&ev);
                     finished = true;
                     break;

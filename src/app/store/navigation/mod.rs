@@ -250,6 +250,13 @@ impl AppStore {
         // The capacity-1 channel coalesces rapid jump bursts; a full
         // channel (a wake already queued) needs no second wake — the
         // driver re-reads the latest `set_at` when it runs.
+        // Latent hazard (P2-4, recorded not fixed): if `Root`'s
+        // `use_future` is ever dropped or aborted, `try_send` fails
+        // silently forever — the same silent-drop class this lane fixed
+        // with `try_send`. Self-healing: the band still ends at the next
+        // render (intensity 0 ⇒ no highlight) or the next command clear.
+        // A `watch` channel or receiver re-install is only worth it if
+        // `Root` re-mounting becomes possible.
         let _ = self.jump_wake_tx.try_send(());
     }
 }

@@ -1175,3 +1175,37 @@ use super::*;
             "C-g outside isearch clears the highlight"
         );
     }
+
+    /// jump-highlight P2-1: the `search_jump` landing hook — the third of
+    /// three `record_landing_highlight` call-sites (the other two, in
+    /// `record_jump` and `navigate_to_entry`, have coverage in
+    /// `tests/navigation/jump.rs`). `search_jump` records the jump stack
+    /// directly (not through `record_jump`), so it calls the shared
+    /// helper itself: this test pins that the search-RET landing sets the
+    /// transient landing highlight on the landed hit's symbol.
+    #[test]
+    fn search_jump_sets_the_landing_highlight() {
+        let (_dir, mut s) = search_project();
+        let mut rx = s.search_rx().unwrap();
+        s.open_path("src/main.rs");
+        s.set_viewport_lines(10);
+        s.start_project_search("target".into());
+        drain_search_finished(&mut s, &mut rx);
+        // The deterministic sort puts lib.rs first: "pub fn target() {}",
+        // "target" at byte column 7.
+        assert_eq!(s.search.hits[0].file, "src/lib.rs");
+        assert_eq!(s.search.hits[0].line_no, 1);
+        assert_eq!(s.search.hits[0].col, Some(7));
+        s.search.selected = 0;
+        s.search_jump();
+        let h = s
+            .jump_highlight()
+            .expect("search_jump must set the landing highlight");
+        let key = s.buffers.current().unwrap().to_string();
+        assert_eq!(h.buffer_key, key, "the highlight belongs to the landed buffer");
+        assert_eq!(h.line, 0, "the highlight is on the hit's line (0-based)");
+        // Line 0 is `pub fn target() {}`: the word `target` spans bytes
+        // 7..13 (all ASCII).
+        assert_eq!(h.start, 7, "the symbol's byte start");
+        assert_eq!(h.end, 13, "the symbol's byte end (exclusive)");
+    }

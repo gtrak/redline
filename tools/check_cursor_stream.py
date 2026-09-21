@@ -1154,7 +1154,7 @@ def jump_highlight_checks():
             buf = s.screen.buffer[row - 1]
             for c in sorted(buf):
                 h = str(buf[c].bg).lower()
-                if (int(h[:2], 16) > 100 and int(h[2:4], 16) > 100
+                if len(h) == 6 and (int(h[:2], 16) > 100 and int(h[2:4], 16) > 100
                         and int(h[4:6], 16) < 100):
                     out.append(h)
             return out
