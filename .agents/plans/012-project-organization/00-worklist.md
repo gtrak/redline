@@ -529,37 +529,41 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
 
 ## Gate reliability (higher priority than the cosmetic items)
 
-**Three distinct flake classes are now characterised — do not conflate them:**
+**Four distinct flake classes are now characterised — do not conflate them:**
 
-1. **Cursor CUP race (app-side, root-caused)** — the hardware-cursor write is emitted
-   from a spawned task 12 ms after each frame, i.e. outside the synchronized-output
-   region, so under load it can land after the frame's `?2026l` (or be starved
-   entirely) and the terminal's cursor is stale for a frame. Reproduced live 78/80.
-   Being fixed by the `deflake-cursor` lane (root fix + a harness gate).
+1. **Cursor CUP race (app-side; root-caused; NOT fixed)** — the hardware-cursor write is
+   emitted from a spawned task 12 ms after each frame, i.e. outside the synchronized-output
+   region. The deflake lane's harness gate (`cup_settle`, landed `b47e03c`) makes a starved
+   CUP a **loud protocol failure** instead of a silent mis-read, but it does **not** fix the
+   race: re-measured under confirmed load the drive is **~50% failure (7/10, then 3/8)**,
+   dominated by `cup=None` occurring *after* the full 5 s wait. A second sub-class was also
+   observed: **pre-frame starvation** (`?25l=0` — the startup hide itself missed; plus
+   stale-content failures), which the item-2 gate structurally cannot cover.
+   **The app-side fix is verified impossible in-fence**: iocraft 0.9.1's `write_canvas`
+   parks the cursor at the canvas bottom row inside the sync region after every row write,
+   and there is **no post-canvas/post-frame seam** (`use_effect` fires before
+   `write_canvas`; `use_output` writes above the canvas; the `Terminal` handle is owned
+   inside the render-loop future). A true fix needs an iocraft-side hook → **upstream PR or
+   vendored patch** (decision open with the user; with ~50% under load the case for it is
+   now stronger than "accept the occasional lag").
 2. **`git::repo` assertion flake (environmental, correlated)** —
-   `stage_file_then_unstage_matches_cli` failed under two concurrent full suites with
-   swap fully exhausted (8G/8G), green 5/5 in isolation; a git-level probe ruled out the
-   libgit2 stat short-circuit, and there is no timing/ordering assumption to pin. Green
-   runs have since been observed *under* the same swap exhaustion, so swap is a
-   **correlate, not a deterministic cause**.
-3. **External SIGTERM of the test harness (unattributed)** — the store-tests gate's first
-   `gate.sh full` run had its `test` stage SIGTERM-killed at ~test 812/847 with **no
-   OOM-kill in the journal**, while every PTY stage still ran and passed; the re-run was
-   21/21 green. Three mechanisms have been **eliminated**: `gate.sh` wraps only the PTY
-   steps in `timeout`; the failure was at 78 s so no per-tool deadline was involved; and
-   the PTY harness only ever `os.kill(self.pid, SIGKILL)`s its **own** spawned app
-   (never by name, never SIGTERM). Cause still unknown — record it as its own class.
+   `stage_file_then_unstage_matches_cli` fails under two concurrent full suites with swap
+   exhausted, green in isolation; no timing/ordering assumption to pin. Swap is a
+   **correlate, not a deterministic cause** (green runs observed under it).
+3. **External SIGTERM of the test harness (unattributed)** — a `test` stage SIGTERM-killed
+   at ~test 812/847 and a rustc killed during a build, no OOM-kill logged. **Four**
+   mechanisms eliminated: `gate.sh` wraps only PTY steps; timing rules out a per-tool
+   deadline; the PTY harness only `os.kill(self.pid, SIGKILL)`s its own children; and no
+   oom manager (earlyoom/nohang/systemd-oomd) is installed.
+4. **Swap exhaustion as a load multiplier** — not a flake itself, but the condition under
+   which (1), (2) and (3) all appear. Resource guards therefore check `free -g` **and swap**
+   and defer the battery rather than produce an unattributable FAIL.
 
-**Rule that follows**: auto-retry is wrong for (1) and (2) — a retry hides a real
-failure — but **legitimate for a signal-kill** (cargo exit 143/137), because a killed
-process is not a test outcome at all. If a retry is ever added to `gate.sh`'s test
-stage it must be **signal-specific and logged** ("test stage killed by signal N —
-retried"), never triggered by an assertion failure (exit 101).
+**Rules that follow**: auto-retry is wrong for (1)–(2) — it hides a real failure — but
+legitimate for a **signal-kill** (cargo exit 143/137), which is not a test outcome at all;
+any such retry must be signal-specific and logged, never triggered by exit 101.
 
-- **Load-correlated timing flakes** (see `.agents/tasks/issue-deflake-timing.md`):
-  the parallelism/flake trade-off, and the fallback of serialising the PTY tier.
-- **Every lane's report omits gate numbers by default** — briefs must require the gate
-  to establish them, not the worker's summary.
+## Known follow-ups from gate findings (low priority)
 
 ## Known follow-ups from gate findings (low priority)
 
