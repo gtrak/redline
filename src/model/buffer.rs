@@ -182,7 +182,6 @@ impl Buffer {
     }
 
     /// Non-panicking `byte_to_line`; `None` when out of bounds.
-    #[allow(dead_code)] // public API: spec-required byte↔line conversion
     pub fn try_byte_to_line(&self, byte_idx: usize) -> Option<usize> {
         self.rope.try_byte_to_line(byte_idx).ok()
     }
@@ -194,7 +193,7 @@ impl Buffer {
     /// offset as a column is off-by-N on any line that starts with a
     /// multibyte character.
     pub fn try_byte_to_line_col(&self, byte_idx: usize) -> Option<(usize, usize)> {
-        let line = self.rope.try_byte_to_line(byte_idx).ok()?;
+        let line = self.try_byte_to_line(byte_idx)?;
         let char_idx = self.rope.try_byte_to_char(byte_idx).ok()?;
         let line_start = self.rope.try_line_to_char(line).ok()?;
         Some((line, char_idx - line_start))

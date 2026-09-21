@@ -613,7 +613,10 @@ pub struct JumpEntry {
     pub buffer_key: String,
     /// Line (0-based).
     pub line: usize,
-    /// Column (byte offset within the line; 0 when unknown).
+    /// Column (0-based CHAR index within the line; 0 when unknown).
+    /// Recorded from `point_col()` (or an explicit byte→char conversion) and
+    /// consumed by `set_point` — a byte column would land off-by-N on
+    /// multibyte lines.
     pub col: usize,
     /// Short label (e.g. the command that triggered the jump).
     pub label: String,
@@ -1060,6 +1063,10 @@ pub struct IsearchState {
     /// The line to restore to when isearch exits without a confirmed
     /// match (C-g cancel).
     pub pre_search_line: usize,
+    /// The column (0-based CHAR index — `point_col()`'s unit, consumed
+    /// directly by `set_point`) to restore with `pre_search_line` on
+    /// cancel.
+    pub pre_search_col: usize,
 }
 
 impl Default for IsearchState {
@@ -1071,6 +1078,7 @@ impl Default for IsearchState {
             matches: Vec::new(),
             current: 0,
             pre_search_line: 0,
+            pre_search_col: 0,
         }
     }
 }

@@ -2,7 +2,8 @@ use super::*;
 
 impl AppStore {
     /// Start an incremental search in the given direction.
-    /// Records the pre-search line for clean exit (C-g restores it).
+    /// Records the pre-search position (line AND column) for clean exit
+    /// (C-g restores it).
     pub fn isearch_start(&mut self, direction: IsearchDirection) {
         // PART A fix (item 5): never latch isearch behind an open picker
         // (C-s / C-r with a picker open is a no-op, not a search).
@@ -19,6 +20,10 @@ impl AppStore {
             matches: Vec::new(),
             current: 0,
             pre_search_line: self.point_line(),
+            // A CHAR column (point_col's unit, consumed directly by
+            // set_point) — NOT a byte: a byte stored here would land
+            // off-by-N on a multibyte line.
+            pre_search_col: self.point_col(),
         };
         self.minibuffer_message("I-search: ");
     }
@@ -155,7 +160,9 @@ impl AppStore {
         }
     }
 
-    /// Cancel isearch (C-g): restore the pre-search position.
+    /// Cancel isearch (C-g): restore the pre-search position (line AND
+    /// column — the cursor goes back where it was, not to the line's
+    /// start). The landing column becomes the goal column.
     pub fn isearch_cancel(&mut self) {
         if !self.isearch.active {
             return;
@@ -163,7 +170,11 @@ impl AppStore {
         self.isearch.active = false;
         self.isearch.matches.clear();
         self.isearch.query.clear();
-        self.set_point_line(self.isearch.pre_search_line);
+        self.set_point(
+            self.isearch.pre_search_line,
+            self.isearch.pre_search_col,
+            self.isearch.pre_search_col,
+        );
         self.minibuffer_message("cancel");
     }
 
@@ -336,7 +347,15 @@ impl AppStore {
             self.minibuffer_message(&format!("cannot open {file}: the jump did not happen"));
             return;
         }
-        self.set_point_line(line_no.saturating_sub(1));
+        // The hit's column is a BYTE offset within the line (rg's
+        // pipeline unit); the point's `col` is a CHAR index — convert
+        // within the hit's line (a raw byte column is off-by-N when a
+        // multibyte character precedes the match). `None` (regex hits
+        // carry no column) lands col 0.
+        let hit_col = hit
+            .col
+            .map_or(0, |byte_col| Self::byte_col_to_char_col(&hit.line, byte_col));
+        self.set_point(line_no.saturating_sub(1), hit_col, hit_col);
         self.ensure_highlight();
         // Leave the results view so the jumped file is what's on screen;
         // `M-,` (the sentinel entry) pushes the results back on top.
@@ -354,12 +373,32 @@ impl AppStore {
             let dest = JumpEntry {
                 buffer_key: key,
                 line: line_no.saturating_sub(1),
-                col: hit.col.unwrap_or(0) as usize,
+                // JumpEntry.col is a CHAR index (the landing above);
+                // recording the raw byte column would send `M-,`
+                // off-by-N on multibyte lines.
+                col: hit_col,
                 label: "search-RET".to_string(),
             };
             self.jump_stack.record_jump(&origin, &dest);
             self.minibuffer_message(&format!("jumped to {file}:{line_no}"));
         }
+    }
+
+    /// The CHAR index of the byte offset `byte_col` within `line` (the
+    /// point's `col` unit). A byte offset past the line's end lands at
+    /// the line's end (the caller's `set_point` clamps to the CURRENT
+    /// line's length anyway).
+    fn byte_col_to_char_col(line: &str, byte_col: u64) -> usize {
+        let mut rest = byte_col as usize;
+        let mut col = 0;
+        for c in line.chars() {
+            if rest < c.len_utf8() {
+                break;
+            }
+            rest -= c.len_utf8();
+            col += 1;
+        }
+        col
     }
 
     /// The visible window of results-view rows, pre-computed for the UI:

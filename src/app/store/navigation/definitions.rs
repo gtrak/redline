@@ -181,9 +181,21 @@ impl AppStore {
             let origin = self.current_jump_entry();
             let def = &defs[0];
             self.open_path(&def.file);
-            // Move the point to the definition's line; the jump-landing
-            // recenter positions the window (plan 004 issue 07).
-            self.set_point_line(def.symbol.line);
+            // Move the point to the definition's line AND the name's
+            // column: `start_byte` is an absolute FILE byte offset
+            // (tree-sitter's name-node byte range), so land it via the
+            // byte→(line, char column) conversion — a line-only landing
+            // drops the name's column (a raw byte column is off-by-N on
+            // multibyte lines). The line stays `def.symbol.line` (the
+            // indexed line); `None` (out of bounds, e.g. a stale index
+            // after an external edit) keeps the old col-0 landing.
+            let def_col = self
+                .buffers
+                .current_buffer()
+                .and_then(|b| b.try_byte_to_line_col(def.symbol.start_byte))
+                .map(|(_, col)| col)
+                .unwrap_or(0);
+            self.set_point(def.symbol.line, def_col, def_col);
             self.recenter_landing();
             self.ensure_highlight();
             self.record_jump(origin, "M-.");

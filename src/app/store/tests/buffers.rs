@@ -864,6 +864,57 @@ use super::*;
     }
 
     #[test]
+    fn exchange_point_and_mark_lands_mark_column() {
+        // Regression (column-landings): `C-x C-x` took only
+        // `try_byte_to_line(mark)` and landed col 0, dropping the
+        // column the mark's byte offset encodes. The mark here is
+        // MID-LINE (byte 3 of line 2); the existing fixture's mark was
+        // a line-start byte (col 0) and cannot discriminate.
+        let (mut s, _dir) = store_with_lines(5);
+        let key = s.buffers.current().unwrap().to_string();
+        let line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(line2_byte + 3); // mid-line: "lin|e2"
+        }
+        // Point is at line 0, col 0.
+        s.exchange_point_and_mark();
+        assert_eq!(s.point_line(), 2, "point must move to where the mark was");
+        assert_eq!(s.point_col(), 3, "the mark's column must land — not the line start");
+        assert_eq!(
+            s.file_point().goal_col,
+            3,
+            "the landing column becomes the goal column (C-n/C-p hold it)"
+        );
+        // Existing semantics kept: the mark moves to the old point
+        // (a line-start byte — region semantics, plan 004 issue 05b).
+        let line0_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(0).unwrap();
+        assert_eq!(s.buffers.get(&key).unwrap().mark, Some(line0_byte));
+    }
+
+    #[test]
+    fn exchange_point_and_mark_lands_multibyte_mark_column() {
+        // Pins the byte→char conversion: in "café omega" the 'o' of
+        // "omega" sits at BYTE 6 of the line (é is 2 bytes) but CHAR 5.
+        // A byte-based landing would put the cursor at col 6 (the 'm');
+        // the old line-only landing at col 0.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        let key = s.buffers.current().unwrap().to_string();
+        // Mark on the 'o' of "omega": byte 6 (c=0 a=1 f=2 é=3..4 ' '=5 o=6).
+        if let Some(buf) = s.buffers.get_mut(&key) {
+            buf.mark = Some(6);
+        }
+        s.exchange_point_and_mark();
+        assert_eq!(s.point_line(), 0);
+        assert_eq!(s.point_col(), 5, "char index 5 — not byte index 6, not col 0");
+    }
+
+    #[test]
     fn exchange_point_and_mark_noop_when_no_mark() {
         let (mut s, _dir) = notes_store_with_lines(10);
         assert_eq!(s.scroll_top(), 0);

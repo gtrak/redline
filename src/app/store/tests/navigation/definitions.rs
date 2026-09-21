@@ -208,6 +208,61 @@ use super::*;
         assert_eq!(s.jump_stack.len(), 2, "origin + destination recorded");
     }
 
+    #[test]
+    fn mdot_unique_def_lands_name_column() {
+        // Regression (column-landings): the unique-definition `M-.`
+        // jump landed via `set_point_line` — col 0 — although
+        // `Symbol.start_byte` (an absolute file byte offset) encodes
+        // the name's column. The definition here starts at a NONZERO
+        // column ("pub fn |target"), so the old landing cannot pass
+        // (the existing fixtures only asserted the line).
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub fn target() {}\nfn use_it() {\n    target();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 2: "    target();" — cursor on `target` (col 4).
+        s.set_point(2, 4, 4);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique def: no picker");
+        assert_eq!(s.point_line(), 0, "the definition's line");
+        assert_eq!(
+            s.point_col(),
+            7,
+            "the name's column — not the line start (msg: {})",
+            s.message
+        );
+        assert_eq!(
+            s.file_point().goal_col,
+            7,
+            "the landing column becomes the goal column"
+        );
+    }
+
+    #[test]
+    fn mdot_unique_def_lands_multibyte_name_column() {
+        // Pins the byte→char conversion: the definition line starts
+        // with a doc attribute holding a multibyte char — `target` sits
+        // at BYTE 17 of the line (é is 2 bytes) but CHAR 16. A byte
+        // landing would put the cursor one char past the name; the old
+        // line-only landing at col 0.
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "#[doc = \"é\"] fn target() {}\nfn use_it() {\n    target();\n}\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(2, 4, 4);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "unique def: no picker (msg: {})", s.message);
+        assert_eq!(s.point_line(), 0, "the definition's line");
+        assert_eq!(
+            s.point_col(),
+            16,
+            "char index 16 — not byte index 17, not col 0 (msg: {})",
+            s.message
+        );
+    }
+
     /// Same-file M-. jump-back accuracy (user report: "popping back can go
     /// to the wrong place, not where my cursor was"). The jump stack's
     /// "current position" slot goes STALE when the point moves via plain

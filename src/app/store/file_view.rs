@@ -593,13 +593,17 @@ impl AppStore {
     /// column — goto-line (M-g g; emacs `goto-line` lands at the line
     /// start), imenu / the xref & symbol pickers (M-i / M-.; candidates
     /// are "symbol:line" / "file:line"), resolver landings
-    /// (`ResolvedSource` has no column), external xref jumps (line-only
-    /// outcome), and isearch cancel (only the pre-search LINE was
-    /// recorded). Callers that DO know a landing column must not use
+    /// (`ResolvedSource` has no column), and external xref jumps (line-only
+    /// outcome). Callers that DO know a landing column must not use
     /// this — they land via `set_point(line, col, col)`: isearch lands
-    /// on the match's column, `M-,`/`M-.` restore the recorded column
-    /// (`navigate_to_entry`). C-x C-x and project-search RET still use
-    /// this although a column is available (follow-up, not this lane).
+    /// on the match's column, isearch cancel (C-g) restores the recorded
+    /// pre-search (line, col), C-x C-x lands the mark's byte offset via
+    /// `try_byte_to_line_col`, project-search RET lands the hit's byte
+    /// column (converted within the line; regex hits have none and land
+    /// col 0), the unique-definition `M-.` jump lands
+    /// `Symbol.start_byte` via `try_byte_to_line_col`, and `M-,` /
+    /// picker-selected `M-.` restore the recorded column
+    /// (`navigate_to_entry`).
     pub(super) fn set_point_line(&mut self, line: usize) {
         self.set_point(line, 0, 0);
     }

@@ -138,6 +138,62 @@ use super::*;
     }
 
     #[test]
+    fn isearch_cancel_restores_column() {
+        // Regression (column-landings): C-g restored only the pre-search
+        // LINE — `IsearchState` stored no column, so the landing was
+        // `set_point_line` (col 0). The pre-search point here is at a
+        // NONZERO column, so a line-only restore cannot pass (the
+        // existing cancel fixture's point was at col 0).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "alpha\nxy omega\ngamma\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.set_point(1, 3, 3); // "xy omega": col 3 is the 'o'
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('y'); // only in "xy omega" (line 1)
+        assert_eq!(s.isearch_match_count(), 1);
+        assert_eq!(s.point_line(), 1, "the search moved the point (col 3 → 0)");
+        s.isearch_cancel();
+        assert!(!s.isearch_active());
+        assert_eq!(s.point_line(), 1, "the pre-search line");
+        assert_eq!(s.point_col(), 3, "the pre-search column — not the line start");
+        assert_eq!(
+            s.file_point().goal_col,
+            3,
+            "the restored column becomes the goal column"
+        );
+    }
+
+    #[test]
+    fn isearch_cancel_restores_multibyte_column() {
+        // Pins the CHAR unit of the recorded column: the pre-search
+        // point is "café| omega" — CHAR 4 (just after the é) but BYTE 5.
+        // A byte recorded and landed verbatim would put the cursor at
+        // col 5 (the 'o'); the old line-only landing at col 0.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.set_point(0, 4, 4);
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o'); // the match moves the point to col 5
+        assert_eq!(s.isearch_match_count(), 1);
+        s.isearch_cancel();
+        assert_eq!(s.point_line(), 0);
+        assert_eq!(s.point_col(), 4, "char index 4 — a recorded byte (5) would land on the 'o'");
+    }
+
+    #[test]
     fn isearch_bound_command_letters_extend_query() {
         // Regression: keys that are depth-1 leaf commands in the file view
         // (n, p, l, g, q) must extend the isearch query, not dispatch.
@@ -304,6 +360,59 @@ use super::*;
             stack_len_before,
             "no jump entry on a failed open"
         );
+    }
+
+    #[test]
+    fn search_jump_lands_match_column() {
+        // Regression (column-landings): project-search RET landed via
+        // `set_point_line` — zeroing the hit's column although
+        // `Hit.col` carries it. The hit here sits at a NONZERO column
+        // ("xx omega" → col 3), so the old landing cannot pass.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "xx omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = s.search_rx().unwrap();
+        s.start_project_search("omega".into());
+        drain_search_finished(&mut s, &mut rx);
+        assert_eq!(s.search.hits.len(), 1);
+        assert_eq!(s.search.hits[0].col, Some(3), "the pipeline's byte column");
+        s.key_event(key("RET"));
+        assert_eq!(s.point_line(), 0, "the hit's line");
+        assert_eq!(s.point_col(), 3, "the hit's column — not the line start");
+        assert_eq!(
+            s.file_point().goal_col,
+            3,
+            "the landing column becomes the goal column"
+        );
+    }
+
+    #[test]
+    fn search_jump_lands_multibyte_match_column() {
+        // Pins the byte→char conversion: in "café omega" rg reports a
+        // BYTE column of 6 (é is 2 bytes); the char column is 5. A
+        // byte landing would put the cursor at col 6 (the 'm'); the old
+        // line-only landing at col 0.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = s.search_rx().unwrap();
+        s.start_project_search("omega".into());
+        drain_search_finished(&mut s, &mut rx);
+        assert_eq!(s.search.hits.len(), 1);
+        assert_eq!(
+            s.search.hits[0].col,
+            Some(6),
+            "byte column after the multibyte prefix"
+        );
+        s.key_event(key("RET"));
+        assert_eq!(s.point_line(), 0);
+        assert_eq!(s.point_col(), 5, "char index 5 — not byte index 6 or col 0");
     }
 
     /// Watchlist item 4: `M-,` under the Search view — the jump-back

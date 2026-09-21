@@ -448,14 +448,17 @@ impl AppStore {
             return;
         };
         let Some(point) = point else { return };
-        // Move the point to the line where the mark was (the new point);
-        // the window follows.
-        let mark_line = self
+        // Move the point to where the mark was (the new point); the
+        // window follows. The mark is a BYTE offset (region semantics,
+        // plan 004 issue 05b), so land it via the byte→(line, char
+        // column) conversion — a line-only landing drops the mark's
+        // column (a raw byte column is off-by-N on multibyte lines).
+        let (mark_line, mark_col) = self
             .buffers
             .get(&key)
-            .and_then(|b| b.rope.try_byte_to_line(mark).ok())
-            .unwrap_or(0);
-        self.set_point_line(mark_line);
+            .and_then(|b| b.try_byte_to_line_col(mark))
+            .unwrap_or((0, 0));
+        self.set_point(mark_line, mark_col, mark_col);
         // Set the mark to the old point.
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.mark = Some(point);
