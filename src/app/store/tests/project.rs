@@ -43,6 +43,15 @@ use super::*;
             .map(|(c, _)| c.display.as_str())
             .collect();
         assert_eq!(names, vec!["beta"], "{names:?}");
+        // picker-density: the project row is name-first — the project
+        // name left, the root path right.
+        let c = store.picker_filtered().first().unwrap().0.clone();
+        assert_eq!(c.label, "beta", "the project name is the label: {c:?}");
+        assert_eq!(
+            c.detail,
+            p2.to_string_lossy().into_owned(),
+            "the root path is the detail: {c:?}"
+        );
 
         store.key_event(key("RET"));
         assert_eq!(store.project_display(), "beta");

@@ -673,15 +673,21 @@ impl JumpStack {
 /// The NAME owns the space: `label` truncates only if the name alone exceeds
 /// the whole candidate column, and it is `detail` that truncates (keeping its
 /// tail — the file name — so the repetitive path prefix is dropped). When
-/// `detail` is empty the renderer draws `display` as a single left-anchored
-/// string (today's shape for the palette / file / buffer / imenu / branch
-/// pickers).
+/// `detail` is empty the renderer draws a single left-anchored string: the
+/// `label` when it is non-empty (the non-current branch rows — their
+/// `display` keeps the `*` marker slot's leading space for matching, but
+/// the name must align with the current branch row's name column), or
+/// `display` when the label is empty (the palette — a single command
+/// identifier has no context to right-align — and the scratch buffer row,
+/// where label == display).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerCandidate {
     pub name: String,
     pub display: String,
-    /// Left-anchored row text (the name-first label); empty when the row
-    /// renders `display` as a single string.
+    /// Left-anchored row text (the name-first label); also the
+    /// single-string fallback when `detail` is empty. `display` (the
+    /// nucleo match target, byte-stable) is drawn only when the label
+    /// is empty.
     pub label: String,
     /// Right-aligned detail column (`[kind] path:line`); empty = no split.
     pub detail: String,

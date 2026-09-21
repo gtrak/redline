@@ -23,11 +23,17 @@ pub fn reload_anchor(old_top: usize, new_total: usize) -> usize {
 
 
 pub(super) fn file_candidate(rel: &str) -> PickerCandidate {
+    let label = rel.rsplit('/').next().unwrap_or(rel);
     PickerCandidate {
         name: rel.to_string(),
         display: rel.to_string(),
-        label: String::new(),
-        detail: String::new(),
+        // picker-density: name-first — the file name left, the path
+        // right-aligned (truncates tail-keeping, so the name survives
+        // long paths). A root-level file has no directory component, so
+        // the name IS the path: `detail` stays empty and the row draws
+        // the name once (left-anchored), not twice.
+        label: label.to_string(),
+        detail: if label == rel { String::new() } else { rel.to_string() },
         docs: String::new(),
         category: "file".to_string(),
     }

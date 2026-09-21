@@ -3503,8 +3503,9 @@ fn unit_flow_xref_uppercase_type_m_dot() {
 }
 
 /// U-K item 2 (imenu flat, no impl-parent nesting): M-i groups the Rust
-/// impl methods under the impl's type — state on the candidate display +
-/// render80 on the indented list row.
+/// impl methods under the impl's type — state on the name-first row
+/// (label = the indented name, detail = the kind tag) + render80 on the
+/// indented list row.
 #[test]
 fn unit_flow_imenu_impl_parent_grouping() {
     let dir = tempfile::tempdir().unwrap();
@@ -3522,20 +3523,104 @@ fn unit_flow_imenu_impl_parent_grouping() {
     s.key_event(key("M-i"));
     assert!(s.picker_open(), "M-i opens the imenu picker");
     assert_eq!(s.picker_kind(), Some(crate::app::store::PickerKind::Imenu));
-    let rows: Vec<(String, String)> = s
+    // picker-density re-pin (was: exact `display` == "  new  [fn]"): the
+    // row is now name-first — the label carries the (indented) name and
+    // the detail carries the kind tag. Requirement-level intent kept:
+    // imenu rows still show the kind tag, and the impl method stays
+    // grouped/indented under its struct (the free fn does not).
+    let rows: Vec<(String, String, String)> = s
         .picker_filtered()
         .iter()
-        .map(|(c, _)| (c.name.clone(), c.display.clone()))
+        .map(|(c, _)| (c.name.clone(), c.label.clone(), c.detail.clone()))
         .collect();
-    let new = rows.iter().find(|(n, _)| n == "new:3").unwrap();
-    assert_eq!(new.1, "  new  [fn]", "impl method grouped under the struct: {rows:?}");
-    let free = rows.iter().find(|(n, _)| n == "free:5").unwrap();
-    assert_eq!(free.1, "free  [fn]", "the free fn stays flat: {rows:?}");
+    let new = rows.iter().find(|(n, _, _)| n == "new:3").unwrap();
+    assert_eq!(new.1, "  new", "impl method grouped/indented under the struct: {rows:?}");
+    assert_eq!(new.2, "[fn]", "imenu rows still show the kind tag: {rows:?}");
+    let free = rows.iter().find(|(n, _, _)| n == "free:5").unwrap();
+    assert_eq!(free.1, "free", "the free fn stays flat: {rows:?}");
+    assert_eq!(free.2, "[fn]", "the kind tag on the flat row: {rows:?}");
+    // render80 re-pin (was: contiguous "  new  [fn]"): the kind tag is now
+    // a right-aligned detail column, so pin the row shape — the method
+    // row carries its 2-space indent AND ends with its tag; the free fn
+    // row renders flat.
     let frame = render80(s);
+    // The preview pane shares the row, so pin the row shape in-row: the
+    // method row carries its 2-space indent, its name left, and the kind
+    // tag after the name on the same row.
+    let new_row = frame
+        .lines()
+        .find(|l| l.trim_start().starts_with("new") && l.contains("[fn]"))
+        .unwrap_or("");
     assert!(
-        frame.contains("  new  [fn]") && frame.contains("free  [fn]"),
-        "the grouped list renders: {frame}"
+        new_row.contains("  new"),
+        "the grouped row renders indented with its kind tag: {frame}"
     );
+    let free_row = frame
+        .lines()
+        .find(|l| l.trim_start().starts_with("free") && l.contains("[fn]"))
+        .unwrap_or("");
+    assert!(
+        !free_row.contains("  free"),
+        "the free fn renders flat (no indent): {frame}"
+    );
+}
+
+/// picker-density follow-up: the remaining pickers render NAME-FIRST —
+/// find-file and the buffer switcher rows carry the name left and the
+/// path right-aligned on the SAME row (the scannable right column the
+/// Xref/Symbols conversion established; the state-level label/detail are
+/// pinned in the store tests, this pins the rendered row shape).
+#[test]
+fn unit_flow_picker_name_first_rows_find_file_and_buffers() {
+    // find-file: the file name left, the path right, on the same row.
+    {
+        let repo = fixture_repo();
+        let mut s = store_in(repo.path());
+        open_via_finder(&mut s, "lib");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-f"));
+        assert!(s.picker_open(), "find-file opens");
+        let c = s
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == "src/lib.rs")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(c.label, "lib.rs", "the file name is the label: {c:?}");
+        assert_eq!(c.detail, "src/lib.rs", "the path is the detail: {c:?}");
+        let frame = render80(s);
+        // The preview pane shares the row, so pin in-row: the label left,
+        // the detail path after it on the same row.
+        let row = frame
+            .lines()
+            .find(|l| l.trim_start().starts_with("lib.rs") && l.contains("src/lib.rs"))
+            .unwrap_or("");
+        assert!(!row.is_empty(), "the find-file row is name-first (name left, path right): {frame}");
+    }
+    // switch-buffer: the buffer name left, the absolute path right.
+    {
+        let repo = fixture_repo();
+        let mut s = store_in(repo.path());
+        open_via_finder(&mut s, "lib");
+        s.key_event(key("C-x"));
+        s.key_event(key("b"));
+        assert!(s.picker_open(), "switch-buffer opens");
+        let key = s.buffers.current().map(String::from).unwrap();
+        let c = s
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == key)
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(c.label, "src/lib.rs", "the buffer name is the label: {c:?}");
+        assert_eq!(c.detail, key, "the absolute path is the detail: {c:?}");
+        let frame = render80(s);
+        let row = frame
+            .lines()
+            .find(|l| l.trim_start().starts_with("src/lib.rs") && l.contains(&key))
+            .unwrap_or("");
+        assert!(!row.is_empty(), "the buffer row is name-first (name left, path right): {frame}");
+    }
 }
 
 /// U-K items 3 + 4 (search_jump + M-, under Search): state + render80.

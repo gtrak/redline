@@ -556,5 +556,50 @@ use super::*;
         assert!(!s.discard_armed());
     }
 
+    #[test]
+    fn branch_and_stash_candidates_are_name_first() {
+        // picker-density: the branch row carries the branch name left and
+        // the HEAD marker right; the stash row carries the stash ref left
+        // and the subject right. `display` (the match target) keeps its
+        // pre-conversion shape.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = git_store(dir.path());
+        fn git_cli(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let root = dir.path();
+        git_cli(root, &["branch", "feature"]);
+        std::fs::write(root.join("a.txt"), "a\nb\n").unwrap();
+        git_cli(root, &["stash", "push", "-m", "wip subject"]);
+        s.open_magit_status(); // prime the repo handle
+
+        let branches = s.branch_candidates();
+        let main = branches.iter().find(|b| b.name == "main").unwrap();
+        assert_eq!(main.display, "*main", "{}", main.display);
+        assert_eq!(main.label, "main", "the branch name is the label: {main:?}");
+        assert_eq!(main.detail, "*", "the HEAD marker is the detail: {main:?}");
+        let feature = branches.iter().find(|b| b.name == "feature").unwrap();
+        assert_eq!(feature.label, "feature", "{}", feature.label);
+        assert!(feature.detail.is_empty(), "non-current: no detail: {feature:?}");
+
+        let stashes = s.stash_candidates();
+        assert_eq!(stashes.len(), 1, "{stashes:?}");
+        let st = &stashes[0];
+        assert_eq!(st.display, "stash@{0} On main: wip subject", "{}", st.display);
+        assert_eq!(st.label, "stash@{0}", "the stash ref is the label: {st:?}");
+        assert_eq!(st.detail, "On main: wip subject", "the subject is the detail: {st:?}");
+    }
+
     // ── issue 05 (finding 1): editable-buffer key order ─────────────
 

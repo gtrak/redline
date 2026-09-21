@@ -41,6 +41,17 @@ use super::*;
         let root = store.project.as_ref().unwrap().root.to_string_lossy().into_owned();
         assert_eq!(store.project_store.recents.list(&root), vec!["src/main.rs"]);
         assert!(store.project_store.recents_path().is_file());
+
+        // picker-density: the recents row is name-first — the file name
+        // left, the path right; display (the match target) stays the path.
+        store.key_event(key("C-c"));
+        store.key_event(key("p"));
+        store.key_event(key("e"));
+        assert!(store.picker_open(), "C-c p e opens the recents picker");
+        let c = store.picker_filtered().iter().find(|(c, _)| c.name == "src/main.rs").map(|(c, _)| c.clone()).unwrap();
+        assert_eq!(c.display, "src/main.rs", "{c:?}");
+        assert_eq!(c.label, "main.rs", "the file name is the label: {c:?}");
+        assert_eq!(c.detail, "src/main.rs", "the path is the detail: {c:?}");
     }
 
     #[test]
@@ -179,6 +190,97 @@ use super::*;
         store.key_event(key("C-f"));
         assert!(!store.picker_open());
         assert!(store.message.contains("no project"));
+    }
+
+    #[test]
+    fn find_file_candidates_are_name_first() {
+        // picker-density: find-file rows split into name (the file name)
+        // and detail (the path); `display` — the nucleo match target —
+        // stays the full path.
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_find_file();
+        let c = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == "src/main.rs")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(c.display, "src/main.rs", "matching stays on the full path: {c:?}");
+        assert_eq!(c.label, "main.rs", "the file name is the label: {c:?}");
+        assert_eq!(c.detail, "src/main.rs", "the path is the detail: {c:?}");
+        // A root-level file has no directory component, so the name IS
+        // the path: the detail stays empty (the row would otherwise draw
+        // `Cargo.toml …………… Cargo.toml`) and display (the match target)
+        // stays the path. This pin fails if the name-first split ever
+        // duplicates a root-level file's name into both cells.
+        let root = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == "Cargo.toml")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(root.display, "Cargo.toml", "matching stays on the full path: {root:?}");
+        assert_eq!(root.label, "Cargo.toml", "{root:?}");
+        assert!(
+            root.detail.is_empty(),
+            "root-level: no detail — the name must not repeat: {root:?}"
+        );
+    }
+
+    #[test]
+    fn root_level_recent_rows_carry_no_detail() {
+        // Same requirement on the RECENTS path: a root-level file in the
+        // recents picker must not draw the name twice. detail stays
+        // empty (single left-anchored name); display (the match target)
+        // stays the full path.
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        // Visit the root-level file through the find-file picker so it
+        // lands in recents.
+        store.open_find_file();
+        for c in "Cargo.toml".chars() {
+            store.key_event(key(&c.to_string()));
+        }
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Cargo.toml"], "{names:?}");
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
+        store.key_event(key("C-c"));
+        store.key_event(key("p"));
+        store.key_event(key("e"));
+        assert!(store.picker_open(), "C-c p e opens the recents picker");
+        let c = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.name == "Cargo.toml")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(c.display, "Cargo.toml", "matching stays on the full path: {c:?}");
+        assert_eq!(c.label, "Cargo.toml", "{c:?}");
+        assert!(c.detail.is_empty(), "root-level recent: the name must not repeat: {c:?}");
+    }
+
+    #[test]
+    fn palette_rows_stay_display_only() {
+        // picker-density judgement call: a palette row's whole content is
+        // one command identifier (no kind or path context to right-align),
+        // so the row keeps the single left-anchored `display` shape.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        store.open_palette();
+        let c = &store.picker_filtered()[0].0;
+        assert!(
+            c.label.is_empty() && c.detail.is_empty(),
+            "the palette stays display-only: {c:?}"
+        );
+        assert_eq!(c.display, c.name, "{c:?}");
     }
 
     #[test]

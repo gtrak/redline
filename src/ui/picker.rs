@@ -20,9 +20,13 @@
 //!   truncates (keeping its tail — the file name — so the repetitive path
 //!   prefix is what gets dropped). On rows with very long names the detail
 //!   column's left edge moves (its fixed right-alignment is preserved, its
-//!   width shrinks). Candidates with no `detail` draw their `display` as a
-//!   single left-anchored string (today's shape for the palette / file /
-//!   buffer / imenu / branch pickers).
+//!   width shrinks). Candidates with no `detail` draw a single
+//!   left-anchored string: the `label` when it is non-empty (the
+//!   non-current branch rows — their `display` keeps the `*` marker slot's
+//!   leading space for matching, but the name must align with the current
+//!   branch row's name column), or `display` when the label is empty (the
+//!   palette — a single command identifier has no context to right-align —
+//!   and the scratch buffer row, where label == display).
 //! - The selected-row bar is one CONTIGUOUS run. A name-first row issues two
 //!   `set_text` calls (label, then detail); the default-background gap between
 //!   the inverted cells is painted with the bar color (the face foreground,
@@ -181,8 +185,10 @@ impl Component for PickerCanvas {
 
 /// Draw one candidate row on the picker canvas (see the module doc for the
 /// row layout). A candidate with no `detail` is a single left-anchored
-/// `display` string; otherwise it is a name-first row (label left, detail
-/// right-aligned at the column's right edge).
+/// string (the `label` when it is non-empty — the non-current branch
+/// rows' `display` keeps the `*` marker slot's leading space for matching
+/// — otherwise `display`); otherwise it is a name-first row (label left,
+/// detail right-aligned at the column's right edge).
 fn draw_candidate_row(
     canvas: &mut CanvasSubviewMut,
     y: isize,
@@ -192,9 +198,22 @@ fn draw_candidate_row(
     selected: bool,
 ) {
     if candidate.detail.is_empty() {
-        // Single left-anchored string (palette / file / buffer / imenu /
-        // branch / stash / impls).
-        let label = truncate(&candidate.display, cand_w);
+        // Single left-anchored string. When the candidate carries a
+        // label, draw the LABEL: the non-current branch rows keep
+        // `display` as `" name"` (the leading space is the `*` marker
+        // slot, retained for matching), so drawing `display` would push
+        // the branch name one column right of the current branch row's
+        // name column — the label aligns it. For the other
+        // empty-detail candidates the label is either empty (the
+        // palette — a single command identifier has no context to
+        // right-align; `display` is drawn, unchanged) or identical to
+        // `display` (the scratch buffer row), so nothing is lost.
+        let text = if candidate.label.is_empty() {
+            &candidate.display
+        } else {
+            &candidate.label
+        };
+        let label = truncate(text, cand_w);
         canvas.set_text(1, y, &label, text_style(face.foreground, selected, selected));
     } else {
         // A: name-first — the NAME owns the space (issue picker-density):
@@ -416,5 +435,62 @@ mod tests {
         let detail_cell = canvas.cell(detail_x, 0).unwrap();
         assert_eq!(detail_cell.background_color, None);
         assert!(detail_cell.text_style().unwrap().invert);
+    }
+
+    /// Gate follow-up (alignment): a non-current branch row's `display`
+    /// carries a leading space (the `*` marker slot, kept for matching).
+    /// The empty-detail fallback must draw the LABEL (the bare branch
+    /// name), not `display`, so the branch name starts in the same
+    /// column as the current branch row's name. This test fails if the
+    /// fallback regresses to drawing `display` (the name lands one column
+    /// right of the current branch row).
+    #[test]
+    fn non_current_branch_rows_align_with_the_current() {
+        let face = theme::current().list_item;
+        let current = PickerCandidate {
+            name: "main".into(),
+            display: "*main".into(),
+            label: "main".into(),
+            detail: "*".into(),
+            docs: String::new(),
+            category: "branch".into(),
+        };
+        let other = PickerCandidate {
+            name: "feature".into(),
+            display: " feature".into(), // marker slot: leading space
+            label: "feature".into(),
+            detail: String::new(),
+            docs: String::new(),
+            category: "branch".into(),
+        };
+        let w = 80;
+        let cand_w = w - 1; // right edge 1 + cand_w = 80, inside the canvas
+        let mut canvas = iocraft::Canvas::new(w, 2);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, w, 2);
+            draw_candidate_row(&mut sv, 0, cand_w, &current, face, false);
+            draw_candidate_row(&mut sv, 1, cand_w, &other, face, false);
+        }
+        // Both branch names start at column 1 — the current branch row's
+        // label and the non-current branch row's label. Before the fix the
+        // non-current row drew `display` (" feature"), so cell 1 was a
+        // blank and "feature" started at column 2.
+        assert_eq!(
+            canvas.cell(1, 0).unwrap().text(),
+            Some("m"),
+            "current branch name starts at column 1"
+        );
+        assert_eq!(
+            canvas.cell(1, 1).unwrap().text(),
+            Some("f"),
+            "non-current branch name must start in the same column (no marker-slot offset)"
+        );
+        assert_eq!(canvas.cell(2, 1).unwrap().text(), Some("e"));
+        // The `*` marker still rides the current branch row, right-aligned
+        // at the column's right edge.
+        let marker = (0..w)
+            .find(|&x| canvas.cell(x, 0).and_then(|c| c.text()) == Some("*"))
+            .expect("the current branch's * marker is right-aligned");
+        assert_eq!(marker, 1 + cand_w - 1, "the * sits on the column's right edge");
     }
 }

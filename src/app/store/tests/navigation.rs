@@ -242,21 +242,36 @@ use super::*;
         s.open_imenu();
         assert!(s.picker_open());
         assert_eq!(s.picker_kind(), Some(PickerKind::Imenu));
-        let rows: Vec<(String, String)> = s
+        // (name, display, label, detail): the row is now name-first
+        // (picker-density) — the label carries the (indented) name and the
+        // detail the kind tag; `display` (the match target) keeps its
+        // byte-identical pre-conversion shape.
+        let rows: Vec<(String, String, String, String)> = s
             .picker_filtered()
             .iter()
-            .map(|(c, _)| (c.name.clone(), c.display.clone()))
+            .map(|(c, _)| (
+                c.name.clone(),
+                c.display.clone(),
+                c.label.clone(),
+                c.detail.clone(),
+            ))
             .collect();
-        let foo = rows.iter().find(|(n, _)| n == "Foo:1").unwrap();
+        let foo = rows.iter().find(|(n, _, _, _)| n == "Foo:1").unwrap();
         assert_eq!(foo.1, "Foo  [type]", "the struct stays at top level: {rows:?}");
-        let new = rows.iter().find(|(n, _)| n == "new:3").unwrap();
+        assert_eq!(foo.2, "Foo", "the struct label is unindented: {rows:?}");
+        assert_eq!(foo.3, "[type]", "the kind tag is the detail: {rows:?}");
+        let new = rows.iter().find(|(n, _, _, _)| n == "new:3").unwrap();
         assert_eq!(
             new.1,
             "  new  [fn]",
             "the impl method is indented one level under the struct: {rows:?}"
         );
-        let free = rows.iter().find(|(n, _)| n == "free:5").unwrap();
+        assert_eq!(new.2, "  new", "the indent travels with the label: {rows:?}");
+        assert_eq!(new.3, "[fn]", "the kind tag is the detail: {rows:?}");
+        let free = rows.iter().find(|(n, _, _, _)| n == "free:5").unwrap();
         assert_eq!(free.1, "free  [fn]", "a free fn stays flat: {rows:?}");
+        assert_eq!(free.2, "free", "a free fn label stays flat: {rows:?}");
+        assert_eq!(free.3, "[fn]", "the kind tag on the flat row: {rows:?}");
 
         // The refilter path (candidates_for) must keep the SAME display.
         s.picker_query_char('n');
@@ -271,6 +286,10 @@ use super::*;
             vec![("new:3".to_string(), "  new  [fn]".to_string())],
             "the re-derivation keeps the grouped display: {rows:?}"
         );
+        // …and the SAME name-first split (label keeps the indent).
+        let re = &s.picker_filtered()[0].0;
+        assert_eq!(re.label, "  new", "re-derivation keeps the label: {re:?}");
+        assert_eq!(re.detail, "[fn]", "re-derivation keeps the detail: {re:?}");
     }
 
     /// Watchlist item 2 degradation (byte-for-byte): a non-Rust file
@@ -591,6 +610,13 @@ use super::*;
             "{}",
             filtered[1].0.display
         );
+        // picker-density: the impl row is name-first — label = the impl
+        // block (the name), detail = the location; display (the match
+        // target) is pinned above.
+        assert_eq!(filtered[0].0.label, "impl Tr for S", "{}", filtered[0].0.label);
+        assert_eq!(filtered[0].0.detail, "src/extra.rs:3", "{}", filtered[0].0.detail);
+        assert_eq!(filtered[1].0.label, "impl Tr for N", "{}", filtered[1].0.label);
+        assert_eq!(filtered[1].0.detail, "src/lib.rs:5", "{}", filtered[1].0.detail);
         // RET on the lib.rs candidate jumps to the impl header (line 4,
         // 0-based) and records the jump.
         s.picker_select_next();

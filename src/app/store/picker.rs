@@ -2,6 +2,10 @@ use super::*;
 
 impl AppStore {
     fn palette_candidates(&self) -> Vec<PickerCandidate> {
+        // picker-density: the palette stays display-only on purpose — a
+        // row's whole content is a single command identifier (no kind or
+        // path context to right-align), so the name-first split would
+        // just duplicate the name into two cells.
         self.registry
             .list()
             .map(|c| PickerCandidate {
@@ -32,11 +36,18 @@ impl AppStore {
         for rel in self.project_store.recents.list(&root) {
             // Deleted files drop out of the list.
             if project.root.join(rel).is_file() {
+                let label = rel.rsplit('/').next().unwrap_or(rel);
                 out.push(PickerCandidate {
                     name: rel.clone(),
                     display: rel.clone(),
-                    label: String::new(),
-                    detail: String::new(),
+                    // picker-density: name-first — the file name left,
+                    // the path right-aligned (truncates tail-keeping, so
+                    // the name survives long paths). A root-level file
+                    // has no directory component, so the name IS the
+                    // path: detail stays empty and the row draws the
+                    // name once (left-anchored), not twice.
+                    label: label.to_string(),
+                    detail: if label == rel { String::new() } else { rel.clone() },
                     docs: String::new(),
                     category: "recent".to_string(),
                 });
@@ -46,13 +57,24 @@ impl AppStore {
     }
 
     fn buffer_candidates(&self) -> Vec<PickerCandidate> {
-        self.buffers.list().into_iter().map(|(key, _)| PickerCandidate {
-            name: key.to_string(),
-            display: self.buffer_display(key),
-            label: String::new(),
-            detail: String::new(),
-            docs: String::new(),
-            category: "buffer".to_string(),
+        self.buffers.list().into_iter().map(|(key, _)| {
+            // picker-density: name-first — the (marked) buffer name left,
+            // the absolute path right-aligned (the project root context
+            // display alone doesn't carry for external buffers).
+            let detail = self
+                .buffers
+                .get(key)
+                .and_then(|b| b.path.clone())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            PickerCandidate {
+                name: key.to_string(),
+                display: self.buffer_display(key),
+                label: self.buffer_display(key),
+                detail,
+                docs: String::new(),
+                category: "buffer".to_string(),
+            }
         }).collect()
     }
 
@@ -67,8 +89,11 @@ impl AppStore {
             .map(|p| PickerCandidate {
                 name: p.root.to_string_lossy().into_owned(),
                 display: p.name.clone(),
-                label: String::new(),
-                detail: String::new(),
+                // picker-density: name-first — the project name left,
+                // the root path right-aligned (what the preview used to
+                // be the only place for).
+                label: p.name.clone(),
+                detail: p.root.to_string_lossy().into_owned(),
                 docs: p.root.to_string_lossy().into_owned(),
                 category: "project".to_string(),
             })
@@ -100,8 +125,11 @@ impl AppStore {
             .map(|b| PickerCandidate {
                 name: b.name.clone(),
                 display: format!("{}{}", if b.current { "*" } else { " " }, b.name),
-                label: String::new(),
-                detail: String::new(),
+                // picker-density: name-first — the branch name left,
+                // the HEAD marker right-aligned (display keeps the
+                // `*`-prefixed form for matching).
+                label: b.name.clone(),
+                detail: if b.current { "*".to_string() } else { String::new() },
                 docs: if b.current {
                     "current branch".to_string()
                 } else {
@@ -120,8 +148,10 @@ impl AppStore {
             .map(|s| PickerCandidate {
                 name: s.index.to_string(),
                 display: format!("stash@{{{}}} {}", s.index, s.subject),
-                label: String::new(),
-                detail: String::new(),
+                // picker-density: name-first — the stash ref left, the
+                // subject right-aligned.
+                label: format!("stash@{{{}}}", s.index),
+                detail: s.subject,
                 docs: String::new(),
                 category: "stash".to_string(),
             })
@@ -189,8 +219,10 @@ impl AppStore {
                         key,
                         l.self_type
                     ),
-                    label: String::new(),
-                    detail: String::new(),
+                    // picker-density: name-first — the impl block left,
+                    // its location right-aligned.
+                    label: format!("impl {} for {}", key, l.self_type),
+                    detail: format!("{}:{}", l.file, l.impl_line + 1),
                     docs: String::new(),
                     category: "impls".to_string(),
                 });
@@ -235,8 +267,12 @@ impl AppStore {
         PickerCandidate {
             name: format!("{}:{}", s.name, s.line + 1),
             display: format!("{indent}{}  [{}]", s.name, s.kind.tag()),
-            label: String::new(),
-            detail: String::new(),
+            // picker-density: name-first — the (indented) name left, the
+            // kind tag right-aligned. The indent travels with the LABEL so
+            // the impl-parent grouping/indent renders unchanged; `display`
+            // (the match target) stays byte-identical.
+            label: format!("{indent}{}", s.name),
+            detail: format!("[{}]", s.kind.tag()),
             docs: String::new(),
             category: "imenu".to_string(),
         }

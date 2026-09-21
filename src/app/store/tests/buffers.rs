@@ -614,6 +614,17 @@ use super::*;
             .map(|(c, _)| c.display.as_str())
             .collect();
         assert!(names.contains(&"src/lib.rs"), "{names:?}");
+        // picker-density: the buffer row is name-first — label = the
+        // (marked) display name, detail = the absolute path (the buffer
+        // key); display (the match target) is pinned above.
+        let c = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.display == "src/lib.rs")
+            .map(|(c, _)| c.clone())
+            .unwrap();
+        assert_eq!(c.label, "src/lib.rs", "the buffer name is the label: {c:?}");
+        assert_eq!(c.detail, c.name, "the absolute path is the detail: {c:?}");
         // Select the lib.rs row (find its index, drive selection there).
         let idx = names.iter().position(|n| *n == "src/lib.rs").unwrap();
         for _ in 0..idx {
