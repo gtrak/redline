@@ -497,7 +497,11 @@ fn char_at(s: &str, i: usize) -> Option<char> {
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    // C15: mirrors the redline crate's single word-char rule —
+    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
+    // redline-resolve has no dependency on redline, so the rule is
+    // duplicated here rather than imported; keep the two in sync.
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -546,6 +550,22 @@ mod tests {
     fn strip_generics_keeps_arrow() {
         assert_eq!(strip_generics("fn f<T>() -> Vec<u32> {"), "fn f() -> Vec {");
         assert_eq!(strip_generics("impl<T> Foo {"), "impl Foo {");
+    }
+
+    /// C15: identifier-constituency mirrors the redline crate's Unicode
+    /// word-char rule (`redline::model::buffer::is_word_char`) — non-ASCII
+    /// letters are identifier characters, so they block a whole-word
+    /// boundary just like ASCII letters.
+    #[test]
+    fn ident_char_is_unicode_aware() {
+        assert!(is_ident_char('é'), "accented letter");
+        assert!(is_ident_char('漢'), "CJK letter");
+        assert!(is_ident_char('_'));
+        assert!(!is_ident_char('-'));
+        assert!(!is_ident_char(' '));
+        // Whole-word pin: `greet` inside `greeté` is NOT a definition of
+        // `greet` (the `é` is an identifier char, not a boundary).
+        assert_eq!(line_defines_item("fn greeté() {", "greet"), None);
     }
 
     #[test]

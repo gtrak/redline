@@ -586,12 +586,13 @@ impl Sink for StreamSink {
 /// `target` and `-target-` are kept). Used by the streaming sink to
 /// compute the in-line column for fixed-string searches.
 fn is_word_boundary(line: &str, idx: usize, len: usize) -> bool {
-    fn is_word_char(c: Option<char>) -> bool {
-        c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-    }
+    // C15: word-constituency is the crate-wide Unicode rule
+    // (`crate::model::buffer::is_word_char`), not ASCII-only — a non-ASCII
+    // identifier (e.g. `café`) must not be truncated by an ASCII boundary.
+    use crate::model::buffer::is_word_char;
     let prev = line[..idx].chars().next_back();
     let next = line.get(idx + len..).and_then(|rest| rest.chars().next());
-    !is_word_char(prev) && !is_word_char(next)
+    !prev.is_some_and(is_word_char) && !next.is_some_and(is_word_char)
 }
 
 #[cfg(test)]
@@ -974,6 +975,45 @@ mod tests {
         // BOTH sides to be a non-word char or the line edge; `mytarget`/
         // `target2` have word chars on one side → excluded.
         assert_eq!(line_nos, vec![1, 3], "word-boundary hits: {line_nos:?}");
+        drop(bus);
+    }
+
+    /// C15: the sink's word-boundary rule is the crate-wide Unicode rule
+    /// (`model::buffer::is_word_char`), not ASCII-only — `é` and CJK
+    /// characters are word constituents, so they block a boundary.
+    #[test]
+    fn sink_word_boundary_is_unicode_aware() {
+        // Full `café` at line edges: boundary.
+        assert!(is_word_boundary("café", 0, 4), "line edges around café");
+        // `caf` inside `café`: the following `é` is a WORD char → NOT a
+        // boundary (the old ASCII rule would have let it through).
+        assert!(!is_word_boundary("café", 0, 3), "`é` after `caf` blocks the boundary");
+        // `é` at the tail of `café`: the preceding `f` is a word char.
+        assert!(!is_word_boundary("café", 3, 1), "`f` before `é` blocks the boundary");
+        // A genuine separator still gives a boundary.
+        assert!(is_word_boundary("caf é", 0, 3), "space after `caf` is a boundary");
+        // CJK: the same rule (Lo chars are alphanumeric).
+        assert!(!is_word_boundary("漢字", 0, 3), "CJK `字` after `漢` blocks the boundary");
+        assert!(is_word_boundary("漢 字", 0, 3), "space after CJK char is a boundary");
+    }
+
+    /// C15, end-to-end: a word search for the ASCII prefix `caf` must NOT
+    /// match inside `café` (the `é` is a word char, not a boundary); the
+    /// same literal still matches where both sides are real boundaries.
+    #[test]
+    fn pipeline_word_boundaries_multibyte() {
+        let dir = project();
+        fs::write(dir.path().join("a.txt"), "café\nmycafé\ncaf é\n").unwrap();
+        let mut cfg = base_cfg(dir.path().to_path_buf(), "caf");
+        cfg.fixed = true;
+        cfg.word = true;
+        let (bus, mut rx, _cancel) = start(dir.path().to_path_buf(), cfg);
+        let events = drain_until_finished(&mut rx, std::time::Duration::from_secs(5));
+        let line_nos: Vec<u64> = hits(&events).iter().map(|h| h.line_no).collect();
+        // Line 1 `café`: `caf` is followed by the word char `é` → excluded.
+        // Line 2 `mycafé`: word char on the left → excluded.
+        // Line 3 `caf é`: real boundaries on both sides → hit.
+        assert_eq!(line_nos, vec![3], "multibyte word-boundary hits: {line_nos:?}");
         drop(bus);
     }
 

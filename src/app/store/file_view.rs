@@ -510,17 +510,6 @@ impl AppStore {
             .map_or_else(Vec::new, |t| t.chars().collect())
     }
 
-    /// Word-constituent for word motion (plan 004 issue 05c): an
-    /// alphanumeric or `_`. This is a fixed rule, NOT the emacs syntax
-    /// table: emacs decides word-ness per buffer from its syntax table
-    /// (where e.g. `?` and `!` can be word-constituents and whitespace,
-    /// symbol, and word categories are distinct). Redline treats every
-    /// other character — punctuation AND whitespace — as one "non-word"
-    /// class; newlines are non-word.
-    fn is_word_char(c: char) -> bool {
-        c.is_alphanumeric() || c == '_'
-    }
-
     /// The current buffer's point, clamped to the buffer's bounds (a reload
     /// that shrinks the buffer self-heals here). `(0,0)` when there is no
     /// current buffer or it is empty. `goal_col` is not clamped to the
@@ -724,7 +713,7 @@ impl AppStore {
             let len = chars.len();
             // Skip the non-word run (punctuation/whitespace) up to the
             // next word's first char.
-            while col < len && !Self::is_word_char(chars[col]) {
+            while col < len && !is_word_char(chars[col]) {
                 col += 1;
                 moved = true;
             }
@@ -732,7 +721,7 @@ impl AppStore {
                 // Landed on the next word's first char: advance to the
                 // word's END (emacs forward-word lands at the end, not the
                 // first char). A word run cannot span a line.
-                while col < len && Self::is_word_char(chars[col]) {
+                while col < len && is_word_char(chars[col]) {
                     col += 1;
                     moved = true;
                 }
@@ -766,11 +755,11 @@ impl AppStore {
         if total == 0 || (p.line == 0 && p.col == 0) {
             return;
         }
-        if p.col > 0 && Self::is_word_char(self.line_chars(p.line)[p.col - 1]) {
+        if p.col > 0 && is_word_char(self.line_chars(p.line)[p.col - 1]) {
             // Preceded by a word: retreat to its first char.
             let chars = self.line_chars(p.line);
             let mut col = p.col;
-            while col > 0 && Self::is_word_char(chars[col - 1]) {
+            while col > 0 && is_word_char(chars[col - 1]) {
                 col -= 1;
             }
             self.set_point(p.line, col, col);
@@ -784,14 +773,14 @@ impl AppStore {
         loop {
             if col > 0 {
                 let chars = self.line_chars(line);
-                while col > 0 && !Self::is_word_char(chars[col - 1]) {
+                while col > 0 && !is_word_char(chars[col - 1]) {
                     col -= 1;
                 }
                 if col > 0 {
                     // Landed just past a word's last char: retreat to the
                     // word's FIRST char (emacs backward-word lands at the
                     // start, not the end).
-                    while col > 0 && Self::is_word_char(chars[col - 1]) {
+                    while col > 0 && is_word_char(chars[col - 1]) {
                         col -= 1;
                     }
                     self.set_point(line, col, col);

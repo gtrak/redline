@@ -66,7 +66,7 @@ pub fn symbol_under_point(line: &str, col: usize, is_known: impl Fn(&str) -> boo
     let mut ids: Vec<(usize, usize, &str)> = Vec::new();
     let mut start = 0;
     for (i, c) in line.char_indices() {
-        if !c.is_alphanumeric() && c != '_' {
+        if !crate::model::buffer::is_word_char(c) {
             if start < i {
                 ids.push((start, i, &line[start..i]));
             }
@@ -105,6 +105,19 @@ mod tests {
     use crate::search::rg::SearchEvent;
     use std::fs;
     use std::time::Duration;
+
+    /// C15: symbol extraction uses the crate-wide Unicode word-char rule —
+    /// `é` is a word character, so a multibyte identifier is extracted
+    /// whole, not truncated at its ASCII prefix.
+    #[test]
+    fn symbol_under_point_multibyte_identifier() {
+        // "fn café()" — the identifier spans bytes 3..8 (`café`).
+        assert_eq!(symbol_under_point("fn café()", 5, |_| false), Some("café"));
+        assert_eq!(symbol_under_point("fn café()", 4, |_| false), Some("café"));
+        // CJK identifier: extracted whole (the `(` separator keeps it a
+        // single identifier).
+        assert_eq!(symbol_under_point("(漢字)", 4, |_| false), Some("漢字"));
+    }
 
     /// Build a project with `src/main.rs` holding the same identifier in
     /// code, a comment, and a string (the spec's reference-filtering case).

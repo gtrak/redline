@@ -658,7 +658,8 @@ impl AppStore {
         if col > chars.len() {
             return None;
         }
-        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        // C15: word-constituent is the crate-wide Unicode rule.
+        let is_ident = is_word_char;
         let start = if col < chars.len() && is_ident(chars[col]) {
             let mut i = col;
             while i > 0 && is_ident(chars[i - 1]) {
@@ -2033,7 +2034,8 @@ impl AppStore {
         if col > chars.len() {
             return None;
         }
-        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        // C15: word-constituent is the crate-wide Unicode rule.
+        let is_ident = is_word_char;
         // 006-02b item 4: a cursor parked on the SECOND colon of a `::`
         // separator (the point's own char and its predecessor are both
         // `:`) sits at the very end of the preceding path segment — treat

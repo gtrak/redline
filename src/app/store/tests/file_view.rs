@@ -678,3 +678,35 @@ use super::*;
         assert_eq!(s.scroll_top(), pre, "cancel must not change scroll");
     }
 
+    // ── C15: the unified word-char rule (Unicode, `model::buffer::is_word_char`) ──
+
+    /// Multibyte symbol pin: word motion (M-f/M-b) and the M-?/references
+    /// symbol extraction must AGREE on the extent of `café` — `é` is a
+    /// word character on both paths, so M-f lands past it (char col 4),
+    /// M-b returns to 0, and `symbol_under_point` extracts the full
+    /// identifier (not the ASCII prefix `caf`).
+    #[test]
+    fn multibyte_symbol_word_motion_and_references_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/mb.rs"), "café\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/mb.rs");
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 4), "M-f lands past `é`");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "M-b returns to the word start");
+        // The M-? path: a point on the word (col 2, on `f`) extracts the
+        // same full multibyte identifier the word motion just covered.
+        let symbol = crate::search::references::symbol_under_point("café", 2, |_| false)
+            .expect("line has an identifier");
+        assert_eq!(symbol, "café", "references extraction agrees with word motion");
+        // CJK identifier: the same agreement holds for a CJK word.
+        let symbol = crate::search::references::symbol_under_point("漢字", 1, |_| false)
+            .expect("line has an identifier");
+        assert_eq!(symbol, "漢字");
+    }
+

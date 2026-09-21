@@ -32,7 +32,7 @@ use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use crate::git::diff::{DiffSide, FileDiff};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
-use crate::model::buffer::{load_file, BufferTable, SCRATCH_NAME};
+use crate::model::buffer::{is_word_char, load_file, BufferTable, SCRATCH_NAME};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
 use crate::model::sections::{MagitRow, RowRole, SectionKind, StatusTree};
