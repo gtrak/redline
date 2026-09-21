@@ -606,6 +606,152 @@ use super::*;
         );
     }
 
+    /// F5 (a): a landed dependency inside a git repo's `node_modules/`
+    /// (gitignored by the PROJECT's `.gitignore`) must still be walked —
+    /// before F5, `ignore::Walk::new`'s defaults (`parents +
+    /// git_ignore + require_git`) applied the project's ignore sources to
+    /// this walk and zeroed the file list; `.git/info/exclude` is
+    /// asserted too.
+    #[test]
+    fn crate_source_files_walks_gitignored_node_modules_dependency() {
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(proj.path().join(".git")).unwrap();
+        std::fs::write(proj.path().join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::create_dir_all(proj.path().join(".git/info")).unwrap();
+        std::fs::write(
+            proj.path().join(".git/info/exclude"),
+            "skipped-by-exclude.js\n",
+        )
+        .unwrap();
+        let root = proj.path().join("node_modules/demo");
+        for rel in ["index.js", "lib/skipped-by-exclude.js", "README.md"] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "// x\n").unwrap();
+        }
+        let mut files = AppStore::crate_source_files(
+            &root,
+            &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
+        );
+        files.sort();
+        // The project's `node_modules/` rule and `.git/info/exclude`
+        // must NOT reach this walk: both js files are the landed
+        // dependency's own source (README.md is dropped by the
+        // extension set).
+        assert_eq!(
+            files,
+            vec!["index.js", "lib/skipped-by-exclude.js"],
+            "the project's ignore sources must not apply to the dependency walk"
+        );
+    }
+
+    /// F5 (b): a landed dependency under a HIDDEN directory (`.venv`)
+    /// must still be walked — before F5, `hidden(true)` (a
+    /// `WalkBuilder` default) pruned hidden entries below the walk
+    /// root: hidden directories inside the package (`.venv/lib/...` is
+    /// only hidden-above the root — the root itself is always visited —
+    /// but local plugin dirs, cache dirs, and venv layouts whose root is
+    /// the hidden dir itself) vanished from the index. Non-source files
+    /// stay out via the extension set; a `.git` inside the dependency
+    /// is pruned explicitly (the walker's docs).
+    #[test]
+    fn crate_source_files_walks_hidden_venv_dependency() {
+        let hidden = tempfile::tempdir().unwrap();
+        // A hidden-named walk root (`.venv`): the root entry itself is
+        // always visited, but every hidden component BELOW it used to be
+        // pruned by `hidden(true)` before F5.
+        let root = hidden.path().join(".venv");
+        for rel in [
+            "lib/site-packages/demo/__init__.py",
+            "lib/site-packages/demo/pkg/mod.py",
+            "lib/site-packages/demo/data.txt",
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x\n").unwrap();
+        }
+        let mut files = AppStore::crate_source_files(&root, &["py", "pyi"]);
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "lib/site-packages/demo/__init__.py",
+                "lib/site-packages/demo/pkg/mod.py"
+            ],
+            "the venv tree under the hidden root must be walked (data.txt is not python)"
+        );
+        // And hidden dirs INSIDE a non-hidden package root are walked too
+        // (local plugin dirs holding source).
+        let pkg = tempfile::tempdir().unwrap();
+        for rel in ["__init__.py", ".local/plugin.pyi"] {
+            let path = pkg.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x\n").unwrap();
+        }
+        let mut files2 = AppStore::crate_source_files(pkg.path(), &["py", "pyi"]);
+        files2.sort();
+        assert_eq!(
+            files2,
+            vec![".local/plugin.pyi", "__init__.py"],
+            "hidden dirs inside the package must be walked"
+        );
+        // A `.git` inside the dependency is never indexed (defensive
+        // prune, since `hidden(false)` now walks dotdirs).
+        let gitpkg = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(gitpkg.path().join(".git")).unwrap();
+        std::fs::write(gitpkg.path().join(".git/config"), "[core]\n").unwrap();
+        std::fs::write(gitpkg.path().join("mod.py"), "x\n").unwrap();
+        let files3 = AppStore::crate_source_files(gitpkg.path(), &["py", "pyi"]);
+        assert_eq!(files3, vec!["mod.py"], ".git must not be indexed");
+    }
+
+    /// F5 end-to-end: a landed `node_modules/<pkg>` dependency inside a
+    /// git repo (the project `.gitignore`s `node_modules/`) indexes
+    /// through the full path and resolves M-. in-crate via the
+    /// external-buffer xref. Pre-F5 the walk saw zero files, so the
+    /// index was empty and M-. fell through.
+    #[test]
+    fn git_repo_node_modules_dependency_resolves_in_crate_via_m_dot() {
+        let (mut s, _dir) = store_with_index(&[("src/main.rs", "fn main() {}\n")]);
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(proj.path().join(".git")).unwrap();
+        std::fs::write(proj.path().join(".gitignore"), "node_modules/\n").unwrap();
+        let root = proj.path().join("node_modules/demo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.js"),
+            "export function useIt() {\n    helper();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/helper.js"),
+            "export function helper() {}\n",
+        )
+        .unwrap();
+        let files = AppStore::crate_source_files(
+            &root,
+            &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
+        );
+        assert_eq!(
+            files.len(),
+            2,
+            "F5: both of the dependency's own files must be walked: {files:?}"
+        );
+        s.apply_crate_index_event(&CrateIndexEvent {
+            source_root: root.clone(),
+            index: build_index(&root, &files, None),
+        });
+        let abs = root.join("src/lib.js");
+        s.open_external_path(&abs).unwrap();
+        s.set_point(1, 4, 4); // line 1 = "    helper();" — `helper` at col 4.
+        s.xref_find_definitions();
+        assert!(
+            s.message.contains("jumped to src/helper.js:1"),
+            "in-crate M-. must resolve in the landed dependency, got: {}",
+            s.message
+        );
+    }
+
     /// 011-04 discriminating: a synthetic out-of-root JS tree indexes
     /// through the FULL path (language derivation from the landed file →
     /// per-language walk → build_index → CrateIndexBus): crate-relative
@@ -1277,6 +1423,56 @@ use super::*;
                 "src/gone.rs",       // deleted indexed file: removal still runs
             ]),
             "only the non-ignored changes (and the indexed-file deletion) survive"
+        );
+    }
+
+    /// The incremental filter mirrors the walk's `hidden(true)` (F4) and,
+    /// in a git repo, `.git/info/exclude` (F1): a batch mixing hidden
+    /// paths, repo-excluded paths, a `.gitignore`-ignored path, and a
+    /// deletion keeps exactly what the walk would index — one shared
+    /// memo across the batch (F3).
+    #[test]
+    fn indexable_changes_drops_hidden_and_repo_excluded_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // git repo with per-repo excludes (the walk's native source).
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "local/\n").unwrap();
+        for rel in [
+            "src/keep.rs",
+            "src/gen/out.rs",
+            ".venv/lib/site.py",
+            "local/build.tmp",
+            "src/gone.rs",
+        ] {
+            std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(root.join(rel), "x\n").unwrap();
+        }
+        std::fs::write(root.join("src/gen/.gitignore"), "out.rs\n").unwrap();
+        // A deleted, non-ignored file: still indexed (the `remove_file`
+        // arm needs it).
+        std::fs::remove_file(root.join("src/gone.rs")).unwrap();
+
+        let changed: Vec<std::path::PathBuf> = [
+            "src/keep.rs",
+            "src/gen/out.rs",
+            ".venv/lib/site.py",
+            "local/build.tmp",
+            "src/gone.rs",
+        ]
+        .iter()
+        .map(|rel| root.join(*rel))
+        .collect();
+
+        let kept = AppStore::indexable_changes(&changed, root);
+        let kept_rel: std::collections::BTreeSet<&str> = kept
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            kept_rel,
+            std::collections::BTreeSet::from(["src/keep.rs", "src/gone.rs"]),
+            "hidden (.venv/), repo-excluded (local/), and .gitignore-ignored (src/gen/out.rs) are all dropped by the walk, so all are dropped here"
         );
     }
 

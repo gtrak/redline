@@ -408,23 +408,32 @@ impl AppStore {
 
     /// The changed paths the incremental index job must process
     /// (this issue): everything EXCEPT the paths the file walk would
-    /// never index — those gitignored by the `.gitignore` chain from the
-    /// project root down to the path (`model::files::is_gitignored`, the
-    /// same ancestor-chain predicate the walk and the search pipeline
-    /// make) or under the `graft/` agent cache (issue 05, finding 3).
+    /// never index — a hidden component (the walk's `hidden(true)`),
+    /// the `.gitignore` chain from the project root down to the path,
+    /// and, in git repos, `.git/info/exclude` + the global git excludes
+    /// (the walk's native sources — `model::files::is_gitignored`, the
+    /// same per-path predicate the walk and the search pipeline make)
+    /// — or under the `graft/` agent cache (issue 05, finding 3).
     /// Purely subtractive: a non-ignored change still reaches
     /// `refresh_in_place`, and a path that no longer exists (a deletion)
     /// is kept whenever it is not ignored, so a deleted INDEXED file
     /// still hits the `remove_file` arm. A directory event is dropped
     /// only when the directory ITSELF is ignored (then its contents
     /// were never indexed either).
+    ///
+    /// The batch shares ONE `GitignoreMemo` (F2/F3): each directory's
+    /// `.gitignore` (and the repo-level sources) is parsed at most once
+    /// per batch, not once per changed path, so a 10,000-path burst
+    /// stays cheap on the UI thread.
     pub(super) fn indexable_changes(changed: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+        let memo: crate::model::files::GitignoreMemo =
+            std::sync::Mutex::new(std::collections::HashMap::new());
         changed
             .iter()
             .filter(|p| {
                 let is_dir = p.is_dir();
                 !crate::model::files::under_graft(root, p, is_dir)
-                    && !crate::model::files::is_gitignored(root, p, is_dir)
+                    && !crate::model::files::is_gitignored(root, p, is_dir, &memo)
             })
             .cloned()
             .collect()
@@ -539,8 +548,42 @@ impl AppStore {
     /// packages (transitive deps), never the landed dependency's own
     /// source — the js provider's definition walk skips them the same
     /// way; the refusal cap stays the backstop for every other tree.
+    ///
+    /// Deliberate exception to the project's ignore rules (F5): a landed
+    /// dependency lives exactly where the PROJECT index excludes it —
+    /// `hidden(true)` skips `.venv/…`, and in a git repo
+    /// `parents(true) + git_ignore(true) + require_git(true)` make
+    /// `ignore::Walk::new` apply the PROJECT's `.gitignore` (e.g.
+    /// `node_modules/`), the repo exclude file, and the global excludes
+    /// to THIS walk — silently zeroing the file list (the dependency is
+    /// excluded from the project index so it doesn't pollute project
+    /// symbols; once the user lands in it, navigation inside it is the
+    /// whole point). So this walk disables `hidden` and every gitignore
+    /// source (the `parents` / `git_ignore` / `git_global` /
+    /// `git_exclude` / `require_git` flags). The dependency's OWN
+    /// `.gitignore` is deliberately not honoured either (it would only
+    /// shrink the set of files we can jump to). The explicit rules stay:
+    /// the owning language's extension set, the nested `node_modules`
+    /// boundary, and — defensively, since `hidden(false)` now walks
+    /// dotdirs — the dependency's own `.git`.
     pub(super) fn crate_source_files(root: &Path, exts: &[&str]) -> Vec<String> {
-        ignore::Walk::new(root)
+        let mut builder = ignore::WalkBuilder::new(root);
+        builder
+            .hidden(false)
+            .parents(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .require_git(false);
+        builder
+            .filter_entry(|e| {
+                // A `.git` directory (the dependency may itself be a git
+                // checkout; `hidden(false)` now walks dotdirs): its
+                // objects/hooks are never source.
+                !(e.file_type().is_some_and(|ft| ft.is_dir())
+                    && e.file_name() == ".git")
+            })
+            .build()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_some_and(|t| t.is_file())
