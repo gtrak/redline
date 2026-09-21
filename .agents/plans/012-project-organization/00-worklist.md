@@ -89,6 +89,74 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **T7** | Strengthen non-discriminating tests: bare `.is_ok()` with no payload/state check (`store.rs:10577`, `:16949`, `:3645`); audit twins for vacuous absence-only assertions post `PTY_QUIET` shrink | strengthen, never delete | low |
 | **T8** | PTY battery drivers `drive_{emacs,redline}_battery2/3` → parameterized driver | lower priority than Rust duplication | low |
 
+## Round 2 test-ledger deltas (both sides read, local model)
+
+### T2 is RESOLVED — and much smaller than scoped
+
+Every pair in T2 was diffed by reading both bodies. **Only 3 tests can be
+dropped without losing an assertion:**
+
+| drop | reason |
+|---|---|
+| `flow_tests.rs:1498 unit_flow_quit_prompt_none` | same three asserts as `quit_prompt_unmodified_fast_path` (11906); only the fixture differs |
+| `flow_tests.rs:708 unit_flow_buffer_list_np` | strict subset of `buffer_list_n_p_d_keys` (13075), which also asserts C-n/C-p equivalence, exact row names, kill echo, clamp, `q`→Home |
+| `flow_tests.rs:1569 unit_flow_quit_prompt_cg` | subset of `quit_prompt_c_g_cancels_the_whole_quit` (12033), and its "intact" check is weaker (`contains("QZ")`) |
+
+Everything else in the five pairs carries a **positive delta**: render80/flat
+width pins, raw-key-path coverage (which the API-driven store tests skip by
+construction), the watcher-driven reload seam, the ±25/±26 boundary math,
+window-recenter after `M-,` (exists *only* in the twin), or exact cache-line semantics.
+
+**Whole-file audit (88 tests, all read)**: ~24 add a render assertion, ~50 add a
+key-path assertion (overlapping), ~12 are unique behaviour, **3 are safe drops**.
+Honest conclusion: **`flow_tests.rs` is almost entirely additive** — the
+positive-gated style means dropping anything else would lose real coverage. The
+ledger belongs in `docs/ux-testing-plan.md` so this is not re-litigated.
+Unverified (marked, not assumed duplicate): magit f5–f8/cds/blw, the edit-mode
+pair, `panes_*`.
+
+**Positive audit result**: **no flow twin asserts only absence** — every absence
+check is composed in the same `assert!` as a positive signal. The `PTY_QUIET`
+shrink did not create vacuous passes. One weak gate remains: `ux_view_alive`
+(`flow_tests.rs:3196`) has a `_ => true` catch-all, so the transient-menu leg of
+`unit_flow_ux_keymap_coverage` degrades to near-absence → handle `TransientMenu`
+explicitly (assert menu rows non-empty) instead of the catch-all (T12).
+
+### Correction to T7 — two of those "weak tests" are PRODUCTION code
+
+- `store.rs:3645` (`open_resolved_source`) and `store.rs:10577` (search-jump
+  path) are **not tests**: `(rel.clone(), self.open_project_path(..).is_ok())`
+  and its twin **discard the `Err`**, so the report cannot say *why* the open
+  failed ("cannot open {file}: the jump did not happen"). Fix is mechanical
+  (`match` → include `e`), but the message text is PTY-pinned — grep the ledger
+  for "cannot open" first, then extend `unit_flow_search_ret_and_mcomma` Leg A to
+  assert the cause token (the discriminating assertion that today doesn't exist).
+- `store.rs:16949`: `assert!(event.is_ok())` after `.expect("…")` on the same
+  `timeout(...).await` is **vacuous** — it cannot fail once the expect passes;
+  delete it (the payload asserts right after are the real spec).
+- `config.rs:261`: bare `assert!(good.validate_bindings(&registry).is_ok())` — a
+  validator that silently swallows a malformed binding still passes; assert the
+  exact `Err` for a deliberately bad binding.
+
+### Harness inconsistency (new, and it can explain serial-vs-pooled flake differences)
+
+**T11**: `tools/pyte_driver.py:42` defaults `PTY_QUIET` to **0.06** while
+`tools/pool.py:195` defaults the pool path to **0.2** — the two tiers run with
+different quiet windows. Confirm which is intended before shrinking further.
+
+### Test-cost / correctness foot-guns (new)
+
+- **T13a**: `crate_index_refuses_oversized_tree` (`store.rs:17714`) materializes
+  `EXT_INDEX_FILE_CAP + 1` = **2,001 real files** — the slowest test in the
+  family; a smaller probe + boundary comment would do.
+- **T13b**: both quit-prompt save-failure tests (`store.rs:12063`,
+  `flow_tests.rs:1598`) force failure with `chmod 0o444`, which **root bypasses**
+  — the test flips meaning if the suite ever runs as root. Guard with a geteuid
+  skip or use a real failure seam.
+- **T13c**: `land_resolved`/`miss_resolved` (synthetic events) and the store's
+  resolver tests (ambient `~/.cargo`) pin the *same* report text from two seams —
+  any reword must update both; a shared prefix `const` would de-risk the fanout.
+
 ## Round 2 coverage-gap deltas (read-verified, local model)
 
 This lane read every module round 1 skipped. Its most valuable output is a class
