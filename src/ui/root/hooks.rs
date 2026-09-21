@@ -1,11 +1,14 @@
 //! Root hook installers: the terminal-event handler, the five async
-//! bus-drain futures, and the hardware-cursor effect. Each function
+//! bus-drain futures, the jump-landing-highlight animation driver (the
+//! first time-driven re-render; self-stopping), and the hardware-cursor
+//! effect. Each function
 //! makes exactly one `use_*` hook call, unconditionally; `Root` invokes
 //! them in a fixed order so iocraft's hook-order contract holds.
 
 use std::sync::{Arc, Mutex};
 
 use iocraft::prelude::*;
+use tokio::sync::mpsc;
 
 use crate::app::store::AppStore;
 
@@ -234,6 +237,67 @@ pub(super) fn drain_search(
     });
 }
 
+/// The animation step (jump-highlight), extracted so the termination
+/// rule is unit-testable WITHOUT iocraft hooks or a render loop:
+/// await one wake (a landing highlight was set — the ONLY sender is
+/// `record_landing_highlight`, so "no highlight -> no timer" holds at the
+/// source: while idle this sits in `recv().await`, zero ticks, zero CPU),
+/// then bump `tick` at most once per `JUMP_HIGHLIGHT_FRAME` until the
+/// store's highlight has elapsed `JUMP_HIGHLIGHT_DURATION` — that final
+/// bump paints the cleared frame — and stop (no further ticks, ever; a
+/// jump costs at most `ceil(DURATION / FRAME) + 1` ticks). A highlight
+/// CLEARED mid-fade stops it early (the store is re-read each frame);
+/// a jump that REPLACES the highlight mid-fade just extends the window
+/// (the latest `set_at` wins; the capacity-1 wake channel coalesces the
+/// burst).
+pub(super) async fn jump_animation_loop(
+    store: Arc<Mutex<AppStore>>,
+    rx: &mut mpsc::Receiver<()>,
+    mut tick: impl FnMut(),
+) {
+    use crate::app::store::{JUMP_HIGHLIGHT_DURATION, JUMP_HIGHLIGHT_FRAME};
+    use std::time::Instant;
+    while rx.recv().await.is_some() {
+        // Coalesce any pending wakes (rapid consecutive jumps).
+        while rx.try_recv().is_ok() {}
+        loop {
+            let deadline = {
+                let s = store.lock().unwrap();
+                s.jump_highlight()
+                    .map(|h| h.set_at + JUMP_HIGHLIGHT_DURATION)
+            };
+            let Some(deadline) = deadline else {
+                break; // cleared by the next command: stop, no tick
+            };
+            let now = Instant::now();
+            tick();
+            if now >= deadline {
+                // This tick paints the cleared frame; then nothing, ever.
+                break;
+            }
+            tokio::time::sleep(JUMP_HIGHLIGHT_FRAME.min(deadline - now)).await;
+        }
+    }
+}
+
+/// The `use_future` driver of the jump-landing-highlight fade
+/// (jump-highlight): the app's first time-driven re-render, the iocraft
+/// wrapper around [`jump_animation_loop`] (the wake receiver is taken out
+/// of the store exactly once — the issue-04/05 bus precedent; a second
+/// install, e.g. on the static render path, gets `None` and does nothing).
+pub(super) fn drive_jump_highlight(
+    hooks: &mut Hooks,
+    anim_store: Arc<Mutex<AppStore>>,
+    mut tick: State<u64>,
+) {
+    hooks.use_future(async move {
+        let Some(mut rx) = anim_store.lock().unwrap().take_jump_wake_rx() else {
+            return; // already taken (e.g. by a test)
+        };
+        jump_animation_loop(anim_store, &mut rx, move || tick.set(tick.get() + 1)).await;
+    });
+}
+
 /// The `use_effect` that re-shows + repositions the hardware cursor after
 /// every frame.
 pub(super) fn install_cursor_effect(
@@ -275,4 +339,124 @@ pub(super) fn install_cursor_effect(
         },
         (&revision,),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::store::{JUMP_HIGHLIGHT_DURATION, JUMP_HIGHLIGHT_FRAME};
+    use std::time::Duration;
+
+    /// A store with an open `src/a.rs` and a synchronous symbol index,
+    /// the point parked on the `alpha` REFERENCE (line 2, col 5) — so an
+    /// `M-.` keypress lands the unique definition (line 0) and the landing
+    /// hook sets the highlight + wakes the driver, all through the PUBLIC
+    /// API (key events + keymap, exactly as the live loop drives them).
+    fn store_with_pending_jump() -> AppStore {
+        use crate::app::keymap::parse_key;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/a.rs"),
+            "fn alpha() {}\nfn beta() {\n    alpha();\n}\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/a.rs");
+        // Build the symbol index synchronously (the store tests' shape).
+        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        s.set_index(crate::nav::index::build_index(dir.path(), &files_list.files, None));
+        // Point (0,0) -> the reference at (2,5) by public motion keys.
+        for _ in 0..2 {
+            s.key_event(parse_key("C-n").unwrap());
+        }
+        for _ in 0..5 {
+            s.key_event(parse_key("C-f").unwrap());
+        }
+        s
+    }
+
+    /// jump-highlight (spec h): the animation driver is SELF-STOPPING —
+    /// (1) no highlight set, no timer: the loop idles with ZERO ticks;
+    /// (2) a jump sets the highlight and wakes it: a BOUNDED burst of
+    /// ticks (at most `ceil(DURATION/FRAME) + 1`), then (3) NO further
+    /// ticks, ever — the fade is done and nothing keeps spinning.
+    #[tokio::test]
+    async fn jump_animation_idle_has_no_ticks_and_terminates_after_fade() {
+        let store = Arc::new(Mutex::new(store_with_pending_jump()));
+        let rx = store.lock().unwrap().take_jump_wake_rx().expect("wake receiver");
+        let (tick_tx, mut tick_rx) = mpsc::unbounded_channel::<()>();
+        let wake_tx = tick_tx.clone();
+        let task = tokio::spawn({
+            let mut rx = rx;
+            let store = store.clone();
+            async move { jump_animation_loop(store, &mut rx, move || { let _ = wake_tx.send(()); }).await }
+        });
+
+        // (1) No highlight set -> no timer: 150 ms of idling costs zero
+        // ticks (a spinning 30 fps loop would have ticked ~4 times).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            tick_rx.len(),
+            0,
+            "no highlight set: the driver must not tick while idle"
+        );
+
+        // A jump (M-.) sets the landing highlight + wakes the driver.
+        store
+            .lock()
+            .unwrap()
+            .key_event(crate::app::keymap::parse_key("M-.").unwrap());
+        assert!(
+            store.lock().unwrap().jump_highlight().is_some(),
+            "the M-. landing set the highlight"
+        );
+
+        // (2) Collect the tick burst: it must finish (a quiet 100 ms
+        // after the last tick, well inside the 600 ms cap).
+        let mut ticks = 0usize;
+        let mut last_tick = std::time::Instant::now();
+        let cap = std::time::Instant::now() + Duration::from_millis(600);
+        loop {
+            match tick_rx.try_recv() {
+                Ok(()) => {
+                    ticks += 1;
+                    last_tick = std::time::Instant::now();
+                }
+                Err(_) => {
+                    if ticks > 0 && last_tick.elapsed() >= Duration::from_millis(100) {
+                        break;
+                    }
+                    if std::time::Instant::now() >= cap {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+        let bound =
+            (JUMP_HIGHLIGHT_DURATION.as_millis() / JUMP_HIGHLIGHT_FRAME.as_millis()) as usize;
+        assert!(
+            ticks >= 3,
+            "the fade must animate (at least one frame tick + the clear tick), got {ticks}"
+        );
+        assert!(
+            ticks <= bound + 2,
+            "the fade must be BOUNDED (at most {bound} + 2 ticks), got {ticks}"
+        );
+
+        // (3) Termination: once the fade has completed, NO further ticks —
+        // a leftover 30 fps loop would keep ticking forever (the power
+        // burn the spec forbids).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            tick_rx.len(),
+            0,
+            "no tick bumps after the animation completed (self-stopping)"
+        );
+
+        task.abort();
+    }
 }

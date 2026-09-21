@@ -453,6 +453,11 @@ impl AppStore {
             .get(name)
             .cloned()
             .ok_or_else(|| RegistryError::UnknownCommand(name.to_string()))?;
+        // jump-highlight lifetime: the landing highlight lives ONE command
+        // — it is set during the jump and cleared at the start of the
+        // next command dispatch (a jump command replaces it: the clear
+        // happens here, the jump's set happens in its handler, after).
+        self.jump_highlight = None;
         // emacs `recenter-top-bottom`: the position only advances when the
         // immediately-preceding command was also recenter; any other
         // command resets the cycle (emacs `recenter-last-op`), so a fresh

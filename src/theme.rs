@@ -80,6 +80,14 @@ pub struct Theme {
     /// the two.
     pub search_match: Face,
     pub search_match_current: Face,
+    /// The landing-highlight face (jump-highlight): the transient band on
+    /// the symbol a jump lands on. DELIBERATELY distinct from the search
+    /// faces — the meaning differs ("I just landed here" vs "these match
+    /// the query"), and the user will want to tell them apart: a yellow
+    /// background band (inverted-text style) that no other face uses,
+    /// visible against the default background in both themes (the
+    /// truecolor fade interpolates its RGB toward the base background).
+    pub jump_highlight: Face,
     /// One face per tree-sitter token category, indexed by
     /// `HIGHLIGHT_FACES`. See `Theme::syntax_face`.
     pub syntax_faces: Vec<Face>,
@@ -116,6 +124,7 @@ impl Theme {
             region: Face::new(Color::White, Color::DarkGrey, false),
             search_match: Face::new(Color::Grey, Color::Black, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
+            jump_highlight: Face::new(Color::Black, Color::Yellow, true),
             syntax_faces: dark_syntax_faces(),
         }
     }
@@ -146,6 +155,7 @@ impl Theme {
             region: Face::new(Color::Black, Color::Grey, false),
             search_match: Face::new(Color::DarkGrey, bg, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
+            jump_highlight: Face::new(Color::Black, Color::Yellow, true),
             syntax_faces: light_syntax_faces(),
         }
     }
@@ -344,6 +354,42 @@ mod tests {
             assert!(
                 !t.search_match.bold,
                 "{name}: the all-match face stays unbolded (the dim one)"
+            );
+        }
+    }
+
+    /// jump-highlight: the landing face exists in both themes and is
+    /// DISTINCT from the search faces, the view face, and the region face
+    /// (the meaning differs: "I just landed here"), and it carries its own
+    /// background band (visible against the default background — the view
+    /// background) while the text stays readable (dark text on the band).
+    #[test]
+    fn jump_highlight_face_distinct_with_own_band() {
+        let themes = [("dark", Theme::dark("d")), ("light", Theme::light("l"))];
+        for (name, t) in themes {
+            assert_ne!(
+                t.jump_highlight, t.view,
+                "{name}: the landing face must differ from the view face"
+            );
+            assert_ne!(
+                t.jump_highlight, t.search_match,
+                "{name}: the landing face must be distinct from the all-match face"
+            );
+            assert_ne!(
+                t.jump_highlight, t.search_match_current,
+                "{name}: the landing face must be distinct from the selected-match face"
+            );
+            assert_ne!(
+                t.jump_highlight.background, t.view.background,
+                "{name}: the landing highlight needs its own background band"
+            );
+            assert_ne!(
+                t.jump_highlight.background, t.search_match_current.background,
+                "{name}: the landing band must not be the cursor/search blue band"
+            );
+            assert!(
+                t.jump_highlight.bold,
+                "{name}: the landing band is bold (prominent)"
             );
         }
     }

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use iocraft::hooks::State;
 
 use crate::app::store::AppStore;
+use crate::app::store::jump_highlight_intensity;
 use crate::app::store::{BufferRow, DirtyCounts, FileViewRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
 use crate::model::sections::MagitRow;
 /// One render's worth of store state, extracted as owned values so the
@@ -132,6 +133,32 @@ pub(super) fn build(
     let (blame_rows, _blame_top, _blame_total) = s.blame_view_info();
     let (commit_diff_rows, commit_diff_top_row, commit_diff_total_rows) =
         s.commit_diff_view_info();
+    // jump-highlight: the landing row's highlight is attached AFTER the
+    // rows are built — the fade intensity is computed HERE (in the
+    // snapshot) as a pure function of the landing's age and the
+    // terminal's color capability, so `render_row` stays dumb (it maps
+    // an intensity to a color). The highlight only applies to the CURRENT
+    // buffer (a cross-file highlight is not rendered anywhere) and to
+    // code rows (not note rows).
+    let mut file_view_rows = s.file_view_rows();
+    if let Some(h) = s.jump_highlight()
+        && s
+            .buffers
+            .current()
+            .is_some_and(|k| *k == h.buffer_key)
+    {
+        let intensity = jump_highlight_intensity(
+            h.set_at.elapsed(),
+            crate::ui::truecolor_enabled(),
+        );
+        if intensity > 0.0
+            && let Some(row) = file_view_rows
+                .iter_mut()
+                .find(|r| !r.is_note && r.line == h.line)
+        {
+            row.highlight = Some((h.start, h.end, intensity));
+        }
+    }
     Snapshot {
         quit: s.quit,
         project: s.project_display().to_string(),
@@ -172,7 +199,7 @@ pub(super) fn build(
         commit_editor_title: s.commit_editor_title(),
         commit_editor_rows: s.commit_editor_rows(),
         dirty: s.dirty_counts(),
-        file_view_rows: s.file_view_rows(),
+        file_view_rows,
         file_view_total_rows: s.file_view_total_rows(),
         file_view_title: s.view_name_display(),
         file_view_top_line: top_line,

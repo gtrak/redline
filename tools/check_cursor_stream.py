@@ -1104,6 +1104,121 @@ def annotation_gutter_checks():
     return checks
 
 
+
+def jump_highlight_checks():
+    """jump-highlight: the animated landing highlight, with an animated
+    jump exercised (the spec's CUP-race interaction check, plan 013):
+    * M-i -> beta (window pinned at Bot: beta lands on terminal row 20,
+      1-based): the landing pulse is a YELLOW band (iocraft's bright
+      yellow, `48;5;11`, under the 256-color path) — present in the raw
+      stream right after the landing and reconstructable in pyte (a
+      `ffff00` bg on the landing row) — then CLEARS (no `48;5;11` / no
+      yellow row after the ~200 ms fade), while the hardware cursor (the
+      CUP after the final `?2026l`) lands exactly on the landing row/col
+      BOTH during and after the animation (the extra animation frames
+      must not widen the cursor race);
+    * M-, back to the `alpha` reference (row 21, col 6): a second
+      animated landing, CUP tracking;
+    * COLORTERM=truecolor: the band is a genuine RGB fade — the full-
+      strength `48;2;255;255;0` band plus dimmer yellow-family 48;2;
+      values (interpolation across frames, not a fake hold).
+    """
+    import os as _os
+    src_dir = _os.path.join(REPO, "src")
+    _os.makedirs(src_dir, exist_ok=True)
+    # jumpfn.rs: `alpha` at line 0, filler to line 27, `fn beta() {` at
+    # line 28 with an `alpha` reference at line 29 (31 lines total, no
+    # trailing newline). Window: 24-3=21 rows; the imenu jump keeps the
+    # window at Bot (top=10): beta = terminal row 20 (1-based), the
+    # reference line = terminal row 21.
+    lines = ["fn alpha() {}"] + [f"// filler {i}" for i in range(1, 28)] + \
+        ["fn beta() {", "    alpha();", "}"]
+    with open(_os.path.join(src_dir, "jumpfn.rs"), "w") as f:
+        f.write("\n".join(lines))
+
+    BETA_ROW = 20          # 1-based terminal row of `fn beta() {`
+    REF_ROW, REF_COL = 21, 6  # 1-based row/col of the `alpha` reference
+
+    def run(mode):
+        s = Session(mode)
+        checks = []
+
+        def rec(name, ok, detail=""):
+            checks.append((name, ok, detail))
+            print(f"  {'PASS' if ok else 'FAIL'}  {name:52s} {detail}")
+
+        def yellow_cells(row):
+            """Yellow-family bg hexes (r>100, g>100, b<100) on 1-based
+            terminal row `row` (pyte stores bg as a lowercase hex str)."""
+            out = []
+            buf = s.screen.buffer[row - 1]
+            for c in sorted(buf):
+                h = str(buf[c].bg).lower()
+                if (int(h[:2], 16) > 100 and int(h[2:4], 16) > 100
+                        and int(h[4:6], 16) < 100):
+                    out.append(h)
+            return out
+
+        # Open jumpfn.rs.
+        s.key("C-x C-f", 1.0)
+        for ch in "jumpfn":
+            s.key(ch, 0.25)
+        s.cup_settle(s.key("RET", 1.0))
+        # Park the point on the `alpha` reference (line 29, 0-based col 5).
+        s.key("C-n " * 29, 0.8)
+        s.key("C-f C-f C-f C-f C-f", 0.6)
+        # M-i (imenu) -> filter to beta -> RET: the animated jump landing.
+        s.key("M-i", 0.8)
+        s.key("b", 0.6)
+        buf = s.key("RET", 0.3)
+        if mode is None:
+            rec("256: M-i landing band emitted (48;5;11)",
+                b"48;5;11" in buf,
+                f"48;5;11 count={buf.count(b'48;5;11')}")
+        else:
+            # The first frame is drawn a couple of ms after `set_at`, so the
+            # full-strength band reads 250-255 per channel, not exactly 255.
+            full = bool(re.search(rb"48;2;(25[0-5]);\1;0", buf))
+            fades = {m2 for m2 in re.findall(rb"48;2;(\d+);(\d+);(\d+)", buf)
+                     if m2[0] == m2[1] and m2[2] == b"0" and m2[0] != b"0"}
+            rec("truecolor: full-strength band (48;2;~255;~255;0)", full,
+                "found" if full else "missing")
+            rec("truecolor: the fade interpolates (dimmer yellow-family 48;2; values)",
+                len(fades) >= 2,
+                f"distinct yellow-family rgbs={sorted(fades)[:6]}")
+        # The CUP survives the animation and lands on the landing row
+        # (cup_settle keeps the window open until the CUP after the final
+        # ?2026l is in the chunk — the landing frame's CUP or a later
+        # animation frame's; the point does not move during the fade).
+        r, c = last_cup_after_sync(s.cup_settle(buf))
+        rec(f"{'truecolor' if mode else '256'}: CUP on the animated landing",
+            (r, c) == (BETA_ROW, 1), f"cup=({r},{c}) want ({BETA_ROW},1)")
+        if mode is None:
+            # The band CLEARS after the ~200 ms fade: the settled frame
+            # (pyte's final state AND the raw stream) carries no yellow.
+            settled = s._read(0.8, quiet=0.15)
+            rec("256: band cleared after the fade",
+                b"48;5;11" not in settled and not yellow_cells(BETA_ROW),
+                f"48;5;11 in settled={settled.count(b'48;5;11')}, "
+                f"yellow left={yellow_cells(BETA_ROW)[:3]}")
+        # M-, back to the reference: a second animated landing.
+        buf2 = s.key("M-,", 0.3)
+        r, c = last_cup_after_sync(s.cup_settle(buf2))
+        rec(f"{'truecolor' if mode else '256'}: CUP on the M-, landing (row 21 col 6)",
+            (r, c) == (REF_ROW, REF_COL), f"cup=({r},{c}) want ({REF_ROW},{REF_COL})")
+        s.kill()
+        return checks
+
+    out = run(None)
+    out += run("truecolor")
+    # Test hygiene (shared /tmp fixture): remove the scratch file so
+    # re-runs start from the baseline file set.
+    try:
+        os.remove(_os.path.join(src_dir, "jumpfn.rs"))
+    except OSError:
+        pass
+    return out
+
 def main():
     print(f"BIN={BIN}\nREPO={REPO}\n")
     all_checks = []
@@ -1151,6 +1266,11 @@ def main():
     # + note-row overflow (point's line always drawn, cursor on it).
     print("=== ANNOTATION GUTTER + NOTE-ROW OVERFLOW (02b) ===")
     all_checks += annotation_gutter_checks()
+    print()
+    # jump-highlight: animated landing highlight (CUP-race interaction,
+    # plan 013) with an animated jump exercised (256 + truecolor).
+    print("=== JUMP-HIGHLIGHT ANIMATED LANDING (CUP during/after the fade) ===")
+    all_checks += jump_highlight_checks()
     print()
     bad = [n for n, ok, _ in all_checks if not ok]
     print("=== SUMMARY ===")

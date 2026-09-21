@@ -25,7 +25,8 @@ use crate::app::store::ViewId;
 use geometry::cursor_cell;
 use hooks::{
     drain_crate_index, drain_project_changes, drain_search, drain_symbol_index,
-    drain_tooling_resolve, install_cursor_effect, install_terminal_events,
+    drain_tooling_resolve, drive_jump_highlight, install_cursor_effect,
+    install_terminal_events,
 };
 use render::StaticRenderWidth;
 use snapshot::Snapshot;
@@ -83,6 +84,10 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     drain_tooling_resolve(&mut hooks, store.clone(), tick);
     drain_crate_index(&mut hooks, store.clone(), tick);
     drain_search(&mut hooks, store.clone(), tick);
+
+    // jump-highlight: the landing-highlight fade driver (the first
+    // time-driven re-render; self-stopping — see `drive_jump_highlight`).
+    drive_jump_highlight(&mut hooks, store.clone(), tick);
 
     let snap: Snapshot = snapshot::build(store, tick, tw_raw);
 

@@ -1064,15 +1064,29 @@ use super::*;
     /// search ends is the point of the feature); point motion keeps it; a
     /// DIFFERENT search clears it; a same-query re-run keeps it; leaving
     /// the results view ends the session; C-g outside isearch clears it.
+    /// Match-highlight lifetime rule (issue match-highlight, corrected
+    /// rule): isearch confirm (RET) — like cancel — CLEARS the context
+    /// (emacs `isearch-exit` removes the lazy-highlight faces when the
+    /// search ends), while the isearch STATE survives (a repeat search
+    /// works). The context that PERSISTS is the one owned by a
+    /// search-results jump: it survives point motion, is cleared by a
+    /// different query, kept by a same-query re-run, and cleared by
+    /// closing the results view or the global C-g.
     #[test]
     fn match_context_lifetime_rule() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        std::fs::write(dir.path().join("src/t.rs"), "foo world\nfoo there\nbar\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "foo world\nfoo there\nbar\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/u.rs"), "foo lib\n").unwrap();
         let mut s = store(dir.path());
         s.set_viewport_lines(10);
         s.open_path("src/t.rs");
+        let mut rx = s.search_rx().unwrap();
         let type_foo = |s: &mut AppStore| {
             s.isearch_start(IsearchDirection::Forward);
             s.isearch_query_char('f');
@@ -1085,44 +1099,76 @@ use super::*;
         // 2. Cancel (C-g) clears.
         s.isearch_cancel();
         assert!(s.match_context.ranges.is_empty(), "C-g cancel clears the highlight");
-        // 3. Confirm (RET) keeps — the user wants the context after the
-        //    search ends (emacs's faces vanish; here cancel is the
-        //    boundary, confirm is not).
+        // 3. Confirm (RET) now CLEARS too: emacs `isearch-exit` removes the
+        //    lazy-highlight faces when the search ends. The old rule kept
+        //    the context here — that rationale ("the context after jumping
+        //    from results") belongs to the results-jump path (step 4),
+        //    which sets its own context and is unaffected.
         type_foo(&mut s);
         s.isearch_confirm();
-        assert_eq!(s.match_context.ranges.len(), 2, "confirm keeps the context");
-        // 4. Point motion does not clear it.
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "confirm clears the highlight (faces vanish when the search ends)"
+        );
+        // 3b. The isearch STATE survives confirm (only the highlight
+        //     lifetime changed): re-running the same search finds the same
+        //     matches.
+        type_foo(&mut s);
+        assert_eq!(s.isearch_match_count(), 2, "the search state survived confirm");
+        s.isearch_cancel();
+        // 4. The jump-from-results context is the one that PERSISTS: a
+        //    RET from the results view sets it (this buffer's hits only),
+        //    and it survives point motion.
+        s.start_project_search("foo".into());
+        drain_search_finished(&mut s, &mut rx);
+        s.search.selected = 0; // t.rs line 1 ("src/t.rs" < "src/u.rs")
+        s.search_jump();
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        assert_eq!(
+            s.match_context.ranges.len(),
+            2,
+            "the jump sets this buffer's match context (t.rs only)"
+        );
         s.point_down();
         s.point_up();
         s.point_forward();
         s.point_line_start();
-        assert_eq!(s.match_context.ranges.len(), 2, "point motion keeps the context");
-        // 5. A different search clears it.
-        s.start_project_search("bar".into());
-        assert!(
-            s.match_context.ranges.is_empty(),
-            "a different search clears the old highlight"
+        assert_eq!(
+            s.match_context.ranges.len(),
+            2,
+            "the jump context survives point motion"
         );
-        // 6. A same-query re-run keeps it.
-        type_foo(&mut s);
-        s.isearch_confirm();
-        assert_eq!(s.match_context.ranges.len(), 2, "re-established context before the re-run");
+        // 5. A same-query re-run keeps it.
         s.start_project_search("foo".into());
+        drain_search_finished(&mut s, &mut rx);
         assert_eq!(
             s.match_context.ranges.len(),
             2,
             "a same-query re-run keeps the highlight"
         );
+        // 6. A different search clears it.
+        s.start_project_search("bar".into());
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "a different search clears the old highlight"
+        );
+        // Drain the "bar" job so its (stale-generation) Finished event
+        // cannot make the step-7 drain return early.
+        drain_search_finished(&mut s, &mut rx);
         // 7. Leaving the results view (q / ESC) ends the session.
+        s.start_project_search("foo".into());
+        drain_search_finished(&mut s, &mut rx);
         s.search_close();
         assert!(
             s.match_context.ranges.is_empty(),
             "closing the results view clears the highlight"
         );
         // 8. Global C-g (buffer view, no isearch active) clears it.
-        type_foo(&mut s);
-        s.isearch_confirm();
-        assert!(!s.match_context.ranges.is_empty());
+        s.start_project_search("foo".into());
+        drain_search_finished(&mut s, &mut rx);
+        s.search.selected = 0;
+        s.search_jump();
+        assert!(!s.match_context.ranges.is_empty(), "jump re-established the context");
         s.key_event(Key::ctrl_char('g'));
         assert!(
             s.match_context.ranges.is_empty(),

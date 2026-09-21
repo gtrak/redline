@@ -76,7 +76,7 @@ pub(crate) fn face_weight(face: theme::Face) -> Weight {
 /// selected-row bar emits its background as SGR `48;2;r;g;b` with the theme's
 /// exact RGB instead of the 256-color palette index, which user terminal
 /// themes can remap to near-background (plan-004 issue 05).
-fn truecolor_enabled() -> bool {
+pub(crate) fn truecolor_enabled() -> bool {
     std::env::var("COLORTERM")
         .is_ok_and(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"))
 }
@@ -109,4 +109,57 @@ pub(crate) fn bar_bg(face: theme::Face) -> Color {
         };
     }
     face_bg(face)
+}
+
+/// The theme's exact RGB for the landing-highlight band (jump-highlight),
+/// matching the xterm-256 palette index iocraft emits for the face's
+/// background (`Color::Yellow` -> `48;5;6`, nominal (255,255,0)). `None`
+/// when the color has no truecolor mapping (falls back to the 256-color
+/// path — the same adaptive strategy as `bar_rgb`).
+fn jump_highlight_rgb(c: theme::Color) -> Option<(u8, u8, u8)> {
+    use theme::Color as TC;
+    Some(match c {
+        TC::Yellow => (255, 255, 0),
+        _ => return None,
+    })
+}
+
+/// The theme's exact RGB for the VIEW's base background (the fade's
+/// interpolation target: black in the dark theme, white in the light).
+/// `None` when the color has no truecolor mapping.
+fn view_bg_rgb(c: theme::Color) -> Option<(u8, u8, u8)> {
+    use theme::Color as TC;
+    Some(match c {
+        TC::Black => (0, 0, 0),
+        TC::White => (255, 255, 255),
+        _ => return None,
+    })
+}
+
+/// jump-highlight: the landing band's color at a given fade intensity
+/// (in `[0, 1]`, the snapshot's pure curve). Under truecolor the face's
+/// background RGB is INTERPOLATED toward the view's base background as
+/// `(1 - intensity)` (a genuine fade: full face color at `1.0`, the base
+/// background at `0.0`). Without truecolor the 16-color palette cannot
+/// interpolate, so the band holds the face's palette color for the whole
+/// duration and then clears — the hold-then-clear lives in the intensity
+/// curve (`jump_highlight_intensity`), never in a faked RGB step here.
+pub(crate) fn jump_band_bg(t: &theme::Theme, intensity: f32) -> Color {
+    if truecolor_enabled()
+        && let (Some((fr, fg, fb)), Some((br, bg, bb))) = (
+            jump_highlight_rgb(t.jump_highlight.background),
+            view_bg_rgb(t.view.background),
+        )
+    {
+        let w = (intensity.clamp(0.0, 1.0) * 255.0) as u32; // face-weight
+        let mix = |face: u8, base: u8| -> u8 {
+            ((face as u32 * w + base as u32 * (255 - w)) / 255) as u8
+        };
+        return Color::Rgb {
+            r: mix(fr, br),
+            g: mix(fg, bg),
+            b: mix(fb, bb),
+        };
+    }
+    face_bg(t.jump_highlight)
 }

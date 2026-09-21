@@ -383,6 +383,9 @@ impl AppStore {
                 is_note: false,
                 annotated,
                 matches,
+                // jump-highlight: the snapshot attaches the landing row's
+                // highlight (with the frame's fade intensity) after this.
+                highlight: None,
                 text,
                 spans,
             });
@@ -401,6 +404,7 @@ impl AppStore {
                         is_note: true,
                         annotated: false,
                         matches: Vec::new(),
+                        highlight: None,
                         text: note,
                         spans: Vec::new(),
                     });

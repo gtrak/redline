@@ -133,6 +133,12 @@ impl AppStore {
         };
         dest.label = label.to_string();
         self.jump_stack.record_jump(&origin, &dest);
+        // jump-highlight hook (choke point 1): every FORWARD jump funnels
+        // through here (M-., the xref/annotations/imenu pickers) — the
+        // callers navigate first and then record, so the landing is
+        // complete and `dest` describes the destination. One rule, all
+        // forward jumps, no per-command special cases.
+        self.record_landing_highlight(&dest);
     }
 
     /// `M-,`: pop back to the prior position (line + column).
@@ -191,5 +197,100 @@ impl AppStore {
         if self.top_view() == ViewId::Search {
             self.close_view();
         }
+        // jump-highlight hook (choke point 2): the landing path for
+        // `jump_back` (M-,) / `jump_forward` (C-i) — the buffer path only
+        // (the SEARCH_JUMP_KEY sentinel returns to the results view, where
+        // there is no buffer symbol, and the no-buffer early return above
+        // never reaches here: neither sets a highlight).
+        self.record_landing_highlight(entry);
     }
+
+    /// jump-highlight: after a landing, compute the symbol at the landing
+    /// point and store its BYTE range as the transient landing highlight
+    /// (the one rule for every jump — called from BOTH choke points:
+    /// `record_jump` for forward jumps, `navigate_to_entry` for M-,
+    /// /C-i). The extent is the word-boundary run at the point (the
+    /// `is_word_char` walk the word motions use), gated by the
+    /// syntax-aware `symbol_at_point`: neither yielding a non-empty extent
+    /// (a whitespace/punctuation landing) sets NO highlight — never an
+    /// empty or whole-line range. Byte/char: `JumpEntry.col` is a 0-based
+    /// CHAR index; the span layer is BYTE offsets, and the conversion
+    /// happens inside `symbol_extent_at` (the recurring bug class here —
+    /// a byte column would land off-by-N on multibyte lines). A missing
+    /// buffer or line sets nothing.
+    pub(super) fn record_landing_highlight(&mut self, entry: &JumpEntry) {
+        let Some(buf) = self.buffers.get(&entry.buffer_key) else {
+            return;
+        };
+        let Some(text) = buf.line_text(entry.line) else {
+            return;
+        };
+        let text = &*text;
+        let lang = self
+            .grammar_registry
+            .language_for(&buf.path.as_ref().map(|p| p.to_string_lossy()).unwrap_or_default());
+        // A symbol must exist at the landing point (no-symbol landings set
+        // no highlight).
+        if AppStore::symbol_at_point(lang, text, entry.col).is_none() {
+            return;
+        }
+        let Some((start, end)) = symbol_extent_at(text, entry.col) else {
+            return;
+        };
+        self.jump_highlight = Some(LandingHighlight {
+            buffer_key: entry.buffer_key.clone(),
+            line: entry.line,
+            start,
+            end,
+            set_at: std::time::Instant::now(),
+        });
+        // Wake the animation driver (the Root hook). `try_send` (NOT the
+        // async `send` — the store's landing paths are SYNC, and the
+        // async `send`'s future would drop without waking the driver).
+        // The capacity-1 channel coalesces rapid jump bursts; a full
+        // channel (a wake already queued) needs no second wake — the
+        // driver re-reads the latest `set_at` when it runs.
+        let _ = self.jump_wake_tx.try_send(());
+    }
+}
+
+/// jump-highlight: the BYTE range (line-relative) of the word-boundary run
+/// at char column `col` — the same `is_word_char` walk the word motions
+/// use: a word char AT the point owns the run, else the run ending
+/// immediately BEFORE it (a cursor parked just after the name — the usual
+/// call-site spot — still belongs to it). `None` for whitespace / 
+/// punctuation / no-run points. The char indices are converted to BYTE
+/// offsets (the span layer's domain) explicitly — the char→byte
+/// translation the whole recurring bug class demands.
+pub(in crate::app::store) fn symbol_extent_at(text: &str, col: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    if col > chars.len() {
+        return None;
+    }
+    let start = if col < chars.len() && is_word_char(chars[col]) {
+        let mut i = col;
+        while i > 0 && is_word_char(chars[i - 1]) {
+            i -= 1;
+        }
+        i
+    } else if col > 0 && is_word_char(chars[col - 1]) {
+        let mut i = col - 1;
+        while i > 0 && is_word_char(chars[i - 1]) {
+            i -= 1;
+        }
+        i
+    } else {
+        return None;
+    };
+    let mut end = start;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+    if end <= start {
+        return None;
+    }
+    // Char indices → byte offsets (the span layer's domain).
+    let start_byte = chars[..start].iter().map(|c| c.len_utf8()).sum::<usize>();
+    let end_byte = start_byte + chars[start..end].iter().map(|c| c.len_utf8()).sum::<usize>();
+    Some((start_byte, end_byte))
 }

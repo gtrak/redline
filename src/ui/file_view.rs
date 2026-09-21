@@ -221,6 +221,12 @@ fn draw_line(
     // match's face wins on overlap).
     let segments = overlay_match_ranges(text, &segments, matches);
 
+    // jump-highlight: the third pass — the landing-highlight range (the
+    // snapshot's byte range + fade intensity, `None` when no landing
+    // highlight applies to this line) substitutes the jump face, winning
+    // on overlap (the newest information is the landing itself).
+    let segments = overlay_jump_range(text, &segments, file_row.highlight);
+
     let mut x = x_start as isize;
     for (cs, ce, face) in &segments {
         if *cs >= *ce || *cs >= total_chars {
@@ -234,18 +240,24 @@ fn draw_line(
         if segment.is_empty() {
             continue;
         }
-        let (face, selected_match) = match face {
-            RowFace::View => (t.view, false),
-            RowFace::Syntax(idx) => (t.syntax_face(*idx), false),
-            RowFace::Match => (t.search_match, false),
-            RowFace::MatchCurrent => (t.search_match_current, true),
+        // The band: the selected match's background (issue match-highlight)
+        // or the landing-highlight fade band (jump-highlight — interpolated
+        // toward the base background by intensity under truecolor).
+        let (face, band) = match face {
+            RowFace::View => (t.view, None),
+            RowFace::Syntax(idx) => (t.syntax_face(*idx), None),
+            RowFace::Match => (t.search_match, None),
+            RowFace::MatchCurrent => (
+                t.search_match_current,
+                Some(color(t.search_match_current.background)),
+            ),
+            RowFace::Jump(intensity) => (t.jump_highlight, Some(crate::ui::jump_band_bg(t, *intensity))),
         };
         // The selected match's background band (issue match-highlight):
         // the user's complaint was the cursor being hard to see when
         // jumping to a search result — the inverse-video band under the
         // matched text is the prominence the fg-only faces can't give.
-        if selected_match {
-            let bg = color(face.background);
+        if let Some(bg) = band {
             canvas.set_background_color(x, row, display_width(&segment), 1, bg);
         }
         let style = text_style(face.foreground, false, face.bold);
@@ -264,13 +276,16 @@ fn draw_line(
 /// A cell face in the match overlay's second pass (issue match-highlight):
 /// the base face (view or syntax) with the search-match faces substituted
 /// over the match ranges — `Match` for the query's other matches,
-/// `MatchCurrent` for the match the cursor is on (wins on overlap).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `MatchCurrent` for the match the cursor is on (wins on overlap) — plus
+/// the landing-highlight face (jump-highlight), `Jump` with its frame's
+/// fade intensity, which wins on overlap in the third pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum RowFace {
     View,
     Syntax(usize),
     Match,
     MatchCurrent,
+    Jump(f32),
 }
 
 /// The match overlay (issue match-highlight): split the base syntax
@@ -351,6 +366,67 @@ fn overlay_match_ranges(
             out.last_mut().unwrap().1 = c + 1;
         } else {
             out.push((c, c + 1, face));
+        }
+    }
+    out
+}
+
+/// jump-highlight: the landing-highlight overlay (the third pass, after
+/// the match overlay): split the segments at the landing range's boundaries
+/// and substitute the jump face (with the frame's fade intensity) over the
+/// overlapping cells. `jump` is `Some((start, end, intensity))` with
+/// LINE-RELATIVE BYTE offsets (the span layer's byte domain — it goes
+/// through `byte_to_char_offset` for the char-indexed segments, so a
+/// landing after a multibyte character highlights the right cells, the
+/// same byte/char discipline as the match overlay). The jump face wins on
+/// overlap (the landing pulse is the newest information); a range running
+/// past the text's end clips instead of panicking. Returns the input
+/// unchanged (a face rewrite only) when no landing highlight applies.
+fn overlay_jump_range(
+    text: &str,
+    segments: &[(usize, usize, RowFace)],
+    jump: Option<(usize, usize, f32)>,
+) -> Vec<(usize, usize, RowFace)> {
+    let total = text.chars().count();
+    let Some((start, end, intensity)) = jump else {
+        return segments
+            .iter()
+            .map(|&(cs, ce, face)| (cs.min(total), ce.min(total), face))
+            .filter(|&(s, e, _)| s < e)
+            .collect();
+    };
+    let (s, e) = (byte_to_char_offset(text, start), byte_to_char_offset(text, end));
+    if s >= e {
+        // An empty extent (start == end after the char conversion) sets no
+        // highlight — never a zero-width band.
+        return segments
+            .iter()
+            .map(|&(cs, ce, face)| (cs.min(total), ce.min(total), face))
+            .filter(|&(s, e, _)| s < e)
+            .collect();
+    }
+    let mut out: Vec<(usize, usize, RowFace)> = Vec::new();
+    for (cs, ce, face) in segments {
+        let cs = (*cs).min(total);
+        let ce = (*ce).min(total);
+        if ce <= s || cs >= ce {
+            if ce > cs {
+                out.push((cs, ce, *face));
+            }
+            continue;
+        }
+        if cs >= e {
+            out.push((cs, ce, *face));
+            continue;
+        }
+        // The segment crosses the range: keep the left tail, replace the
+        // covered cells with the jump face, keep the right tail.
+        if cs < s {
+            out.push((cs, s, *face));
+        }
+        out.push((s.max(cs), e.min(ce), RowFace::Jump(intensity)));
+        if e < ce {
+            out.push((e, ce, *face));
         }
     }
     out
@@ -570,6 +646,7 @@ mod tests {
         assert!(row.text.is_empty());
         assert!(row.spans.is_empty());
         assert!(row.matches.is_empty());
+        assert!(row.highlight.is_none());
         assert!(!row.is_note);
         assert!(!row.annotated);
     }
@@ -728,6 +805,76 @@ mod tests {
         assert_eq!(segs, vec![(0, 3, RowFace::Syntax(2))]);
     }
 
+    // ── jump-highlight: the landing-highlight overlay (third pass) ─────
+
+    /// jump-highlight: the landing range substitutes the jump face (with
+    /// the frame's intensity) over the covered cells; the rest of the line
+    /// keeps its base face. Discriminates: without the third pass the
+    /// whole line would stay base faces.
+    #[test]
+    fn overlay_jump_range_substitutes_jump_face() {
+        let text = "fn alpha() {";
+        let base: Vec<(usize, usize, RowFace)> = vec![(0, 12, RowFace::View)];
+        let segs = overlay_jump_range(text, &base, Some((3, 8, 1.0)));
+        assert_eq!(
+            segs,
+            vec![
+                (0, 3, RowFace::View),
+                (3, 8, RowFace::Jump(1.0)),
+                (8, 12, RowFace::View),
+            ]
+        );
+    }
+
+    /// jump-highlight: the jump face WINS where a search match overlaps the
+    /// landing range (the newest information is the landing itself).
+    #[test]
+    fn overlay_jump_range_wins_over_match() {
+        let text = "foo a foo";
+        // A plain search match over the first "foo", landing over the
+        // second.
+        let base: Vec<(usize, usize, RowFace)> = vec![
+            (0, 3, RowFace::Match),
+            (3, 9, RowFace::View),
+        ];
+        let segs = overlay_jump_range(text, &base, Some((6, 9, 0.5)));
+        assert_eq!(
+            segs,
+            vec![
+                (0, 3, RowFace::Match),
+                (3, 6, RowFace::View),
+                (6, 9, RowFace::Jump(0.5)),
+            ]
+        );
+    }
+
+    /// jump-highlight multibyte: the range is BYTE offsets (the span
+    /// layer's domain) — "caf\u{e9} caf\u{e9}", landing on the second
+    /// caf\u{e9} (bytes 6..11, chars 5..9). A char-indexed (or byte-as-char)
+    /// overlay would highlight the wrong cells.
+    #[test]
+    fn overlay_jump_range_multibyte_highlights_the_right_chars() {
+        let text = "caf\u{e9} caf\u{e9}"; // 9 chars, 11 bytes
+        let base: Vec<(usize, usize, RowFace)> = vec![(0, 9, RowFace::View)];
+        let segs = overlay_jump_range(text, &base, Some((6, 11, 1.0)));
+        assert_eq!(
+            segs,
+            vec![(0, 5, RowFace::View), (5, 9, RowFace::Jump(1.0))]
+        );
+        let chars: Vec<char> = text.chars().collect();
+        let highlighted: String = chars[5..9].iter().collect();
+        assert_eq!(highlighted, "caf\u{e9}", "the highlighted chars are the landing symbol");
+    }
+
+    /// jump-highlight: no landing highlight (None) is a pure pass-through
+    /// (the segments survive, nothing else moves).
+    #[test]
+    fn overlay_jump_range_none_is_pass_through() {
+        let text = "abc";
+        let base: Vec<(usize, usize, RowFace)> = vec![(0, 3, RowFace::Syntax(2))];
+        assert_eq!(overlay_jump_range(text, &base, None), base);
+    }
+
     /// plan 005 issue 02: the rendered-row map round-trips buffer_line ↔
     /// rendered_row with interleaved note rows, both directions.
     #[test]
@@ -741,6 +888,7 @@ mod tests {
             text: format!("line {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
+            highlight: None,
         };
         let note = |line: usize| FileViewRow {
             line,
@@ -749,6 +897,7 @@ mod tests {
             text: format!("  \u{25b8} note {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
+            highlight: None,
         };
         let rows = vec![
             code(0),

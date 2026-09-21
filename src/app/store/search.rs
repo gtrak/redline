@@ -185,17 +185,25 @@ impl AppStore {
         self.set_point(line, col, col);
     }
 
-    /// Confirm isearch (RET): keep the current position, deactivate.
-    /// The highlight context is KEPT (issue match-highlight's lifetime
-    /// rule: confirm ends the search but the user wants the context —
-    /// cancel, not confirm, is the clearing boundary).
+    /// Confirm isearch (RET): keep the current position, deactivate. The
+    /// match highlight goes with the session — confirm CLEARS it, like
+    /// cancel (emacs `isearch-exit` removes the lazy-highlight faces when
+    /// the search ends). The user-visible "context after a search" case is
+    /// the results-view jump (`set_match_context_from_jump`), which sets
+    /// its own context and is unaffected by this. The isearch STATE
+    /// (query / matches / current) is kept as-is: repeating `C-s` re-runs
+    /// the same search (the highlight lifetime, not the search state,
+    /// changes here).
     pub fn isearch_confirm(&mut self) {
         if !self.isearch.active {
             return;
         }
         let query = self.isearch.query.clone();
         self.isearch.active = false;
-        self.isearch_sync_match_context();
+        // The highlight lifetime rule: isearch confirm CLEARS the match
+        // context (matching `isearch_cancel` above and emacs
+        // `isearch-exit`) — the faces vanish when the search ends.
+        self.match_context = MatchContext::default();
         if query.is_empty() {
             self.minibuffer_message("");
         } else if self.isearch.matches.is_empty() {
@@ -437,6 +445,11 @@ impl AppStore {
                 label: "search-RET".to_string(),
             };
             self.jump_stack.record_jump(&origin, &dest);
+            // jump-highlight: the search-RET landing gets the same
+            // landing highlight as every other jump (this path records
+            // the jump stack directly, not through `record_jump`, so it
+            // calls the shared helper itself — one rule, all jumps).
+            self.record_landing_highlight(&dest);
             self.minibuffer_message(&format!("jumped to {file}:{line_no}"));
         }
     }

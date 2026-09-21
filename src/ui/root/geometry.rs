@@ -147,6 +147,7 @@ mod tests {
                 text: (*t).to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
+                highlight: None,
             })
             .collect();
         Snapshot {
@@ -276,6 +277,7 @@ mod tests {
                     text: (*text).to_string(),
                     spans: Vec::new(),
                     matches: Vec::new(),
+                    highlight: None,
                 };
                 let notes: Vec<FileViewRow> = note_lines
                     .iter()
@@ -287,6 +289,7 @@ mod tests {
                         text: format!("  \u{25b8} note {l}"),
                         spans: Vec::new(),
                         matches: Vec::new(),
+                        highlight: None,
                     })
                     .collect();
                 std::iter::once(code_row).chain(notes)
@@ -407,6 +410,7 @@ mod tests {
                 text: format!("line {}", line),
                 spans: Vec::new(),
                 matches: Vec::new(),
+                highlight: None,
             });
         }
         let snap = Snapshot {

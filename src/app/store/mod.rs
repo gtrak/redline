@@ -883,6 +883,13 @@ pub struct FileViewRow {
     /// renderer's overlay gives its face priority on overlap). Empty for
     /// note rows and when no match context applies to this buffer.
     pub matches: Vec<LineMatch>,
+    /// The landing highlight on this line (jump-highlight; code rows
+    /// only): the landed-on symbol's BYTE range (line-relative — the same
+    /// byte domain as `spans`/`matches`) plus the fade intensity in
+    /// `[0, 1]` the snapshot computed for this frame (the pure curve of the
+    /// landing's age; 0.0 at or past the duration). `None` for note rows
+    /// and whenever no landing highlight applies to this line.
+    pub highlight: Option<(usize, usize, f32)>,
 }
 
 impl FileViewRow {
@@ -1104,11 +1111,14 @@ pub struct LineMatch {
 /// carry per-file paths, so only THIS buffer's hits enter the context).
 ///
 /// Lifetime (pinned in the store tests): while isearch is active the
-/// context tracks it; isearch confirm (RET) KEEPS it (the user wants the
-/// context after the search ends); it is cleared by C-g / cancel (isearch
-/// cancel, the global C-g, and closing or cancelling the results view),
-/// and by a new search with a DIFFERENT query (a same-query re-run keeps
-/// it). A search jump REPLACES it with the jumped buffer's hits.
+/// context tracks it; isearch confirm (RET) and cancel (C-g) BOTH clear
+/// it (emacs `isearch-exit` removes the lazy-highlight faces when the
+/// search ends); a new search with a DIFFERENT query clears it (a
+/// same-query re-run keeps it). A search-results jump REPLACES it with
+/// the jumped buffer's hits, and THAT context persists (it is the
+/// cursor-visibility case the feature was built for) — until point
+/// motion elsewhere, a different query, or closing/cancelling the
+/// results view.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MatchContext {
     /// The buffer key the ranges belong to (empty = inactive).
@@ -1120,6 +1130,60 @@ pub struct MatchContext {
     /// Index into `ranges` of the selected match (out of range = none —
     /// e.g. a jumped hit whose column is undeterminable).
     pub selected: usize,
+}
+
+/// The transient landing highlight (jump-highlight): the symbol a jump
+/// landed ON — its buffer, line, and the symbol's BYTE range within the
+/// line. `set_at` is the animation's t=0. Describes the CURRENT buffer's
+/// landing (a cross-file highlight is not rendered anywhere — no
+/// per-file map). Lifetime (pinned in the store tests): set during the
+/// jump, cleared at the start of the next command dispatch (a jump
+/// replaces it).
+#[derive(Clone, Debug)]
+pub struct LandingHighlight {
+    /// The buffer key the landing is in (rendered only while that buffer
+    /// is current).
+    pub buffer_key: String,
+    /// The landing line (0-based).
+    pub line: usize,
+    /// Byte offset within the line (inclusive).
+    pub start: usize,
+    /// Byte offset within the line (exclusive, <= the line's byte length).
+    pub end: usize,
+    /// When the landing was recorded (the fade's t=0).
+    pub set_at: std::time::Instant,
+}
+
+/// The landing-highlight fade constants (jump-highlight), named in one
+/// place: the duration the highlight takes to fade out and the frame
+/// interval the animation driver bumps the revision tick at. The driver,
+/// the intensity curve, and the tests all read from here. 200 ms / 33 ms
+/// (~30 fps, 6-7 frames): clearly perceptible, but shorter than the
+/// 250 ms default on purpose — the render loop's cursor workaround
+/// (plan 013) runs on every frame it causes, so fewer frames means fewer
+/// frames the known CUP race runs on.
+pub const JUMP_HIGHLIGHT_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
+pub const JUMP_HIGHLIGHT_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// The landing-highlight fade curve (jump-highlight): the highlight's
+/// intensity as a pure function of the age of a landing and the terminal's
+/// color capability — computed in the snapshot (NOT in the renderer), so
+/// the curve is unit-testable without rendering anything. With truecolor
+/// the face's RGB is interpolated toward the base background, so the
+/// intensity decays linearly `1.0 -> 0.0` over `JUMP_HIGHLIGHT_DURATION`
+/// (0.0 at or past the duration). Without truecolor a 16-color palette
+/// cannot interpolate: the highlight HOLDS at full intensity for the
+/// whole duration, then clears (an honest flash — not a fake fade). Either
+/// way the curve is monotone non-increasing: `1.0` at the start, `0.0` at
+/// or before the duration.
+pub fn jump_highlight_intensity(elapsed: std::time::Duration, truecolor: bool) -> f32 {
+    if elapsed >= JUMP_HIGHLIGHT_DURATION {
+        0.0
+    } else if !truecolor {
+        1.0 // hold: the palette cannot fade
+    } else {
+        1.0 - elapsed.as_secs_f32() / JUMP_HIGHLIGHT_DURATION.as_secs_f32()
+    }
 }
 
 /// Incremental in-buffer search state. The store owns this; the UI
@@ -1587,6 +1651,19 @@ pub struct AppStore {
     /// index job starts (tokio watch `send` with zero receivers discards the
     /// event -- see the tokio skill). `Root` takes it for its drain.
     index_rx: Option<tokio::sync::watch::Receiver<crate::nav::index::IndexEvent>>,
+    // ── jump-highlight: the transient landing highlight ──────────────────
+    /// The transient landing highlight (jump-highlight) — see
+    /// `LandingHighlight` for the lifetime rule. Cleared at the start of
+    /// every command dispatch; set by the jump landing hooks.
+    jump_highlight: Option<LandingHighlight>,
+    /// The landing-highlight wake channel (jump-highlight): the store owns
+    /// the sender; the UI's `use_future` driver in `Root` takes the
+    /// receiver exactly once (the issue-04/05 bus precedent). A jump that
+    /// sets the highlight sends one message; the bounded (capacity 1)
+    /// channel coalesces rapid jump bursts (one animation per burst, the
+    /// latest `set_at` wins).
+    jump_wake_tx: mpsc::Sender<()>,
+    jump_wake_rx: Option<mpsc::Receiver<()>>,
     /// The current search job's results state (issue 06).
     search: SearchState,
     /// Generation counter for search jobs: bumped on every new search
@@ -1710,6 +1787,12 @@ impl AppStore {
         let (search_bus, search_rx) = SearchBus::new();
         let search_rx = Some(search_rx);
 
+        // jump-highlight: the landing-highlight wake channel (the store
+        // keeps the sender; the Root hook's animation driver takes the
+        // receiver exactly once). Capacity 1: rapid jump bursts
+        // coalesce into one wake (the latest `set_at` decides the fade).
+        let (jump_wake_tx, jump_wake_rx) = mpsc::channel(1);
+
         Self {
             theme: Theme::default(),
             registry,
@@ -1769,6 +1852,9 @@ impl AppStore {
             search_bus,
             search_rx,
             index_rx: None,
+            jump_highlight: None,
+            jump_wake_tx,
+            jump_wake_rx: Some(jump_wake_rx),
             search: SearchState::default(),
             search_generation: 0,
             search_prompt: None,
@@ -1821,6 +1907,21 @@ impl AppStore {
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// jump-highlight: the transient landing highlight, when one is
+    /// active (the snapshot reads it to compute the fade intensity; the
+    /// animation driver reads it to find the deadline).
+    pub fn jump_highlight(&self) -> Option<&LandingHighlight> {
+        self.jump_highlight.as_ref()
+    }
+
+    /// jump-highlight: take the animation driver's wake receiver out of
+    /// the store (exactly once — the Root hook's `use_future` driver
+    /// takes it; a second take returns `None`, e.g. on the static render
+    /// path or after a test's take). Mirrors `search_rx()`.
+    pub fn take_jump_wake_rx(&mut self) -> Option<mpsc::Receiver<()>> {
+        self.jump_wake_rx.take()
     }
 
     pub fn top_view(&self) -> ViewId {
