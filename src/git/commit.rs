@@ -192,9 +192,11 @@ mod tests {
     #[test]
     fn commit_without_author_fails() {
         // Serialize: HOME isolation is process-global; other threads reading
-        // env vars concurrently is UB per Rust docs.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard_mutex = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // env vars concurrently is UB per Rust docs. The lock is the
+        // crate-level `ENV_LOCK` (P3b), also held by `model::files`'s
+        // `EnvGuard` — separate per-module locks would not exclude each
+        // other.
+        let _guard_mutex = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let _guard = IsolatedHome::apply();
         let dir = tempfile::tempdir().unwrap();

@@ -422,8 +422,9 @@ impl AppStore {
     /// were never indexed either).
     ///
     /// The batch shares ONE `GitignoreMemo` (F2/F3): each directory's
-    /// `.gitignore` (and the repo-level sources) is parsed at most once
-    /// per batch, not once per changed path, so a 10,000-path burst
+    /// ignore files (`.gitignore` + `.ignore`) and the repo-level
+    /// sources are parsed at most once per batch, not once per changed
+    /// path, so a 10,000-path burst
     /// stays cheap on the UI thread.
     pub(super) fn indexable_changes(changed: &[PathBuf], root: &Path) -> Vec<PathBuf> {
         let memo: crate::model::files::GitignoreMemo =
@@ -551,11 +552,17 @@ impl AppStore {
     ///
     /// Deliberate exception to the project's ignore rules (F5): a landed
     /// dependency lives exactly where the PROJECT index excludes it —
-    /// `hidden(true)` skips `.venv/…`, and in a git repo
-    /// `parents(true) + git_ignore(true) + require_git(true)` make
-    /// `ignore::Walk::new` apply the PROJECT's `.gitignore` (e.g.
-    /// `node_modules/`), the repo exclude file, and the global excludes
-    /// to THIS walk — silently zeroing the file list (the dependency is
+    /// `hidden(true)` skips a `.venv/…` root, and in a git repo the
+    /// defaults `parents(true) + git_ignore(true) + git_exclude(true) +
+    /// git_global(true) + require_git(true)` make `ignore::Walk::new`
+    /// apply the repo exclude file, the global excludes, and any
+    /// `.gitignore` pattern that matches a directory AT OR BELOW this
+    /// walk root to THIS walk. A pattern matching an ancestor ABOVE the
+    /// root does not apply (a project `node_modules/` rule does not
+    /// prune a walk rooted inside `node_modules/<pkg>` — executed
+    /// pre-F5, such a walk returned its files), so the real pre-F5
+    /// failure modes here are hidden pruning, the exclude/global
+    /// sources, and below-root `.gitignore` patterns (the dependency is
     /// excluded from the project index so it doesn't pollute project
     /// symbols; once the user lands in it, navigation inside it is the
     /// whole point). So this walk disables `hidden` and every gitignore

@@ -21,6 +21,16 @@ mod ui;
 #[cfg(test)]
 mod perf;
 
+/// The ONE lock every test that mutates process-global environment
+/// holds while its env guard is live (P3b): `std::env::set_var`
+/// mutates process state, and other threads reading env vars
+/// concurrently is UB per the Rust docs — so `model::files`'s
+/// `EnvGuard` and `git::commit`'s `IsolatedHome` serialize on this
+/// shared crate-level mutex (separate per-module locks would not
+/// exclude each other).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use app::config;
 use app::store::AppStore;
 use iocraft::prelude::*;

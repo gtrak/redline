@@ -1,30 +1,31 @@
 //! Per-project file lists: an `ignore`-crate walk of the project root
-//! (respects `.gitignore`, skips hidden files/dirs, never descends into
-//! `.git`), cached in memory per project root. The walk runs once per
-//! project (measured ~20ms for a 10k-file repo, debug build); the
-//! `re-walk` command invalidates the cache (live refresh via the file
-//! watcher in `src/app/watcher.rs`).
+//! (respects `.gitignore` and `.ignore`, skips hidden files/dirs,
+//! never descends into `.git`), cached in memory per project root. The
+//! walk runs once per project (measured ~20ms for a 10k-file repo,
+//! debug build); the `re-walk` command invalidates the cache (live
+//! refresh via the file watcher in `src/app/watcher.rs`).
 //!
 //! `.gitignore` handling has two modes (verified against the ignore
 //! crate 0.4.33): inside a git repo the crate applies the ignore
 //! sources natively — `.gitignore`, `.git/info/exclude`, and the global
 //! git excludes (`IgnoreBuilder` defaults `git_ignore/git_exclude/
 //! git_global: true, require_git: true`); for marker-only (non-git)
-//! projects it applies **none** of them (`require_git` gates all of
-//! them), so this module evaluates the per-path predicate
-//! (`is_gitignored`) itself and filters the walk.
+//! projects it applies **none** of the GIT sources (`require_git`
+//! gates them all — per-directory `.ignore` files are NOT gated and
+//! still apply natively), so this module evaluates the per-path
+//! predicate (`is_gitignored`) itself and filters the walk.
 //!
 //! `is_gitignored` is the shared decision of the marker-only walk and
 //! the incremental index filter (`AppStore::indexable_changes`); the
 //! search pipeline's parallel walk carries the memoized equivalent
 //! (`git_ignored_by_ancestors`) — R3: the walkers agree. Behaviourally,
-//! the filter reproduces the walk for marker-only trees (`.gitignore`
-//! chain + `hidden(true)`), and in git repos for the sources above
-//! (`.gitignore` chain + `.git/info/exclude` + global excludes +
-//! `hidden(true)`). The one remaining divergence is the pre-existing
-//! cross-level negation precedence (a deeper `!pat` cannot rescue a
-//! path a shallower `.gitignore` ignores — not real git semantics, and
-//! shared by all three walkers).
+//! the filter reproduces the walk for marker-only trees (the
+//! `.gitignore` and `.ignore` chain, `hidden(true)`), and in git repos
+//! for the sources above (`.gitignore` and `.ignore` chain, `.git/
+//! info/exclude`, global excludes, `hidden(true)`). The one remaining
+//! divergence is the pre-existing cross-level negation precedence (a
+//! deeper `!pat` cannot rescue a path a shallower ignore-file rule
+//! ignores — not real git semantics, and shared by all three walkers).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,15 +71,19 @@ impl FileList {
             });
         } else {
             // Marker-only (non-git) project: the ignore crate applies
-            // **none** of the ignore sources at all (`require_git`), so
-            // filter through the shared per-path predicate
-            // (`is_gitignored_memo` + `under_graft`) — the SAME decisions
-            // the incremental index filter and the search pipeline make
-            // (R3: one source of truth).
+            // **none** of the GIT ignore sources (`require_git` gates
+            // `.gitignore`, `.git/info/exclude` and the global
+            // excludes — per-directory `.ignore` files are not gated
+            // and apply natively), so filter through the shared
+            // per-path predicate (`is_gitignored` + `under_graft`) —
+            // the SAME decisions the incremental index filter and the
+            // search pipeline make (R3: one source of truth). The
+            // predicate also covers `.ignore` (P3a), so the native
+            // application and the filter agree.
             let root_owned = root.to_path_buf();
             // One memo for the whole walk (F2): each directory's
-            // `.gitignore` is parsed at most once per walk, not once
-            // per entry. Per-invocation on purpose: `.gitignore` files
+            // ignore files (`.gitignore` + `.ignore`) are parsed at
+            // most once per walk, not once per entry. Per-invocation on purpose: `.gitignore` files
             // change while the app runs, and a persistent cache would
             // serve stale verdicts with no invalidation path. Both are
             // moved into the `filter_entry` closure (it must be 'static;
@@ -140,10 +145,11 @@ pub fn under_graft(root: &Path, path: &Path, is_dir: bool) -> bool {
 }
 
 /// A per-invocation memo of the ignore matchers: each directory's
-/// `.gitignore` (keyed by that directory's path) and, for git repos,
-/// the repo's `.git/info/exclude` and the process's global git excludes
-/// (keyed by sentinel paths under `root/.git/info/`). A `None` value is
-/// a cached "absent/unparseable" verdict, not just a matcher cache.
+/// `.gitignore` and `.ignore` (keyed by the ignore FILE's path) and,
+/// for git repos, the repo's `.git/info/exclude` and the process's
+/// global git excludes (keyed by sentinel paths under `root/.git/
+/// info/`). A `None` value is a cached "absent/unparseable" verdict,
+/// not just a matcher cache.
 ///
 /// Scope: **per invocation** — created inside `FileList::build` (one
 /// per walk) and inside `AppStore::indexable_changes` (one per change
@@ -152,30 +158,38 @@ pub fn under_graft(root: &Path, path: &Path, is_dir: bool) -> bool {
 /// runs, and a persistent cache would serve stale verdicts with no
 /// invalidation path. Sharing one memo across a batch is what keeps
 /// the incremental filter's I/O off the UI thread: each directory's
-/// `.gitignore` is parsed at most once per batch, not once per
-/// changed path.
+/// `.gitignore` and `.ignore` are parsed at most once per batch, not
+/// once per changed path.
 pub type GitignoreMemo = Mutex<HashMap<PathBuf, Option<Gitignore>>>;
 
 /// True when `path` (absolute, under `root`) is excluded from the
-/// `FileList` walk for ignore reasons. Evaluates, in git precedence
+/// `FileList` walk for ignore reasons. Evaluates, in the walk's source
 /// order:
 ///
 /// 1. any HIDDEN component of the project-relative path — the walk's
 ///    `hidden(true)` (F4: the incremental filter must not index what
 ///    the full build excluded);
-/// 2. the `.gitignore` ANCESTOR CHAIN (the path's own directory for a
-///    dir, its parent for a file, up to `root`), memoized per
-///    directory in `memo`; each matcher is asked in the ancestor form
+/// 2. the ignore-file ANCESTOR CHAIN — each directory's `.ignore`
+///    (the ignore crate's second per-directory source, P3a) then its
+///    `.gitignore`; the path's own directory for a dir, its parent for
+///    a file, up to `root` — memoized per ignore file in `memo`; each
+///    matcher is asked in the ancestor form
 ///    (`matched_path_or_any_parents`) — a directory rule like `gen/`
 ///    ignores the files beneath it, and a DIRECTORY is judged the same
 ///    way, so `build/sub` under a root `build/` rule is reported
-///    ignored (the walk prunes `build` wholesale);
+///    ignored (the walk prunes `build` wholesale). A `.ignore` match
+///    (either direction) outranks the `.gitignore` chain, mirroring
+///    the walk's evaluation order (`m_ignore` before `m_gi` in the
+///    ignore crate);
 /// 3. git repos only (F1): `.git/info/exclude`, then the process's
 ///    global git excludes (`core.excludesFile`, `Gitignore::global`) —
 ///    the sources the walk's `IgnoreBuilder` defaults
 ///    (`git_exclude/git_global: true, require_git: true`) apply
-///    natively. An explicit `.gitignore` match (either direction)
-///    takes precedence over both: git reads `.gitignore` last.
+///    natively. An explicit ignore-file match (either direction) takes
+///    precedence over both. The global excludes are matched against
+///    the FULL (absolute) path — the same input the walk feeds its
+///    cwd-rooted global matcher (P2a: the project-relative input made
+///    slash/anchored global patterns over-ignore against the walk).
 ///
 /// Paths outside `root` and `root` itself are never reported ignored.
 ///
@@ -189,7 +203,7 @@ pub type GitignoreMemo = Mutex<HashMap<PathBuf, Option<Gitignore>>>;
 ///
 /// Known divergence (pre-existing in all three walkers, not fixed
 /// here): cross-level negation precedence is not real git semantics —
-/// a deeper `!pat` cannot rescue a path a shallower `.gitignore`
+/// a deeper `!pat` cannot rescue a path a shallower ignore-file rule
 /// ignores; git gives the deepest matching rule the final word.
 ///
 /// The shared decision for the file-list walk (non-git branch), the
@@ -220,11 +234,16 @@ pub fn is_gitignored(
         return true;
     }
     let mut map = memo.lock().unwrap();
-    // (2) the `.gitignore` ancestor chain, deepest to root. An explicit
-    // match in either direction is decisive: `.gitignore` outranks the
-    // repo-level sources (step 3).
-    let mut ignored = false;
-    let mut explicit = false;
+    // (2) The ignore-file ancestor chain, deepest to root: each
+    // directory's `.ignore` (the ignore crate's second per-directory
+    // source, P3a) and its `.gitignore` — the walk's source order.
+    // An explicit match in either direction is decisive over the
+    // repo-level sources (step 3); a `.ignore` match outranks the
+    // `.gitignore` chain.
+    let mut ig_ignored = false;
+    let mut ig_explicit = false;
+    let mut gi_ignored = false;
+    let mut gi_explicit = false;
     let mut dir = if is_dir {
         Some(path.to_path_buf())
     } else {
@@ -234,26 +253,38 @@ pub fn is_gitignored(
         // The matcher's root `d` is `path` itself (a dir) or an ancestor
         // of it, so the ancestor-form call below is always inside the
         // matcher's root (its precondition).
-        let matcher = map
-            .entry(d.clone())
-            .or_insert_with(|| load_gitignore(&d));
-        if let Some(gi) = matcher {
-            let m = gi.matched_path_or_any_parents(path, is_dir);
-            if m.is_ignore() {
-                ignored = true;
-            } else if m.is_whitelist() {
-                explicit = true;
+        for (name, ignored, explicit) in [
+            (".ignore", &mut ig_ignored, &mut ig_explicit),
+            (".gitignore", &mut gi_ignored, &mut gi_explicit),
+        ] {
+            let key = d.join(name);
+            let matcher = map
+                .entry(key)
+                .or_insert_with(|| load_ignore_file(&d, name));
+            if let Some(gi) = matcher {
+                let m = gi.matched_path_or_any_parents(path, is_dir);
+                if m.is_ignore() {
+                    *ignored = true;
+                } else if m.is_whitelist() {
+                    *explicit = true;
+                }
             }
         }
         if d == root {
-            break; // the root's own `.gitignore` was the last check
+            break; // the root's own ignore files were the last check
         }
         dir = d.parent().map(|p| p.to_path_buf());
     }
-    if ignored {
+    if ig_ignored {
         return true;
     }
-    if explicit {
+    if ig_explicit {
+        return false; // `.ignore` says "keep": the `.gitignore` chain and the exclude sources cannot override
+    }
+    if gi_ignored {
+        return true;
+    }
+    if gi_explicit {
         return false; // `.gitignore` says "keep": the exclude sources cannot override
     }
     // (3) git repos only: `.git/info/exclude` (higher precedence) and
@@ -279,27 +310,37 @@ pub fn is_gitignored(
         let global = map
             .entry(global_key.clone())
             .or_insert_with(load_global_excludes);
+        // P2a: the global matcher is rooted at the process cwd (like
+        // the walk's), so it gets the FULL path — the same input the
+        // walk feeds. Feeding the project-relative path made slash and
+        // anchored global patterns match at the cwd root instead of
+        // where the walk sees them, so the filter OVER-ignored files
+        // the full build indexed (stale symbols until a full rebuild).
+        // `.git/info/exclude` above keeps `rel`: it is repo-rooted,
+        // exactly as the walk roots it.
         return global
             .as_ref()
-            .is_some_and(|gi| matches!(rel_decision(gi, rel, is_dir), Some(true)));
+            .is_some_and(|gi| matches!(rel_decision(gi, path, is_dir), Some(true)));
     }
     false
 }
 
 /// The decision a repo-level source (`.git/info/exclude` or the global
-/// excludes) makes about `rel` — the project-relative path, exactly
-/// what the walk feeds its `Ignore` matchers (entries are evaluated
-/// relative to the walked root, so a root-anchored pattern like
-/// `/build/` lands where git puts it). Ancestor form, because the walk
-/// prunes an ignored directory wholesale: a directory rule (`build/`)
-/// must drop the directory and everything under it. `Some(true)` =
-/// ignore, `Some(false)` = explicit keep, `None` = no match.
-fn rel_decision(gi: &Gitignore, rel: &Path, is_dir: bool) -> Option<bool> {
-    let m = gi.matched(rel, is_dir);
+/// excludes) makes about `input` — the same input the walk feeds that
+/// matcher (entries are evaluated relative to the matcher's root, so a
+/// root-anchored pattern like `/build/` lands where git puts it):
+/// the PROJECT-relative path for `.git/info/exclude` (repo-rooted),
+/// the FULL (absolute) path for the global excludes (cwd-rooted —
+/// P2a). Ancestor form, because the walk prunes an ignored directory
+/// wholesale: a directory rule (`build/`) must drop the directory and
+/// everything under it. `Some(true)` = ignore, `Some(false)` = explicit
+/// keep, `None` = no match.
+fn rel_decision(gi: &Gitignore, input: &Path, is_dir: bool) -> Option<bool> {
+    let m = gi.matched(input, is_dir);
     if !m.is_none() {
         return Some(m.is_ignore());
     }
-    let mut parent = rel.parent();
+    let mut parent = input.parent();
     while let Some(p) = parent {
         let m = gi.matched(p, true);
         if !m.is_none() {
@@ -325,13 +366,26 @@ fn load_excludes(root: &Path, file: &Path) -> Option<Gitignore> {
 /// The process's global git excludes (`core.excludesFile`), resolved
 /// from the git-config environment exactly as the walk's `IgnoreBuilder`
 /// resolves them (`Gitignore::global`; the matcher's base is the
-/// process cwd, and `rel_decision` matches against the project-relative
-/// path — the same relative input the walk's matcher sees). `Some`
-/// (possibly empty) when nothing is configured or the read fails: the
-/// walk applies the same empty matcher, so caching "nothing to ignore"
-/// keeps the two agreeing.
+/// process cwd, and `rel_decision` matches it against the FULL
+/// (absolute) path — the same input the walk's matcher sees, P2a;
+/// the old project-relative input made slash/anchored patterns
+/// disagree with the walk). `Some` (possibly empty) when nothing is
+/// configured or the read fails: the walk applies the same empty
+/// matcher, so caching "nothing to ignore" keeps the two agreeing.
 fn load_global_excludes() -> Option<Gitignore> {
     Some(Gitignore::global().0)
+}
+
+/// Load a per-directory ignore file (`.gitignore` or `.ignore`) from
+/// `dir` as a matcher rooted at `dir`. `None` when the file is absent
+/// or unparseable. Shared by the file-list walk, the incremental index
+/// filter, and the search pipeline (R3: all walkers must agree on
+/// gitignore semantics).
+pub(crate) fn load_ignore_file(dir: &Path, name: &str) -> Option<Gitignore> {
+    match Gitignore::new(dir.join(name)) {
+        (gi, None) => Some(gi),
+        _ => None,
+    }
 }
 
 /// Load a `.gitignore` file from `dir` as a matcher. `None` when the
@@ -339,10 +393,7 @@ fn load_global_excludes() -> Option<Gitignore> {
 /// incremental index filter, and the search pipeline (R3: all walkers
 /// must agree on gitignore semantics).
 pub(crate) fn load_gitignore(dir: &Path) -> Option<Gitignore> {
-    match Gitignore::new(dir.join(".gitignore")) {
-        (gi, None) => Some(gi),
-        _ => None,
-    }
+    load_ignore_file(dir, ".gitignore")
 }
 
 /// True when `gi` ignores `path` (a directory when `is_dir`, a file
@@ -565,13 +616,22 @@ mod tests {
     /// Hermetic git-config environment for the global-excludes test:
     /// `GIT_CONFIG_GLOBAL` replaces `$HOME/.gitconfig` and the XDG file
     /// (git 2.32+), and the temp `HOME`/`XDG_CONFIG_HOME` guard the
-    /// fallbacks. Restored on drop, the established pattern of the git
-    /// test harness (process-global env change, accepted race window as
-    /// in `git/commit.rs`'s `IsolatedHome`).
-    struct EnvGuard(HashMap<String, Option<std::ffi::OsString>>);
+    /// fallbacks. Restored on drop.
+    ///
+    /// P3b: env mutation is process-global and other threads reading
+    /// env vars concurrently is UB, so the guard holds the crate-level
+    /// `ENV_LOCK` for its whole life — the pattern of `git/commit.rs`
+    ///'s `IsolatedHome` precedent, which SERIALIZES behind that lock
+    /// (the old doc here cited it as an "accepted race window", which
+    /// was backwards).
+    struct EnvGuard {
+        restore: HashMap<String, Option<std::ffi::OsString>>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
 
     impl EnvGuard {
         fn set(pairs: &[(&str, &str)]) -> Self {
+            let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let restore = pairs
                 .iter()
                 .map(|(k, _)| (k.to_string(), std::env::var_os(k)))
@@ -579,45 +639,65 @@ mod tests {
             for (k, v) in pairs {
                 unsafe { std::env::set_var(k, v); }
             }
-            Self(restore)
+            Self { restore, _lock }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            for (k, v) in self.0.drain() {
+            for (k, v) in self.restore.drain() {
                 match v {
                     Some(v) => unsafe { std::env::set_var(k, v); },
                     None => unsafe { std::env::remove_var(k); },
                 }
             }
+            // `_lock` (declared after `restore`) drops last: the env is
+            // fully restored before the serialization window closes.
         }
     }
 
-    /// (a) Git-repo agreement (F1): the walk's `IgnoreBuilder` defaults
-    /// honour `.git/info/exclude` AND the global git excludes
+    /// (a) Git-repo agreement (F1 + P2a): the walk's `IgnoreBuilder`
+    /// defaults honour `.git/info/exclude` AND the global git excludes
     /// (`git_exclude/git_global: true, require_git: true`) — a file
     /// ignored SOLELY by those sources must not be re-indexed. The
     /// existing fixtures have no `.git`, so this is the behavioural
     /// arm: the same paths are fed to the walk and to the filter, and
     /// each source independently drops a distinct path (drop one and
     /// the assertion pins which source went missing).
+    ///
+    /// P2a: the global-excludes file also carries a SLASH pattern
+    /// (`sub/inner.rs`) and an ANCHORED pattern (`/anchored.rs`). The
+    /// global matcher is cwd-rooted (the walk's and the filter's are
+    /// the same matcher), so both must be fed the FULL path — with
+    /// the project-relative input the filter over-ignored exactly
+    /// these two (it is the pre-fix failure this test pins). Real
+    /// `git check-ignore` reports `sub/inner.rs`/`anchored.rs`
+    /// ignored here too — the walk (and thus the fixed filter) is the
+    /// one that keeps them, an ignore-crate quirk of cwd-rooting; the
+    /// filter's contract is agreement with the walk.
     #[test]
     fn git_repo_walk_and_filter_agree_on_exclude_and_global() {
         let dir = project();
         let root = dir.path();
-        // Repo marker + per-repo excludes (the gate's demonstrated case).
+        // Repo marker + per-repo excludes (the gate's demonstrated
+        // case + a slash pattern and an anchored pattern, repo-rooted
+        // like the walk's exclude matcher).
         fs::create_dir_all(root.join(".git/info")).unwrap();
         fs::write(
             root.join(".git/info/exclude"),
-            "local/\nsecret.rs\n",
+            "local/\nsecret.rs\nexsub/inner.rs\n/anchored_excl.rs\n",
         )
         .unwrap();
         fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-        // Global excludes, hermetic (see `EnvGuard`).
+        // Global excludes, hermetic (see `EnvGuard`) — plain, slash,
+        // and anchored patterns (the P2a inputs).
         let home = tempfile::tempdir().unwrap();
         let global_ig = home.path().join("global-ignore");
-        fs::write(&global_ig, "gignored.rs\n").unwrap();
+        fs::write(
+            &global_ig,
+            "gignored.rs\nsub/inner.rs\n/anchored.rs\n",
+        )
+        .unwrap();
         let gitconfig = home.path().join("gitconfig");
         fs::write(
             &gitconfig,
@@ -630,20 +710,35 @@ mod tests {
             ("HOME", home.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", home.path().to_str().unwrap()),
         ]);
-        // Candidate paths, one drop source each (+ one plain kept file):
-        //   src/a.rs          kept
-        //   src/secret.rs     .git/info/exclude (file rule)
-        //   local/cache.tmp   .git/info/exclude (directory rule `local/`)
-        //   gignored.rs       global excludes
-        //   note.log          .gitignore (chain)
-        //   top.rs            kept (root file)
+        // Candidate paths, one drop source each (+ plain kept files):
+        //   src/a.rs            kept
+        //   src/secret.rs       .git/info/exclude (file rule)
+        //   local/cache.tmp     .git/info/exclude (directory rule `local/`)
+        //   exsub/inner.rs      .git/info/exclude (slash rule, repo-rooted)
+        //   anchored_excl.rs    .git/info/exclude (anchored rule)
+        //   gignored.rs         global excludes (plain rule)
+        //   sub/inner.rs        global excludes (SLASH rule): the walk
+        //                       KEEPS it (cwd-rooting quirk) — pre-P2a
+        //                       the filter dropped it (over-ignore)
+        //   anchored.rs         global excludes (anchored rule): same
+        //                       shape, same quirk
+        //   note.log            .gitignore (chain)
+        //   top.rs              kept (root file)
+        //   nested/plain.rs     kept
+        //   excl/plain2.rs      kept
         for rel in [
             "src/a.rs",
             "src/secret.rs",
             "local/cache.tmp",
+            "exsub/inner.rs",
+            "anchored_excl.rs",
             "gignored.rs",
+            "sub/inner.rs",
+            "anchored.rs",
             "note.log",
             "top.rs",
+            "nested/plain.rs",
+            "excl/plain2.rs",
         ] {
             file(root.join(rel), "x\n");
         }
@@ -653,22 +748,40 @@ mod tests {
         let walk_set: std::collections::BTreeSet<&str> =
             walk.files.iter().map(|s| s.as_str()).collect();
         // Expected membership — proves each source is honoured by the
-        // walk itself (the invariant that was previously false).
+        // walk itself (the invariant that was previously false), and
+        // pins the P2a quirk: the cwd-rooted global matcher does not
+        // reach the slash/anchored candidates, so the walk keeps them.
         assert_eq!(
             walk_set,
-            std::collections::BTreeSet::from(["Cargo.toml", "src/a.rs", "top.rs"]),
-            "walk must drop the exclude/global/gitignore paths: {:?}",
+            std::collections::BTreeSet::from([
+                "Cargo.toml",
+                "src/a.rs",
+                "top.rs",
+                "sub/inner.rs",
+                "anchored.rs",
+                "nested/plain.rs",
+                "excl/plain2.rs"
+            ]),
+            "walk must drop the exclude/global/gitignore paths (and keep the
+slash/anchored global ones the cwd-rooted matcher cannot reach): {:?}",
             walk.files
         );
         // The FILTER (incremental index path) agrees with the walk on
-        // every candidate:
+        // every candidate — the P2a contract is filter verdict == walk
+        // membership, on every path, not just the plain-rule ones:
         for rel in [
             "src/a.rs",
             "src/secret.rs",
             "local/cache.tmp",
+            "exsub/inner.rs",
+            "anchored_excl.rs",
             "gignored.rs",
+            "sub/inner.rs",
+            "anchored.rs",
             "note.log",
             "top.rs",
+            "nested/plain.rs",
+            "excl/plain2.rs",
         ] {
             let p = root.join(rel);
             let in_index = !ignored(root, &p, false) && !under_graft(root, &p, false);
@@ -679,6 +792,94 @@ mod tests {
                 walk_set.contains(rel)
             );
         }
+        // Directory-event form: the walk prunes the ignored directory
+        // wholesale, so the filter must report the directory itself
+        // ignored — and keep the directories the walk keeps.
+        assert!(
+            ignored(root, &root.join("local"), true),
+            "`local/` exclude rule must ignore the directory itself"
+        );
+        assert!(
+            !ignored(root, &root.join("exsub"), true),
+            "the slash exclude rule matches the PATH exsub/inner.rs, not the
+parent dir — the walk keeps `exsub/` and drops the file, the filter must"
+        );
+        assert!(
+            !ignored(root, &root.join("sub"), true),
+            "the walk keeps `sub/`; the filter must too (P2a)"
+        );
+    }
+
+    /// (b) `.ignore` files (P3a): the walk's per-directory chain also
+    /// honours `.ignore` (the ignore crate's `ignore: true` default —
+    /// NOT gated by `require_git`, so it applies in marker-only trees
+    /// too), so the predicate must read `.ignore` as the same
+    /// per-directory chain with a second filename — the faithful
+    /// choice (decision: reading it). Without it, a changed path the
+    /// full build dropped via a parent `.ignore` would be re-indexed —
+    /// the F1 bug class, pre-existing and outside the F1–F5 fence.
+    /// Hermetic agreement: the filter's verdict equals walk membership
+    /// on every candidate, for both a root `.ignore` and a PARENT
+    /// (subdir) `.ignore`.
+    #[test]
+    fn walk_and_filter_agree_on_dot_ignore_files() {
+        let dir = project();
+        let root = dir.path();
+        // Marker-only tree (no `.git`): the native GIT ignore sources
+        // are inert (`require_git`); `.ignore` still applies to the
+        // walk natively, and the predicate must agree.
+        fs::write(root.join(".ignore"), "*.tmp\nbuild2/\n").unwrap();
+        file(root.join("src/.ignore"), "gen2/\n");
+        file(root.join("src/keep.rs"), "k\n");
+        file(root.join("src/gen2/out.rs"), "g\n");
+        file(root.join("src/vis.rs"), "v\n");
+        file(root.join("scratch.tmp"), "t\n");
+        file(root.join("build2/x.bin"), "b\n");
+        file(root.join("plain.rs"), "p\n");
+
+        let walk = FileList::build(root).unwrap();
+        let walk_set: std::collections::BTreeSet<&str> =
+            walk.files.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            walk_set,
+            std::collections::BTreeSet::from([
+                "Cargo.toml",
+                "plain.rs",
+                "src/keep.rs",
+                "src/vis.rs"
+            ]),
+            "walk must drop the .ignore paths (root and parent level): {:?}",
+            walk.files
+        );
+        // Filter verdict == walk membership on every candidate.
+        for rel in [
+            "plain.rs",
+            "scratch.tmp",
+            "build2/x.bin",
+            "src/keep.rs",
+            "src/gen2/out.rs",
+            "src/vis.rs",
+        ] {
+            let p = root.join(rel);
+            let in_index = !ignored(root, &p, false) && !under_graft(root, &p, false);
+            assert_eq!(
+                walk_set.contains(rel),
+                in_index,
+                "`{rel}`: in-walk={:?} in-index={in_index}",
+                walk_set.contains(rel)
+            );
+        }
+        // Directory-event form: the walk prunes the directory
+        // wholesale, so the filter must report it ignored.
+        assert!(
+            ignored(root, &root.join("build2"), true),
+            "root .ignore directory rule must ignore the directory"
+        );
+        assert!(
+            ignored(root, &root.join("src/gen2"), true),
+            "parent (subdir) .ignore directory rule must ignore the directory"
+        );
+        assert!(!ignored(root, &root.join("src"), true));
     }
 
     /// (c) Hidden components (F4): the walk's `hidden(true)` is mirrored
@@ -710,10 +911,25 @@ mod tests {
     }
 
     /// (d) The memo (F2): one batch with many paths under the same
-    /// directories parses each `.gitignore` a bounded number of times —
-    /// exactly once per distinct directory (each memo entry is one
-    /// `or_insert_with` load; a per-path memo would grow with the
+    /// directories parses each ignore file a bounded number of times —
+    /// exactly once per distinct (directory, file) (each memo entry is
+    /// one `or_insert_with` load; a per-path memo would grow with the
     /// batch and re-parse the root `.gitignore` 300 times).
+    ///
+    /// Perf record (P3c — restated as a ratio with the profile named,
+    /// not as unverifiable absolutes): the F2 fixture is now
+    /// reproducible from the tree — `python3 tools/ignore_fixture.py
+    /// /tmp/ignore_fixture` (20,000-file depth-4 marker-only tree,
+    /// 33-line root `.gitignore`, a `.gitignore` every 5th directory),
+    /// measured by the `--index-profile` walk leg. Release build,
+    /// lane's box: pre-memo 7359.7 ms vs memoized 555.0 ms — a
+    /// ~13× walk-speedup. This session re-measured the memoized walk
+    /// on the same fixture (release build, `--index-profile`): 171.6 ms
+    /// over 18,401 files. The gate's independent debug-build re-run
+    /// reproduced the direction: 8751.5 → 1529.8 ms cold, 5.7×.
+    /// Absolute ms are machine- and profile-dependent; regenerate the
+    /// fixture and re-measure to confirm, and compare the ratio,
+    /// not the absolutes.
     #[test]
     fn memo_bounds_gitignore_loads_per_directory() {
         let dir = project();
@@ -744,12 +960,13 @@ mod tests {
             );
         }
         // 300 paths across exactly 3 directories (src/gen, src, root)
-        // -> at most 3 memo entries (one per distinct directory).
+        // -> exactly 6 memo entries (one per distinct (directory,
+        // ignore FILE): `.gitignore` + `.ignore` each).
         let map = memo.lock().unwrap();
         assert_eq!(
             map.len(),
-            3,
-            "memo must hold one entry per directory, got: {map:?}"
+            6,
+            "memo must hold one entry per (directory, ignore file), got: {map:?}"
         );
         // A second identical batch hits the memo: no new entries, same
         // verdicts (the memo is per invocation, not per path).
@@ -757,7 +974,11 @@ mod tests {
         for (p, want) in paths.iter().zip(ignored.iter()).take(50) {
             assert_eq!(is_gitignored(root, p, false, &memo), *want);
         }
-        assert_eq!(memo.lock().unwrap().len(), 3, "second batch must not re-load");
+        assert_eq!(
+            memo.lock().unwrap().len(),
+            6,
+            "second batch must not re-load"
+        );
     }
 
     /// R3: the file-list walk and the search pipeline must agree on
