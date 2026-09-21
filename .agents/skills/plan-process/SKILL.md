@@ -409,3 +409,29 @@ Mitigations, strongest first:
 owns the test update (a test that pins the removed behaviour must move — test-authority
 policy). Fix it on `main` directly, then **steer any in-flight lane that shares the file** so it
 does not re-touch the same region and conflict at landing.
+
+## Gate scratch copies: never share the worktree's git index
+
+A reviewer needs a scratch copy to test a hypothesis (revert one hunk, re-run a
+test). **How you make that copy matters**, because a worktree's `.git` is a
+*file* pointing at the real gitdir — so a naive `cp -r` (or a copy that keeps
+that file) gives you a tree whose **index is the lane's real index**.
+
+Observed near-miss: a gate ran `git checkout <base-rev> -- src/model/files.rs`
+inside such a copy to test the pre-fix behaviour. That **staged the base blob in
+the lane's actual index**. It was caught and repaired (`git reset`, index only,
+no file writes) and the five files were re-hashed against the expected commit
+blobs to prove nothing had been modified — but the same mistake could just as
+easily have produced a **commit containing the wrong blob**, or a confusing
+"clean" status that hid a staged revert.
+
+**Rules:**
+
+1. Prefer **`git archive <rev> | tar -x -C <scratch>`** — it materializes a tree
+   with **no `.git` at all**, so nothing you do in it can touch the lane.
+2. Or make a real `git clone`/`git worktree` for the scratch.
+3. **Never** run `git checkout <rev> -- <path>` inside a copied tree.
+4. If it does happen: `git reset` (index only) in the *lane*, then verify every
+   touched file still hashes to the expected blob and that `git status` and the
+   diff stat are unchanged. Report it — a self-repaired index incident is worth
+   knowing about, because the alternative is a silent wrong commit.
