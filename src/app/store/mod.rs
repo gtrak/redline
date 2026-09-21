@@ -29,9 +29,7 @@ use crate::app::config::Config;
 use crate::app::events::{ChangeBus, ProjectChange};
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, parse_sequence};
 use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
-use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffSide, FileDiff};
-use crate::git::log::{relative_time_from, LogEntry};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
 use crate::model::buffer::{load_file, BufferTable, SCRATCH_NAME};
@@ -46,6 +44,16 @@ use crate::syntax::cache::{CacheKey, HighlightCache, TreeKey};
 use crate::syntax::highlight::{self, HighlightResult, RetainedTree};
 use crate::syntax::registry::{GrammarRegistry, LanguageId};
 use crate::theme::Theme;
+
+mod helpers;
+pub use self::helpers::reload_anchor;
+mod notes_doc;
+pub use self::notes_doc::{NotesDoc, parse_notes, serialize_notes};
+use self::helpers::{
+    blame_line_display, editor_cursor_line, extract_commit_message, file_candidate,
+    keep_cursor_visible, log_entry_display, pane_window, prefill_commit_message,
+    recenter_top_for, window_slice,
+};
 
 /// The result the background tooling-resolver job publishes to the app via
 /// the [`ResolveBus`] (plan 006 issue 02). Mirrors the [`IndexBus`] pattern:
@@ -879,17 +887,6 @@ impl NotesEntry {
     }
 }
 
-/// The parsed `.redline-notes.md` document (plan 005 issue 02): free text
-/// BEFORE the structured annotation section, the section's entries, and
-/// free text AFTER it. Everything outside the section is preserved
-/// verbatim on re-serialization.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NotesDoc {
-    pub before: Vec<String>,
-    pub entries: Vec<NotesEntry>,
-    pub after: Vec<String>,
-}
-
 /// The notes file's structured-section markers (plan 005 issue 02).
 pub const NOTES_BEGIN: &str = "<!-- redline-annotations:begin -->";
 pub const NOTES_END: &str = "<!-- redline-annotations:end -->";
@@ -900,193 +897,6 @@ pub const NOTES_RECORD_START: &str = "[annotation]";
 /// The ±25-line content search window for annotation re-anchoring
 /// (plan 005 issue 02).
 pub const ANNOTATION_REANCHOR_WINDOW: usize = 25;
-
-/// Parse a notes file's text into a `NotesDoc` (plan 005 issue 02):
-/// free text outside the structured section is preserved verbatim; a
-/// record block (`[annotation]` + `key: value` lines) parses into an
-/// `Annotation` when the required fields (`path`, `line`, `anchor`,
-/// `note`) are present and well-formed; every other block (malformed
-/// records, stray lines) is kept verbatim as a `NotesEntry::Raw`, never
-/// dropped. No markers at all → the whole file is `before` (untouched).
-pub fn parse_notes(text: &str) -> NotesDoc {
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    // A trailing newline is a line terminator, not an empty last line:
-    // drop the final empty element so round-trips don't accumulate
-    // blank lines.
-    if text.ends_with('\n') && lines.last() == Some(&"") {
-        lines.pop();
-    }
-    let begin = lines
-        .iter()
-        .position(|l| l.trim() == NOTES_BEGIN)
-        .and_then(|b| {
-            lines[b + 1..]
-                .iter()
-                .position(|l| l.trim() == NOTES_END)
-                .map(|e| (b, b + 1 + e))
-        });
-    let Some((b, e)) = begin else {
-        return NotesDoc {
-            before: lines.iter().map(|s| s.to_string()).collect(),
-            entries: Vec::new(),
-            after: Vec::new(),
-        };
-    };
-    NotesDoc {
-        before: lines[..b].iter().map(|s| s.to_string()).collect(),
-        entries: parse_notes_section(&lines[b + 1..e]),
-        after: lines[e + 1..].iter().map(|s| s.to_string()).collect(),
-    }
-}
-
-/// Parse the section body into entries: record blocks (`[annotation]`
-/// through the next `[annotation]` / end) that carry every required field
-/// become `Record`s; anything else is a verbatim `Raw` block (malformed
-/// records are kept, never dropped).
-fn parse_notes_section(lines: &[&str]) -> Vec<NotesEntry> {
-    // Split into (is_record_start, verbatim text) blocks: a block begins at
-    // every record start and runs to the next record start.
-    let starts: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.trim() == NOTES_RECORD_START)
-        .map(|(i, _)| i)
-        .collect();
-    let mut entries = Vec::new();
-    // Stray lines before the first record block → one verbatim block.
-    if !starts.is_empty() && starts[0] > 0 {
-        entries.push(NotesEntry::Raw(lines[..starts[0]].join("\n")));
-    }
-    for (i, start) in starts.iter().enumerate() {
-        let end = starts.get(i + 1).copied().unwrap_or(lines.len());
-        let block = &lines[*start..end];
-        match parse_record_block(block) {
-            Some(rec) => entries.push(NotesEntry::Record(rec)),
-            None => entries.push(NotesEntry::Raw(block.join("\n"))),
-        }
-    }
-    entries
-}
-
-/// Parse one `[annotation]` block into an `Annotation`. `None` when a
-/// required field (`path`, `line`, `anchor`, `note`) is missing or
-/// ill-formed (the caller keeps the block verbatim).
-fn parse_record_block(block: &[&str]) -> Option<Annotation> {
-    let mut rec = Annotation::default();
-    let mut have = [false; 4]; // path, line, anchor, note
-    // The syntax anchor's keys (plan 007 issue 02) are OPTIONAL: both must
-    // be present for `syntax: Some`; either missing → `None` (legacy).
-    let mut syntax_kind: Option<String> = None;
-    let mut syntax_name: Option<String> = None;
-    for line in &block[1..] {
-        // Lines without a `:` (stray text, blank lines) are skipped, not
-        // fatal: a record stays valid as long as the required fields are
-        // present (tolerant parse — hand-edited blocks survive).
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        // Value: the remainder after the first ':' with one leading space
-        // stripped (anchor text is otherwise exact — it is the re-anchor
-        // key, so it must round-trip byte-for-byte).
-        let value = value.strip_prefix(' ').unwrap_or(value);
-        match key {
-            "path" => {
-                rec.path = value.to_string();
-                have[0] = true;
-            }
-            "line" => {
-                rec.line = value.trim().parse::<usize>().ok()?;
-                have[1] = true;
-            }
-            "col" => {
-                // `col` is optional metadata (not an anchor field): a
-                // malformed value defaults to 0 rather than demoting the
-                // whole record to raw.
-                rec.col = value.trim().parse::<usize>().unwrap_or(0);
-            }
-            "anchor" => {
-                rec.anchor = value.to_string();
-                have[2] = true;
-            }
-            "note" => {
-                rec.text = value.to_string();
-                have[3] = true;
-            }
-            "orphaned" => {
-                rec.orphaned = value.trim() == "true";
-            }
-            "syntax_kind" => {
-                syntax_kind = Some(value.to_string());
-            }
-            "syntax_name" => {
-                syntax_name = Some(value.to_string());
-            }
-            // Unknown keys inside a record block: the block stays valid
-            // (forward compatibility), they are simply not re-emitted.
-            _ => {}
-        }
-    }
-    if have.iter().all(|h| *h) {
-        // The syntax anchor is OPTIONAL: absent keys (legacy records) and a
-        // half-written pair (a hand-edited `syntax_kind` without a
-        // `syntax_name`) both degrade to `None` — the record stays valid
-        // (tolerant parse), the anchor simply does not half-fire.
-        rec.syntax = match (syntax_kind, syntax_name) {
-            (Some(kind), Some(name)) => Some(SyntaxAnchor { kind, name }),
-            _ => None,
-        };
-        Some(rec)
-    } else {
-        None
-    }
-}
-
-/// Serialize a `NotesDoc` back to file text (plan 005 issue 02): free text
-/// outside the section verbatim, records in canonical form, raw blocks
-/// verbatim, in the entries' order.
-pub fn serialize_notes(doc: &NotesDoc) -> String {
-    let mut out = String::new();
-    for line in &doc.before {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(NOTES_BEGIN);
-    out.push('\n');
-    for entry in &doc.entries {
-        match entry {
-            NotesEntry::Record(a) => {
-                out.push_str(NOTES_RECORD_START);
-                out.push('\n');
-                out.push_str(&format!("path: {}\n", a.path));
-                out.push_str(&format!("line: {}\n", a.line));
-                out.push_str(&format!("col: {}\n", a.col));
-                out.push_str(&format!("anchor: {}\n", a.anchor));
-                out.push_str(&format!("note: {}\n", a.text));
-                out.push_str(&format!("orphaned: {}\n", a.orphaned));
-                // The syntax keys are emitted ONLY when present, appended
-                // after `orphaned` (additive): a record without a syntax
-                // anchor serializes byte-identically to the pre-007-02
-                // shape (no migration of legacy files).
-                if let Some(sa) = &a.syntax {
-                    out.push_str(&format!("syntax_kind: {}\n", sa.kind));
-                    out.push_str(&format!("syntax_name: {}\n", sa.name));
-                }
-            }
-            NotesEntry::Raw(s) => {
-                out.push_str(s);
-                out.push('\n');
-            }
-        }
-    }
-    out.push_str(NOTES_END);
-    out.push('\n');
-    for line in &doc.after {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
 
 /// One annotation in the quit-dump shape (plan 005 issue 03): a
 /// self-contained brief an agent can act on. `line` is 1-based (the
@@ -11637,33 +11447,6 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
     }
 }
 
-/// Pure scroll-anchor math for a buffer reload (issue 04).
-///
-/// `old_top` is the scroll top (first visible line, 0-based) before the
-/// reload; `new_total` is the line count after the reload. The reader's line
-/// anchor is preserved when it still exists (`old_top < new_total`); when the
-/// anchor line has vanished (the file shrank past it), the view clamps to the
-/// last line so the reader snaps to the end of the now-shorter file.
-///
-/// Extracted as a pure function so it is testable without notify / IO.
-pub fn reload_anchor(old_top: usize, new_total: usize) -> usize {
-    if new_total == 0 {
-        return 0;
-    }
-    old_top.min(new_total - 1)
-}
-
-fn file_candidate(rel: &str) -> PickerCandidate {
-    PickerCandidate {
-        name: rel.to_string(),
-        display: rel.to_string(),
-        label: String::new(),
-        detail: String::new(),
-        docs: String::new(),
-        category: "file".to_string(),
-    }
-}
-
 /// Cursor-move direction for the commit editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditorMove {
@@ -11671,143 +11454,6 @@ enum EditorMove {
     Right,
     Up,
     Down,
-}
-
-/// Build the commit editor's pre-filled text (a magit-style comment block
-/// listing the staged files) and place the cursor at the end (on the trailing
-/// empty line, where the user types the message).
-fn prefill_commit_message(staged: &[(String, char)]) -> (String, usize) {
-    let mut s = String::new();
-    s.push_str("# Please enter the commit message for these changes.\n");
-    s.push_str("# Lines starting with '#' are ignored; C-c C-c commits, C-c C-k aborts.\n");
-    s.push_str("#\n");
-    s.push_str("# Staged changes:\n");
-    if staged.is_empty() {
-        s.push_str("#   (nothing staged)\n");
-    } else {
-        for (path, letter) in staged {
-            s.push_str(&format!("#   {letter} {path}\n"));
-        }
-    }
-    s.push_str("#\n");
-    let len = s.len();
-    (s, len)
-}
-
-/// Extract the commit message from the editor text: drop `#`-prefixed comment
-/// lines and trim leading/trailing blank lines. An empty result means the
-/// user typed no message.
-fn extract_commit_message(rope: &Rope) -> String {
-    let text = rope.to_string();
-    let mut lines: Vec<String> = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .map(|l| l.to_string())
-        .collect();
-    while !lines.is_empty() && lines.first().map(|s| s.trim().is_empty()).unwrap_or(true) {
-        lines.remove(0);
-    }
-    while !lines.is_empty() && lines.last().map(|s| s.trim().is_empty()).unwrap_or(true) {
-        lines.pop();
-    }
-    lines.join("\n")
-}
-
-/// Move the commit-editor cursor to a neighbouring line, keeping the column
-/// (clamped to the target line's length).
-fn editor_cursor_line(ed: &mut CommitEditorState, delta: i32) {
-    let len = ed.rope.len_lines();
-    let line = ed.rope.char_to_line(ed.cursor.min(ed.rope.len_chars()));
-    let line_start = ed.rope.line_to_char(line);
-    let col = ed.cursor - line_start;
-    let target = line as i64 + delta as i64;
-    if target < 0 || target >= len as i64 {
-        return;
-    }
-    let target = target as usize;
-    let t_start = ed.rope.line_to_char(target);
-    let t_len = ed
-        .rope
-        .get_line(target)
-        .map(|l| l.len_chars())
-        .unwrap_or(0);
-    ed.cursor = t_start + col.min(t_len);
-}
-
-// ── Shared windowing (issue 003-02) ──────────────────────────────────────
-//
-// The single windowing mechanism for every long-content pane (magit status,
-// commit-diff, blame, log, editable buffers). Three pure pieces of math,
-// extracted from the magit status buffer's shipped logic so each pane reuses
-// one implementation. All are plain Rust (no iocraft), so the UI layer only
-// renders whatever the store pre-computes.
-
-/// The number of rows that fit in a pane's content area: the viewport minus
-/// the pinned chrome rows (the title, a scroll indicator, and the help line),
-/// at least one. `viewport_lines` is the content height set on resize.
-fn pane_window(viewport_lines: usize) -> usize {
-    viewport_lines.saturating_sub(2).max(1)
-}
-
-/// The first/last visible row indices for a scroll window over `total` rows.
-/// `scroll` is clamped into `[0, total)`; `end` is bounded by `total`. Returns
-/// `(start, end)` (a half-open range); `(0, 0)` when `total` is 0.
-fn window_slice(scroll: usize, total: usize, window: usize) -> (usize, usize) {
-    if total == 0 {
-        return (0, 0);
-    }
-    let start = scroll.min(total.saturating_sub(1));
-    (start, (start + window).min(total))
-}
-
-/// The new scroll offset that keeps `cursor` inside the visible window:
-/// scroll up when the cursor is above the top row, scroll down when it is
-/// below the last visible row (the cursor then lands on the last visible row).
-/// `cursor` must be `< total`. Pure; returns the clamped offset.
-fn keep_cursor_visible(scroll: usize, cursor: usize, total: usize, window: usize) -> usize {
-    if total == 0 {
-        return 0;
-    }
-    let mut scroll = scroll;
-    if cursor < scroll {
-        scroll = cursor;
-    } else if cursor >= scroll + window {
-        scroll = cursor + 1 - window;
-    }
-    scroll.min(total.saturating_sub(1))
-}
-
-/// The new scroll offset that puts buffer line `point_line` on screen row
-/// `desired_row`: `scroll_top = point_line - desired_row`, clamped to
-/// `[0, total - viewport]`. Returns `None` when the buffer does not scroll
-/// at all (nothing to recenter). Shared by `recenter` (C-l — the desired
-/// row is cycle-selected) and the jump-landing recenter (plan 004 issue
-/// 07 — always the fresh MIDDLE row; the only difference from `recenter`
-/// is that `recenter_cycle` is NOT advanced: a jump is not a `C-l`).
-fn recenter_top_for(point_line: usize, desired_row: usize, total: usize, viewport: usize) -> Option<usize> {
-    if total <= 1 {
-        return None;
-    }
-    let vp = viewport.max(1);
-    let max_scroll = total.saturating_sub(vp);
-    if max_scroll == 0 {
-        return None;
-    }
-    Some((point_line as i64 - desired_row as i64).clamp(0, max_scroll as i64) as usize)
-}
-
-/// One log row: `<short_id> <subject>  <author>  <date>`.
-fn log_entry_display(e: &LogEntry) -> String {
-    format!("{} {}  {}  {}", e.short_id, e.subject, e.author, e.date)
-}
-
-/// One blame row: aligned `<hash> <author> <age>  <text>`.
-fn blame_line_display(line: &BlameLine, now: i64, author_w: usize) -> String {
-    let age = relative_time_from(line.time, now);
-    format!(
-        "{:<7} {:<author_w$} {:<5} {}",
-        line.short_id, line.author, age, line.text
-    )
 }
 
 impl Default for AppStore {
@@ -11857,6 +11503,8 @@ fn point_byte_offset(rope: &Rope, line: usize, col: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::app::keymap::parse_key;
+    use crate::git::blame::BlameLine;
+    use crate::git::log::LogEntry;
 
     /// A store rooted in `dir` as the project start, with persistence
     /// under a throwaway sibling base (never the project dir itself —
@@ -15083,7 +14731,6 @@ mod tests {
         let free = rows.iter().find(|(n, _)| n.starts_with("free")).unwrap();
         assert_eq!(free.1, "free  [fn]", "a top-level fn has no indent: {rows:?}");
     }
-
 
     fn store_with_index(files: &[(&str, &str)]) -> (AppStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -23114,13 +22761,11 @@ mod tests {
         }
     }
 
-
-
 }
 
 // loop-03: the below-PTY unit twins of tools/sweep_flows.py (their own
 // file, hung off this module so the AppStore's private fields are visible;
 // the ledger lives in docs/ux-testing-plan.md).
 #[cfg(test)]
-#[path = "flow_tests.rs"]
+#[path = "../flow_tests.rs"]
 mod flow_tests;

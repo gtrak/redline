@@ -1,19 +1,21 @@
 # Architecture — module map and the `store.rs` split plan
 
-Plan 012, issue 01. All line numbers and counts below were measured from
-`src/app/store.rs` at **`acd974e`** (22,992 lines). This file is the shared map
-for every later 012 stage and for reviewers.
+Plan 012, issue 01. All line numbers below were **re-derived against the
+CURRENT** `src/app/store.rs` (23,126 lines); the original measurement was at
+**`acd974e`** (22,992 lines). This file is the shared map for every later 012
+stage and for reviewers.
 
-> **The map is baseline-pinned — re-derive before executing.** `store.rs` has
-> already moved once since measurement: the picker-density landing (`6d01393`)
-> added 45 lines and removed 1, so **every line number below is stale** (the file
-> is now 23,037 lines). A stage that trusts these numbers edits the wrong lines.
-> **Step 1 of the split is therefore to re-run the census against the current
-> file and update this map** — the invariants to check are: the `impl` method
-> count (421 = 253 `pub` + 168 private), the §3 ranges are disjoint and cover
-> every method line exactly once, and the per-module name lists reconcile (no
-> duplicates; union = the methods + the assigned free fns). The **counts** are
-> stable across the move; only the **line numbers** need re-deriving.
+> **The map is baseline-pinned — re-derive before executing.** The numbers
+> below were re-derived (012-02, Step 0) after `store.rs` moved: the
+> picker-density landing (`6d01393`) added 45 / removed 1 lines and a later
+> model change (`e2e1221`) touched the test module. The invariants were
+> re-verified: the `impl` method count (421 = 253 `pub` + 168 private), the §3
+> ranges are disjoint and cover every method line exactly once, and the
+> per-module name lists reconcile (no duplicates; union = the methods + the
+> 12 assigned free fns). The **impl-method counts** are stable; note the
+> test-fn count drifted 389 → 401 (350 `#[test]` + 22 `#[tokio::test]` +
+> 29 helpers) when model work landed tests. Re-run the census against the
+> current file and update this map if `store.rs` moves again.
 
 ## 1. Crate module map
 
@@ -32,7 +34,7 @@ src/
     events.rs              201  ChangeBus / ProjectChange (project-change bus)
     flow_tests.rs         3,624  PTY-style flow tests, hung off store.rs via #[path]
     keymap.rs              628  KeymapEngine, KeySeq, C-x/C-c prefixes
-    store.rs            22,992  AppStore — THE file this plan splits (see §2–5)
+    store.rs            23,126  AppStore — THE file this plan splits (see §2–5)
     watcher.rs             656  ActiveWatcher (notify-based, debounced)
 
   git/
@@ -76,54 +78,54 @@ src/
 
 | Region | Lines | Contents |
 |---|---|---|
-| 1–1428 | 1,428 | helper types + free fns (see below) |
-| 1429–1699 | 271 | `pub struct AppStore` — **83 fields: 19 `pub`, 64 private** |
-| 1701–11588 | 9,888 | single `impl AppStore { … }` — **421 methods (253 `pub`, 168 private; 2 private methods are formatted at column 0 — lines 2602/2627)** |
-| 11589–11759 | 171 | 11 module-level **free fns** (assigned to core/commit/picker in §3) + the `EditorMove` enum (11617 → commit) |
-| 11761–11765 | 5 | `impl Default for AppStore` (delegates to `new`) |
-| 11767–11791 | 25 | `impl Picker` (`recompute`) |
-| 11793–11802 | 10 | free fn `point_byte_offset` (→ navigation, §3) |
-| 11804–22985 | 11,182 | `#[cfg(test)] mod tests` — **389 fns (349 `#[test]` + 22 `#[tokio::test]` + 18 non-test helpers)** |
-| 22987–22992 | 6 | loop-03 comment (22987–22989) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` |
+| 1–1444 | 1,444 | helper types + free fns (see below) |
+| 1445–1715 | 271 | `pub struct AppStore` — **83 fields: 19 `pub`, 64 private** |
+| 1717–11638 | 9,922 | single `impl AppStore { … }` — **421 methods (253 `pub`, 168 private; 2 private methods are formatted at column 0 — lines 2618/2643)** |
+| 11639–11811 | 173 | 11 module-level **free fns** (assigned to core/commit/picker in §3) + the `EditorMove` enum (11669 → commit) |
+| 11813–11817 | 5 | `impl Default for AppStore` (delegates to `new`) |
+| 11819–11843 | 25 | `impl Picker` (`recompute`) |
+| 11844–11854 | 11 | free fn `point_byte_offset` (→ navigation, §3) |
+| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 fns (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers)** |
+| 23121–23126 | 6 | loop-03 comment (23121–23123) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` (23124–23126) |
 
-Helper items in lines 1–1428 (move with their concern in Phase 2):
+Helper items in lines 1–1444 (move with their concern in Phase 2):
 
-- Buses: `ResolveEvent`/`ResolveBus` (77), `CrateIndexEvent`/`CrateIndexBus` (121),
+- Buses: `ResolveEvent`/`ResolveBus` (56/73), `CrateIndexEvent`/`CrateIndexBus` (109/121),
   consts `EXT_INDEX_CAP` (149), `EXT_INDEX_FILE_CAP` (153) → **navigation / index_wiring**
-- `ViewId` (201) → **views**; `FilePoint` (550), `JumpEntry`/`JumpStack` (576) →
+- `ViewId` (176) → **views**; `FilePoint` (550), `JumpEntry`/`JumpStack` (559/576) →
   **file_view / navigation**
-- `PickerKind` (505) → **picker**; `PickerCandidate`/`Picker` (648), `BufferRow` (722),
-  `TreeRow` (732), `TreeState` (749), `FileViewRow` (764) →
+- `PickerKind` (505) → **picker**; `PickerCandidate`/`Picker` (659/674), `BufferRow` (738),
+  `TreeRow` (748), `TreeState` (765), `FileViewRow` (780) →
   **picker / buffers / project / file_view**
-- `TransientMenuState`/`TransientMenuEntry`/`TransientMenuRow` (674–712),
-  `DiscardTarget` (712) → **views / magit**
-- `SyntaxAnchor` (816), `Annotation` (827), `NotesEntry`/`NotesDoc` (848–878),
-  consts `NOTES_BEGIN`/`NOTES_END`/`NOTES_RECORD_START` (878–886),
-  `ANNOTATION_REANCHOR_WINDOW` (886), free fns `parse_notes` (895),
-  `parse_notes_section` (930), `parse_record_block` (958), `serialize_notes` (1032),
-  `DumpAnnotation`/`format_notes_dump` (1083–1110) → **notes**
-- `IsearchState`/`IsearchDirection` (1168/1176), `DirtyCounts` (1205),
-  `SearchKind`/`ResultRow`/`SearchState` (1225–1281), `SearchPrompt` (1282),
-  `SearchPromptKind` (1289) → **search / magit**
-- `QuitPrompt` (1313) → **keys**; `LogState` (1327), `CommitDiffState` (1350),
-  `BlameState` (1356), `CommitEditorState` (1368), `KillRing` (1389) → **commit / buffers**
-- Outside the 1–1428 framing: `EditorMove` (11617, `enum`, used by
-  `commit_editor_move`) → **commit**; free fn `point_byte_offset` (11798) →
+- `TransientMenuState`/`TransientMenuEntry`/`TransientMenuRow` (690–715),
+  `DiscardTarget` (728) → **views / magit**
+- `SyntaxAnchor` (832), `Annotation` (843), `NotesEntry`/`NotesDoc` (859–887),
+  consts `NOTES_BEGIN`/`NOTES_END`/`NOTES_RECORD_START` (894–898),
+  `ANNOTATION_REANCHOR_WINDOW` (902), free fns `parse_notes` (911),
+  `parse_notes_section` (946), `parse_record_block` (974), `serialize_notes` (1048),
+  `DumpAnnotation`/`format_notes_dump` (1099–1126) → **notes**
+- `IsearchState`/`IsearchDirection` (1192/1184), `DirtyCounts` (1221),
+  `SearchKind`/`ResultRow`/`SearchState` (1230–1270), `SearchPrompt` (1298),
+  `SearchPromptKind` (1305) → **search / magit**
+- `QuitPrompt` (1329) → **keys**; `LogState` (1343), `CommitDiffState` (1366),
+  `BlameState` (1372), `CommitEditorState` (1384), `KillRing` (1401) → **commit / buffers**
+- Outside the 1–1444 framing: `EditorMove` (11669, `enum`, used by
+  `commit_editor_move`) → **commit**; free fn `point_byte_offset` (11850) →
   **navigation** — both sit after the `impl AppStore` block (see the region
   rows above); they are listed here so no item of the file is unassigned.
 
 > **Deviation from PLAN.md:** the plan's 869-method figure was a bad grep.
 > The measured count is **421 methods** in the single `impl AppStore`
-> block (lines 1701–11588: 253 `pub fn`, 168 private `fn`, of which 2 are
+> block (lines 1717–11638: 253 `pub fn`, 168 private `fn`, of which 2 are
 > formatted at column 0 — §5 item 8; several signatures wrap to a second
 > line). The previously reported **432 = 421 methods + 11 associated free
-> fns** (lines 11599–11753, folded into the concern counts in §3).
-> Full-file total: **857 `fn` declarations** = 421 (`impl AppStore`)
-> + 45 helper fns (28 struct fns at lines 78–1424 + 17 free fns at lines
-> 895–11798, the last of which is `point_byte_offset` at 11798) + 1
-> (`impl Default`) + 1 (`impl Picker::recompute`) + 389 test fns
-> (349 `#[test]` + 22 `#[tokio::test]` + 18 non-test helpers).
-> 421 + 45 + 1 + 1 + 389 = 857. The 869 figure appears to have conflated
+> fns** (lines 11649–11811, folded into the concern counts in §3).
+> Full-file total: **869 `fn` declarations** = 421 (`impl AppStore`)
+> + 45 helper fns (28 struct fns at lines 78–1444 + 17 free fns at lines
+> 911–11850, the last of which is `point_byte_offset` at 11850) + 1
+> (`impl Default`) + 1 (`impl Picker::recompute`) + 401 test fns
+> (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers).
+> 421 + 45 + 1 + 1 + 401 = 869. The 869 figure appears to have conflated
 > impl methods with test fns; the 421/11 split is the authoritative
 > number. Per-module counts in §3 include the 12 associated free fns
 > (11 + `point_byte_offset`); the methods-only counts sum exactly to 421.
@@ -135,37 +137,37 @@ Concern counts sum: 23+18+29+30+52+39+24+61+52+34+42+17+1+11 = **433**
 = 421 + 11, before `point_byte_offset` was assigned to navigation).
 Methods-only counts: core 18, commit 56, picker 41, navigation 51 (the rest as listed).
 Line ranges are disjoint runs (verified by program) — each method line in
-1701–11588 falls in exactly one concern. Concerns are
+1717–11638 falls in exactly one concern. Concerns are
 interleaved in the file — methods are ordered roughly by feature-landing,
 not by concern; Phase 2 stages will de-interleave as they move.
 
 | # | Concern (target module) | Methods | Line runs (store.rs) |
 |---|---|---:|---|
-| 1 | core / shared helpers (`mod.rs`) | 23 | 1704–1712, 1916–2044, 4737, 11399–11421, 11599, 11696–11735 |
-| 2 | views / windowing + transient menu (`views.rs`) | 18 | 2061–2107, 6261–6508 |
-| 3 | buffers / edit / save / region-kill-ring (`buffers.rs`) | 29 | 2057, 2126–2233, 2298–2312, 2753, 3065–3182, 3237–3485, 4530–4578 |
-| 4 | notes / inline annotations (`notes.rs`) | 30 | 2247, 2389–2473, 2563–2752, 2754–2824, 2932–3046, 3190–3203 |
-| 5 | file-view point/cursor/scroll (`file_view.rs`) | 52 | 4742–5013, 5146–5607, 5847–5910 |
-| 6 | isearch + project search / occur (`search.rs`) | 39 | 5672–5840, 5921, 10450, 10468–10547, 10615–10872, 10947 |
-| 7 | magit status / staging / discard (`magit.rs`) | 24 | 5948–6237, 6535–6604 |
-| 8 | log / blame / commit-diff / editor / branch / stash (`commit.rs`) | 61 | 6632–7417, 11627–11666, 11748–11753 |
-| 9 | M-. / jump stack / xref / imenu / impls (`navigation.rs`) | 52 | 3616–3639, 7722–7770, 7936, 8133, 8231–8328, 8398, 8461–8654, 8726–8777, 8853–8892, 8954–8975, 9036, 9124–9243, 9319, 9401–9495, 9771–9805, 9893, 10024, 10190–10366, 10392 (`which_function` singleton) |
-| 10 | index + crate-index + watcher/auto-reload (`index_wiring.rs`) | 34 | 7427–7522, 7599–7701, 7813–7863, 9525, 9593–9745, 10367–10391 (`apply_index_event`), 10419–10441, 10455–10461 (`set_index_rx`/`take_index_rx`) |
-| 11 | pickers (all flavors + previews) (`picker.rs`) | 42 | 3744–4371, 4505–4514, 11606 |
-| 12 | project / files / recents / file-tree sidebar (`project.rs`) | 17 | 3545–3560, 3682–3715, 4457, 4596–4726 |
-| 13 | minibuffer / echo-area message (`minibuffer.rs`) | 1 | 11425 |
-| 14 | key dispatch + quit prompts (`keys.rs`) | 11 | 11009, 11356–11380, 11436–11583 |
+| 1 | core / shared helpers (`mod.rs`) | 23 | 1720–2060, 4773, 11449–11471, 11649, 11748–11787 |
+| 2 | views / windowing + transient menu (`views.rs`) | 18 | 2077–2123, 6305–6552 |
+| 3 | buffers / edit / save / region-kill-ring (`buffers.rs`) | 29 | 2073, 2142–2249, 2314–2328, 2769, 3081–3198, 3253–3501, 4566–4614 |
+| 4 | notes / inline annotations (`notes.rs`) | 30 | 2263, 2405–2761, 2781–3062, 3206–3219 |
+| 5 | file-view point/cursor/scroll (`file_view.rs`) | 52 | 4778–5643, 5883–5946 |
+| 6 | isearch + project search / occur (`search.rs`) | 39 | 5708–5876, 5957, 10500, 10518–10997 |
+| 7 | magit status / staging / discard (`magit.rs`) | 24 | 5984–6281, 6579–6648 |
+| 8 | log / blame / commit-diff / editor / branch / stash (`commit.rs`) | 61 | 6676–7461, 11679–11718, 11800–11805 |
+| 9 | M-. / jump stack / xref / imenu / impls (`navigation.rs`) | 52 | 3632–3655, 7766–7814, 7980–9541, 9817–10384, 10442 (`which_function` singleton), 11850 (`point_byte_offset`) |
+| 10 | index + crate-index + watcher/auto-reload (`index_wiring.rs`) | 34 | 7471–7745, 7857–7907, 9571–9791, 10417 (`apply_index_event`), 10469–10491, 10505–10511 (`set_index_rx`/`take_index_rx`) |
+| 11 | pickers (all flavors + previews) (`picker.rs`) | 42 | 3760–4407, 4541–4550, 11656 |
+| 12 | project / files / recents / file-tree sidebar (`project.rs`) | 17 | 3561–3576, 3698–3731, 4493, 4632–4762 |
+| 13 | minibuffer / echo-area message (`minibuffer.rs`) | 1 | 11475 |
+| 14 | key dispatch + quit prompts (`keys.rs`) | 11 | 11059–11430, 11486–11633 |
 
 **Free-fn note.** 12 of the 433 items are module-level free fns, not
-`impl` methods: core +5 (`reload_anchor` 11599, `pane_window` 11696,
-`window_slice` 11703, `keep_cursor_visible` 11715, `recenter_top_for`
-11735), commit +5 (`prefill_commit_message` 11627, `extract_commit_message`
-11648, `editor_cursor_line` 11666, `log_entry_display` 11748,
-`blame_line_display` 11753), picker +1 (`file_candidate` 11606),
-navigation +1 (`point_byte_offset` 11798 — it appeared in no earlier
+`impl` methods: core +5 (`reload_anchor` 11649, `pane_window` 11748,
+`window_slice` 11755, `keep_cursor_visible` 11767, `recenter_top_for`
+11787), commit +5 (`prefill_commit_message` 11679, `extract_commit_message`
+11700, `editor_cursor_line` 11718, `log_entry_display` 11800,
+`blame_line_display` 11805), picker +1 (`file_candidate` 11656),
+navigation +1 (`point_byte_offset` 11850 — it appeared in no earlier
 module list; all five call sites are navigation methods:
-`xref_find_definitions` 8006/8028, `resolver_scope_for` 8610,
-`crate_xref_outcome` 9918/9937).
+`xref_find_definitions` 8050/8072, `resolver_scope_for` 8656,
+`crate_xref_outcome` 9966/9985).
 
 ### Per-module method lists
 
@@ -262,7 +264,7 @@ local_binding_candidates type_member_candidates rust_dotted_receiver
 start_symbol_resolution apply_resolve_event resolving_display
 resolution_language resolver_scope resolver_scope_for xref_in_external_buffer
 crate_xref_outcome resolver_from_file` · *free fn:* `point_byte_offset`
-(11798; byte-offset helper for the tree-sitter surfaces — all five
+(11850; byte-offset helper for the tree-sitter surfaces — all five
 call sites are navigation methods, see the free-fn note) ·
 *per-language import-path
 extraction (20):* `use_path_for_symbol use_decl_path use_group_entries
@@ -321,7 +323,7 @@ quit_prompt_cancel`
 src/app/store/
   mod.rs         struct AppStore + its 83 fields, Default impl,
                  `pub use` re-exports for UI-imported items, core (23)
-                 → ~1,430 + 670 lines (struct + helpers)
+                 → ~1,444 + 271 (struct) + 670 (core) lines (helpers + struct + core)
   views.rs        18
   buffers.rs      29
   notes.rs        30
@@ -389,8 +391,8 @@ field would need `pub(crate)` — not required by this plan.
    moved methods `pub(super)` (visible in `store` + all submodules —
    exactly the needed scope; cheaper than `pub(crate)`). The 253 `pub`
    methods keep their visibility. The 11 associated free fns at
-   11599–11753 (core 5, commit 5, picker 1) and `point_byte_offset`
-   (navigation) need **no visibility change**: the five core free fns
+   11649–11811 (core 5, commit 5, picker 1) and `point_byte_offset`
+   (11850, navigation) need **no visibility change**: the five core free fns
    land in `store/mod.rs`, where module privacy is already visible to
    every submodule, and the remaining seven (commit 5, picker 1,
    navigation 1) are called only from within their own target module.
@@ -425,13 +427,13 @@ field would need `pub(crate)` — not required by this plan.
    would resolve to `src/app/store/flow_tests.rs` (which does not exist)
    → E0583. Because `flow_tests` is a *child* of the
    `store` module, it keeps access to every private field/method of
-   `mod.rs` — which is exactly why the comment at lines 22987–22989
+   `mod.rs` — which is exactly why the comment at lines 23121–23123
    ("hung off this module so the AppStore's private fields are visible")
    keeps working. If Phase 3 splits flow_tests into per-concern test files
    inside `store/`, the same descendant rule applies.
 
-6. **The `#[cfg(test)] mod tests` move (lines 11804–22985).** 389 fns
-   (349 `#[test]` + 22 `#[tokio::test]` + 18 non-test helpers), 11,182
+6. **The `#[cfg(test)] mod tests` move (lines 11856–23119).** 401 fns
+   (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers), 11,264
    lines. Tests call private
    methods and private fields freely (descendant access). Phase 3 moves
    test fns *with* their concern's module; until then any interim
@@ -445,8 +447,8 @@ field would need `pub(crate)` — not required by this plan.
    `../flow_tests.rs`) changes no build-graph behavior.
 
 8. **Two impl methods are formatted at column 0.**
-   `collect_syntax_anchor_nodes` (2602) and `is_syntax_anchor_kind`
-   (2627) are `impl AppStore` methods whose signatures sit at column 0 —
+   `collect_syntax_anchor_nodes` (2618) and `is_syntax_anchor_kind`
+   (2643) are `impl AppStore` methods whose signatures sit at column 0 —
    indent-based tooling must not treat them as free fns (moving them
    out of the impl breaks their `Self::` calls).
 
