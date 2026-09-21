@@ -553,6 +553,10 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
    inside the render-loop future). A true fix needs an iocraft-side hook → **upstream PR or
    vendored patch** (decision open with the user; with ~50% under load the case for it is
    now stronger than "accept the occasional lag").
+   **→ written up as plan 013** (`.agents/plans/013-cursor-race/`): the mechanism with
+   exact iocraft + redline anchors, what is NOT broken (position and content are correct;
+   only the cursor *report* is late), the four options, and three issues — upstream PR
+   (recommended) · vendored patch (contingent) · the pre-frame harness sub-class.
 2. **`git::repo` assertion flake (environmental, correlated)** —
    `stage_file_then_unstage_matches_cli` fails under two concurrent full suites with swap
    exhausted, green in isolation; no timing/ordering assumption to pin. Swap is a
