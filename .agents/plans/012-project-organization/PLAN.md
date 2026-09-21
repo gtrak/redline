@@ -105,6 +105,11 @@ helpers (e.g. `truncate` exists in more than one ui module); stale comments
 ## Success criteria
 
 - No `src/` file over ~1,500 lines; `store.rs` concerns split as planned.
+  **SUPERSEDED as a criterion (user directive, 2026-09): test file size is not a
+  criterion; production *logic* organization is** (see
+  `.agents/skills/plan-process/SKILL.md` § Maintainability criterion). The line bar
+  therefore applies to production modules only — the test-side `definitions.rs`
+  (1,548) and `flow_tests.rs` (3,709) are **not** findings.
   **PARTIALLY MET (audited after all 17 lanes landed)**: `store.rs`'s concerns ARE split
   (403 methods into 13 concern files + an 18-method core), but six `src/` files still
   exceed 1,500 — three are test files (cohesive), and the production misses are

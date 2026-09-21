@@ -136,6 +136,32 @@ Practical consequences for lanes:
   the *requirement* (the minibuffer message, the invariant), never on a screen
   substring the fixture itself contains.
 
+### Maintainability criterion (user directive, 2026-09)
+
+**Test file size is not a criterion. The criterion is: is complex logic organized
+for maintainability?**
+
+A line count is a *proxy*, and it is the wrong proxy for this codebase: a 3,000-line
+file of flat, cohesive tests is fine, and a 150-line function with 8 levels of
+nesting is not. Judge by:
+
+- **Function shape** — length, nesting depth, argument count, and whether the name
+  still describes what the body does (a 151-line predicate named `is_path_segment`
+  is a naming failure, not a size failure).
+- **Separation of jobs** — a function that extracts state *and* runs an effect *and*
+  dispatches *and* assembles output is four functions wearing one name.
+- **Data expressed as code** — hundreds of imperative `bind(...)` statements inside
+  a constructor are configuration that wants to be a table (the `LanguageSpec`
+  precedent), because adding an entry should be a one-line data edit.
+- **Shared shape vs. coincidence** — per-language logic that repeats a structure is
+  a candidate for a trait/table with per-language hooks; logic that genuinely
+  differs is not.
+
+Consequences: a plan's "no file over N lines" criterion applies to **production
+logic**, not to test files; a large test file is not a finding. When a lane reports
+a big test file as a judgement item, the answer is "not a criterion" unless the
+tests themselves are hard to navigate.
+
 ### Numbers in briefs are claims, not facts
 When relaying a reviewer's arithmetic (counts, line spans, test totals) into a
 worker's brief, label it **"reviewer-reported — re-derive before relying on it"**.
