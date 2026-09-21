@@ -555,6 +555,15 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
    mechanisms eliminated: `gate.sh` wraps only PTY steps; timing rules out a per-tool
    deadline; the PTY harness only `os.kill(self.pid, SIGKILL)`s its own children; and no
    oom manager (earlyoom/nohang/systemd-oomd) is installed.
+**FINAL VERIFICATION (end of the 012 session): `tools/gate.sh full` on main passed —
+`GATE RESULT: OK (full)`, all 21 stages, exit 0**, including `check_cursor_stream.py`
+(71 s) and `sweep_flows` 15/15. This closed all seven per-lane deferrals in one serial pass
+on the assembled 17-lane tree, and it **refines class 1**: the cursor drive is 80/80 on an
+idle box and fails only **under concurrent build load**, so the race is *load-induced*, not
+intermittent-at-rest. The iocraft-side fix is therefore less urgent than the ~50%-under-load
+figure suggested — but the race is still real (a starved CUP leaves the cursor stale for a
+frame), so the upstream-PR/vendored-patch decision stands as an open, evidenced item.
+
 4. **Swap exhaustion as a load multiplier** — not a flake itself, but the condition under
    which (1), (2) and (3) all appear. Resource guards therefore check `free -g` **and swap**
    and defer the battery rather than produce an unattributable FAIL.
