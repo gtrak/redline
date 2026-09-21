@@ -513,7 +513,14 @@ canvas `min(candidates+2, viewport-1)`; no preview split when the preview is
 empty; contiguous selected-row bar (gap-only paint — iocraft's `invert` is SGR 7,
 so painting text cells too would be white-on-white). 6 new tests; 835/0/2; clippy
 clean; `gate.sh full` OK 15/15; zero deleted assertions.
-- **picker-density follow-up (new, needs a lane that may edit `flow_tests.rs`)**:
+- **picker-density follow-up — LANDED** (`5d53a35`, lane `08c3bde`+`33a3d74`, gate-reviewed
+  twice; the re-gate audited all 16 `PickerCandidate` constructions to prove nothing lost
+  information). All eight remaining pickers converted; palette deliberately left
+  display-only and pinned. The two implementation-level `flow_tests` substrings were
+  re-pinned on the requirement (imenu kind tag, impl grouping/indent, free fn flat) —
+  strictly stronger: one contiguous-display assert per row became two state asserts plus
+  two render80 shape asserts. Two gate-found row quirks fixed with discriminating tests.
+  (Original entry, kept for the record:)
   convert the remaining single-string pickers — **imenu, impls, palette,
   find-file, recents, buffers, project, branch, stash** — to name-first +
   right-aligned detail, and **re-pin** `src/app/flow_tests.rs:3531` (exact
@@ -572,7 +579,21 @@ frame), so the upstream-PR/vendored-patch decision stands as an open, evidenced 
 legitimate for a **signal-kill** (cargo exit 143/137), which is not a test outcome at all;
 any such retry must be signal-specific and logged, never triggered by exit 101.
 
-## Known follow-ups from gate findings (low priority)
+## What remains (after the 17 landed lanes)
+
+Everything plan 012 targeted structurally is done and the final full battery on main
+passed (`GATE RESULT: OK`, 21/21 stages, incl. `check_cursor_stream` 71 s). The true
+remainder:
+
+| Item | Kind | State |
+|---|---|---|
+| cleanup tail: inline `ui/views/` (F-5) · dedup the 10 `git_cli` + fixture family in `store/tests` · optional `Snapshot::from_store` (removes 67 `pub(super)`) | hygiene | **in flight** (`cleanup-tail`) |
+| iocraft post-canvas hook (the cursor race's only real fix) | decision + upstream PR / vendored patch | **open — user decision** |
+| clearing swap (`swapoff -a && swapon -a`) to stop load-induced flakes | ops | **open — user decision** |
+| plan 012 archival | mechanical | ready on request |
+| `Snapshot::from_store` if the tail lane skips it | design (small) | optional |
+| re-land input coalescing (`git revert 0ddaf46`) | UX (user asked to park it) | parked, recipe in the commit |
+| Shape B (rust-analyzer as a library) | architecture | only if written-down-types ever bites |
 
 ## Known follow-ups from gate findings (low priority)
 
