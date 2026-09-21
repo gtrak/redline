@@ -365,3 +365,19 @@ code first and prove that**, which is the only way to know it discriminates.
 Ask what each test would do on the unfixed code. A lane that says "the test fails on the old
 code with `left: 0, right: 3`" has proved discrimination; a lane that says "5 new tests, all
 passing" has not.
+
+**A lane that changes user-visible behaviour owns the drives that assert it.** The PTY drives
+in `tools/` encode behaviour, so when a lane intentionally changes it (a silent jump becomes a
+picker, a binding moves), the drives **must** move — otherwise the battery fails asserting the
+old contract. That is legitimate (an implementation-level pin yields to the requirement), but
+two rules apply:
+
+1. **The drive is in the lane's fence.** The widening must be **disclosed with a per-file
+   before/after** ("this drive asserted X, now asserts Y"). A lane editing the harness that
+   gates it is a conflict of interest, so the gate must *audit* those edits against the
+   disclosure rather than re-derive them — and an undisclosed fence widening is a finding even
+   when the edits are correct.
+2. **No assertion may be weakened to get green.** `== expected` must not become a bare `ok`,
+   and the downstream assertions (the landing, the screen contents) must survive the new step.
+   The right shape is *stronger*: assert the new step **and** that it still reaches the old
+   outcome. If a drive cannot be updated honestly, report the failure rather than loosen it.
