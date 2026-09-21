@@ -43,7 +43,7 @@ exists) — so the notes buffer is a *view* of records, not the primary editing 
    accurate mode mostly falls out. **This is not optional**; every item below depends
    on it.
 
-## 3. The cutline (user to pick; my recommendation marked)
+## 3. The cutline — **SETTLED by the user (2026-09-21)**
 
 **P0 — prerequisite:** honest `current_point_byte()`.
 
@@ -67,9 +67,22 @@ exists) — so the notes buffer is a *view* of records, not the primary editing 
 
 **P2:** yank semantics; `C-o`/`C-t` polish.
 
-**Recommended cutline:** the **annotations picker first** (self-contained, reuses the
-picker machine, immediately useful, no dependency on the point model), then P0, then
-accurate mode ①–④; **undo gets its own plan**.
+**SETTLED SCOPE (user, 2026-09-21):** accurate mode takes **①–⑥ and ⑧** — insert at
+point · backspace-before-point · `RET` newline · `C-k` kill-line · `C-d` delete-char ·
+`M-d`/`M-DEL` kill-word · **`C-o` open-line / `C-t` transpose** (the user: *"I use
+transpose"*). Yank semantics (⑦'s neighbours, P2) and `C-o`/`C-t` *polish* stay P2; undo
+is plan 016 with **both `C-x u` and `C-/`**.
+
+**The two key collisions are resolved by freeing `C-d`/`C-u`.** They currently scroll a
+half page, which is *not* emacs — emacs uses `C-d` = delete-char and `C-u` =
+universal-argument. Redline already binds the real emacs page-scroll keys (`C-v`
+scroll-page-down, `M-v` scroll-page-up, plus PGDN/PGUP), so the only loss is half-page
+scrolling. Recommendation accepted unless the user objects; if they do, move half-page
+scroll to another key rather than re-colliding.
+
+**Original recommendation, kept for the record:** the annotations picker first
+(self-contained, reuses the picker machine, no dependency on the point model), then P0,
+then accurate mode ①–④.
 
 ## 4. Success criteria
 

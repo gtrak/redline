@@ -27,11 +27,16 @@ why.
    `target`, `.venv`/`venv`, `vendor`, `dist`, `build`, `__pycache__`, `.next`,
    `.cache`, `Pods`, `bower_components`. Justify additions; keep the list in one
    place with a comment explaining the policy.
-2. **Decide the default honestly, and state it.** Two defensible options — warn,
-   or prune by default with the count disclosed. Whichever is chosen:
+2. **Decide the default honestly, and state it.** **SETTLED by the user (2026-09-21):
+   WARN — do not prune by default.** The user's words: *"dep-dir warning sounds good"*.
+   So: detect and disclose (directory, file count, and the `.gitignore` line that fixes
+   it), and leave the files in the index unless the user excludes them. Rationale worth
+   recording: pruning by default would silently contradict the project's own ignore
+   rules, and this spec exists because redline was *silent* about a dependency tree —
+   replacing one silence with another would miss the point. The remaining requirements
+   stand:
    * it must be **overridable** (a user may legitimately want to browse a
      directory that happens to be named `build/`);
-   * it must be **disclosed**, never silent;
    * it must NOT break the deliberate dependency-navigation exception
      (`crate_source_files`): dependencies stay *navigable after landing* — the
      guard is about what enters the *project* index, which is exactly the

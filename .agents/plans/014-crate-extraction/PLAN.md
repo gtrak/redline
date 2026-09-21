@@ -1,7 +1,8 @@
 # Plan 014 — crate extraction (from the measured import graph)
 
-**Status:** stage 1 LANDED (`crates/redline-syntax`, `56efe19`); stage 2
-(`redline-git`) staged, not started; stage 3 (`redline-model`) contingent on
+**Status:** stage 1 LANDED (`crates/redline-syntax`, `56efe19`); **stage 2
+(`redline-git`) APPROVED by the user (2026-09-21: *"can keep extracting crate"*) —
+staged, not started, needs a task spec; stage 3 (`redline-model`) contingent on
 the `sections.rs` decision (not specced yet).
 
 ## 1. Why
