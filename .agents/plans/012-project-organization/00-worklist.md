@@ -89,6 +89,104 @@ Baseline facts (all grep-verified, HEAD `acd974e`):
 | **T7** | Strengthen non-discriminating tests: bare `.is_ok()` with no payload/state check (`store.rs:10577`, `:16949`, `:3645`); audit twins for vacuous absence-only assertions post `PTY_QUIET` shrink | strengthen, never delete | low |
 | **T8** | PTY battery drivers `drive_{emacs,redline}_battery2/3` → parameterized driver | lower priority than Rust duplication | low |
 
+## Round 2 structural deltas (read-verified, local model)
+
+Full design preserved in-repo: **`02-language-descriptor-design.md`** (19-row
+inventory, dispatch table, 7-step migration order).
+
+### S1 CORRECTED — the store split IS mechanically viable (compiler-verified)
+
+Round 2 concluded the 9,887-line `impl AppStore` is "not mechanically splittable
+without traits/restructuring". **That is wrong, and the compiler settles it.**
+Verified with a standalone `rustc --edition 2021` experiment (clean compile,
+run output `8 16 x`): an `impl AppStore` block placed in a **child module** of the
+module that defines `AppStore` reads and mutates **private fields with no
+visibility change** — Rust privacy makes a module's private items visible to its
+descendants:
+
+```rust
+mod app {
+    pub struct AppStore { secret: u32, pub name: String }   // app/store/mod.rs
+    pub mod buffers { impl super::AppStore { fn bump(&mut self) { self.secret += 1; } } }
+    pub mod sibling { impl super::AppStore { fn x(&self) -> u32 { self.secret * 2 } } }
+}
+```
+
+Constraint this imposes: the new files must be **children of the defining
+module** (`app::store::buffers`), *not* siblings (`app::store_buffers`) — which is
+exactly the layout plan 012 already proposed. So **no `pub(crate)` pass is needed**,
+and the split is `git mv`-shaped per stage as originally planned. Keep round 2's
+inventory: `impl` 1,701–11,588 (253 `pub fn`) · state types 56–1,700 (~40 structs,
+`ViewId` alone 176–504) · free helpers 11,588–11,804 · tests 11,805–22,985
+(**11,181 lines**).
+
+Warm-up stages round 2 identified, in this order (each green before the next):
+**S1a** free helpers → `app/store/helpers.rs` (`window_slice` 11,703,
+`keep_cursor_visible` 11,715, `prefill_commit_message` 11,627,
+`extract_commit_message` 11,648, `point_byte_offset` 11,798) · **S1b** notes doc →
+`app/notes_doc.rs` (`NotesDoc` 871, `parse_notes` 895, `parse_notes_section` 930,
+`parse_record_block` 958, `serialize_notes` 1,032 — already store-free) ·
+**S1c** test module → `#[cfg(test)] #[path]` files by cluster (low risk).
+Decomposing the impl into separate *types* (state-struct extraction) remains a
+later, optional, high-risk project — it is **no longer a prerequisite**.
+
+### D1 CORRECTED — the sync sites are EIGHT, not six
+
+| # | Site | What it pins |
+|---|------|--------------|
+| S1 | `registry::{name, ALL}` | identity |
+| S2 | `registry::ext_map` | extensions (incl. quirks `h`→C, `mdx`→Md, `ini/conf`→Toml) |
+| S3 | `registry::build` | grammar + highlights + injections + locals |
+| S4 | `registry::highlight_query_for` | **duplicates S3's highlights arm-for-arm** (vendored arms twice) |
+| S5 | `queries::{query_for, language_for}` | definition query + grammar |
+| S6 | `highlight::{supports_reuse, reuse_language}` | reuse policy + **grammar pinned a third time** |
+| S7 | `node.rs`: `parse_source` whitelist, `in_identifier_position`, `is_path_segment`, `is_identifier_kind` + 15 predicates, 13 scope walkers | node predicates |
+| S8 | `tokens::token_class_query_for` | token-class queries (round 1 missed this one) |
+
+Hazards worth separate issues, because they are **correctness** and not tidiness:
+1. **Grammar pinned in 3 places** (S3/S5/S6); only S5's pin is covered by the ABI
+   guard test ⇒ a miss in S3/S6 **silently falls back to plain text**.
+2. **Highlights pinned in 2 places** (S3/S4), vendored `include_str!` arms twice.
+3. `supports_reuse` is a **non-exhaustive `matches!`** while `reuse_language` is an
+   exhaustive arm ⇒ a new language silently defaults to "no reuse" and the two can
+   drift (the warm-up test only covers the languages it names).
+4. `parse_source`'s 18-language whitelist is a **4th identity list** duplicating
+   `LanguageId::ALL` ⇒ adding a language without it makes M-. dead with **zero
+   compile error**.
+5. TS/TSX aliasing is implicit (one definition query, two grammars, two rows).
+
+### Verified split plans (A1–A7, full ranges in the design doc)
+
+`queries.rs`→3 modules · `node.rs`→3 submodules · `nav/index.rs`→4 ·
+`ui/root.rs`→5 (medium: iocraft component re-derivation + `Snapshot` visibility) ·
+`command.rs::seed()`→per-category fns (**the 108 registrations already carry
+category strings** — the split axis exists in the data) · `git/repo.rs`→free-fn
+extraction only (`hunks.rs` 676–824, `index_ops.rs` 833–908); the 641-line impl
+stays whole. `` `git/repo.rs`''s 805-line test file is mostly the pure hunk math.
+
+### Explicitly CLEAN — do not churn
+
+`model/{sections,buffer,project,files,text_width}.rs`, `search/{rg,occur,references}.rs`,
+`syntax/cache.rs`, `app/{watcher,events,keymap}.rs` — read end-to-end, **no splits
+justified**. Recording this prevents a future lane from "improving" them.
+
+### New findings
+
+- **F-5**: `ui/views/` is dead weight — `mod.rs` is 2 lines, the only child is
+  `buffer.rs` (102 lines, one component whose test module sits *above* it). Inline it.
+- **F-6**: the resolver providers are the repo's 2nd–4th largest files (js 1,642 /
+  go 1,601 / python 1,033), each with its own locate/line-scan + ~400-line golden
+  suite; a shared `src/locate.rs` needs a follow-up read of the three locate sections.
+- **F-7**: `ui::root::render_at_width` is a `pub fn` that exists **solely** for
+  app-side tests — a deliberate cross-layer test seam (acceptable; now named).
+- **F-8**: the vendored highlight queries are pinned by "sha256 at copy time"
+  **only in comments** — nothing verifies `third_party/*/highlights.scm` still
+  matches, so a local edit to a vendored file is undetectable. Add a checksum test
+  (it should move with the consts into `language.rs`).
+- Round-1 corrections: the fn is `code_to_app_code` (not `to_app_key`); `node.rs`
+  has **16** kind-predicates (not 17) and **14** scope walkers (not 16); Scheme and
+  Clojure have no scope walkers at all (flat grammars — a silent default today).
+
 ## Round 2 test-ledger deltas (both sides read, local model)
 
 ### T2 is RESOLVED — and much smaller than scoped

@@ -37,11 +37,16 @@ Target layout (names indicative; the inventory confirms):
 `commit.rs` (log/blame/diff/editor), `notes.rs`, `navigation.rs`
 (M-./jump/xref/imenu/impls), `index_wiring.rs`, `picker.rs`,
 `minibuffer.rs`, `project.rs` (files/recents/tree), `keys.rs` (dispatch).
-Mechanics: Rust allows `impl AppStore` in any module of the same crate, so
-methods move without changing the type; internal fields needed by
-submodules become `pub(crate)`/`pub(super)` (a one-time, mechanical
-visibility pass). **Each stage is behavior-preserving and lands
-gate-green**; no stage mixes a behavior change with a move.
+Mechanics (**compiler-verified** in round 2): Rust allows `impl AppStore` blocks
+in other modules of the same crate, and a module's **private** items are visible
+to its **descendant** modules — so placing the files under
+`app::store::*` (children of the module defining `AppStore`) lets them read and
+mutate its private fields with **no `pub(crate)` pass at all**. Files must be
+children, not siblings (`app::store_buffers` would need the visibility pass).
+**Each stage is behavior-preserving and lands gate-green**; no stage mixes a
+behavior change with a move. Warm-up stages first (`00-worklist.md` §Round-2
+structural deltas): free helpers · notes doc · test module, then per-concern
+`impl` moves.
 
 **Phase 3 — split the tests.** `store.rs`'s test module → per-concern test
 files alongside the new modules; `flow_tests.rs` split by the same concerns.
