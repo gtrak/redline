@@ -1,5 +1,6 @@
 ---
-source: src/git/repo.rs
+source: src/git/repo/tests.rs
+assertion_line: 806
 expression: rows
 ---
 [
