@@ -529,19 +529,35 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
 
 ## Gate reliability (higher priority than the cosmetic items)
 
-- **Load-correlated timing flakes, characterised** (see
-  `.agents/tasks/issue-deflake-timing.md`): `check_cursor_stream.py`'s `M-b x5` leg
-  read a `None` cursor on the **first** press (first-frame timing), and
-  `git::repo::tests::unstage_hunk_on_no_trailing_newline_file_keeps_index_exact` failed
-  2 of ~11 full-suite runs **under peak load** with a self-contradictory shape (a
-  byte-exact assert passed while `git diff --cached` was still stale). Mechanism
-  hypothesis: three lanes building + driving PTY suites in parallel create the load
-  that exposes them. The deflake lane is specced; it must demonstrate ≥10× under load
-  and must not add blanket retries.
-- **The trade-off to manage**: parallel lanes buy throughput but raise the flake rate
-  in timing-sensitive legs. If a deflake does not stick, the fallback is to serialise
-  the PTY tier across lanes (the per-invocation fixture root already makes that safe,
-  just not automatic).
+**Three distinct flake classes are now characterised — do not conflate them:**
+
+1. **Cursor CUP race (app-side, root-caused)** — the hardware-cursor write is emitted
+   from a spawned task 12 ms after each frame, i.e. outside the synchronized-output
+   region, so under load it can land after the frame's `?2026l` (or be starved
+   entirely) and the terminal's cursor is stale for a frame. Reproduced live 78/80.
+   Being fixed by the `deflake-cursor` lane (root fix + a harness gate).
+2. **`git::repo` assertion flake (environmental, correlated)** —
+   `stage_file_then_unstage_matches_cli` failed under two concurrent full suites with
+   swap fully exhausted (8G/8G), green 5/5 in isolation; a git-level probe ruled out the
+   libgit2 stat short-circuit, and there is no timing/ordering assumption to pin. Green
+   runs have since been observed *under* the same swap exhaustion, so swap is a
+   **correlate, not a deterministic cause**.
+3. **External SIGTERM of the test harness (unattributed)** — the store-tests gate's first
+   `gate.sh full` run had its `test` stage SIGTERM-killed at ~test 812/847 with **no
+   OOM-kill in the journal**, while every PTY stage still ran and passed; the re-run was
+   21/21 green. Three mechanisms have been **eliminated**: `gate.sh` wraps only the PTY
+   steps in `timeout`; the failure was at 78 s so no per-tool deadline was involved; and
+   the PTY harness only ever `os.kill(self.pid, SIGKILL)`s its **own** spawned app
+   (never by name, never SIGTERM). Cause still unknown — record it as its own class.
+
+**Rule that follows**: auto-retry is wrong for (1) and (2) — a retry hides a real
+failure — but **legitimate for a signal-kill** (cargo exit 143/137), because a killed
+process is not a test outcome at all. If a retry is ever added to `gate.sh`'s test
+stage it must be **signal-specific and logged** ("test stage killed by signal N —
+retried"), never triggered by an assertion failure (exit 101).
+
+- **Load-correlated timing flakes** (see `.agents/tasks/issue-deflake-timing.md`):
+  the parallelism/flake trade-off, and the fallback of serialising the PTY tier.
 - **Every lane's report omits gate numbers by default** — briefs must require the gate
   to establish them, not the worker's summary.
 
