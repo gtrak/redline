@@ -27,8 +27,8 @@ use tree_sitter::Language;
 
 use crate::queries::{
     BASH_QUERY, C_SHARP_QUERY, CLOJURE_QUERY, C_QUERY, CPP_QUERY, GO_QUERY, JAVA_QUERY,
-    JAVASCRIPT_QUERY, JSON_QUERY, MARKDOWN_QUERY, PYTHON_QUERY, RUBY_QUERY, RUST_QUERY,
-    RUST_TABLES_QUERY, SCHEME_QUERY, TOML_QUERY, TYPESCRIPT_QUERY, YAML_QUERY,
+    JAVASCRIPT_QUERY, MARKDOWN_QUERY, PYTHON_QUERY, RUBY_QUERY, RUST_QUERY,
+    RUST_TABLES_QUERY, SCHEME_QUERY, TOML_QUERY, TYPESCRIPT_QUERY,
 };
 use crate::registry::LanguageId;
 
@@ -89,7 +89,8 @@ pub struct LanguageSpec {
     pub token_class: TokenClass,
     /// The definition query for the outline. TypeScript and TSX share
     /// one — the alias is now a visible row pair instead of a hidden
-    /// match arm. `None` only for Plain.
+    /// match arm. `None` for Plain, JSON, and YAML (config/data formats
+    /// whose keys are not navigation targets — issue-json-yaml-no-symbols).
     pub definition_query: Option<&'static str>,
     /// The Rust-only second definition query (010-01/010-03 association,
     /// struct-field, and local-binding tables); `None` elsewhere.
@@ -339,7 +340,8 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         injections_query: "",
         locals_query: "",
         token_class: TokenClass::FromHighlight,
-        definition_query: Some(JSON_QUERY),
+        // JSON keys are not navigation targets (issue-json-yaml-no-symbols).
+        definition_query: None,
         rust_tables_query: None,
         flat_define: None,
         supports_reuse: true,
@@ -356,7 +358,8 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         injections_query: "",
         locals_query: "",
         token_class: TokenClass::FromHighlight,
-        definition_query: Some(YAML_QUERY),
+        // YAML keys are not navigation targets (issue-json-yaml-no-symbols).
+        definition_query: None,
         rust_tables_query: None,
         flat_define: None,
         supports_reuse: true,
@@ -660,7 +663,9 @@ mod tests {
         assert_eq!(seen.len(), 19, "expected one row per LanguageId variant");
 
         // Every non-Plain row carries a name, at least one extension, a
-        // grammar, a highlight query, and a definition query.
+        // grammar, and a highlight query. Every non-Plain, non-JSON, non-YAML
+        // row additionally carries a definition query (issue-json-yaml-no-symbols:
+        // JSON and YAML have no symbols — their keys are not navigation targets).
         for row in &LANGUAGES {
             if row.id == LanguageId::Plain {
                 assert!(row.extensions.is_empty());
@@ -685,11 +690,19 @@ mod tests {
                 "{:?}: no highlight query",
                 row.id
             );
-            assert!(
-                row.definition_query.is_some(),
-                "{:?}: no definition query",
-                row.id
-            );
+            let expect_no_def = matches!(row.id, LanguageId::Json | LanguageId::Yaml);
+            if expect_no_def {
+                assert!(
+                    row.definition_query.is_none(),
+                    "{:?}: JSON/YAML must have no definition query", row.id
+                );
+            } else {
+                assert!(
+                    row.definition_query.is_some(),
+                    "{:?}: no definition query",
+                    row.id
+                );
+            }
         }
 
         // Extensions are unique across rows and round-trip through the

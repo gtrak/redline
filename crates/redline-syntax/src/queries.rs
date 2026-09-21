@@ -46,7 +46,8 @@ pub enum SymbolKind {
     Macro,
     /// A markdown heading (outline entry for docs).
     Heading,
-    /// A key in TOML / JSON / YAML (the "definition" of a config field).
+    /// A key in TOML (the "definition" of a config field). JSON and YAML
+    /// keys were removed as symbols (issue-json-yaml-no-symbols).
     Key,
 }
 
@@ -282,14 +283,6 @@ pub(crate) const TOML_QUERY: &str = r#"
 (pair (dotted_key) @name) @item
 "#;
 
-pub(crate) const JSON_QUERY: &str = r#"
-(pair key: (string (string_content) @name)) @item
-"#;
-
-pub(crate) const YAML_QUERY: &str = r#"
-(block_mapping_pair key: (flow_node) @name) @item
-"#;
-
 pub(crate) const BASH_QUERY: &str = r#"
 (function_definition (word) @name) @item
 "#;
@@ -426,10 +419,12 @@ fn flat_define_kind(
     }
 }
 
-/// The definition query for a language; `None` for plain text (the
-/// documented empty fallback — plain files contribute no outline).
-/// Thin wrapper over the descriptor table (the old 18-arm match, which
-/// duplicated the table's `definition_query` column, is gone).
+/// The definition query for a language; `None` for plain text, JSON, and
+/// YAML (the documented empty fallback — these formats contribute no
+/// outline: JSON/YAML keys are not navigation targets,
+/// issue-json-yaml-no-symbols). Thin wrapper over the descriptor table
+/// (the old 18-arm match, which duplicated the table's `definition_query`
+/// column, is gone).
 pub fn query_for(lang: LanguageId) -> Option<&'static str> {
     crate::language::spec(lang).definition_query
 }
@@ -1576,18 +1571,15 @@ mod tests {
         assert_eq!(syms.len(), 3, "{syms:?}");
     }
 
-    // ── JSON: keys ─────────────────────────────────────────────────────
+    // ── JSON: no symbols (issue-json-yaml-no-symbols) ──────────────────
     #[test]
-    fn json_extracts_keys() {
+    fn json_yields_zero_symbols() {
         let src = "{\n  \"a\": 1,\n  \"b\": {\"c\": 2}\n}\n";
         let got = names(LanguageId::Json, src);
-        let got_names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(got_names.contains(&"a"), "{got:?}");
-        assert!(got_names.contains(&"b"), "{got:?}");
-        assert!(got_names.contains(&"c"), "{got:?}");
-        for (_, k) in &got {
-            assert_eq!(*k, SymbolKind::Key);
-        }
+        assert!(
+            got.is_empty(),
+            "JSON must yield zero symbols (keys are not navigation targets), got {got:?}"
+        );
     }
 
     // ── TOML: table + pair keys ────────────────────────────────────────
@@ -1605,18 +1597,53 @@ mod tests {
         }
     }
 
-    // ── YAML: mapping keys ─────────────────────────────────────────────
+    // ── YAML: no symbols (issue-json-yaml-no-symbols) ──────────────────
     #[test]
-    fn yaml_extracts_keys() {
+    fn yaml_yields_zero_symbols() {
         let src = "a:\n  b: 1\nc: 2\n";
         let got = names(LanguageId::Yaml, src);
-        let got_names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(got_names.contains(&"a"), "{got:?}");
-        assert!(got_names.contains(&"b"), "{got:?}");
-        assert!(got_names.contains(&"c"), "{got:?}");
-        for (_, k) in &got {
-            assert_eq!(*k, SymbolKind::Key);
-        }
+        assert!(
+            got.is_empty(),
+            "YAML must yield zero symbols (keys are not navigation targets), got {got:?}"
+        );
+    }
+
+    // ── Control: Rust and TypeScript still yield their symbols ─────────
+    #[test]
+    fn rust_and_typescript_symbols_unaffected_by_json_yaml_change() {
+        // Rust: the struct + const + fn all still extract.
+        let rust_src = "struct Point { x: i32, y: i32 }\nconst TWO: i32 = 2;\nimpl Point {\n    fn new(x: i32, y: i32) -> Self { Point { x, y } }\n}\nfn main() {}\n";
+        let rust_syms = extract_symbols(LanguageId::Rust, rust_src);
+        let rust_names: Vec<&str> = rust_syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(rust_names.contains(&"Point"), "Rust must still yield struct Point: {rust_names:?}");
+        assert!(rust_names.contains(&"TWO"), "Rust must still yield const TWO: {rust_names:?}");
+        assert!(rust_names.contains(&"main"), "Rust must still yield fn main: {rust_names:?}");
+
+        // TypeScript: the interface + class + method all still extract.
+        let ts_src = "interface Foo { a: number; b?: string }\nclass A {\n  baz() { return 1 }\n}\n";
+        let ts_syms = extract_symbols(LanguageId::TypeScript, ts_src);
+        let ts_names: Vec<&str> = ts_syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(ts_names.contains(&"Foo"), "TS must still yield interface Foo: {ts_names:?}");
+        assert!(ts_names.contains(&"A"), "TS must still yield class A: {ts_names:?}");
+        assert!(ts_names.contains(&"baz"), "TS must still yield method baz: {ts_names:?}");
+    }
+
+    // ── JSON/YAML highlighting is unaffected by the symbol change ──────
+    #[test]
+    fn json_yaml_highlight_query_unchanged() {
+        // The highlight query must remain set for JSON/YAML even though the
+        // definition query is now None (issue-json-yaml-no-symbols: only
+        // symbol extraction changes; highlighting is untouched). The
+        // end-to-end face assertions live in `highlight.rs`'s
+        // `json_key_is_property_face` and `yaml_key_is_highlighted`.
+        assert!(
+            crate::language::spec(LanguageId::Json).highlight_query.is_some(),
+            "JSON must still have a highlight query (symbol removal does not affect highlighting)"
+        );
+        assert!(
+            crate::language::spec(LanguageId::Yaml).highlight_query.is_some(),
+            "YAML must still have a highlight query (symbol removal does not affect highlighting)"
+        );
     }
 
     // ── Bash: functions ────────────────────────────────────────────────

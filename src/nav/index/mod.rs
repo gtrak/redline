@@ -87,10 +87,11 @@ mod tests {
         assert_eq!(index.definition_count("other"), 1);
         // `main` once (main.rs).
         assert_eq!(index.definition_count("main"), 1);
-        // Markdown heading + JSON keys are present.
+        // Markdown heading is present.
         assert_eq!(index.definition_count("Title"), 1);
-        assert_eq!(index.definition_count("k1"), 1);
-        assert_eq!(index.definition_count("k3"), 1);
+        // JSON keys are NOT symbols (issue-json-yaml-no-symbols).
+        assert_eq!(index.definition_count("k1"), 0, "JSON keys must not be symbols");
+        assert_eq!(index.definition_count("k3"), 0, "JSON keys must not be symbols");
         // Plain-text (no code grammar) contributes no outline.
         assert!(!index.has("src/readme.txt"), "readme.txt must be plain: no symbols");
         // The TOML key `name` (not the value string) is a symbol.
