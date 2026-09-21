@@ -2,6 +2,10 @@
 
 **Status:** design only; no issues specced. Deliberately separate from plan 015.
 
+**Settled since (user directive, 2026-09-21):** undo is bound to **both `C-x u` and
+`C-/`** (see §3 item 4). The user reported that `C-x u` is what they reach for, so it is
+not optional.
+
 ## 1. Why its own plan
 
 There is **no undo anywhere in the codebase** — no command, no history, nothing. That is
@@ -32,8 +36,13 @@ each edit, and the hook belongs beside `retain_rope_edit`.
    run. Implement that rule explicitly and state it, rather than a time-based heuristic.
 4. **Undo vs redo.** Simplest coherent model: one undo stack; an undo pushes the inverse
    onto a redo stack; **any new edit clears the redo stack** (emacs's behaviour).
-   Bindings are a detail — `C-/` (and `C-x u`) for undo, `M-_` for redo, or state your
-   choice.
+   **SETTLED (user directive): undo is bound to BOTH `C-x u` and `C-/`** — both verified
+   free in the keymap tables, and `C-x u` fits the existing `C-x` prefix family with no
+   collision (`C-x C-x`, `C-x 0`, `C-x b`, …). Note a terminal subtlety worth pinning
+   rather than being surprised by: **`C-/` and `C-_` are the same control code (0x1F)** on
+   most terminals, so they are indistinguishable and binding `C-/` picks up `C-_` for
+   free; assert what crossterm actually reports rather than assuming. Redo has no emacs
+   default — state your choice and justify it.
 5. **The dirty flag — the requirement that is easy to get wrong.** Undoing back to the
    content that was last saved/loaded must clear `locally_modified`, or the buffer keeps
    claiming unsaved changes forever. This needs a **saved-state marker** in the history
