@@ -116,17 +116,27 @@ impl AppStore {
         self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
     }
 
-    /// Scroll the view to show the current match.
+    /// Land the point ON the current match (line and column — the user
+    /// reported the cursor stopping at the line's start, not the match)
+    /// and scroll the view to show it.
     fn isearch_jump_to_current(&mut self) {
         let Some(&match_byte) = self.isearch.matches.get(self.isearch.current) else {
             return;
         };
-        let line = self
+        // The matches are BYTE offsets (find_all_matches), but the point's
+        // `col` is a CHAR index (`set_point` clamps against
+        // `chars().count()`): convert explicitly so a match that follows a
+        // multibyte character lands ON the match, not off-by-N.
+        let Some((line, col)) = self
             .buffers
             .current_buffer()
-            .and_then(|b| b.try_byte_to_line(match_byte))
-            .unwrap_or(0);
-        self.set_point_line(line);
+            .and_then(|b| b.try_byte_to_line_col(match_byte))
+        else {
+            return;
+        };
+        // The landing column becomes the goal column (emacs: a following
+        // C-n/C-p holds it) — the same convention as `navigate_to_entry`.
+        self.set_point(line, col, col);
     }
 
     /// Confirm isearch (RET): keep the current position, deactivate.

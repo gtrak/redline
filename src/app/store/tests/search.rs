@@ -90,6 +90,54 @@ use super::*;
     }
 
     #[test]
+    fn isearch_lands_point_on_match_column() {
+        // Regression (user report): isearch moved the cursor to the match's
+        // LINE but not the match — `set_point_line` zeroed the column. The
+        // match here is at a NONZERO column ("xx omega" → col 3); the
+        // existing fixture's match ("omega" at col 0) cannot discriminate.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "alpha\nbeta\ngamma\ndelta\nxx omega\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o'); // only in "xx omega" (line 4)
+        assert_eq!(s.isearch_match_count(), 1);
+        assert_eq!(s.point_line(), 4, "the match's line");
+        assert_eq!(s.point_col(), 3, "the match's column — not the line start");
+        assert_eq!(
+            s.file_point().goal_col,
+            3,
+            "the landing column becomes the goal column (C-n/C-p hold it)"
+        );
+    }
+
+    #[test]
+    fn isearch_lands_on_multibyte_match_column() {
+        // Pins the byte→char conversion: in "café omega" the 'o' of
+        // "omega" sits at BYTE 6 of the line (é is 2 bytes) but CHAR 5.
+        // A byte-based conversion would land the point at col 6 (the 'm').
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch_match_count(), 1);
+        assert_eq!(s.point_line(), 0);
+        assert_eq!(s.point_col(), 5, "char index 5 — not byte index 6");
+    }
+
+    #[test]
     fn isearch_bound_command_letters_extend_query() {
         // Regression: keys that are depth-1 leaf commands in the file view
         // (n, p, l, g, q) must extend the isearch query, not dispatch.

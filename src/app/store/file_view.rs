@@ -588,10 +588,18 @@ impl AppStore {
         }
     }
 
-    /// A landing that moves the point to buffer line `line` at column 0
-    /// (isearch, goto-line, xref, imenu, jump, search-RET, click):
-    /// `set_point` with the point's column reset (the emacs landing is at the
-    /// start of the target line).
+    /// A col-0 landing: `set_point` with the point's column (and goal
+    /// column) reset to 0. For the callers whose target carries no
+    /// column — goto-line (M-g g; emacs `goto-line` lands at the line
+    /// start), imenu / the xref & symbol pickers (M-i / M-.; candidates
+    /// are "symbol:line" / "file:line"), resolver landings
+    /// (`ResolvedSource` has no column), external xref jumps (line-only
+    /// outcome), and isearch cancel (only the pre-search LINE was
+    /// recorded). Callers that DO know a landing column must not use
+    /// this — they land via `set_point(line, col, col)`: isearch lands
+    /// on the match's column, `M-,`/`M-.` restore the recorded column
+    /// (`navigate_to_entry`). C-x C-x and project-search RET still use
+    /// this although a column is available (follow-up, not this lane).
     pub(super) fn set_point_line(&mut self, line: usize) {
         self.set_point(line, 0, 0);
     }

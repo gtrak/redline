@@ -108,6 +108,41 @@ use super::*;
     // ── plan 004 row 11: position display ─────────────────────────────
 
     #[test]
+    fn jump_back_restores_recorded_column() {
+        // Regression (user report): M-, must restore the prior position as
+        // line + column (its own doc promises it; `current_jump_entry`
+        // records `col: point_col()`). The fixture's column is intentionally
+        // NONZERO — a col-0 fixture cannot discriminate (the same class of
+        // defect that let the isearch col-0 landing survive).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "first line\nsecond line with words\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        // Record the point at line 1, col 4 (inside "second").
+        s.set_point(1, 4, 4);
+        let origin = s.current_jump_entry().expect("current buffer has a jump entry");
+        assert_eq!(
+            (origin.line, origin.col),
+            (1, 4),
+            "the recorded entry keeps the column"
+        );
+        // Jump away, then M-, back.
+        s.set_point_line(0);
+        assert_eq!(s.point_col(), 0, "the forward landing zeroed the column");
+        s.record_jump(Some(origin), "M-.");
+        s.jump_back();
+        assert_eq!(s.point_line(), 1, "M-, restores the recorded line");
+        assert_eq!(s.point_col(), 4, "M-, restores the recorded column");
+    }
+
+    #[test]
     fn jump_stack_back_forward_round_trip() {
         let mut stack = JumpStack::default();
         let p0 = jump_entry("a.rs", 0);

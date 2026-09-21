@@ -182,8 +182,22 @@ impl Buffer {
     }
 
     /// Non-panicking `byte_to_line`; `None` when out of bounds.
+    #[allow(dead_code)] // public API: spec-required byte↔line conversion
     pub fn try_byte_to_line(&self, byte_idx: usize) -> Option<usize> {
         self.rope.try_byte_to_line(byte_idx).ok()
+    }
+
+    /// The 0-based line and 0-based CHAR column (chars from the line's
+    /// start — the same units the point's `col` uses) of the byte at
+    /// `byte_idx`. Non-panicking; `None` when out of bounds. The
+    /// byte→char step is required, not a convenience: using the raw byte
+    /// offset as a column is off-by-N on any line that starts with a
+    /// multibyte character.
+    pub fn try_byte_to_line_col(&self, byte_idx: usize) -> Option<(usize, usize)> {
+        let line = self.rope.try_byte_to_line(byte_idx).ok()?;
+        let char_idx = self.rope.try_byte_to_char(byte_idx).ok()?;
+        let line_start = self.rope.try_line_to_char(line).ok()?;
+        Some((line, char_idx - line_start))
     }
 
     /// The full text as a `String` (O(N); prefer `line_text` for
@@ -481,6 +495,25 @@ mod tests {
         assert_eq!(buf.try_line_to_byte(1), Some(4));
         assert_eq!(buf.try_line_to_byte(2), Some(4)); // == len_lines(), end-of-file
         assert_eq!(buf.try_line_to_byte(3), None);     // truly out of bounds
+    }
+
+    #[test]
+    fn try_byte_to_line_col_multibyte() {
+        let mut t = BufferTable::new();
+        let k = t.insert(key("/p/a.rs"), "café omega\nxx\n".into());
+        let buf = t.get(&k).unwrap();
+        // Line 0 "café omega" in BYTES: c=0 a=1 f=2 é=3,4 ' '=5 o=6 m=7
+        // e=8 g=9 a=10; in CHARS: c=0 a=1 f=2 é=3 ' '=4 o=5 …
+        assert_eq!(buf.try_byte_to_line_col(0), Some((0, 0)));
+        assert_eq!(
+            buf.try_byte_to_line_col(6),
+            Some((0, 5)),
+            "byte 6 is char 5 (é occupies 2 bytes)"
+        );
+        // Line 1 "xx" starts at byte 12 (11 bytes + the '\n' at 11).
+        assert_eq!(buf.try_byte_to_line_col(12), Some((1, 0)));
+        assert_eq!(buf.try_byte_to_line_col(13), Some((1, 1)));
+        assert_eq!(buf.try_byte_to_line_col(999), None, "out of bounds");
     }
 
     #[test]
