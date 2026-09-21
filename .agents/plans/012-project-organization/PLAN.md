@@ -57,14 +57,20 @@ and mutates private *fields* with no visibility change. **But** a private
 with `E0624: method is private`; `pub(super)` on it compiles. So the split needs:
 files placed under `app::store::*` (**children** of the module defining
 `AppStore`, not siblings like `app::store_buffers`), **no field-visibility pass**,
-and a **`pub(super)` pass on the 168 private methods that cross concern
-boundaries** (the 10 private *free* fns need none). Two further facts the review
+and a **`pub(super)` pass on the private methods that cross concern
+boundaries** (measured at **73** when the 13 concern moves landed — far below the
+168 private methods the original estimate assumed, because most private methods
+are called from within their own concern). Two further facts the review
 established, both easy to get wrong: `#[path = "flow_tests.rs"]` must become
 **`"../flow_tests.rs"`** (the attribute resolves relative to the containing
 file's directory, so it would otherwise point at a nonexistent
 `src/app/store/flow_tests.rs` → E0583), and `collect_syntax_anchor_nodes` (2602)
 + `is_syntax_anchor_kind` (2627) are **impl methods formatted at column 0**, so
-indent-based tooling must not move them out of the impl.
+indent-based tooling must not move them out of the impl. A third rule came from
+splitting `syntax/node.rs`: **a `pub use` re-export cannot re-export an item less
+visible than itself** (`pub use` of a `pub(super)`/private item → **E0364**); for
+internal-only items use `pub(crate) use` (or widen the item to `pub(crate)`), which
+keeps the visibility narrowing rather than adding public API.
 **Each stage is behavior-preserving and lands gate-green**; no stage mixes a
 behavior change with a move. Warm-up stages first (`00-worklist.md` §Round-2
 structural deltas): free helpers · notes doc · test module, then per-concern
