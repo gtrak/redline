@@ -71,6 +71,15 @@ document whatever remains** rather than resurrecting a deleted copy.
   **fails** with the expected lint name, then restore it. Report the observed output. An
   enforcement you never saw fail is theater.
 - Read clippy's exit code via `${PIPESTATUS[0]}` (the standing rule).
+- **Do NOT add `cargo fmt --check` to the gate or the hook as part of this task.** Measured on
+  `main` (before any lane's changes): it reports **744 diff hunks** across the repo,
+  including files in `crates/redline-resolve/` that the lane under review never touched. The
+  installed `rustfmt` is **1.9.0-stable (2026-07-14)** — a newer style edition than the tree
+  was formatted with — so the repo is fmt-dirty **environment-wide**. A fmt check added today
+  would fail for reasons unrelated to any change and train everyone to bypass the hook. If
+  formatting should be enforced, that is its own lane: either pin the toolchain (a
+  `rust-toolchain.toml`) or do the one-off repo-wide `cargo fmt` and land it deliberately —
+  **then** add the check. Record whichever you choose; do not silently skip it.
 
 ## Part C — a pre-push hook that runs the fast gate
 
