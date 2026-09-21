@@ -7,9 +7,13 @@ over `src/` + `crates/redline-resolve/`, each reporting
 tag. Supervisor then **verified** every headline claim by grep (see
 §Verification) before it entered this list.
 
-Baseline facts (all grep-verified, HEAD `acd974e`):
-`src/app/store.rs` 22,992 lines / 869 methods / 324 `pub fn` / **349 tests**
-(one 11k-line test module) · `flow_tests.rs` 3,624 lines / 88 twins ·
+Baseline facts (re-verified; several earlier figures were grep artifacts — see §Verification):
+`src/app/store.rs` 22,992 lines; `impl AppStore` **432 methods** per the `012-01`
+inventory (254 `pub` / 178 private). My own recount of the impl region gives 419, so
+the exact figure is being settled by the `012-01` review gate. The widely-quoted
+"869" was a bad grep that swept in the 11 k-line test module's fns. Tests in the
+file: **349 `#[test]` + 22 `#[tokio::test]` = 371** (plus ~18 helpers = the 389 the
+worker measured); `flow_tests.rs` 3,624 lines / 88 twins ·
 `allow|expect(dead_code)` **50 occurrences** · `seed()` 694 lines ·
 `tempfile::tempdir()` 205 sites · `Cargo.toml` scaffolds 69 sites.
 
@@ -114,8 +118,10 @@ mod app {
 
 Constraint this imposes: the new files must be **children of the defining
 module** (`app::store::buffers`), *not* siblings (`app::store_buffers`) — which is
-exactly the layout plan 012 already proposed. So **no `pub(crate)` pass is needed**,
-and the split is `git mv`-shaped per stage as originally planned. Keep round 2's
+exactly the layout plan 012 already proposed. So **no field-visibility pass is
+needed** — but (compiler-verified, `E0624`) private *methods* called across
+submodules DO need `pub(super)`. `012-01` counts **178 private methods** → that is
+the real mechanical pass, additive and non-breaking. Keep round 2's
 inventory: `impl` 1,701–11,588 (253 `pub fn`) · state types 56–1,700 (~40 structs,
 `ViewId` alone 176–504) · free helpers 11,588–11,804 · tests 11,805–22,985
 (**11,181 lines**).
@@ -129,6 +135,17 @@ Warm-up stages round 2 identified, in this order (each green before the next):
 **S1c** test module → `#[cfg(test)] #[path]` files by cluster (low risk).
 Decomposing the impl into separate *types* (state-struct extraction) remains a
 later, optional, high-risk project — it is **no longer a prerequisite**.
+
+**Authoritative module map (from `012-01`, pending review):** `docs/architecture.md`
+holds the measured 14-module concern table — `core/mod.rs` (23 methods) ·
+`views.rs` 18 · `buffers.rs` 29 · `notes.rs` 30 · `file_view.rs` 52 · `search.rs` 39 ·
+`magit.rs` 24 · `commit.rs` 61 · `navigation.rs` 51 · `index_wiring.rs` 34 ·
+`picker.rs` 42 · `project.rs` 17 · `minibuffer.rs` 1 · `keys.rs` 11 — with exact
+line runs per module. Its extra requirements for stage 4: `pub use` re-exports in
+`mod.rs` for the UI-imported row types (`BufferRow`, `DirtyCounts`, `FileViewRow`,
+`PickerCandidate`, `ResultRow`, `TransientMenuRow`, `TreeRow`, `ViewId`), and the
+`#[path = "flow_tests.rs"]` wiring moves verbatim with `flow_tests` **staying a
+descendant of `store`** (its private-field access depends on it) until phase 3.
 
 ### D1 CORRECTED — the sync sites are EIGHT, not six
 

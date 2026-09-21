@@ -6,8 +6,12 @@ Depends on: nothing (behavior-preserving refactor + cleanup)
 
 ## Why
 
-`src/app/store.rs` is **22,992 lines with 869 methods in a single
-`impl AppStore` block** — roughly 40% of the 56 k-line codebase. It mixes
+`src/app/store.rs` is **22,992 lines** — roughly 40% of the 56 k-line codebase —
+with an `impl AppStore` of **~420–430 methods** (the frequently-quoted "869" was a
+bad grep that swept the 11 k-line test module in; `012-01` measured 432 and the
+review gate is settling the exact figure). One impl block holds every concern:
+buffers, views, file-view cursor/scroll, search, magit, log/blame/commit, notes,
+navigation, index wiring, pickers, minibuffer, project/files, key dispatch. It mixes
 buffers, views, the view stack, file-view cursor/scroll, search, magit
 status/staging, log/blame/commit/diff, notes, annotations, navigation
 (M-., jump stack, xref/imenu/impls pickers), index wiring, crate indexes,
@@ -26,7 +30,7 @@ Adjacent offenders: `src/app/flow_tests.rs` 3,624 · `src/syntax/node.rs`
 ## What
 
 **Phase 1 — plan the split on facts (no behavior change).**
-Inventory the 869 methods into coherent concerns with line ranges; publish
+Inventory the methods into coherent concerns with line ranges; publish
 `docs/architecture.md` (module map + the split plan + the mechanical
 constraints). Reviewer checks the inventory against the file.
 
@@ -37,16 +41,21 @@ Target layout (names indicative; the inventory confirms):
 `commit.rs` (log/blame/diff/editor), `notes.rs`, `navigation.rs`
 (M-./jump/xref/imenu/impls), `index_wiring.rs`, `picker.rs`,
 `minibuffer.rs`, `project.rs` (files/recents/tree), `keys.rs` (dispatch).
-Mechanics (**compiler-verified** in round 2): Rust allows `impl AppStore` blocks
-in other modules of the same crate, and a module's **private** items are visible
-to its **descendant** modules — so placing the files under
-`app::store::*` (children of the module defining `AppStore`) lets them read and
-mutate its private fields with **no `pub(crate)` pass at all**. Files must be
-children, not siblings (`app::store_buffers` would need the visibility pass).
+Mechanics (**compiler-verified**, in both directions): Rust allows `impl AppStore`
+blocks in other modules of the same crate, and a module's **private items are
+visible to its descendant modules** — verified with `rustc`: a child module reads
+and mutates private *fields* with no visibility change. **But** a private
+*method* defined in one submodule and called from a **sibling** submodule fails
+with `E0624: method is private`; `pub(super)` on it compiles. So the split needs:
+files placed under `app::store::*` (**children** of the module defining
+`AppStore`, not siblings like `app::store_buffers`), **no field-visibility pass**,
+and a **`pub(super)` pass on the private methods that cross concern boundaries**
+(`012-01` counted 178 private methods → an additive, non-breaking change).
 **Each stage is behavior-preserving and lands gate-green**; no stage mixes a
 behavior change with a move. Warm-up stages first (`00-worklist.md` §Round-2
 structural deltas): free helpers · notes doc · test module, then per-concern
-`impl` moves.
+`impl` moves. The authoritative concern/module map is `docs/architecture.md`
+(from `012-01`).
 
 **Phase 3 — split the tests.** `store.rs`'s test module → per-concern test
 files alongside the new modules; `flow_tests.rs` split by the same concerns.
