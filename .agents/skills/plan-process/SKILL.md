@@ -201,6 +201,31 @@ where the missing 20 commands lived. The fix is procedural, not diligence:
    "current at spec time" and tell the lane to re-read it, or leave the number out and
    require the lane to state the baseline it measured.
 
+### A line number is not evidence of which function it is in
+
+Distinct from a miscounted number: a spec claimed a defect from a `rg` hit plus an
+*earlier, unrelated* read. The evidence was real (`navigation/mod.rs:73` does call
+`set_point_line`), but the spec asserted that line was inside `navigate_to_entry` and
+therefore that "the recorded column is never restored" — complete with a doc it
+claimed was contradicted. It was inside `open_resolved_source` (whose target has no
+column, so col 0 is correct), and `navigate_to_entry` had restored the column since a
+much earlier commit. The lane caught it with `git log -L` / `git log -S`, i.e. it
+checked whether the defect had *ever* existed rather than reasoning about the
+present.
+
+Rules that follow:
+1. **Read the enclosing item.** A line number from `rg` tells you nothing about the
+   function, impl, or block it sits in; open the file at that line before attributing
+   behaviour to it.
+2. **To claim "X is contradicted by the code", quote the code that contradicts it** —
+   not a line number that plausibly does.
+3. **Use history to test a defect hypothesis**: `git log -L <fn>:<file>` and
+   `git log -S <string>` answer "did this ever behave differently?" far more cheaply
+   than reasoning from the current snapshot. A hypothesis that the code never had the
+   bug is a hypothesis worth one command.
+4. A claim of the form "and the same defect affects Y" **doubles** the blast radius of
+   a mistake. Either verify Y the same way as X, or label it explicitly as unverified.
+
 ### A pin must read the same source of truth as the code it guards
 
 A pin that asserts an invariant via a *copy* of the fact gives **false

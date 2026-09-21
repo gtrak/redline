@@ -688,6 +688,36 @@ functions are excluded by the criterion above.
   right, or should the constructor be deleted / `#[cfg(test)]`-gated? An allow with
   no stated reason is exactly what that audit exists to catch.
 
+### Follow-ups from the isearch-column lane (user-reported bug + audit)
+
+**Fixed:** isearch now lands the point on the match's **column**, not the line start.
+`isearch_jump_to_current` used `try_byte_to_line` then `set_point_line` (col 0); it now
+uses a new `Buffer::try_byte_to_line_col` (explicit byte→char: `try_byte_to_char` −
+`try_line_to_char`) and lands with `set_point(line, col, col)`. Pinned by a
+**multibyte** test (`"café omega"` → char 5, not byte 6) — the byte/char trap was real.
+The `set_point_line` doc was corrected (it is the *col-0* landing, not a blanket rule).
+
+**My spec was wrong about a second defect:** `M-,` was already correct
+(`navigate_to_entry` has used `set_point(entry.line, entry.col, entry.col)` since
+`0bc74c3`). The lane added `jump_back_restores_recorded_column` as a **regression pin**
+(it would fail if the col were zeroed). See the skill rule "a line number is not
+evidence of which function it is in".
+
+**Column-availability audit (report-only; four callers still drop a column):**
+
+| Caller | Column source | Notes |
+|---|---|---|
+| `buffers.rs:458` `C-x C-x` `exchange_point_and_mark` | mark is a byte offset | **most emacs-visible of the four**; the new `try_byte_to_line_col` is exactly the seam it needs |
+| `search.rs:156` isearch **cancel** | not recorded — `IsearchState` stores only `pre_search_line` | needs a `pre_search_col` field to restore the original column on `C-g` |
+| `search.rs:329` project-search RET | `Hit.col: Option<u64>` (byte col; `None` for regex) | |
+| `definitions.rs:186` unique-def jump | `Symbol.start_byte` | derivable |
+
+**One-line doc fix:** `JumpEntry.col` (`src/app/store/mod.rs:616`) is documented as
+"byte offset within the line" but is actually a **char index** (recorded from
+`point_col()`, consumed by `set_point`). Zero behaviour impact; wrong doc.
+
+**Still out of scope:** a match beyond the pane width clamps at the edge (no hscroll).
+
 ## Known follow-ups from gate findings (low priority)
 
 - **PTY flake, unattributed** (descriptor-table gate): the first `gate.sh full` run on a
