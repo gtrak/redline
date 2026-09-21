@@ -22,10 +22,28 @@
 //! the filter reproduces the walk for marker-only trees (the
 //! `.gitignore` and `.ignore` chain, `hidden(true)`), and in git repos
 //! for the sources above (`.gitignore` and `.ignore` chain, `.git/
-//! info/exclude`, global excludes, `hidden(true)`). The one remaining
-//! divergence is the pre-existing cross-level negation precedence (a
-//! deeper `!pat` cannot rescue a path a shallower ignore-file rule
-//! ignores — not real git semantics, and shared by all three walkers).
+//! info/exclude`, global excludes, `hidden(true)`).
+//!
+//! Two divergences remain, both PRE-EXISTING and narrow:
+//!
+//! 1. **Cross-level negation precedence**: a deeper `!pat` cannot
+//!    rescue a path that a shallower ignore-file rule ignores — not real
+//!    git semantics. The file-list walk and the incremental filter share
+//!    the predicate, so they agree with each other; the SEARCH pipeline's
+//!    walk uses the `ignore` crate's native resolution (deepest match
+//!    wins) and can therefore disagree with them in this corner, in
+//!    marker-only trees. In git repos the file-list walk and the search
+//!    walk are both native, so they agree.
+//! 2. **An ignore file ABOVE the project root**: the walk's
+//!    `parents(true)` applies an ancestor directory's `.ignore` /
+//!    `.gitignore` to the walk, but `is_gitignored` stops its chain at
+//!    `root`. A path excluded by such an above-root ignore file is
+//!    therefore excluded by the full build and RE-INDEXED by the
+//!    incremental filter — the same class as the bug this predicate
+//!    exists to prevent, just narrow (it needs an ignore file in a
+//!    directory above the project root). Closing it means walking the
+//!    chain past `root`; until then it is a known, documented
+//!    divergence, not an accident.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -279,7 +297,9 @@ pub fn is_gitignored(
         return true;
     }
     if ig_explicit {
-        return false; // `.ignore` says "keep": the `.gitignore` chain and the exclude sources cannot override
+        // `.ignore` says "keep": the `.gitignore` chain and the exclude
+        // sources cannot override it.
+        return false;
     }
     if gi_ignored {
         return true;
@@ -762,8 +782,8 @@ mod tests {
                 "nested/plain.rs",
                 "excl/plain2.rs"
             ]),
-            "walk must drop the exclude/global/gitignore paths (and keep the
-slash/anchored global ones the cwd-rooted matcher cannot reach): {:?}",
+            "walk must drop the exclude/global/gitignore paths (and keep the \
+             slash/anchored global ones the cwd-rooted matcher cannot reach): {:?}",
             walk.files
         );
         // The FILTER (incremental index path) agrees with the walk on
@@ -801,8 +821,8 @@ slash/anchored global ones the cwd-rooted matcher cannot reach): {:?}",
         );
         assert!(
             !ignored(root, &root.join("exsub"), true),
-            "the slash exclude rule matches the PATH exsub/inner.rs, not the
-parent dir — the walk keeps `exsub/` and drops the file, the filter must"
+            "the slash exclude rule matches the PATH exsub/inner.rs, not the \
+             parent dir — the walk keeps `exsub/` and drops the file, the filter must"
         );
         assert!(
             !ignored(root, &root.join("sub"), true),
