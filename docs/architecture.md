@@ -32,9 +32,12 @@ src/
     command.rs            1,039  CommandRegistry (M-x name → closure)
     config.rs              267  TOML config load/validate
     events.rs              201  ChangeBus / ProjectChange (project-change bus)
-    flow_tests.rs         3,624  PTY-style flow tests, hung off store.rs via #[path]
+    flow_tests.rs         3,624  PTY-style flow tests, hung off store/mod.rs via #[path = "../flow_tests.rs"]
     keymap.rs              628  KeymapEngine, KeySeq, C-x/C-c prefixes
-    store.rs            23,126  AppStore — THE file this plan splits (see §2–5)
+    store/
+      mod.rs            23,000  AppStore — the impl this plan splits (see §2–5)
+      helpers.rs           172  free fns extracted in 012-02 Stage A
+      notes_doc.rs          ~  NotesDoc parse/serialize, 012-02 Stage B
     watcher.rs             656  ActiveWatcher (notify-based, debounced)
 
   git/
@@ -85,7 +88,7 @@ src/
 | 11813–11817 | 5 | `impl Default for AppStore` (delegates to `new`) |
 | 11819–11843 | 25 | `impl Picker` (`recompute`) |
 | 11844–11854 | 11 | free fn `point_byte_offset` (→ navigation, §3) |
-| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 fns (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers)** |
+| 11856–23119 | 11,264 | `#[cfg(test)] mod tests` — **401 top-level fns (350 `#[test]` + 22 `#[tokio::test]` + 29 non-test helpers)**, plus **9 helper fns nested inside test bodies** (`fn git_cli`/`fn git_cli(d:…)` at the old 14645/19059/19096/19333/19702/19737/20404/20566/20092) — the test-split lane must carry those 9 too, or they are lost |
 | 23121–23126 | 6 | loop-03 comment (23121–23123) + `#[cfg(test)] #[path = "flow_tests.rs"] mod flow_tests;` (23124–23126) |
 
 Helper items in lines 1–1444 (move with their concern in Phase 2):
@@ -324,6 +327,9 @@ src/app/store/
   mod.rs         struct AppStore + its 83 fields, Default impl,
                  `pub use` re-exports for UI-imported items, core (23)
                  → ~1,444 + 271 (struct) + 670 (core) lines (helpers + struct + core)
+  helpers.rs     12 free fns — LANDED in 012-02 Stage A (11 moved; `point_byte_offset`
+                 stayed in mod.rs because its 4 call sites are in-impl)
+  notes_doc.rs   NotesDoc + parse/serialize — LANDED in 012-02 Stage B
   views.rs        18
   buffers.rs      29
   notes.rs        30
@@ -392,10 +398,10 @@ field would need `pub(crate)` — not required by this plan.
    exactly the needed scope; cheaper than `pub(crate)`). The 253 `pub`
    methods keep their visibility. The 11 associated free fns at
    11649–11811 (core 5, commit 5, picker 1) and `point_byte_offset`
-   (11850, navigation) need **no visibility change**: the five core free fns
-   land in `store/mod.rs`, where module privacy is already visible to
-   every submodule, and the remaining seven (commit 5, picker 1,
-   navigation 1) are called only from within their own target module.
+   (11850, navigation) need **no visibility change**: the free fns that stay in
+   `store/mod.rs` are already visible to every submodule, and the rest live in
+   `store/helpers.rs` (`pub(super)` — 012-02 Stage A landed this) or are called
+   only from within their own target module.
    This is the one mechanical pass, and it is
    additive (widening), so no call site breaks.
    Per-module private method counts (methods only; sum 168): core 1,
