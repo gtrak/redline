@@ -27,7 +27,7 @@ use tokio::sync::watch;
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
 use crate::app::events::{ChangeBus, ProjectChange};
-use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, parse_sequence};
+use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, load_bindings, parse_sequence};
 use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use crate::git::diff::{DiffSide, FileDiff};
 use crate::git::status::{RepoStatus, Side};
@@ -219,6 +219,308 @@ pub enum ViewId {
     CommitEditor,
 }
 
+// ── Declarative keymap tables (A2): (emacs-notation sequence, command) ──
+//
+// The old imperative `bind()` calls lived in constructors; these tables are
+// loaded through `load_bindings` (the same parser the user-config path uses,
+// `Config::validate_bindings`). Row order IS the load order: `bind` validates
+// against what is already bound, so a prefix conflict is caught at
+// construction (fail-loud, same as the old `.unwrap()`).
+
+/// Global bindings: 22 entries, shared by every view.
+pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
+    ("C-g", "cancel"),
+    ("M-x", "open-palette"),
+    // C-x C-c (quit): bare C-x stays a prefix (pending), so both the
+    // C-x C-c global binding and the view-map C-x o / C-x C-i
+    // bindings remain reachable.
+    ("C-x C-c", "quit"),
+    // View cycling (issue 01) was M-s / M-p, but issue 06's `M-s o`
+    // (occur) needs the M-s prefix; the engine forbids a command on a
+    // strict prefix of a longer binding, so cycling is now M-x only
+    // (`cycle-view-next` / `cycle-view-prev`).
+    // Browse layer (issue 02).
+    ("C-x C-f", "find-file"),
+    ("C-x b", "switch-buffer"),
+    ("C-x C-b", "list-buffers"),
+    ("C-x k", "kill-buffer"),
+    ("C-x n", "open-notes"),
+    ("C-x C-s", "save-buffer"),
+    // plan 005 issue 01: file edit mode (emacs `toggle-read-only`).
+    ("C-x C-q", "toggle-read-only"),
+    // Magit status (issue 07).
+    ("C-x g", "magit-status"),
+    // Transient menu (issue 002): `?` opens this view's command menu in
+    // any view (magit's hydra tree; `h` does the same in magit views).
+    ("?", "open-transient-menu"),
+    // Isearch (issue 03).
+    ("C-s", "isearch-forward"),
+    ("C-r", "isearch-backward"),
+    // Projectile prefix (C-c p …): verified projectile-ux keys.
+    ("C-c p f", "find-file"),
+    ("C-c p p", "switch-project"),
+    ("C-c p e", "recent-files"),
+    ("C-c p i", "re-walk"),
+    ("C-c p s s", "project-search"),
+    // Tree sidebar (issue 09).
+    ("C-c p t", "toggle-tree"),
+    // Search & references (issue 06).
+    ("M-?", "references-at-point"),
+    ("M-s o", "occur"),
+];
+
+/// Buffer view bindings: 46 entries.
+pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
+    // Bare `q` closes the view (issue 05, finding 5): consistent
+    // with the list views. When the main buffer view is the only
+    // view, `close-view` is a no-op — it does NOT quit the app
+    // (that is still `C-x C-c`).
+    ("q", "close-view"),
+    ("M-o", "open-scratch"),
+    ("C-x o", "open-scratch"),
+    // Motion (issue 03 + plan 004 issue 05b). Point motion:
+    // C-n/Down and C-p/Up move the point (goal column preserved);
+    // C-f/Right and C-b/Left move by character (wrap at EOL/BOL);
+    // C-a/C-e jump to line start/end. The window follows the
+    // point (the shipped follow-scroll pattern). This supersedes
+    // the plan-001 item-4 stopgap that bound the arrows to window
+    // scroll (the user directive is explicit: arrows move point).
+    ("C-n", "point-down"),
+    ("C-p", "point-up"),
+    ("DOWN", "point-down"),
+    ("UP", "point-up"),
+    ("C-f", "point-forward"),
+    ("C-b", "point-backward"),
+    ("RIGHT", "point-forward"),
+    ("LEFT", "point-backward"),
+    ("C-a", "point-line-start"),
+    ("C-e", "point-line-end"),
+    // Word motion (plan 004 issue 05c): M-f / M-b.
+    ("M-f", "word-forward"),
+    ("M-b", "word-backward"),
+    // Window scroll (emacs paging + the non-emacs `j`/`k`):
+    // moves the window, the point's screen row stays fixed.
+    ("j", "scroll-line-down"),
+    ("k", "scroll-line-up"),
+    ("C-v", "scroll-page-down"),
+    ("M-v", "scroll-page-up"),
+    ("PGDN", "scroll-page-down"),
+    ("PGUP", "scroll-page-up"),
+    ("C-d", "scroll-half-page-down"),
+    ("C-u", "scroll-half-page-up"),
+    // `g` = force-reload the current file buffer (issue 04's
+    // refresh role; M-< / M-> / G move the point to start/end).
+    ("g", "reload-buffer"),
+    ("G", "point-buffer-end"),
+    ("M-g g", "goto-line"),
+    ("M-<", "point-buffer-start"),
+    ("M->", "point-buffer-end"),
+    // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
+    ("C-l", "recenter"),
+    // Plan 004 issue 03: mark/region + kill ring.
+    // C-SPC: set-mark. The terminal delivers C-SPC as NUL,
+    // which crossterm/iocraft decode as Char(' ') + CONTROL.
+    // The binding must match that representation.
+    ("C-SPC", "set-mark"),
+    // C-w: kill-region.
+    ("C-w", "kill-region"),
+    // M-w: copy-region-to-kill-ring.
+    ("M-w", "copy-region"),
+    // C-y: yank.
+    ("C-y", "yank"),
+    // M-y: yank-pop.
+    ("M-y", "yank-pop"),
+    // C-x C-x: exchange point and mark.
+    ("C-x C-x", "exchange-point-and-mark"),
+    // Window-split keys (the 3 pre-existing ux_sweep findings),
+    // degraded onto the single-pane view-stack model — a full
+    // vertical split is a scoped follow-up (per-pane buffer /
+    // point / scroll state, a second render pane, window-focus
+    // cycling), so the keys are bound and degrade honestly:
+    // C-x 0 closes the top view (the `q` close-view command;
+    // no-op on the last view), C-x 1 truncates the stack to the
+    // buffer view (no-op when it is already the only view),
+    // C-x 2 reports the single-pane model without changing
+    // state.
+    ("C-x 0", "close-view"),
+    ("C-x 1", "close-other-views"),
+    ("C-x 2", "split-window-vertical"),
+    // plan 005 issue 02: inline annotations. `A` prompts for a
+    // note on the line at point (minibuffer; RET commits and
+    // the cue appears immediately); on an annotated line it
+    // pre-fills for edit. `d` deletes the annotation on the
+    // line at point (a message on an unannotated line — and in
+    // EDIT buffers `A`/`d` self-insert as printables, the
+    // printable-leaf rule). `C-c a` toggles the inline note
+    // rows (the margin markers stay).
+    ("A", "annotate"),
+    ("d", "annotate-delete"),
+    ("C-c a", "annotate-toggle"),
+    // Navigation (issue 05).
+    ("M-.", "xref-find-definitions"),
+    ("M-,", "jump-back"),
+    ("C-i", "jump-forward"),
+    // C-i (Ctrl+I) arrives as Tab from crossterm: bind Tab too.
+    ("TAB", "jump-forward"),
+    ("M-i", "imenu"),
+];
+
+/// Buffer-list view bindings: 11 entries.
+pub const BUFFER_LIST_BINDINGS: &[(&str, &str)] = &[
+    ("q", "close-view"),
+    ("RET", "open-buffer-list-selected"),
+    ("DOWN", "buffer-list-next"),
+    ("C-n", "buffer-list-next"),
+    ("UP", "buffer-list-prev"),
+    ("C-p", "buffer-list-prev"),
+    // Issue 05h: `n`/`p` match the magit/log convention (same
+    // commands as the arrow / C-n / C-p binds).
+    ("n", "buffer-list-next"),
+    ("p", "buffer-list-prev"),
+    // Issue 05h: `d` is the dired-convention kill verb (parity
+    // log row 31). Kills the selected buffer via the same
+    // `kill_buffer` path the `C-x k` picker runs; the list
+    // stays open.
+    ("d", "buffer-list-kill-selected"),
+    // PART A fix (item 4): page keys step the selection too.
+    ("PGDN", "buffer-list-next"),
+    ("PGUP", "buffer-list-prev"),
+];
+
+/// Magit-status view bindings: 21 entries.
+pub const MAGIT_STATUS_BINDINGS: &[(&str, &str)] = &[
+    // Magit dwim keys (issue 07): the section under the cursor
+    // determines what `s`/`u`/`RET` do.
+    ("q", "close-view"),
+    ("s", "magit-stage"),
+    ("u", "magit-unstage"),
+    ("TAB", "magit-fold"),
+    ("RET", "magit-visit-file"),
+    ("g", "magit-refresh"),
+    ("n", "magit-next"),
+    ("C-n", "magit-next"),
+    ("p", "magit-prev"),
+    ("C-p", "magit-prev"),
+    // PART A fix (item 4): arrows + page keys move the cursor too.
+    ("DOWN", "magit-next"),
+    ("UP", "magit-prev"),
+    ("PGDN", "magit-next"),
+    ("PGUP", "magit-prev"),
+    // Issue 08: the magit-status context keys (log/blame/commit/
+    // branch/stash) — redline's binding, documented as a
+    // deviation from real magit (where `b` is the branch
+    // transient and blame is a file-view prefix).
+    ("l", "magit-log"),
+    ("b", "magit-blame"),
+    ("c", "magit-commit"),
+    ("y", "branch-picker"),
+    ("z", "stash-list"),
+    // Issue 002: `h` is magit's top-level dispatch menu (the
+    // same component as `?`), and `k` discards the file/hunk at
+    // point (confirmation-gated).
+    ("h", "open-transient-menu"),
+    ("k", "magit-discard"),
+];
+
+/// Log view bindings: 12 entries.
+pub const LOG_BINDINGS: &[(&str, &str)] = &[
+    // Log (issue 08): n/p page the history, arrows move the
+    // in-page selection, RET opens the selected commit's diff,
+    // q closes.
+    ("q", "close-view"),
+    ("n", "log-next-page"),
+    ("p", "log-prev-page"),
+    ("DOWN", "log-move-down"),
+    ("j", "log-move-down"),
+    ("C-n", "log-move-down"),
+    ("UP", "log-move-up"),
+    ("k", "log-move-up"),
+    ("C-p", "log-move-up"),
+    // PART A fix (item 4): page keys step the selection too.
+    ("PGDN", "log-move-down"),
+    ("PGUP", "log-move-up"),
+    ("RET", "log-open-commit"),
+];
+
+/// Blame view bindings: 7 entries.
+pub const BLAME_BINDINGS: &[(&str, &str)] = &[
+    // Blame (issue 08): read-only; q closes. Emacs motion
+    // (issue 003-02): the cursor-following window keeps the
+    // selected row in view on every move.
+    ("q", "close-view"),
+    ("C-n", "blame-next"),
+    ("C-p", "blame-prev"),
+    ("C-v", "blame-page-down"),
+    ("M-v", "blame-page-up"),
+    ("M-<", "blame-top"),
+    ("M->", "blame-bottom"),
+];
+
+/// Commit-diff view bindings: 7 entries.
+pub const COMMIT_DIFF_BINDINGS: &[(&str, &str)] = &[
+    // Read-only commit diff (issue 08): q closes back to log.
+    // Emacs motion (issue 003-02): the pane has no cursor; these
+    // move the window (the FileView vocabulary, no new bindings).
+    ("q", "close-view"),
+    ("C-n", "commit-diff-scroll-down"),
+    ("C-p", "commit-diff-scroll-up"),
+    ("C-v", "commit-diff-page-down"),
+    ("M-v", "commit-diff-page-up"),
+    ("M-<", "commit-diff-scroll-top"),
+    ("M->", "commit-diff-scroll-bottom"),
+];
+
+/// Commit-editor view bindings: 2 entries.
+pub const COMMIT_EDITOR_BINDINGS: &[(&str, &str)] = &[
+    // Inline commit editor (issue 08). Printable/motion keys and
+    // the ESC/C-g aborts are intercepted in `key_event` before the
+    // keymap engine; only the C-c C-c / C-c C-k bindings resolve
+    // through the engine (so the `C-c` prefix pending state is
+    // visible in the status line). q is deliberately NOT bound:
+    // in the message buffer a bare q types "q" (matching magit's
+    // message buffer, where q is not a command).
+    ("C-c C-c", "commit-editor-commit"),
+    ("C-c C-k", "commit-editor-abort"),
+];
+
+/// Home view bindings: 0 entries (deliberately empty).
+pub const HOME_BINDINGS: &[(&str, &str)] = &[
+    // 06a: home has NO view-local bindings. `q` is deliberately
+    // unbound (there is no buffer to close); every entry point
+    // (C-x C-f, C-x g, C-x n, C-x b, C-x C-c, C-c p …, ?) is a
+    // GLOBAL binding, so they all work from home without any
+    // home-side inheritance. The render switch still shows home
+    // whenever the buffer view has no current buffer.
+];
+
+/// Search view bindings: 14 entries.
+pub const SEARCH_BINDINGS: &[(&str, &str)] = &[
+    // Results view (issue 06): n/p between matches, RET jump
+    // (records a jump-stack entry so M-, returns), g re-run,
+    // q/ESC close (cancelling an in-flight search), C-g
+    // cancels the search without closing.
+    ("q", "close-search-view"),
+    ("ESC", "close-search-view"),
+    ("RET", "search-jump"),
+    ("n", "search-next"),
+    ("C-n", "search-next"),
+    ("p", "search-prev"),
+    ("C-p", "search-prev"),
+    ("DOWN", "search-next"),
+    ("UP", "search-prev"),
+    // PART A fix (item 4): page keys step the selection too.
+    ("PGDN", "search-next"),
+    ("PGUP", "search-prev"),
+    ("g", "search-rerun"),
+    // Watchlist item 4: `M-,` under the results view — jump-back
+    // pops through the sentinel to the pre-search position in
+    // one step (the buffer view's M-, only exists once the
+    // results view is closed; the sentinel entry's navigation
+    // re-opens the view, so the pop must work from it too).
+    ("M-,", "jump-back"),
+    ("C-g", "search-cancel"),
+];
+
 impl ViewId {
     pub fn name(self) -> &'static str {
         match self {
@@ -235,289 +537,18 @@ impl ViewId {
     }
 
     fn keymap(self) -> KeyMap {
-        match self {
-            ViewId::Buffer => {
-                let mut km = KeyMap::new();
-                // Bare `q` closes the view (issue 05, finding 5): consistent
-                // with the list views. When the main buffer view is the only
-                // view, `close-view` is a no-op — it does NOT quit the app
-                // (that is still `C-x C-c`).
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::alt_char('o')], "open-scratch").unwrap();
-                km
-                    .bind(&[Key::ctrl_char('x'), Key::char('o')], "open-scratch")
-                    .unwrap();
-                // Motion (issue 03 + plan 004 issue 05b). Point motion:
-                // C-n/Down and C-p/Up move the point (goal column preserved);
-                // C-f/Right and C-b/Left move by character (wrap at EOL/BOL);
-                // C-a/C-e jump to line start/end. The window follows the
-                // point (the shipped follow-scroll pattern). This supersedes
-                // the plan-001 item-4 stopgap that bound the arrows to window
-                // scroll (the user directive is explicit: arrows move point).
-                km.bind(&[Key::ctrl_char('n')], "point-down").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "point-up").unwrap();
-                km.bind(&[Key::down()], "point-down").unwrap();
-                km.bind(&[Key::up()], "point-up").unwrap();
-                km.bind(&[Key::ctrl_char('f')], "point-forward").unwrap();
-                km.bind(&[Key::ctrl_char('b')], "point-backward").unwrap();
-                km.bind(&[Key::new(KeyCode::Right)], "point-forward").unwrap();
-                km.bind(&[Key::new(KeyCode::Left)], "point-backward").unwrap();
-                km.bind(&[Key::ctrl_char('a')], "point-line-start").unwrap();
-                km.bind(&[Key::ctrl_char('e')], "point-line-end").unwrap();
-                // Word motion (plan 004 issue 05c): M-f / M-b.
-                km.bind(&[Key::alt_char('f')], "word-forward").unwrap();
-                km.bind(&[Key::alt_char('b')], "word-backward").unwrap();
-                // Window scroll (emacs paging + the non-emacs `j`/`k`):
-                // moves the window, the point's screen row stays fixed.
-                km.bind(&[Key::char('j')], "scroll-line-down").unwrap();
-                km.bind(&[Key::char('k')], "scroll-line-up").unwrap();
-                km.bind(&[Key::ctrl_char('v')], "scroll-page-down").unwrap();
-                km.bind(&[Key::alt_char('v')], "scroll-page-up").unwrap();
-                km.bind(&[Key::new(KeyCode::PageDown)], "scroll-page-down").unwrap();
-                km.bind(&[Key::new(KeyCode::PageUp)], "scroll-page-up").unwrap();
-                km.bind(&[Key::ctrl_char('d')], "scroll-half-page-down").unwrap();
-                km.bind(&[Key::ctrl_char('u')], "scroll-half-page-up").unwrap();
-                // `g` = force-reload the current file buffer (issue 04's
-                // refresh role; M-< / M-> / G move the point to start/end).
-                km.bind(&[Key::char('g')], "reload-buffer").unwrap();
-                km.bind(&[Key::char('G')], "point-buffer-end").unwrap();
-                km
-                    .bind(&[Key::alt_char('g'), Key::char('g')], "goto-line")
-                    .unwrap();
-                km
-                    .bind(&[Key::alt_char('<')], "point-buffer-start")
-                    .unwrap();
-                km
-                    .bind(&[Key::alt_char('>')], "point-buffer-end")
-                    .unwrap();
-                // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
-                km.bind(&[Key::ctrl_char('l')], "recenter").unwrap();
-                // Plan 004 issue 03: mark/region + kill ring.
-                // C-SPC: set-mark. The terminal delivers C-SPC as NUL,
-                // which crossterm/iocraft decode as Char(' ') + CONTROL.
-                // The binding must match that representation.
-                km.bind(&[Key::ctrl_char(' ')], "set-mark").unwrap();
-                // C-w: kill-region.
-                km.bind(&[Key::ctrl_char('w')], "kill-region").unwrap();
-                // M-w: copy-region-to-kill-ring.
-                km.bind(&[Key::alt_char('w')], "copy-region").unwrap();
-                // C-y: yank.
-                km.bind(&[Key::ctrl_char('y')], "yank").unwrap();
-                // M-y: yank-pop.
-                km.bind(&[Key::alt_char('y')], "yank-pop").unwrap();
-                // C-x C-x: exchange point and mark.
-                km.bind(&[Key::ctrl_char('x'), Key::ctrl_char('x')], "exchange-point-and-mark")
-                    .unwrap();
-                // Window-split keys (the 3 pre-existing ux_sweep findings),
-                // degraded onto the single-pane view-stack model — a full
-                // vertical split is a scoped follow-up (per-pane buffer /
-                // point / scroll state, a second render pane, window-focus
-                // cycling), so the keys are bound and degrade honestly:
-                // C-x 0 closes the top view (the `q` close-view command;
-                // no-op on the last view), C-x 1 truncates the stack to the
-                // buffer view (no-op when it is already the only view),
-                // C-x 2 reports the single-pane model without changing
-                // state.
-                km.bind(&[Key::ctrl_char('x'), Key::char('0')], "close-view").unwrap();
-                km
-                    .bind(&[Key::ctrl_char('x'), Key::char('1')], "close-other-views")
-                    .unwrap();
-                km.bind(
-                    &[Key::ctrl_char('x'), Key::char('2')],
-                    "split-window-vertical",
-                )
-                .unwrap();
-                // plan 005 issue 02: inline annotations. `A` prompts for a
-                // note on the line at point (minibuffer; RET commits and
-                // the cue appears immediately); on an annotated line it
-                // pre-fills for edit. `d` deletes the annotation on the
-                // line at point (a message on an unannotated line — and in
-                // EDIT buffers `A`/`d` self-insert as printables, the
-                // printable-leaf rule). `C-c a` toggles the inline note
-                // rows (the margin markers stay).
-                km.bind(&[Key::char('A')], "annotate").unwrap();
-                km.bind(&[Key::char('d')], "annotate-delete").unwrap();
-                km
-                    .bind(
-                        &[Key::ctrl_char('c'), Key::char('a')],
-                        "annotate-toggle",
-                    )
-                    .unwrap();
-                // Navigation (issue 05).
-                km
-                    .bind(&[Key::alt_char('.')], "xref-find-definitions")
-                    .unwrap();
-                km
-                    .bind(&[Key::alt_char(',')], "jump-back")
-                    .unwrap();
-                km
-                    .bind(&[Key::ctrl_char('i')], "jump-forward")
-                    .unwrap();
-                // C-i (Ctrl+I) arrives as Tab from crossterm: bind Tab too.
-                km.bind(&[Key::tab()], "jump-forward").unwrap();
-                km
-                    .bind(&[Key::alt_char('i')], "imenu")
-                    .unwrap();
-                km
-            }
-            ViewId::BufferList => {
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::enter()], "open-buffer-list-selected").unwrap();
-                km.bind(&[Key::down()], "buffer-list-next").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "buffer-list-next").unwrap();
-                km.bind(&[Key::up()], "buffer-list-prev").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "buffer-list-prev").unwrap();
-                // Issue 05h: `n`/`p` match the magit/log convention (same
-                // commands as the arrow / C-n / C-p binds).
-                km.bind(&[Key::char('n')], "buffer-list-next").unwrap();
-                km.bind(&[Key::char('p')], "buffer-list-prev").unwrap();
-                // Issue 05h: `d` is the dired-convention kill verb (parity
-                // log row 31). Kills the selected buffer via the same
-                // `kill_buffer` path the `C-x k` picker runs; the list
-                // stays open.
-                km.bind(&[Key::char('d')], "buffer-list-kill-selected").unwrap();
-                // PART A fix (item 4): page keys step the selection too.
-                km.bind(&[Key::new(KeyCode::PageDown)], "buffer-list-next").unwrap();
-                km.bind(&[Key::new(KeyCode::PageUp)], "buffer-list-prev").unwrap();
-                km
-            }
-            ViewId::MagitStatus => {
-                // Magit dwim keys (issue 07): the section under the cursor
-                // determines what `s`/`u`/`RET` do.
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::char('s')], "magit-stage").unwrap();
-                km.bind(&[Key::char('u')], "magit-unstage").unwrap();
-                km.bind(&[Key::tab()], "magit-fold").unwrap();
-                km.bind(&[Key::enter()], "magit-visit-file").unwrap();
-                km.bind(&[Key::char('g')], "magit-refresh").unwrap();
-                km.bind(&[Key::char('n')], "magit-next").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "magit-next").unwrap();
-                km.bind(&[Key::char('p')], "magit-prev").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "magit-prev").unwrap();
-                // PART A fix (item 4): arrows + page keys move the cursor too.
-                km.bind(&[Key::down()], "magit-next").unwrap();
-                km.bind(&[Key::up()], "magit-prev").unwrap();
-                km.bind(&[Key::new(KeyCode::PageDown)], "magit-next").unwrap();
-                km.bind(&[Key::new(KeyCode::PageUp)], "magit-prev").unwrap();
-                // Issue 08: the magit-status context keys (log/blame/commit/
-                // branch/stash) — redline's binding, documented as a
-                // deviation from real magit (where `b` is the branch
-                // transient and blame is a file-view prefix).
-                km.bind(&[Key::char('l')], "magit-log").unwrap();
-                km.bind(&[Key::char('b')], "magit-blame").unwrap();
-                km.bind(&[Key::char('c')], "magit-commit").unwrap();
-                km.bind(&[Key::char('y')], "branch-picker").unwrap();
-                km.bind(&[Key::char('z')], "stash-list").unwrap();
-                // Issue 002: `h` is magit's top-level dispatch menu (the
-                // same component as `?`), and `k` discards the file/hunk at
-                // point (confirmation-gated).
-                km.bind(&[Key::char('h')], "open-transient-menu").unwrap();
-                km.bind(&[Key::char('k')], "magit-discard").unwrap();
-                km
-            }
-            ViewId::Log => {
-                // Log (issue 08): n/p page the history, arrows move the
-                // in-page selection, RET opens the selected commit's diff,
-                // q closes.
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::char('n')], "log-next-page").unwrap();
-                km.bind(&[Key::char('p')], "log-prev-page").unwrap();
-                km.bind(&[Key::down()], "log-move-down").unwrap();
-                km.bind(&[Key::char('j')], "log-move-down").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "log-move-down").unwrap();
-                km.bind(&[Key::up()], "log-move-up").unwrap();
-                km.bind(&[Key::char('k')], "log-move-up").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "log-move-up").unwrap();
-                // PART A fix (item 4): page keys step the selection too.
-                km.bind(&[Key::new(KeyCode::PageDown)], "log-move-down").unwrap();
-                km.bind(&[Key::new(KeyCode::PageUp)], "log-move-up").unwrap();
-                km.bind(&[Key::enter()], "log-open-commit").unwrap();
-                km
-            }
-            ViewId::Blame => {
-                // Blame (issue 08): read-only; q closes. Emacs motion
-                // (issue 003-02): the cursor-following window keeps the
-                // selected row in view on every move.
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "blame-next").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "blame-prev").unwrap();
-                km.bind(&[Key::ctrl_char('v')], "blame-page-down").unwrap();
-                km.bind(&[Key::alt_char('v')], "blame-page-up").unwrap();
-                km.bind(&[Key::alt_char('<')], "blame-top").unwrap();
-                km.bind(&[Key::alt_char('>')], "blame-bottom").unwrap();
-                km
-            }
-            ViewId::CommitDiff => {
-                // Read-only commit diff (issue 08): q closes back to log.
-                // Emacs motion (issue 003-02): the pane has no cursor; these
-                // move the window (the FileView vocabulary, no new bindings).
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-view").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "commit-diff-scroll-down").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "commit-diff-scroll-up").unwrap();
-                km.bind(&[Key::ctrl_char('v')], "commit-diff-page-down").unwrap();
-                km.bind(&[Key::alt_char('v')], "commit-diff-page-up").unwrap();
-                km.bind(&[Key::alt_char('<')], "commit-diff-scroll-top").unwrap();
-                km.bind(&[Key::alt_char('>')], "commit-diff-scroll-bottom").unwrap();
-                km
-            }
-            ViewId::CommitEditor => {
-                // Inline commit editor (issue 08). Printable/motion keys and
-                // the ESC/C-g aborts are intercepted in `key_event` before the
-                // keymap engine; only the C-c C-c / C-c C-k bindings resolve
-                // through the engine (so the `C-c` prefix pending state is
-                // visible in the status line). q is deliberately NOT bound:
-                // in the message buffer a bare q types "q" (matching magit's
-                // message buffer, where q is not a command).
-                let mut km = KeyMap::new();
-                km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('c')], "commit-editor-commit")
-                    .unwrap();
-                km.bind(&[Key::ctrl_char('c'), Key::ctrl_char('k')], "commit-editor-abort")
-                    .unwrap();
-                km
-            }
-            ViewId::Home => {
-                // 06a: home has NO view-local bindings. `q` is deliberately
-                // unbound (there is no buffer to close); every entry point
-                // (C-x C-f, C-x g, C-x n, C-x b, C-x C-c, C-c p …, ?) is a
-                // GLOBAL binding, so they all work from home without any
-                // home-side inheritance. The render switch still shows home
-                // whenever the buffer view has no current buffer.
-                KeyMap::new()
-            }
-            ViewId::Search => {
-                // Results view (issue 06): n/p between matches, RET jump
-                // (records a jump-stack entry so M-, returns), g re-run,
-                // q/ESC close (cancelling an in-flight search), C-g
-                // cancels the search without closing.
-                let mut km = KeyMap::new();
-                km.bind(&[Key::char('q')], "close-search-view").unwrap();
-                km.bind(&[Key::new(KeyCode::Escape)], "close-search-view").unwrap();
-                km.bind(&[Key::enter()], "search-jump").unwrap();
-                km.bind(&[Key::char('n')], "search-next").unwrap();
-                km.bind(&[Key::ctrl_char('n')], "search-next").unwrap();
-                km.bind(&[Key::char('p')], "search-prev").unwrap();
-                km.bind(&[Key::ctrl_char('p')], "search-prev").unwrap();
-                km.bind(&[Key::down()], "search-next").unwrap();
-                km.bind(&[Key::up()], "search-prev").unwrap();
-                // PART A fix (item 4): page keys step the selection too.
-                km.bind(&[Key::new(KeyCode::PageDown)], "search-next").unwrap();
-                km.bind(&[Key::new(KeyCode::PageUp)], "search-prev").unwrap();
-                km.bind(&[Key::char('g')], "search-rerun").unwrap();
-                // Watchlist item 4: `M-,` under the results view — jump-back
-                // pops through the sentinel to the pre-search position in
-                // one step (the buffer view's M-, only exists once the
-                // results view is closed; the sentinel entry's navigation
-                // re-opens the view, so the pop must work from it too).
-                km.bind(&[Key::alt_char(',')], "jump-back").unwrap();
-                km.bind(&[Key::ctrl_char('g')], "search-cancel").unwrap();
-                km
-            }
-        }
+        let table = match self {
+            ViewId::Buffer => BUFFER_BINDINGS,
+            ViewId::BufferList => BUFFER_LIST_BINDINGS,
+            ViewId::MagitStatus => MAGIT_STATUS_BINDINGS,
+            ViewId::Log => LOG_BINDINGS,
+            ViewId::Blame => BLAME_BINDINGS,
+            ViewId::CommitDiff => COMMIT_DIFF_BINDINGS,
+            ViewId::CommitEditor => COMMIT_EDITOR_BINDINGS,
+            ViewId::Home => HOME_BINDINGS,
+            ViewId::Search => SEARCH_BINDINGS,
+        };
+        load_bindings(table)
     }
 }
 
@@ -1557,95 +1588,7 @@ impl AppStore {
     pub fn at(start: &Path, base: PathBuf) -> Self {
         let registry = CommandRegistry::seed();
 
-        let mut global = KeyMap::new();
-        global.bind(&[Key::ctrl_char('g')], "cancel").unwrap();
-        global.bind(&[Key::alt_char('x')], "open-palette").unwrap();
-        // C-x C-c (quit): bare C-x stays a prefix (pending), so both the
-        // C-x C-c global binding and the view-map C-x o / C-x C-i
-        // bindings remain reachable.
-        global
-            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('c')], "quit")
-            .unwrap();
-        // View cycling (issue 01) was M-s / M-p, but issue 06's `M-s o`
-        // (occur) needs the M-s prefix; the engine forbids a command on a
-        // strict prefix of a longer binding, so cycling is now M-x only
-        // (`cycle-view-next` / `cycle-view-prev`).
-        // Browse layer (issue 02).
-        global
-            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('f')], "find-file")
-            .unwrap();
-        global
-            .bind(&[Key::ctrl_char('x'), Key::char('b')], "switch-buffer")
-            .unwrap();
-        global
-            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('b')], "list-buffers")
-            .unwrap();
-        global
-            .bind(&[Key::ctrl_char('x'), Key::char('k')], "kill-buffer")
-            .unwrap();
-        global
-            .bind(&[Key::ctrl_char('x'), Key::char('n')], "open-notes")
-            .unwrap();
-        global
-            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('s')], "save-buffer")
-            .unwrap();
-        // plan 005 issue 01: file edit mode (emacs `toggle-read-only`).
-        global
-            .bind(&[Key::ctrl_char('x'), Key::ctrl_char('q')], "toggle-read-only")
-            .unwrap();
-        // Magit status (issue 07).
-        global
-            .bind(&[Key::ctrl_char('x'), Key::char('g')], "magit-status")
-            .unwrap();
-        // Transient menu (issue 002): `?` opens this view's command menu in
-        // any view (magit's hydra tree; `h` does the same in magit views).
-        global.bind(&[Key::char('?')], "open-transient-menu").unwrap();
-        // Isearch (issue 03).
-        global.bind(&[Key::ctrl_char('s')], "isearch-forward").unwrap();
-        global.bind(&[Key::ctrl_char('r')], "isearch-backward").unwrap();
-        // Projectile prefix (C-c p …): verified projectile-ux keys.
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('f')],
-                "find-file",
-            )
-            .unwrap();
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('p')],
-                "switch-project",
-            )
-            .unwrap();
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('e')],
-                "recent-files",
-            )
-            .unwrap();
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('i')],
-                "re-walk",
-            )
-            .unwrap();
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('s'), Key::char('s')],
-                "project-search",
-            )
-            .unwrap();
-        // Tree sidebar (issue 09).
-        global
-            .bind(
-                &[Key::ctrl_char('c'), Key::char('p'), Key::char('t')],
-                "toggle-tree",
-            )
-            .unwrap();
-        // Search & references (issue 06).
-        global.bind(&[Key::alt_char('?')], "references-at-point").unwrap();
-        global
-            .bind(&[Key::alt_char('s'), Key::char('o')], "occur")
-            .unwrap();
+        let global = load_bindings(GLOBAL_BINDINGS);
 
         let view = ViewId::Home.keymap();
         let engine = KeymapEngine::new(global, view);
@@ -1764,9 +1707,7 @@ impl AppStore {
         for (command, sequence) in &config.key_bindings {
             let seq = parse_sequence(sequence)
                 .map_err(|e| format!("`{command}`: invalid key sequence `{sequence}`: {e}"))?;
-            self.engine.global.bind(&seq, command).map_err(|e| {
-                format!("`{command}`: cannot bind `{sequence}`: {e}")
-            })?;
+            self.engine.global.bind(&seq, command)?;
         }
         Ok(())
     }

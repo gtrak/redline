@@ -85,6 +85,9 @@ impl Key {
         Self::new(KeyCode::Enter)
     }
 
+    /// Construct a Tab key (used by tests; the built-in keymap uses the
+    /// string parser, which produces the same `Key`).
+    #[allow(dead_code)]
     pub fn tab() -> Self {
         Self::new(KeyCode::Tab)
     }
@@ -109,6 +112,9 @@ impl Key {
         }
     }
 
+    /// Construct an Alt+char key (used by tests; the built-in keymap uses
+    /// the string parser, which produces the same `Key`).
+    #[allow(dead_code)]
     pub fn alt_char(c: char) -> Self {
         Self {
             code: KeyCode::Char(c),
@@ -357,7 +363,7 @@ impl KeyMap {
             let node = cur.next.entry(*k).or_default();
             if let Some(shadowed) = node.command.as_deref() {
                 return Err(format!(
-                    "cannot bind `{seq}`: sequence prefix already binds `{shadowed}`"
+                    "cannot bind `{seq}` → `{command}`: sequence prefix already binds `{shadowed}`"
                 ));
             }
             cur = node;
@@ -365,13 +371,15 @@ impl KeyMap {
         let node = cur.next.entry(*last).or_default();
         if let Some(old) = &node.command {
             if old != command {
-                return Err(format!("`{seq}` is already bound to `{old}`"));
+                return Err(format!(
+                    "`{seq}` → `{command}`: already bound to `{old}`"
+                ));
             }
         } else if !node.next.is_empty() {
             // A binding here would shadow every longer sequence under
             // this prefix (e.g. a new `C-x` while `C-x C-c` is bound).
             return Err(format!(
-                "cannot bind `{seq}`: existing key sequences extend beyond this prefix"
+                "cannot bind `{seq}` → `{command}`: existing key sequences extend beyond this prefix"
             ));
         } else {
             node.command = Some(command.to_string());
@@ -414,6 +422,21 @@ impl KeyMap {
         });
         out
     }
+}
+
+/// Load a `&[(&str, &str)]` table of (emacs-notation sequence, command)
+/// pairs into a `KeyMap`. Panics on a parse or bind error, naming the
+/// offending sequence and command (fail-loud at construction, preserving
+/// the old per-call `.unwrap()` behaviour).
+pub fn load_bindings(table: &[(&str, &str)]) -> KeyMap {
+    let mut km = KeyMap::new();
+    for (seq_str, command) in table {
+        let seq = parse_sequence(seq_str)
+            .unwrap_or_else(|e| panic!("keymap: invalid sequence `{seq_str}`: {e}"));
+        km.bind(&seq, command)
+            .unwrap_or_else(|e| panic!("keymap: {e}"));
+    }
+    km
 }
 
 /// Global + per-view keymaps. The view's map is tried first; on a dead
@@ -625,5 +648,70 @@ mod tests {
         assert_eq!(by_seq("q").unwrap().1, "quit");
         assert_eq!(by_seq("C-x o").unwrap().1, "open-scratch");
         assert_eq!(by_seq("C-c p f").unwrap().1, "project-find");
+    }
+
+    /// Equivalence test: the declarative binding tables produce the same
+    /// keymap as the old imperative `bind()` calls. For every table entry,
+    /// `km.lookup(parse_sequence(seq))` resolves to the named command, and
+    /// the total binding count matches the pre-change count (142).
+    #[test]
+    fn load_bindings_equivalence() {
+        use crate::app::store::{
+            BLAME_BINDINGS, BUFFER_BINDINGS, BUFFER_LIST_BINDINGS, COMMIT_DIFF_BINDINGS,
+            COMMIT_EDITOR_BINDINGS, GLOBAL_BINDINGS, HOME_BINDINGS, LOG_BINDINGS,
+            MAGIT_STATUS_BINDINGS, SEARCH_BINDINGS,
+        };
+
+        // Global map: 22 bindings, every entry resolves correctly.
+        let global = load_bindings(GLOBAL_BINDINGS);
+        assert_eq!(global.command_pairs().len(), 22, "global binding count");
+        for (seq_str, cmd) in GLOBAL_BINDINGS {
+            let seq = parse_sequence(seq_str).unwrap();
+            assert_eq!(
+                global.lookup(&seq),
+                Some(Lookup::Command(cmd)),
+                "global: `{seq_str}` should resolve to `{cmd}`"
+            );
+        }
+
+        // Per-view maps: 120 total bindings across 9 views.
+        let views: &[(&str, &[(&str, &str)])] = &[
+            ("Buffer", BUFFER_BINDINGS),
+            ("BufferList", BUFFER_LIST_BINDINGS),
+            ("MagitStatus", MAGIT_STATUS_BINDINGS),
+            ("Log", LOG_BINDINGS),
+            ("Blame", BLAME_BINDINGS),
+            ("CommitDiff", COMMIT_DIFF_BINDINGS),
+            ("CommitEditor", COMMIT_EDITOR_BINDINGS),
+            ("Home", HOME_BINDINGS),
+            ("Search", SEARCH_BINDINGS),
+        ];
+        let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
+        assert_eq!(total_per_view, 120, "total per-view bindings must be 120");
+        for (name, table) in views {
+            let km = load_bindings(table);
+            assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");
+            for (seq_str, cmd) in *table {
+                let seq = parse_sequence(seq_str).unwrap();
+                assert_eq!(
+                    km.lookup(&seq),
+                    Some(Lookup::Command(cmd)),
+                    "{name}: `{seq_str}` should resolve to `{cmd}`"
+                );
+            }
+        }
+
+        // Representative spot checks.
+        assert_eq!(
+            global.lookup(&parse_sequence("C-x C-c").unwrap()),
+            Some(Lookup::Command("quit")),
+            "C-x C-c → quit"
+        );
+        let buffer_km = load_bindings(BUFFER_BINDINGS);
+        assert_eq!(
+            buffer_km.lookup(&parse_sequence("q").unwrap()),
+            Some(Lookup::Command("close-view")),
+            "q in Buffer → close-view"
+        );
     }
 }
