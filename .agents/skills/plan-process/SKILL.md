@@ -118,6 +118,14 @@ change, decide what the test actually encodes and act accordingly:
 
 Practical consequences for lanes:
 
+- **Dispatch gates to `gate-reviewer`, not builtin `reviewer`.** The builtin
+  reviewer is granted only `read, grep, find, ls` — it has **no `bash`**, so it
+  cannot run `cargo test`, clippy, or `tools/gate.sh`, and its numeric verdicts
+  are read-only inference. A gate that cannot execute is not a gate. The
+  `gate-reviewer` agent (project `.pi/agents/`, user `~/.pi/agent/agents/`) adds
+  `bash` and must report the commands it ran with observed output. Read-only
+  review is fine for docs-only deliverables; anything touching code needs
+  execution.
 - A lane whose fence excludes a test file **may ask for the fence to be
   widened** instead of shipping a partial result; a fence is an implementation
   detail of the task spec, not a requirement.
