@@ -527,6 +527,18 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
   rather than the per-cell model. Justified as optional: iocraft is lock-pinned to
   0.9.1 and its own suite pins its SGR emission.
 
+## Known follow-ups from gate findings (low priority)
+
+- **Stale `store.rs` references in source comments** (outside every landed lane's
+  fence): `src/app/flow_tests.rs:50` ("`store_with_index` in store.rs"),
+  `src/syntax/queries.rs:8` ("in `app/store.rs`"). Cosmetic; fold into whichever
+  lane next touches those files.
+- **insta snapshot metadata** still records `source: src/app/store.rs` in the two
+  `store/snapshots/*.snap` headers. insta ignores it (the tests pass) and rewrites
+  it on regeneration — leave unless a snapshot is regenerated anyway.
+- **`point_byte_offset`** remains in `store/mod.rs` (its 4 call sites are in-impl).
+  Revisit when the navigation concern moves.
+
 ## Start here
 
 `nav/index.rs:425–650` (M1+M2, one contiguous verified batch delete), then
