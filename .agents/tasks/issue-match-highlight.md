@@ -57,11 +57,36 @@ There is **no match highlighting anywhere today** (verified: no `search_face` /
 
 ## Key decisions
 
-- **Lifetime — decide and state it.** When does the highlighting clear? Options: (a) on
-  `C-g`/cancel and on the next *different* search; (b) whenever the point moves; (c) until
-  an explicit clear. Emacs's isearch faces vanish when the search ends, but the user wants
-  the context *after* jumping from results, so (a) is the coherent choice. Whatever you
-  pick, **pin it with a test** — an unstated lifetime becomes an unexplainable flicker.
+- **Lifetime — OVERRIDDEN by the user (2026-09-21).** The original choice here was (a):
+  cleared on `C-g`/cancel and on the next different search, but **kept** on isearch RET.
+  The user has since reported: *"after i-search is done, the isearch highlight should
+  disappear instead of persist."* **That is correct, and this spec's reasoning was
+  wrong**: it justified keeping the highlight on isearch exit with "the user wants the
+  context *after* jumping from results" — but jumping from results is a **different path**
+  (`set_match_context_from_jump`, the results-view RET), which sets its own context and is
+  unaffected. The trade-off was therefore false: it gave up emacs fidelity for a case that
+  never needed it. Emacs removes the lazy-highlight faces on `isearch-exit`, so:
+
+  | event | highlight |
+  |---|---|
+  | isearch active | shown (the lazy-highlight analogue) |
+  | isearch **RET** (`isearch_confirm`) | **CLEARED** — the fix |
+  | isearch `C-g` (`isearch_cancel`) | cleared (already correct) |
+  | jump from the results view | set, and persists (the cursor-visibility case that motivated the whole feature) |
+  | a different query · closing the results view · global `C-g` | cleared |
+
+  `isearch_confirm` currently calls `isearch_sync_match_context()` and carries the comment
+  "confirm ends the search but the user wants the context — cancel, not confirm, is the
+  clearing boundary". Both the call and that comment are now wrong.
+
+  **The existing tests pin the old rule** (`src/app/store/tests/search.rs`: the lifetime
+  test's steps 3, 4, 6 and 8 all establish the context *via* `isearch_confirm` and then
+  assert it survives). They must be **restructured, not deleted**: assert that RET clears,
+  and assert that the jump-from-results context still persists across point motion — i.e.
+  the new step is asserted *and* the old outcome still holds, via the path that actually
+  owns it. Disclose every test change with before/after, and never weaken an assertion to
+  get green. (No `tools/` drive asserts the match-highlight lifetime — verified:
+  `drive_redline_battery3.py`'s only "highlight" reference is the region highlight.)
 - **Case sensitivity and regex**: reuse whatever the search/isearch already uses; do not
   introduce a new matching rule. The isearch matches are already computed — prefer reusing
   them over re-scanning.

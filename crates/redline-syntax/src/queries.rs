@@ -544,9 +544,19 @@ pub struct ExtractTimings {
     /// One-time `Query::new` compilation (see the struct doc).
     pub query_compile: Duration,
     /// True when the per-file deadline fired (the parse or a query run
-    /// was cancelled): the symbols/tables are INCOMPLETE — a first-class
-    /// "aborted" outcome that the report must distinguish from a plain
-    /// zero-symbol file (never a silent one).
+    /// was cancelled): the symbols/tables MAY be incomplete — a
+    /// first-class "aborted" outcome that the report must distinguish
+    /// from a plain zero-symbol file (never a silent one).
+    ///
+    /// The direction is always safe. tree-sitter exposes no "cancelled
+    /// vs exhausted" signal (the cursor's advance reports `did_match`
+    /// either way), so the check is this call's OWN elapsed time against
+    /// the limit. That can over-report by at most one callback interval
+    /// — 100 cursor operations (`query.c`
+    /// `OP_COUNT_PER_QUERY_TIMEOUT_CHECK`), so a complete result can
+    /// carry the label at the boundary — and can never under-report.
+    /// Symbols that did land are always returned, so an aborted file is
+    /// never silently emptied.
     pub aborted: bool,
     /// The per-file deadline that governed this call (the size-aware
     /// default or the caller's override). 0 on a defaulted instance that
@@ -1980,7 +1990,7 @@ mod tests {
     /// FRESH same-thread measurement of this very file (the estimate must
     /// stay seconds old, not minutes); which half of the query phase an
     /// abort lands in is load-dependent (the pinned cursor checks the
-    /// deadline every 1,000 operations), so the abort is asserted, not
+    /// deadline every 100 operations), so the abort is asserted, not
     /// the outline's exact length.
     #[test]
     fn the_budget_is_one_shared_deadline_not_per_phase() {

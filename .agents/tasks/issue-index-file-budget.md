@@ -124,3 +124,34 @@ The profiler's `total - walk` line currently reads "what a WARM PERSISTED INDEX
 would cost to start", which is **backwards** (`total - walk` = parse +
 assembly = exactly what persistence would SAVE). The orchestrator is fixing
 that label directly. Do not touch it.
+
+## Follow-ups from the gate (all disclosure-class, no behaviour change)
+
+- **P2-3 — `aborted` is invisible in the index.** It is only observable when
+  `timings.is_some()`, and the production indexer (`extract_all`) passes `None`, so in the
+  store an aborted file is **indistinguishable from a zero-symbol file**. The
+  "first-class outcome" requirement holds in the profiler report but not where it matters
+  most. Fix: count aborted files in `index_wiring` and surface the count (the same
+  disclosure surface `issue-dependency-dir-guard.md` needs — consider doing both in one
+  place, since "we silently dropped symbols" and "we silently indexed a dependency tree"
+  are the same class of surprise).
+- **P2-4 — the printed budget is the formula, not the per-file value.**
+  `ExtractTimings::budget` is recorded but never printed, so the report says
+  `base 500 ms + 2.0 ms/KB` when the file actually got `base + 2.0 * its_own_kb`. The
+  effective value is derivable from the row's size column, but printing
+  `r.stages.budget` on the aborted row is strictly better.
+- **Latent (not a gate finding) — `extract_symbols` inherited the budget.**
+  `extract_symbols` is `extract_all(...).0`, so it is budgeted by default. It has **no
+  production caller today** (only `src/app/store/tests/index_wiring.rs`), so there is no
+  regression — but a future *interactive* caller of that convenience wrapper would
+  silently become budgeted, which spec item 4 forbids. Either make the budget explicit in
+  its signature or note the hazard on the wrapper.
+
+## What the budget does NOT do (state this whenever it is discussed)
+
+It **bounds** the pathological case; it does not **fix** it. The 11.3 MB outlier stops at
+23.6 s, so the original cold index becomes ~24.5 s instead of 56.2 s — still ~66x the
+368 ms the same project takes once `node_modules` is excluded. The cause was a
+non-gitignored dependency tree; the real fix is `issue-dependency-dir-guard.md`. On a
+legitimate project the budget never fires (largest legitimate file 98 ms against a 3.4 s
+allowance; 0 aborted expected of 3,596), which is the property that matters.
