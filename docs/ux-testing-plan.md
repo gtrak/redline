@@ -535,6 +535,18 @@ Two constraints, both learned the hard way:
 | 17 | **Pool-lane disk use**: `tools/gate.sh pooled` copies every `/tmp/redline_*` fixture into each lane, so the pool root (`REDLINE_POOL_ROOT`, default `/tmp/rl`) is ~27 MB per lane — **~105 MB for 4 lanes** (the 24 MB `redline_sweep_slow_repo` dominates). It is `/tmp`-ephemeral and never committed, but a 6-lane run grows to ~160 MB. `tools/pool.py clean` removes the whole root; `setup` is idempotent (rebuilds the lanes). | loop-01 (pooled sweep) | **DONE (loop-01)**: documented in the "Pooled parallel sweep" section above; lanes are disposable and cleaned with `pool.py clean`. Candidate to slim further: copy only the fixtures each lane's suite actually reads (the battery uses a subset of all `/tmp/redline_*`), or hardlink the large `sweep_slow_repo` instead of `cp -r`. |
 | 7 | Conflict **minibuffer message** at store.rs:4396 ("changed on disk — press g to reload") fires only in the locally-owned (editable) case where plain `g` self-inserts — repoint to the per-kind helper (M-x reload-buffer wording). Same family as backlog #3; found by the issue-03 review. | Issue-03 review (plan 003) | One-line src fix + message-text test. |
 
+## Test authority (user directive)
+
+**This is greenfield: a test never vetoes a requirement.** Tests are evidence
+and a thinking cue, not an authority. When an assertion blocks a change:
+implementation-level pins (a contiguous rendered substring, an exact helper
+wording) yield to the requirement and get updated, saying so in the report;
+requirement-level assertions (user-requested behaviour, safety/ownership
+guards, data-integrity invariants) are kept, and a genuine conflict escalates
+to the user. Fences that exclude a test file may be widened rather than
+shipping a partial result. Full policy: `.agents/skills/plan-process/SKILL.md`
+§ Test authority.
+
 ## loop-03 — Demote the test pyramid (kept / converted ledger)
 
 **Shape (plan):** PTY → unit → fuzz. This iteration lands the PTY → unit

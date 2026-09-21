@@ -96,6 +96,38 @@ gate evidence, the deviations). Consequences to plan for:
 - **End of mission**: every slot is terminal — merged+released, or parked
   with a named owner and next action.
 
+## Test authority (user directive, 2026-09)
+
+**This is greenfield. A test never vetoes a requirement.**
+
+Tests are evidence and a thinking cue, not an authority. When a test blocks a
+change, decide what the test actually encodes and act accordingly:
+
+1. **Implementation-level assertion** (a contiguous rendered substring, an
+   internal field, a helper's exact wording, a specific line number): the
+   requirement wins — update the assertion and say so in the report. Do not
+   report it as a blocker, and do not ship a degraded deliverable because
+   "the test pins it".
+2. **Requirement-level assertion** (a behaviour the user asked for, a
+   safety/ownership guard, a data-integrity invariant): keep it. If the
+   requirement genuinely conflicts with it, **escalate to the user** — that is
+   the one case where a decision belongs above the agent.
+3. **Genuinely unsure**: escalate with the specific assertion quoted and a
+   recommendation, rather than silently degrading the deliverable or silently
+   rewriting the test.
+
+Practical consequences for lanes:
+
+- A lane whose fence excludes a test file **may ask for the fence to be
+  widened** instead of shipping a partial result; a fence is an implementation
+  detail of the task spec, not a requirement.
+- Reviewers must distinguish "the test pins this" from "the requirement needs
+  this", and must not raise a P1 merely because an implementation-detail
+  assertion would need updating.
+- When a change makes an old assertion describe the wrong thing, re-pin it on
+  the *requirement* (the minibuffer message, the invariant), never on a screen
+  substring the fixture itself contains.
+
 ## Pattern
 
 ### Active plan
