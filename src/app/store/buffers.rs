@@ -224,14 +224,20 @@ impl AppStore {
         self.drop_retained_tree(key);
     }
 
-    /// `C-x C-q` (emacs `toggle-read-only`, plan 005 issue 01): flip the
-    /// current FILE buffer between read-only and edit mode. File-backed
-    /// buffers start read-only; this is the first mid-session editability
-    /// flip. Toggling an editable file buffer with unsaved edits arms the
-    /// discard confirm (`y` discards + goes read-only, `n`/C-g/ESC cancel
-    /// and keep edit mode) instead of silently losing the edits.
-    /// Non-file buffers (scratch) and non-buffer views are no-ops with a
-    /// minibuffer message.
+    /// `C-x C-q` (plan 015 issue 02: the per-buffer edit-MODE toggle;
+    /// emacs `toggle-read-only`): flip the current FILE buffer between the
+    /// edit modes. Entering `Accurate` makes the buffer `Accurate` +
+    /// `editable = true`; leaving it returns `Annotation` and the buffer's
+    /// BASELINE editability (`buffer_baseline_editable`: the notes buffer
+    /// and scratch stay editable in both modes — inherently editable —
+    /// while plain file buffers are read-only in `Annotation`). The
+    /// invariant is `Accurate` ⟹ `editable`; `editable` stays the gate for
+    /// whether text may be modified at all. Leaving `Accurate` with
+    /// unsaved edits on a read-only-baseline buffer arms the discard
+    /// confirm (`y` discards + goes read-only, `n`/C-g/ESC cancel and keep
+    /// accurate mode); the notes baseline loses nothing, so no confirm
+    /// there. Non-file buffers (scratch) and non-buffer views are no-ops
+    /// with a minibuffer message.
     pub fn toggle_read_only(&mut self) {
         if self.top_view() != ViewId::Buffer {
             self.minibuffer_message("toggle-read-only: not a buffer view");
@@ -241,7 +247,7 @@ impl AppStore {
             self.minibuffer_message("toggle-read-only: no current buffer");
             return;
         };
-        let (editable, locally_modified, owned) = {
+        let (mode, locally_modified, owned, baseline) = {
             let buf = match self.buffers.get(&key) {
                 Some(b) => b,
                 None => {
@@ -254,7 +260,12 @@ impl AppStore {
                 self.minibuffer_message("toggle-read-only: scratch has no file");
                 return;
             }
-            (buf.editable, buf.locally_modified, self.buffer_is_project_owned(&key))
+            (
+                buf.mode,
+                buf.locally_modified,
+                self.buffer_is_project_owned(&key),
+                self.buffer_baseline_editable(&key),
+            )
         };
         if !owned {
             // 006-02b item 1: the C-x C-q override must NEVER turn an
@@ -265,8 +276,8 @@ impl AppStore {
             );
             return;
         }
-        if editable {
-            if locally_modified {
+        if mode == BufferMode::Accurate {
+            if locally_modified && !baseline {
                 // Unsaved edits must not be lost silently: confirm first
                 // (the display name keeps the prompt inside one minibuffer
                 // row at 80 columns).
@@ -278,15 +289,36 @@ impl AppStore {
                 return;
             }
             if let Some(buf) = self.buffers.get_mut(&key) {
-                buf.editable = false;
+                buf.mode = BufferMode::Annotation;
+                buf.editable = baseline;
             }
-            self.minibuffer_message("read-only (C-x C-q to edit)");
+            self.minibuffer_message(if baseline {
+                "annotation mode (still editable)"
+            } else {
+                "read-only (C-x C-q to edit)"
+            });
         } else {
             if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.mode = BufferMode::Accurate;
                 buf.editable = true;
             }
-            self.minibuffer_message("editable (C-x C-s to save)");
+            self.minibuffer_message("accurate mode (editable, C-x C-s to save)");
         }
+    }
+
+    /// The buffer at `key`'s BASELINE editability (plan 015 issue 02): what
+    /// `editable` is when the buffer sits in `Annotation` mode — `true` for
+    /// the inherently-editable buffers (the notes document, scratch),
+    /// `false` for plain file buffers. A predicate, not a remembered value:
+    /// the baseline is what the buffer IS, so it cannot drift with session
+    /// state (a save or a reload never changes it), and it is the same
+    /// kind/is-notes predicate plan 015 will keep using for the annotation
+    /// vs accurate behaviour split.
+    pub(super) fn buffer_baseline_editable(&self, key: &str) -> bool {
+        let Some(buf) = self.buffers.get(key) else {
+            return false;
+        };
+        buf.path.is_none() || self.notes_key().as_deref() == Some(key)
     }
 
     /// Whether a toggle-read-only discard confirm is armed.
@@ -341,6 +373,7 @@ impl AppStore {
             buf.locally_modified = false;
             buf.changed_on_disk = false;
             buf.editable = false;
+            buf.mode = BufferMode::Annotation;
         }
         self.drop_retained_tree(&key);
         self.toggle_ro_confirm = None;
@@ -354,16 +387,22 @@ impl AppStore {
         self.minibuffer_message("cancel (edit mode kept)");
     }
 
-    /// The current buffer's "point" as a byte offset: the start of the line
-    /// at the point's line (column 0). The region mark is a line-start byte
-    /// offset, so the point's column does not extend the region (plan 004
-    /// issue 05b: region semantics unchanged). Returns `None` when there is
-    /// no current buffer.
+    /// The current buffer's "point" as a byte offset: the byte of the
+    /// point's exact `(line, col)` position (plan 015 issue 02: the HONEST
+    /// point — the old implementation returned the point's LINE START, which
+    /// made the region line-granular, `C-y` land at the line start, and the
+    /// C-x C-x column work invisible). `point_col()` is a CHAR index
+    /// (`file_point()`'s clamped `col`), so the conversion is line→char +
+    /// col, then char→byte, via the non-panicking `try_` steps (an
+    /// out-of-range line degrades to `None`, as before). The mark is a byte
+    /// offset, and the region is now EXACT (char-granular) in BOTH edit
+    /// modes — a fine mark is meaningful in annotation mode too (plan 015
+    /// decision). Returns `None` when there is no current buffer.
     fn current_point_byte(&self) -> Option<usize> {
         let key = self.buffers.current()?.to_string();
         let buf = self.buffers.get(&key)?;
-        let line = self.point_line();
-        buf.rope.try_line_to_byte(line.min(buf.line_count().saturating_sub(1))).ok()
+        let p = self.file_point();
+        point_byte_offset(&buf.rope, p.line, p.col)
     }
 
     /// The region's normalized byte range [start, end) for the current buffer,

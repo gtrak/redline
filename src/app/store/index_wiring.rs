@@ -272,22 +272,28 @@ impl AppStore {
             .unwrap_or(false)
     }
 
-    /// The status-line mode word for the buffer view (plan 005 issue 01):
-    /// `Edit` while the current buffer is editable, `Read-only` otherwise.
-    /// Empty outside the buffer view (the other views have no buffer-mode
+    /// The status-line mode word for the buffer view (plan 005 issue 01 +
+    /// plan 015 issue 02): `Accurate` in the accurate edit mode (the
+    /// per-buffer `C-x C-q` opt-in — the one short indicator that makes
+    /// the mode toggle visible), `Edit` in annotation mode on an editable
+    /// buffer (the notes document, scratch), `Read-only` otherwise. Empty
+    /// outside the buffer view (the other views have no buffer-mode
     /// notion; a constant word there would just be noise).
     pub fn buffer_mode_display(&self) -> String {
         if self.top_view() != ViewId::Buffer {
             return String::new();
         }
         match self.buffers.current_buffer() {
-            Some(b) => {
-                if b.editable {
-                    "Edit".to_string()
-                } else {
-                    "Read-only".to_string()
+            Some(b) => match b.mode {
+                BufferMode::Accurate => "Accurate".to_string(),
+                BufferMode::Annotation => {
+                    if b.editable {
+                        "Edit".to_string()
+                    } else {
+                        "Read-only".to_string()
+                    }
                 }
-            }
+            },
             None => String::new(),
         }
     }

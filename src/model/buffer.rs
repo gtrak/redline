@@ -31,6 +31,23 @@ use ropey::Rope;
 /// Display name of the scratch buffer.
 pub const SCRATCH_NAME: &str = "*scratch*";
 
+/// The per-buffer edit mode (plan 015 issue 02): selects HOW the buffer's
+/// text may be modified. `Annotation` is the default for every buffer (the
+/// coarse editing shape); `Accurate` is the per-buffer opt-in (emacs
+/// `C-x C-q`). The invariant is **`Accurate` ⟹ `editable`**: `editable`
+/// remains the gate for whether text may be modified at all, the mode only
+/// selects the shape of that modification, and `Annotation` does NOT imply
+/// read-only (the notes buffer is editable + Annotation — that is how
+/// annotations are typed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BufferMode {
+    /// The default: the coarse editing shape (every buffer opens here).
+    #[default]
+    Annotation,
+    /// The per-buffer opt-in (`C-x C-q`): the cursor-accurate editing shape.
+    Accurate,
+}
+
 /// Files larger than this (in bytes) skip highlighting and render as
 /// plain text (graceful degradation, never a hang).
 pub const BIG_FILE_THRESHOLD: usize = 10 * 1024 * 1024; // 10 MiB
@@ -65,8 +82,13 @@ pub struct Buffer {
     /// `UNIX_EPOCH` for the scratch buffer or on stat failure.
     pub mtime: SystemTime,
     /// Whether the buffer is editable (issue 03: read-only for files;
-    /// scratch is editable).
+    /// scratch is editable). The gate for whether text may be modified at
+    /// all (plan 015 issue 02: `Accurate` mode ⟹ `editable`, and the mode
+    /// toggle is what flips this for file buffers).
     pub editable: bool,
+    /// The per-buffer edit mode (plan 015 issue 02): `Annotation` default,
+    /// `Accurate` opt-in via `C-x C-q`. See `BufferMode` for the invariant.
+    pub mode: BufferMode,
     /// True when the in-memory text has unsaved local edits that differ
     /// from what is on disk (the light-editing flag, plan decision #6).
     /// Read-only file buffers stay `false` until an edit lands; the scratch
@@ -103,6 +125,7 @@ impl Buffer {
             rope,
             mtime,
             editable,
+            mode: BufferMode::default(),
             locally_modified: false,
             changed_on_disk: false,
             mark: None,

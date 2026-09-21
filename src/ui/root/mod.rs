@@ -175,9 +175,11 @@ mod tests {
         assert!(s.contains(&format!("* {name} *")), "project name missing:\n{s}");
     }
 
-    /// plan 005 issue 01: the status line shows the current buffer's mode
-    /// word — `Read-only` for a file buffer, `Edit` after `toggle-read-only`
-    /// (and `Edit` on scratch, which is always editable).
+    /// plan 005 issue 01 + plan 015 issue 02: the status line shows the
+    /// current buffer's mode word — `Read-only` for a file buffer in
+    /// annotation mode, `Accurate` after `toggle-read-only` (015-02:
+    /// C-x C-q is the mode toggle; was `Edit` under the pre-mode design),
+    /// and `Edit` on scratch, which is always editable (annotation mode).
     #[test]
     fn status_line_shows_buffer_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -193,15 +195,17 @@ mod tests {
             );
         }
 
-        // C-x C-q flips the file buffer into edit mode.
+        // C-x C-q flips the file buffer into the Accurate mode.
         let mut store2 = store(dir.path());
         store2.open_path("src/main.rs");
         store2.key_event(crate::app::keymap::Key::ctrl_char('x'));
         store2.key_event(crate::app::keymap::Key::ctrl_char('q'));
         let s2 = render_frame(store2);
+        // 015-02 re-pin (was `contains("Edit")`): the mode toggle's status
+        // indicator is the `Accurate` word.
         assert!(
-            s2.contains("Edit") && !s2.contains("Read-only"),
-            "edit mode must show Edit, not Read-only:\n{s2}"
+            s2.contains("Accurate") && !s2.contains("Read-only"),
+            "accurate mode must show Accurate, not Read-only:\n{s2}"
         );
     }
 

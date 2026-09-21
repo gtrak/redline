@@ -32,8 +32,10 @@ pub(super) fn Minibuffer(props: &MinibufferProps, mut _hooks: Hooks) -> impl Int
 pub(super) struct StatusLineProps {
     pub project: String,
     pub view: String,
-    /// The buffer mode word (`Edit` / `Read-only`; empty outside the buffer
-    /// view, plan 005 issue 01).
+    /// The buffer mode word (plan 005 issue 01 + plan 015 issue 02):
+    /// `Accurate` in the accurate edit mode, `Edit` in annotation mode on
+    /// an editable buffer, `Read-only` otherwise; empty outside the buffer
+    /// view.
     pub mode: String,
     pub pending: String,
     pub activity: String,

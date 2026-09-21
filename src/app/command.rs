@@ -815,7 +815,7 @@ impl CommandRegistry {
         )); // ── plan 005 issue 02: inline annotations ─────────────────
         self.register(Command::new(
             "toggle-read-only",
-            "Toggle the current file buffer between edit and read-only (C-x C-q); confirms before discarding unsaved edits",
+            "Toggle the current file buffer's edit mode (C-x C-q): annotation ⇄ accurate; confirms before discarding unsaved edits",
             "buffers",
             |store, _arg| store.toggle_read_only(),
         ));

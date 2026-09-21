@@ -1642,9 +1642,9 @@ fn open_edit_file(store: &mut AppStore) {
     open_via_finder(store, "edit.rs");
 }
 
-/// edit-toggle: C-x C-q toggles Read-only ⇄ Edit; the status line shows
-/// the mode word; with no edits the toggle back is immediate (no confirm
-/// prompt).
+/// edit-toggle: C-x C-q toggles Read-only ⇄ Accurate (015-02: the mode
+/// toggle); the status line shows the mode word; with no edits the
+/// toggle back is immediate (no confirm prompt).
 #[test]
 fn unit_flow_edit_toggle() {
     let (repo, _) = edit_repo();
@@ -1659,7 +1659,9 @@ fn unit_flow_edit_toggle() {
     let status_ro = frame.lines().last().unwrap().contains("Read-only");
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
-    let edit_on = s.buffer_mode_display() == "Edit";
+    // 015-02 re-pin (was `== "Edit"`): C-x C-q enters the Accurate mode
+    // (the file buffer's editable state is the mode itself).
+    let edit_on = s.buffer_mode_display() == "Accurate";
     let editable_msg = s.message.contains("editable");
     // No edits yet: toggle straight back (no confirm prompt).
     s.key_event(key("C-x"));
@@ -1668,7 +1670,8 @@ fn unit_flow_edit_toggle() {
     let no_confirm = !s.message.contains("Discard unsaved edits");
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
-    let edit_again = s.buffer_mode_display() == "Edit";
+    // 015-02 re-pin (was `== "Edit"`): the second toggle re-enters Accurate.
+    let edit_again = s.buffer_mode_display() == "Accurate";
     assert!(
         ro && status_ro && edit_on && editable_msg && ro_again && no_confirm && edit_again,
         "ro={ro} status-ro={status_ro} edit={edit_on} msg={editable_msg} ro-again={ro_again} \
@@ -1724,9 +1727,11 @@ fn unit_flow_edit_confirm() {
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
     let prompt = s.message.contains("Discard unsaved edits");
-    let still_edit = s.buffer_mode_display() == "Edit";
+    // 015-02 re-pin (was `== "Edit"`): the buffer is in the Accurate mode.
+    let still_edit = s.buffer_mode_display() == "Accurate";
     s.key_event(key("C-g"));
-    let cancel_kept_edit = s.buffer_mode_display() == "Edit";
+    // 015-02 re-pin (was `== "Edit"`): cancel keeps the Accurate mode.
+    let cancel_kept_edit = s.buffer_mode_display() == "Accurate";
     let cancel_kept_text = s.buffer_text().contains("qq");
     // Re-arm and accept: y discards the unsaved 'qq'.
     s.key_event(key("C-x"));

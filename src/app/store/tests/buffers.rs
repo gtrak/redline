@@ -257,19 +257,32 @@ use super::*;
         let bufk = s.buffers.current().unwrap().to_string();
         assert!(!s.buffers.get(&bufk).unwrap().editable,
             "file buffers must start read-only");
+        assert_eq!(s.buffers.get(&bufk).unwrap().mode, BufferMode::Annotation,
+            "file buffers must start in Annotation mode");
         assert_eq!(s.buffer_mode_display(), "Read-only");
 
+        // 015-02 re-pin (was: `buffer_mode_display() == "Edit"`): C-x C-q
+        // is the MODE toggle — entering Accurate makes the buffer
+        // editable, and the status line shows the mode word.
         s.key_event(key("C-x"));
         s.key_event(key("C-q"));
-        assert!(s.buffers.get(&bufk).unwrap().editable,
-            "C-x C-q must flip the file buffer into edit mode");
-        assert_eq!(s.buffer_mode_display(), "Edit");
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(buf.mode, BufferMode::Accurate,
+            "C-x C-q must enter the Accurate mode");
+        assert!(buf.editable, "Accurate ⟹ editable");
+        assert_eq!(s.buffer_mode_display(), "Accurate");
         assert!(s.message.contains("editable"), "msg: {}", s.message);
 
+        // 015-02 re-pin (was: flip back to `editable == false` read-only):
+        // leaving Accurate returns the buffer to its baseline — for a
+        // plain file buffer that is read-only in Annotation mode.
         s.key_event(key("C-x"));
         s.key_event(key("C-q"));
-        assert!(!s.buffers.get(&bufk).unwrap().editable,
-            "second C-x C-q must flip back to read-only");
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(buf.mode, BufferMode::Annotation,
+            "second C-x C-q must return to Annotation mode");
+        assert!(!buf.editable,
+            "leaving Accurate must return a file buffer to its read-only baseline");
         assert_eq!(s.buffer_mode_display(), "Read-only");
     }
 
@@ -281,6 +294,10 @@ use super::*;
         // wording said notes "no-op"; that was the ambiguous half and is
         // superseded. The behavior is recoverable (toggle back) and now
         // pinned by this test.
+        // 015-02 re-pin (was: toggle → read-only → editable): the notes
+        // buffer is INHERENTLY editable (that is how annotations are
+        // typed), so C-x C-q toggles its MODE, not its editability:
+        // Annotation ⇄ Accurate, `editable` stays true throughout.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
@@ -289,14 +306,21 @@ use super::*;
         let notes_key = s.buffers.current().unwrap().to_string();
         assert!(s.buffers.get(&notes_key).unwrap().editable,
             "notes start editable");
+        assert_eq!(s.buffers.get(&notes_key).unwrap().mode, BufferMode::Annotation,
+            "notes start in Annotation mode");
 
         s.toggle_read_only();
-        assert!(!s.buffers.get(&notes_key).unwrap().editable,
-            "C-x C-q puts the notes buffer into read-only mode like any file");
+        let buf = s.buffers.get(&notes_key).unwrap();
+        assert_eq!(buf.mode, BufferMode::Accurate,
+            "C-x C-q enters the Accurate mode on the notes buffer");
+        assert!(buf.editable, "Accurate ⟹ editable");
 
         s.toggle_read_only();
-        assert!(s.buffers.get(&notes_key).unwrap().editable,
-            "and back into edit mode");
+        let buf = s.buffers.get(&notes_key).unwrap();
+        assert_eq!(buf.mode, BufferMode::Annotation,
+            "and back into Annotation mode");
+        assert!(buf.editable,
+            "the notes buffer's baseline stays editable (annotations are typed there)");
     }
 
     #[test]
@@ -1268,6 +1292,161 @@ use super::*;
         // The rest of the buffer is intact.
         assert!(after_pop.contains("naïve\n"), "original content must be preserved: {after_pop:?}");
         assert!(after_pop.contains("end\n"), "original content must be preserved: {after_pop:?}");
+    }
+
+    // ── plan 015 issue 02: the honest point + the per-buffer edit mode ──
+
+    #[test]
+    fn set_mark_records_the_honest_point_byte_not_the_line_start() {
+        // Discriminator (spec a): the point is MID-LINE, on a line where
+        // byte ≠ char (é occupies 2 bytes, so char 5 = byte 6). The old
+        // `current_point_byte` returned the LINE START (byte 0) regardless
+        // of column, so a col-0 fixture cannot catch it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "café omega\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        let key = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 5, 5); // the 'o' of "omega": CHAR 5, BYTE 6
+        s.set_mark();
+        assert_eq!(
+            s.buffers.get(&key).unwrap().mark,
+            Some(6),
+            "the mark must hold the point's byte (6) — not the line start (0) or the char index (5)"
+        );
+    }
+
+    #[test]
+    fn region_same_line_mark_and_point_is_non_empty_and_exact() {
+        // Discriminator (spec b): mark and point on the SAME line. The old
+        // point (the line start) made mark == point there, so the region
+        // was `None` — this pin fails on the old code. The region is exact
+        // in both edit modes (plan 015 decision: a fine mark makes sense
+        // in annotation mode too).
+        let (_dir, mut s) = notes_store();
+        for c in "hello world\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        s.set_point(1, 2, 2); // "he|llo world"
+        s.set_mark();
+        s.set_point(1, 5, 5); // "hello| world"
+        let line1 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
+        assert_eq!(
+            s.region_byte_range(),
+            Some((line1 + 2, line1 + 5)),
+            "a same-line mark+point must yield the exact char range"
+        );
+        assert_eq!(s.region_size_bytes(), Some(3), "the region is 'llo' — 3 bytes");
+    }
+
+    #[test]
+    fn copy_region_copies_exact_mid_line_text() {
+        // Discriminator (spec c): the copied text is the EXACT mid-line
+        // span (the old line-granular region would have copied the whole
+        // line, and with a same-line mark+point it would have copied
+        // nothing — "Mark not set").
+        let (_dir, mut s) = notes_store();
+        for c in "hello world\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        s.set_point(1, 6, 6); // after "hello "
+        s.set_mark();
+        s.set_point(1, 11, 11); // EOL
+        s.copy_region();
+        assert_eq!(s.kill_ring.top(), Some("world"),
+            "the copy must be the exact mid-line span");
+        assert!(s.message.contains("copied to kill ring"));
+        // Copy keeps the mark and the buffer.
+        assert!(s.buffers.get(&key).unwrap().mark.is_some());
+        assert_eq!(s.buffers.get(&key).unwrap().text(), "# Notes\nhello world\n");
+    }
+
+    #[test]
+    fn kill_region_removes_exact_mid_line_text_in_editable_buffer() {
+        // Discriminator (spec c): the kill removes EXACTLY the mid-line
+        // span — the old line-granular region with a same-line mark+point
+        // was empty ("Mark not set"), and a line-granular mark at line
+        // start would have removed the whole line.
+        let (_dir, mut s) = notes_store();
+        for c in "hello world\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        s.set_point(1, 5, 5); // after "hello" (the space sits at col 5)
+        s.set_mark();
+        s.set_point(1, 11, 11); // EOL
+        s.kill_region();
+        assert_eq!(s.buffers.get(&key).unwrap().text(), "# Notes\nhello\n",
+            "kill must remove exactly ' world', not the whole line");
+        assert_eq!(s.kill_ring.top(), Some(" world"));
+        assert!(s.buffers.get(&key).unwrap().mark.is_none(), "mark cleared after kill");
+    }
+
+    #[test]
+    fn yank_inserts_at_the_honest_point_not_the_line_start() {
+        // The honest point's consumer: `C-y` inserts at the point's
+        // COLUMN — the old line-start point would have inserted at col 0
+        // (wrong under both modes, plan 015).
+        let (_dir, mut s) = notes_store();
+        for c in "hello world\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        // Copy "world" (line 1, cols 6..11) to the ring.
+        s.set_point(1, 6, 6);
+        s.set_mark();
+        s.set_point(1, 11, 11);
+        s.copy_region();
+        // Yank with the point MID-LINE (after "hello", col 5).
+        s.set_point(1, 5, 5);
+        s.yank();
+        assert_eq!(s.buffers.get(&key).unwrap().text(), "# Notes\nhelloworld world\n",
+            "yank must insert at the point's column, not the line start");
+    }
+
+    #[test]
+    fn c_x_c_q_enters_and_leaves_accurate_and_notes_stay_typable() {
+        // The invariant Accurate ⟹ editable, both directions of the
+        // toggle, on both buffer kinds, with the status-line mode word
+        // visible (spec d + e).
+        // File buffer: Read-only (Annotation) ⇄ Accurate (editable).
+        let (_dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        let b = s.buffers.get(&bufk).unwrap();
+        assert_eq!(b.mode, BufferMode::Accurate, "C-x C-q enters Accurate");
+        assert!(b.editable, "Accurate ⟹ editable");
+        assert_eq!(s.buffer_mode_display(), "Accurate",
+            "the status line must show the mode");
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        let b = s.buffers.get(&bufk).unwrap();
+        assert_eq!(b.mode, BufferMode::Annotation, "leaving returns to Annotation");
+        assert!(!b.editable, "a file buffer's baseline is read-only");
+        assert_eq!(s.buffer_mode_display(), "Read-only");
+
+        // Notes buffer: Accurate ⇄ Annotation, editable in BOTH — and a
+        // typed annotation still lands in Annotation mode.
+        let (_dir, mut s) = notes_store();
+        let nkey = s.buffers.current().unwrap().to_string();        s.toggle_read_only();
+        assert_eq!(s.buffers.get(&nkey).unwrap().mode, BufferMode::Accurate);
+        assert!(s.buffers.get(&nkey).unwrap().editable, "Accurate ⟹ editable");
+        assert_eq!(s.buffer_mode_display(), "Accurate", "the status line must show the mode");
+        s.toggle_read_only();
+        let b = s.buffers.get(&nkey).unwrap();
+        assert_eq!(b.mode, BufferMode::Annotation, "leaving returns to Annotation");
+        assert!(b.editable, "the notes buffer stays editable in Annotation mode");
+        s.key_event(key("z"));
+        assert!(
+            s.buffer_text().ends_with('z'),
+            "typed annotations must land in Annotation mode"
+        );
     }
 
     // ── plan 005 issue 02: inline annotations ─────────────────────────
