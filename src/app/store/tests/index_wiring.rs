@@ -1214,6 +1214,146 @@ use super::*;
 
     // ── issue 05: Finding 2 — stale-generation events discarded ──────────
 
+    /// The incremental index filter (this issue; the R3 third walker).
+    /// Each arm discriminates: a root-only `.gitignore` check would keep
+    /// `src/gen/out.rs` (the NESTED rule only), and a non-ignoring
+    /// filter would drop the negation (`!keep.log`) and the deletion.
+    #[test]
+    fn indexable_changes_filters_ignored_paths_and_keeps_negations_and_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".gitignore"),
+            "ignored.txt\nbuild/\n*.log\n!keep.log\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/gen")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::create_dir_all(root.join("graft")).unwrap();
+        std::fs::write(root.join("src/gen/.gitignore"), "out.rs\n").unwrap();
+        for rel in [
+            "src/keep.rs",
+            "src/gen/out.rs",
+            "src/gen/visible.rs",
+            "build/out.bin",
+            "ignored.txt",
+            "drop.log",
+            "keep.log",
+            "graft/card.md",
+        ] {
+            std::fs::write(root.join(rel), "x\n").unwrap();
+        }
+        // A deleted, non-ignored file: gone from disk, still in the index
+        // — the filter must NOT drop it (the `remove_file` arm needs it).
+        std::fs::write(root.join("src/gone.rs"), "fn gone() {}\n").unwrap();
+        std::fs::remove_file(root.join("src/gone.rs")).unwrap();
+
+        let changed: Vec<std::path::PathBuf> = [
+            "src/keep.rs",
+            "src/gen/out.rs",
+            "src/gen/visible.rs",
+            "build/out.bin",
+            "ignored.txt",
+            "drop.log",
+            "keep.log",
+            "graft/card.md",
+            "src/gone.rs",
+        ]
+        .iter()
+        .map(|rel| root.join(*rel))
+        .collect();
+
+        let kept = AppStore::indexable_changes(&changed, root);
+        let kept_rel: std::collections::BTreeSet<&str> = kept
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            kept_rel,
+            std::collections::BTreeSet::from([
+                "keep.log",          // negation (!keep.log) survives *.log
+                "src/keep.rs",       // non-ignored: still indexed
+                "src/gen/visible.rs", // sibling of the nested-ignored file
+                "src/gone.rs",       // deleted indexed file: removal still runs
+            ]),
+            "only the non-ignored changes (and the indexed-file deletion) survive"
+        );
+    }
+
+    /// End-to-end (this issue): the incremental job must NOT parse in an
+    /// ignored change (nested OR root rule), MUST reparse a non-ignored
+    /// change and the negated file, and MUST still drop a deleted, indexed
+    /// file. Driven through `refresh_index` → spawned job →
+    /// `apply_index_event` exactly as the UI drain does.
+    #[tokio::test]
+    async fn refresh_index_respects_gitignore_chain_and_still_removes_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src/gen")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "build/\n*.log\n!keep.log\ntmp.md\n!keep.md\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/gen/.gitignore"), "out.rs\n").unwrap();
+        std::fs::write(root.join("src/gen/out.rs"), "fn gen_sym() {}\n").unwrap();
+        std::fs::write(root.join("build/tool.rs"), "fn tool_sym() {}\n").unwrap();
+        std::fs::write(root.join("tmp.md"), "# Tmp\n").unwrap();
+        std::fs::write(root.join("keep.md"), "# Alpha\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(root.join("src/aux.rs"), "fn aux() {}\n").unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(&root, base.path().to_path_buf());
+        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let index = build_index(&root, &files_list.files, None);
+        // The full build already excludes the ignored files (unchanged path).
+        assert!(!index.has("src/gen/out.rs"), "full build excluded the nested-ignored file");
+        assert!(!index.has("build/tool.rs"), "full build excluded the root-ignored file");
+        assert!(!index.has("tmp.md"));
+        assert!(index.has("keep.md"), "negation: the full build keeps it");
+        assert!(index.has("src/aux.rs"));
+        s.set_index(index);
+
+        let mut rx = s.index_bus.subscribe();
+        // Change the ignored files (nested + root rule), the negated file,
+        // and a plain file; delete the indexed `src/aux.rs`.
+        std::fs::write(root.join("src/gen/out.rs"), "fn gen_changed() {}\n").unwrap();
+        std::fs::write(root.join("build/tool.rs"), "fn tool_changed() {}\n").unwrap();
+        std::fs::write(root.join("keep.md"), "# Beta\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn kept2() {}\n").unwrap();
+        std::fs::remove_file(root.join("src/aux.rs")).unwrap();
+        s.refresh_index(&[
+            root.join("src/gen/out.rs"),
+            root.join("build/tool.rs"),
+            root.join("keep.md"),
+            root.join("src/main.rs"),
+            root.join("src/aux.rs"),
+        ]);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), rx.changed())
+            .await
+            .expect("incremental index job published within 30s");
+        let event = rx.borrow_and_update().clone();
+        s.apply_index_event(&event);
+
+        let idx = s.index();
+        // (a) the NESTED-ignored change was not parsed into the index.
+        assert!(!idx.has("src/gen/out.rs"), "nested .gitignore must block the reparse");
+        assert_eq!(idx.definition_count("gen_changed"), 0);
+        // (b) the root-ignored change was not parsed into the index.
+        assert!(!idx.has("build/tool.rs"), "root .gitignore must block the reparse");
+        assert_eq!(idx.definition_count("tool_changed"), 0);
+        assert!(!idx.has("tmp.md"));
+        // (c) the NEGATED file went through the reparse (negation honored).
+        assert_eq!(idx.definition_count("Beta"), 1, "!keep.md must still be reindexed");
+        // (d) the non-ignored change was reparsed (filter is subtractive).
+        assert_eq!(idx.definition_count("kept2"), 1, "non-ignored change must reparse");
+        // A deleted, indexed (non-ignored) file still hits the Err arm.
+        assert!(!idx.has("src/aux.rs"), "deletion of an indexed file must remove it");
+    }
+
     #[test]
     fn switch_project_root_discards_stale_index_events() {
         // Create two distinct project roots.

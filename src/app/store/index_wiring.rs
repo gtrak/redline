@@ -356,6 +356,19 @@ impl AppStore {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return;
         };
+        // The incremental path must agree with the file walk (the R3
+        // invariant, third walker): the watcher reports ignored files
+        // too, so filter the changed paths through the SAME gitignore +
+        // `graft/` semantics the full build's `FileList` used —
+        // otherwise a changed ignored file (a build artifact, a log,
+        // anything under `target/`) gets parsed INTO the index the full
+        // build correctly excluded it from. Purely subtractive: every
+        // non-ignored change (including a deletion of an indexed file)
+        // still reaches `refresh_in_place`.
+        let changed = Self::indexable_changes(changed, &root);
+        if changed.is_empty() {
+            return;
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
@@ -391,6 +404,30 @@ impl AppStore {
                 generation,
             });
         });
+    }
+
+    /// The changed paths the incremental index job must process
+    /// (this issue): everything EXCEPT the paths the file walk would
+    /// never index — those gitignored by the `.gitignore` chain from the
+    /// project root down to the path (`model::files::is_gitignored`, the
+    /// same ancestor-chain predicate the walk and the search pipeline
+    /// make) or under the `graft/` agent cache (issue 05, finding 3).
+    /// Purely subtractive: a non-ignored change still reaches
+    /// `refresh_in_place`, and a path that no longer exists (a deletion)
+    /// is kept whenever it is not ignored, so a deleted INDEXED file
+    /// still hits the `remove_file` arm. A directory event is dropped
+    /// only when the directory ITSELF is ignored (then its contents
+    /// were never indexed either).
+    pub(super) fn indexable_changes(changed: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+        changed
+            .iter()
+            .filter(|p| {
+                let is_dir = p.is_dir();
+                !crate::model::files::under_graft(root, p, is_dir)
+                    && !crate::model::files::is_gitignored(root, p, is_dir)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Start the background index build for an EXTERNAL source tree
