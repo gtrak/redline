@@ -40,6 +40,22 @@ pub(crate) fn color(c: theme::Color) -> Color {
     }
 }
 
+/// One canvas text style. `invert` (reverse-video) is the picker's cursor
+/// highlight: it swaps the face's foreground (which becomes the bar) with
+/// the parent background (which becomes the text color), so a bright
+/// foreground face yields a bright, clearly-visible selection bar.
+pub(crate) fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextStyle {
+    let mut style = CanvasTextStyle::default();
+    style.color = Some(color(foreground));
+    if invert {
+        style.invert = true;
+    }
+    if bold {
+        style.weight = Weight::Bold;
+    }
+    style
+}
+
 pub(crate) fn face_color(face: theme::Face) -> Color {
     color(face.foreground)
 }

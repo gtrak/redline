@@ -13,7 +13,7 @@ use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 use crate::app::store::TransientMenuRow;
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
-use crate::ui::color;
+use crate::ui::{color, text_style};
 
 #[derive(Default, Props)]
 struct TransientMenuCanvasProps {
@@ -139,18 +139,6 @@ impl Component for TransientMenuCanvas {
             }
         }
     }
-}
-
-fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextStyle {
-    let mut style = CanvasTextStyle::default();
-    style.color = Some(color(foreground));
-    if invert {
-        style.invert = true;
-    }
-    if bold {
-        style.weight = Weight::Bold;
-    }
-    style
 }
 
 /// Truncate `s` to fit at most `max` terminal cells, appending a trailing

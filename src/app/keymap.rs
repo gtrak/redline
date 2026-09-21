@@ -310,6 +310,19 @@ impl Node {
             None => Some(Lookup::Pending),
         }
     }
+
+    /// Recursively collect every leaf (sequence, command) binding under
+    /// this node into `out`.
+    fn collect_command_pairs(&self, prefix: &mut KeySeq, out: &mut Vec<(KeySeq, String)>) {
+        for (k, child) in &self.next {
+            prefix.push(*k);
+            if let Some(cmd) = &child.command {
+                out.push((prefix.clone(), cmd.clone()));
+            }
+            child.collect_command_pairs(prefix, out);
+            prefix.pop();
+        }
+    }
 }
 
 /// Human-readable form of a sequence (`C-x C-f`), used in error messages.
@@ -393,25 +406,13 @@ impl KeyMap {
     pub fn command_pairs(&self) -> Vec<(KeySeq, String)> {
         let mut out: Vec<(KeySeq, String)> = Vec::new();
         let mut prefix: KeySeq = Vec::new();
-        collect_command_pairs(&self.root, &mut prefix, &mut out);
+        self.root.collect_command_pairs(&mut prefix, &mut out);
         out.sort_by(|a, b| {
             let da: String = a.0.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" ");
             let db: String = b.0.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" ");
             da.cmp(&db).then_with(|| a.1.cmp(&b.1))
         });
         out
-    }
-}
-
-/// Recursively collect every leaf (sequence, command) binding under `node`.
-fn collect_command_pairs(node: &Node, prefix: &mut KeySeq, out: &mut Vec<(KeySeq, String)>) {
-    for (k, child) in &node.next {
-        prefix.push(*k);
-        if let Some(cmd) = &child.command {
-            out.push((prefix.clone(), cmd.clone()));
-        }
-        collect_command_pairs(child, prefix, out);
-        prefix.pop();
     }
 }
 

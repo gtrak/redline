@@ -72,6 +72,65 @@ pub struct Section {
     pub children: Vec<Section>,
 }
 
+impl Section {
+    /// Push this section's heading row, then (when unfolded) its children's
+    /// rows and its own body lines, into `out` (DFS order).
+    fn render(&self, cursor: Option<&str>, depth: usize, out: &mut Vec<MagitRow>) {
+        let role = match self.kind {
+            SectionKind::Header => RowRole::Branch,
+            SectionKind::Group => RowRole::Group,
+            SectionKind::File => RowRole::File,
+            SectionKind::Hunk => RowRole::HunkHeader,
+        };
+        let indent = "  ".repeat(depth);
+        let selected = cursor == Some(self.id.as_str());
+        out.push(MagitRow {
+            text: format!("{indent}{}", self.heading),
+            role,
+            selected,
+        });
+        if !self.folded {
+            for c in &self.children {
+                c.render(cursor, depth + 1, out);
+            }
+            for line in &self.body {
+                let role = match line.origin {
+                    DiffOrigin::Addition => RowRole::DiffAdd,
+                    DiffOrigin::Deletion => RowRole::DiffDelete,
+                    DiffOrigin::Context => RowRole::DiffContext,
+                };
+                out.push(MagitRow {
+                    text: format!("{indent}  {}{}", line.origin.marker(), line.content),
+                    role,
+                    selected: false,
+                });
+            }
+        }
+    }
+
+    /// Push this section's id and (when unfolded) every visible descendant
+    /// id into `out` (DFS order).
+    fn collect_visible_ids(&self, out: &mut Vec<String>) {
+        out.push(self.id.clone());
+        if !self.folded {
+            for c in &self.children {
+                c.collect_visible_ids(out);
+            }
+        }
+    }
+
+    /// Copy the fold state of the same-id section from `prev` onto this
+    /// subtree (magit preserves visibility on refresh).
+    fn set_fold(&mut self, prev: &StatusTree) {
+        if let Some(p) = find_by_id(&prev.sections, &self.id) {
+            self.folded = p.folded;
+        }
+        for c in self.children.iter_mut() {
+            c.set_fold(prev);
+        }
+    }
+}
+
 /// One display row produced by rendering the tree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MagitRow {
@@ -130,7 +189,7 @@ impl StatusTree {
         ];
         if let Some(prev) = prev {
             for s in sections.iter_mut() {
-                set_fold(s, prev);
+                s.set_fold(prev);
             }
         }
         let cursor = resolve_cursor(&sections, prev);
@@ -211,72 +270,21 @@ impl StatusTree {
         let mut out = Vec::new();
         let cursor = self.cursor.as_deref();
         for s in &self.sections {
-            Self::render(s, cursor, 0, &mut out);
+            s.render(cursor, 0, &mut out);
         }
         out
     }
 
     // ── rendering ─────────────────────────────────────────────────────
 
-    fn render(s: &Section, cursor: Option<&str>, depth: usize, out: &mut Vec<MagitRow>) {
-        let role = match s.kind {
-            SectionKind::Header => RowRole::Branch,
-            SectionKind::Group => RowRole::Group,
-            SectionKind::File => RowRole::File,
-            SectionKind::Hunk => RowRole::HunkHeader,
-        };
-        let indent = "  ".repeat(depth);
-        let selected = cursor == Some(s.id.as_str());
-        out.push(MagitRow {
-            text: format!("{indent}{}", s.heading),
-            role,
-            selected,
-        });
-        if !s.folded {
-            for c in &s.children {
-                Self::render(c, cursor, depth + 1, out);
-            }
-            for line in &s.body {
-                let role = match line.origin {
-                    DiffOrigin::Addition => RowRole::DiffAdd,
-                    DiffOrigin::Deletion => RowRole::DiffDelete,
-                    DiffOrigin::Context => RowRole::DiffContext,
-                };
-                out.push(MagitRow {
-                    text: format!("{indent}  {}{}", line.origin.marker(), line.content),
-                    role,
-                    selected: false,
-                });
-            }
-        }
-    }
-
     /// Ids of every section whose heading is rendered (DFS order, skipping
     /// the children of folded sections). The cursor may only rest here.
     fn visible_ids(&self) -> Vec<String> {
         let mut out = Vec::new();
         for s in &self.sections {
-            collect_visible_ids(s, &mut out);
+            s.collect_visible_ids(&mut out);
         }
         out
-    }
-}
-
-fn collect_visible_ids(s: &Section, out: &mut Vec<String>) {
-    out.push(s.id.clone());
-    if !s.folded {
-        for c in &s.children {
-            collect_visible_ids(c, out);
-        }
-    }
-}
-
-fn set_fold(s: &mut Section, prev: &StatusTree) {
-    if let Some(p) = find_by_id(&prev.sections, &s.id) {
-        s.folded = p.folded;
-    }
-    for c in s.children.iter_mut() {
-        set_fold(c, prev);
     }
 }
 
@@ -297,7 +305,7 @@ fn resolve_cursor(sections: &[Section], prev: Option<&StatusTree>) -> Option<Str
 fn collect_all_visible(sections: &[Section]) -> Vec<String> {
     let mut out = Vec::new();
     for s in sections {
-        collect_visible_ids(s, &mut out);
+        s.collect_visible_ids(&mut out);
     }
     out
 }

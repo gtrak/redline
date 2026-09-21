@@ -10,7 +10,7 @@ use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 use crate::app::store::FileViewRow;
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
-use crate::ui::color;
+use crate::ui::{color, text_style};
 
 #[derive(Default, Props)]
 struct FileViewCanvasProps {
@@ -123,7 +123,7 @@ impl Component for FileViewCanvas {
                         0,
                         row as isize,
                         "\u{258e}",
-                        text_style(t.view_title.foreground, false),
+                        text_style(t.view_title.foreground, false, false),
                     );
                 }
             }
@@ -152,7 +152,7 @@ impl Component for FileViewCanvas {
                 x,
                 (h as isize).saturating_sub(1),
                 &indicators,
-                text_style(t.preview.foreground, false),
+                text_style(t.preview.foreground, false, false),
             );
         }
     }
@@ -178,7 +178,7 @@ fn draw_line(
     }
     if spans.is_empty() {
         let face = t.view;
-        let style = text_style(face.foreground, face.bold);
+        let style = text_style(face.foreground, false, face.bold);
         let display = truncate(text, width);
         canvas.set_text(x_start as isize, row, &display, style);
         return;
@@ -228,7 +228,7 @@ fn draw_line(
             Some(idx) => t.syntax_face(*idx),
             None => t.view,
         };
-        let style = text_style(face.foreground, face.bold);
+        let style = text_style(face.foreground, false, face.bold);
         canvas.set_text(x, row, &segment, style);
         // Advance by DISPLAY width, not char count: a segment ending in a
         // wide char occupies one more cell than its char count, and the
@@ -253,18 +253,9 @@ fn byte_to_char_offset(text: &str, byte: usize) -> usize {
     text[..boundary].chars().count()
 }
 
-fn text_style(foreground: theme::Color, bold: bool) -> CanvasTextStyle {
-    let mut style = CanvasTextStyle::default();
-    style.color = Some(color(foreground));
-    if bold {
-        style.weight = Weight::Bold;
-    }
-    style
-}
-
 /// A dim + italic face style (the annotation note rows, plan 005 issue 02).
 fn text_style_italic(foreground: theme::Color) -> CanvasTextStyle {
-    let mut style = text_style(foreground, false);
+    let mut style = text_style(foreground, false, false);
     style.italic = true;
     style
 }

@@ -251,17 +251,7 @@ impl GitRepo {
     /// matched by its new-side (workdir) start line.
     pub fn stage_hunk(&self, path: &str, target_new_start: u32) -> Result<(), GitError> {
         let raw = self.raw_diff(DiffSide::Unstaged, path)?;
-        let check = extract(&raw, path);
-        if !check
-            .hunks
-            .iter()
-            .any(|h| h.new_start == target_new_start)
-        {
-            return Err(GitError::HunkNotFound {
-                file: path.to_string(),
-                start: target_new_start,
-            });
-        }
+        self.find_hunk_in(&raw, path, target_new_start)?;
         // Dry-run validation, then the real apply. `apply(…, Index)` writes
         // the index to disk itself, so no `index.write()` afterwards.
         self.apply_hunk_to_index(&raw, target_new_start, true)?;
@@ -272,12 +262,18 @@ impl GitRepo {
     /// Unstage one hunk of a file: reverse-apply the hunk to the index only,
     /// reverting just that hunk's index content back toward HEAD while
     /// leaving the rest of the index and the whole workdir untouched.
-    /// Whether the HEAD blob for `path` ends with a newline (false when the
-    /// file is absent from HEAD). The diff markers under-determine this in
-    /// the both-sides-lack-LF shape, so the splice paths derive it from the
-    /// actual blob bytes.
-    fn head_blob_ends_with_newline(&self, path: &str) -> Result<bool, GitError> {
-        let raw = self.raw_diff(DiffSide::Staged, path)?;
+    /// Whether the blob on the requested diff side of `path` ends with a
+    /// newline (false when the file is absent on that side). The diff markers
+    /// under-determine this in the both-sides-lack-LF shape, so the splice
+    /// paths derive it from the actual blob bytes. In both diffs the
+    /// requested side is `old_file()`: HEAD in the staged diff (HEAD ->
+    /// index), the index in the unstaged diff (index -> workdir).
+    fn blob_side_ends_with_newline(
+        &self,
+        side: DiffSide,
+        path: &str,
+    ) -> Result<bool, GitError> {
+        let raw = self.raw_diff(side, path)?;
         match raw.get_delta(0).map(|d| d.old_file().exists()) {
             Some(true) => {
                 let blob = self
@@ -291,32 +287,15 @@ impl GitRepo {
         }
     }
 
-    /// Whether the INDEX blob for `path` ends with a newline (false when the
-    /// file is absent from the index).
-    fn index_blob_ends_with_newline(&self, path: &str) -> Result<bool, GitError> {
-        // In an unstaged diff (index -> workdir) the index side is
-        // `old_file()`; `new_file()` is the workdir file, which has no OID.
-        let raw = self.raw_diff(DiffSide::Unstaged, path)?;
-        match raw.get_delta(0).map(|d| d.old_file().exists()) {
-            Some(true) => {
-                let blob = self
-                    .inner
-                    .find_blob(raw.get_delta(0).unwrap().old_file().id())?
-                    .content()
-                    .to_vec();
-                Ok(blob.ends_with(b"\n"))
-            }
-            _ => Ok(false),
-        }
-    }
-
-
-
-    pub fn unstage_hunk(&self, path: &str, target_new_start: u32) -> Result<(), GitError> {
-        // Staged diff: HEAD (old) vs index (new). The new side is the index.
-        let raw = self.raw_diff(DiffSide::Staged, path)?;
-        let check = extract(&raw, path);
-        let hunk = check
+    /// Find the hunk of `path`'s diff (already materialized in `raw`) whose
+    /// new-side start line matches `target_new_start`, else `HunkNotFound`.
+    fn find_hunk_in(
+        &self,
+        raw: &git2::Diff,
+        path: &str,
+        target_new_start: u32,
+    ) -> Result<DiffHunk, GitError> {
+        extract(raw, path)
             .hunks
             .iter()
             .find(|h| h.new_start == target_new_start)
@@ -324,7 +303,15 @@ impl GitRepo {
             .ok_or(GitError::HunkNotFound {
                 file: path.to_string(),
                 start: target_new_start,
-            })?;
+            })
+    }
+
+
+
+    pub fn unstage_hunk(&self, path: &str, target_new_start: u32) -> Result<(), GitError> {
+        // Staged diff: HEAD (old) vs index (new). The new side is the index.
+        let raw = self.raw_diff(DiffSide::Staged, path)?;
+        let hunk = self.find_hunk_in(&raw, path, target_new_start)?;
 
         let mut index = self.inner.index()?;
         let existing = index
@@ -458,34 +445,16 @@ impl GitRepo {
         match side {
             Some(Side::Staged) => {
                 let raw = self.raw_diff(DiffSide::Staged, path)?;
-                let fd = extract(&raw, path);
-                let hunk = fd
-                    .hunks
-                    .iter()
-                    .find(|h| h.new_start == target_new_start)
-                    .cloned()
-                    .ok_or(GitError::HunkNotFound {
-                        file: path.to_string(),
-                        start: target_new_start,
-                    })?;
-                let old_ends_nl = self.head_blob_ends_with_newline(path)?;
+                let hunk = self.find_hunk_in(&raw, path, target_new_start)?;
+                let old_ends_nl = self.blob_side_ends_with_newline(DiffSide::Staged, path)?;
                 self.reverse_apply_hunk_to_workdir(path, &hunk, old_ends_nl)?;
                 self.unstage_hunk(path, target_new_start)?;
                 Ok(())
             }
             _ => {
                 let raw = self.raw_diff(DiffSide::Unstaged, path)?;
-                let fd = extract(&raw, path);
-                let hunk = fd
-                    .hunks
-                    .iter()
-                    .find(|h| h.new_start == target_new_start)
-                    .cloned()
-                    .ok_or(GitError::HunkNotFound {
-                        file: path.to_string(),
-                        start: target_new_start,
-                    })?;
-                let old_ends_nl = self.index_blob_ends_with_newline(path)?;
+                let hunk = self.find_hunk_in(&raw, path, target_new_start)?;
+                let old_ends_nl = self.blob_side_ends_with_newline(DiffSide::Unstaged, path)?;
                 self.revert_hunk_in_workdir(path, &hunk, old_ends_nl)
             }
         }

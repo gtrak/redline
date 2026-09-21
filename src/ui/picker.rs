@@ -42,7 +42,7 @@ use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 use crate::app::store::PickerCandidate;
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
-use crate::ui::color;
+use crate::ui::{color, text_style};
 
 #[derive(Default, Props)]
 struct PickerCanvasProps {
@@ -177,22 +177,6 @@ impl Component for PickerCanvas {
                 canvas.set_text(x, h as isize - 1, &count, text_style(t.minibuffer.foreground, false, false));
         }
     }
-}
-
-/// One canvas text style. `invert` (reverse-video) is the picker's cursor
-/// highlight: it swaps the face's foreground (which becomes the bar) with
-/// the parent background (which becomes the text color), so a bright
-/// foreground face yields a bright, clearly-visible selection bar.
-fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextStyle {
-    let mut style = CanvasTextStyle::default();
-    style.color = Some(color(foreground));
-    if invert {
-        style.invert = true;
-    }
-    if bold {
-        style.weight = Weight::Bold;
-    }
-    style
 }
 
 /// Draw one candidate row on the picker canvas (see the module doc for the
