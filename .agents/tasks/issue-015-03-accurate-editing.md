@@ -87,3 +87,23 @@ point-accurate functions; in `Annotation` mode keep today's behaviour **exactly*
   decision, the three edit-hygiene calls per command, the annotation-mode regression
   test, and the gate output.
 - **Resource guard**: `export CARGO_BUILD_JOBS=4`; check `free -g` and swap first.
+
+## Folded in from the 015-02 gate: the baseline predicate is root-relative
+
+`buffer_baseline_editable` (`src/app/store/buffers.rs`) decides "was this buffer
+editable before Accurate?" as `buf.path.is_none() || notes_key() == key`. That is
+**root-relative, not buffer-relative**, and the 015-02 gate demonstrated the drift
+by execution: open the notes buffer → `C-x C-q` (Accurate) → `switch_project_root`
+to another project → the old notes buffer **survives in the table** but the
+predicate now returns `false`, so leaving Accurate on it yields `Annotation` +
+**read-only** ("read-only (C-x C-q to edit)"). The `Accurate ⟹ editable` invariant
+still holds, so this is not a correctness bug — but it contradicts the doc's claim
+that "the baseline is what the buffer IS, so it cannot drift with session state",
+and it is the kind of surprise that makes a user think the editor lost their mode.
+
+**Fix it here** (this issue already touches the same files): use the per-buffer
+`kind`/`is_notes` flag that `issue-015-02-point-and-modes.md` itself offered as the
+cleaner mechanism, or compare against the notes path recorded when the buffer was
+opened. Then **correct the doc** so the narrow claim (save/reload) and the broader
+claim match reality, and pin the cross-project-root case with a test — the gate's
+probe is the reproduction.

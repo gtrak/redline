@@ -487,3 +487,16 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    it by `export CARGO_TARGET_DIR=<scratch>/target` or `touch`-ing every source
    file before building. A discrimination run against a stale binary is not
    evidence, and it fails in the *safe-looking* direction.
+6. **The shared target dir cuts BOTH ways, and the second direction is worse.**
+   A scratch copy that builds a **modified** source tree (a reverted guard, a
+   neutered function) into a *lane's* target dir leaves an artefact that cargo's
+   freshness check will happily accept for the real sources — their mtimes are
+   older — so a **good lane's own worktree reports failures that do not exist**.
+   Observed: a naive `cargo test --workspace` in a lane's worktree reported
+   `773 passed / 5 FAILED`, the lane's own new tests failing against *old* code,
+   because a previous gate had built its reverted scratch copy there. Tells:
+   `strings target/debug/deps/<binary> | grep <scratch-path>`, and an artefact
+   mtime predating the session. **Never point a scratch copy at a lane's target
+   dir.** And when a worktree's suite fails in a way that contradicts the lane's
+   report, run `cargo clean -p <crate>` (or grep the binary for the scratch path)
+   before believing the failure — a false red is as misleading as a false green.
