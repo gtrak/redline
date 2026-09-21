@@ -10,10 +10,37 @@
 //! The list is drawn with a canvas component: element! `Text` children
 //! are flex-positioned, and we need exact row/column placement for the
 //! list and the preview column.
+//!
+//! Layout (issue picker-density):
+//! - Rows are NAME-FIRST. When a candidate carries a `detail` string the
+//!   `label` (the name) is drawn left-anchored and `detail` is right-aligned
+//!   at the candidate column's right edge, so the paths form a scannable
+//!   column. The name OWNS the space: the label is truncated only if the
+//!   name alone exceeds the whole candidate column, and it is the DETAIL that
+//!   truncates (keeping its tail — the file name — so the repetitive path
+//!   prefix is what gets dropped). On rows with very long names the detail
+//!   column's left edge moves (its fixed right-alignment is preserved, its
+//!   width shrinks). Candidates with no `detail` draw their `display` as a
+//!   single left-anchored string (today's shape for the palette / file /
+//!   buffer / imenu / branch pickers).
+//! - The selected-row bar is one CONTIGUOUS run. A name-first row issues two
+//!   `set_text` calls (label, then detail); the default-background gap between
+//!   the inverted cells is painted with the bar color (the face foreground,
+//!   which is what `invert` visually becomes) so the bar never breaks.
+//! - The canvas is sized to its content and the viewport:
+//!   `height = min(candidates + 2, viewport - 1)` (prompt + rows + count), so
+//!   a 3-candidate list is a 5-row box, not a fixed 12-row one.
+//! - When the selected candidate's preview is empty the candidate rows take
+//!   the full width (no dead 2/3 preview split).
+//!
+//! All truncation here is CELL-AWARE (wide/CJK chars are 2 cells,
+//! `model::text_width`), so a wide char in a fixed column can never overflow
+//! its column.
 
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
 use crate::app::store::PickerCandidate;
+use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::color;
 
@@ -25,6 +52,9 @@ struct PickerCanvasProps {
     pub candidates: Vec<PickerCandidate>,
     pub total: usize,
     pub preview: String,
+    /// The terminal viewport height (rows) — sizes the canvas to content
+    /// (issue picker-density).
+    pub viewport: u32,
 }
 
 /// Canvas-backed picker surface: prompt row, candidate list rows,
@@ -36,6 +66,14 @@ struct PickerCanvas {
     candidates: Vec<PickerCandidate>,
     total: usize,
     preview: String,
+}
+
+/// The canvas height: prompt + rows + count, capped to the viewport. A
+/// 3-candidate list is a 5-row box; a long list fills (nearly) the popup.
+/// Floored so a zero/near-zero viewport still leaves prompt + count.
+fn canvas_height(candidates: usize, viewport: u32) -> u32 {
+    let cap = (viewport as usize).saturating_sub(1).max(1);
+    (candidates + 2).min(cap).max(3) as u32
 }
 
 impl PickerCanvas {
@@ -65,10 +103,13 @@ impl Component for PickerCanvas {
         updater: &mut ComponentUpdater,
     ) {
         *self = Self::from_props(props);
+        // Size the canvas to the content + viewport (issue picker-density B):
+        // `min(candidates + 2, viewport - 1)` rows.
+        let h = canvas_height(props.candidates.len(), props.viewport);
         updater.set_layout_style(iocraft::taffy::style::Style {
             size: iocraft::taffy::geometry::Size {
                 width: iocraft::taffy::style::Dimension::Percent(1.0),
-                height: iocraft::taffy::style::Dimension::Length(12.0),
+                height: iocraft::taffy::style::Dimension::Length(h as f32),
             },
             ..Default::default()
         });
@@ -90,9 +131,11 @@ impl Component for PickerCanvas {
         if list_h > 0 {
             let win = list_h.min(self.candidates.len());
             let start = self.selected.saturating_sub(win.saturating_sub(1));
-            let split = ((w as i32) * 2 / 3) as isize;
-            let preview_x = split + 1;
-            let preview_w = (w as i32 - split as i32).saturating_sub(1);
+            // D: no dead preview space — when the selected candidate has no
+            // preview the candidate rows take the full width (no 2/3 split).
+            let has_preview = !self.preview.is_empty();
+            let split = (w as i32 * 2 / 3) as usize;
+            let cand_w = if has_preview { split } else { w };
             for (row, i) in (start..start + win).enumerate() {
                 if let Some(candidate) = self.candidates.get(i) {
                     let selected = i == self.selected;
@@ -101,25 +144,25 @@ impl Component for PickerCanvas {
                     } else {
                         t.list_item
                     };
-                    let label = truncate(&candidate.display, split as usize);
-                    canvas.set_text(
-                        1,
-                        1 + row as isize,
-                        &label,
-                        text_style(face.foreground, selected, selected),
-                    );
+                    let y = 1 + row as isize;
+                    draw_candidate_row(&mut canvas, y, cand_w, candidate, face, selected);
                 }
             }
-            // Preview pane: the selected candidate's preview text, one
-            // line per row (clipped to the visible rows).
-            if preview_w > 1 {
-                for (row, line) in self.preview.lines().take(list_h).enumerate() {
-                    canvas.set_text(
-                        preview_x,
-                        1 + row as isize,
-                        &truncate(line, preview_w as usize),
-                        text_style(t.preview.foreground, false, false),
-                    );
+            // Preview pane: the selected candidate's preview text, one line
+            // per row (clipped to the visible rows). Only when there is a
+            // preview to show.
+            if has_preview {
+                let preview_x = (split + 1) as isize;
+                let preview_w = (w as i32 - split as i32).saturating_sub(1);
+                if preview_w > 1 {
+                    for (row, line) in self.preview.lines().take(list_h).enumerate() {
+                        canvas.set_text(
+                            preview_x,
+                            1 + row as isize,
+                            &truncate(line, preview_w as usize),
+                            text_style(t.preview.foreground, false, false),
+                        );
+                    }
                 }
             }
         }
@@ -127,7 +170,10 @@ impl Component for PickerCanvas {
         // Last row: candidate count, right-aligned.
         if h > 2 {
             let count = format!("{} of {}", self.candidates.len(), self.total);
-            let x = (w as i32).saturating_sub(count.len() as i32 + 1) as isize;
+            // Cell-aware offset (like every other measure here); `count` is
+            // ASCII so this is a no-op in practice, but keeps the one
+            // exception to cell-measurement gone.
+            let x = (w as i32).saturating_sub(display_width(&count) as i32 + 1) as isize;
                 canvas.set_text(x, h as isize - 1, &count, text_style(t.minibuffer.foreground, false, false));
         }
     }
@@ -149,16 +195,111 @@ fn text_style(foreground: theme::Color, invert: bool, bold: bool) -> CanvasTextS
     style
 }
 
+/// Draw one candidate row on the picker canvas (see the module doc for the
+/// row layout). A candidate with no `detail` is a single left-anchored
+/// `display` string; otherwise it is a name-first row (label left, detail
+/// right-aligned at the column's right edge).
+fn draw_candidate_row(
+    canvas: &mut CanvasSubviewMut,
+    y: isize,
+    cand_w: usize,
+    candidate: &PickerCandidate,
+    face: theme::Face,
+    selected: bool,
+) {
+    if candidate.detail.is_empty() {
+        // Single left-anchored string (palette / file / buffer / imenu /
+        // branch / stash / impls).
+        let label = truncate(&candidate.display, cand_w);
+        canvas.set_text(1, y, &label, text_style(face.foreground, selected, selected));
+    } else {
+        // A: name-first — the NAME owns the space (issue picker-density):
+        // the label truncates only if the name ALONE exceeds the whole
+        // candidate column; the DETAIL is what truncates, and it keeps its
+        // tail (the file name) so the repetitive path prefix is dropped. The
+        // detail stays right-aligned at the column's right edge, so the
+        // paths form a scannable column.
+        let right_edge = 1 + cand_w; // exclusive right boundary of the column
+        let label = if display_width(&candidate.label) > cand_w {
+            truncate(&candidate.label, cand_w)
+        } else {
+            candidate.label.clone()
+        };
+        let label_end = 1 + display_width(&label);
+        let detail = truncate_left(&candidate.detail, right_edge.saturating_sub(label_end));
+        let detail_x = (right_edge - display_width(&detail)) as isize;
+        if selected {
+            // Fix 1: the name-first row issues two set_text calls, so the
+            // inverted (bar) cells leave a default-background gap between the
+            // label and the detail. Paint that gap with the bar color — the
+            // face foreground, which is what `invert` visually becomes — so
+            // the selected row stays one contiguous bar, exactly like the
+            // single-string path.
+            let gap_w = (detail_x - label_end as isize).max(0);
+            if gap_w > 0 {
+                canvas.set_background_color(
+                    label_end as isize,
+                    y,
+                    gap_w as usize,
+                    1,
+                    color(face.foreground),
+                );
+            }
+        }
+        canvas.set_text(1, y, &label, text_style(face.foreground, selected, selected));
+        canvas.set_text(detail_x, y, &detail, text_style(face.foreground, selected, selected));
+    }
+}
+
+/// Truncate `s` to fit at most `max` terminal CELLS, keeping the RIGHTMOST
+/// cells (the tail) instead of the leftmost. Used for the name-first row's
+/// detail column: when it is squeezed by a long name, the repetitive path
+/// prefix (left) is what gets dropped, not the informative file name (right).
+/// `max == 0` yields empty.
+fn truncate_left(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut used = 0usize;
+    let mut start = chars.len();
+    for (i, c) in chars.iter().enumerate().rev() {
+        let cw = char_display_width(*c);
+        if used + cw > max {
+            start = i + 1;
+            break;
+        }
+        used += cw;
+        start = i;
+    }
+    chars[start..].iter().collect()
+}
+
+/// Truncate `s` to fit at most `max` terminal CELLS (not chars): a wide
+/// (CJK) char occupies 2 cells, so a wide char never straddles a column
+/// boundary. Hard cut (no ellipsis) to preserve the picker's existing
+/// left-truncation shape, now measured in cells. `max == 0` yields empty.
 fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        chars[..max].iter().collect()
+    if display_width(s) <= max {
+        return s.to_string();
     }
+    let mut used = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let cw = char_display_width(c);
+        if used + cw > max {
+            break;
+        }
+        used += cw;
+        out.push(c);
+    }
+    out
 }
 
 #[derive(Default, Props)]
@@ -169,6 +310,9 @@ pub struct PickerProps {
     pub candidates: Vec<PickerCandidate>,
     pub total: usize,
     pub preview: String,
+    /// The terminal viewport height (rows) — sizes the canvas (issue
+    /// picker-density).
+    pub viewport: u32,
 }
 
 /// Renders the picker overlay from the store's picker state.
@@ -187,7 +331,106 @@ pub fn Picker(props: &PickerProps, mut _hooks: Hooks) -> impl Into<AnyElement<'s
                 candidates: props.candidates.clone(),
                 total: props.total,
                 preview: props.preview.clone(),
+                viewport: props.viewport,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::text_width::display_width;
+
+    /// The picker's truncation is CELL-AWARE (not char-counting): a wide
+    /// (CJK) char is 2 cells and never straddles a column boundary. This is
+    /// the intentional behavior change from the old char-based `truncate`
+    /// (issue picker-density: name-first rows sit in fixed columns, so a
+    /// wide char must not overflow the column silently).
+    #[test]
+    fn truncate_counts_cells_not_chars() {
+        // 4 wide chars = 8 cells; a 6-cell budget keeps exactly 3 wide chars.
+        let wide = "\u{4e00}\u{4e01}\u{4e02}\u{4e03}"; // 中好世界
+        assert_eq!(display_width(wide), 8);
+        let cut = truncate(wide, 6);
+        assert_eq!(cut, "\u{4e00}\u{4e01}\u{4e02}");
+        assert_eq!(display_width(&cut), 6, "never exceeds the cell budget");
+
+        // ASCII is unaffected by the cell/char switch.
+        assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("abc", 5), "abc");
+        assert_eq!(truncate("abc", 0), "");
+
+        // A wide char that would straddle the boundary is dropped whole
+        // (no half-cell bleed into the next column).
+        assert_eq!(truncate("ab\u{4e00}", 3), "ab", "wide char straddling col 2-3 is dropped");
+    }
+
+    /// `truncate_left` keeps the rightmost cells (the tail), dropping the
+    /// left prefix — the opposite of `truncate`. A wide char straddling the
+    /// boundary is dropped whole from the left.
+    #[test]
+    fn truncate_left_keeps_the_tail() {
+        assert_eq!(truncate_left("abcdefgh", 3), "fgh");
+        assert_eq!(truncate_left("abc", 5), "abc");
+        assert_eq!(truncate_left("abc", 0), "");
+        // Keeps the tail; a wide char that straddles is dropped from the left.
+        assert_eq!(truncate_left("ab\u{4e00}", 3), "b\u{4e00}", "keeps 'b' + wide char (3 cells)");
+    }
+
+    /// Fix 1 (discriminating): the selected name-first row's bar is CONTIGUOUS
+    /// across the label→detail gap. The name-first row issues two set_text
+    /// calls, so without the bar-color paint the gap cells carry NO background
+    /// (default background) and the inverted bar breaks into two. This test
+    /// asserts the gap cells DO carry the bar color (the face foreground, what
+    /// `invert` visually becomes) while the label/detail cells keep the invert
+    /// (no explicit background) — so it FAILS before the fix (gap bg = None)
+    /// and passes after.
+    #[test]
+    fn selected_name_first_row_bar_is_contiguous() {
+        let face = theme::current().list_item_selected;
+        let cand_w = 53;
+        let candidate = PickerCandidate {
+            name: String::new(),
+            display: String::new(),
+            label: "some_symbol_name".to_string(),
+            detail: "[fn] src/app/store.rs:1234".to_string(),
+            docs: String::new(),
+            category: String::new(),
+        };
+        let w = 80;
+        let mut canvas = iocraft::Canvas::new(w, 1);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, w, 1);
+            draw_candidate_row(&mut sv, 0, cand_w, &candidate, face, true);
+        }
+        // Recompute the layout exactly as the row draws it.
+        let label_end = 1 + display_width(&candidate.label);
+        let right_edge = 1 + cand_w;
+        let detail = truncate_left(&candidate.detail, right_edge.saturating_sub(label_end));
+        let detail_x = right_edge - display_width(&detail);
+        // There must be a gap between label and detail for this to be a
+        // discriminating case (no gap => nothing to break, nothing to paint).
+        assert!(
+            detail_x > label_end,
+            "expected a label→detail gap to paint: label_end {label_end}, detail_x {detail_x}"
+        );
+        // The gap cells carry the bar color so the inverted bar is contiguous.
+        for x in label_end..detail_x {
+            assert_eq!(
+                canvas.cell(x, 0).unwrap().background_color,
+                Some(color(face.foreground)),
+                "gap cell {x} must carry the bar color (face foreground)"
+            );
+        }
+        // The label and detail cells keep the invert (no explicit background)
+        // — the bar color comes from `invert`, exactly like the single-string
+        // path, so the text stays visible on the bar.
+        let label_cell = canvas.cell(1, 0).unwrap();
+        assert_eq!(label_cell.background_color, None);
+        assert!(label_cell.text_style().unwrap().invert);
+        let detail_cell = canvas.cell(detail_x, 0).unwrap();
+        assert_eq!(detail_cell.background_color, None);
+        assert!(detail_cell.text_style().unwrap().invert);
     }
 }

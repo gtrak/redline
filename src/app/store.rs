@@ -643,11 +643,27 @@ impl JumpStack {
 
 /// One candidate in the picker. `name` is the value RET acts on
 /// (command name, project-relative path, buffer key, or project root);
-/// `display` is what the list renders. Nucleo matches `display`.
+/// `display` is the searchable text (nucleo matches it) and, when `label`/`detail`
+/// are both empty, the whole left-anchored row.
+///
+/// The name-first row layout (issue picker-density): when `detail` is non-
+/// empty the renderer draws `label` left-anchored and `detail` right-aligned
+/// at the candidate column's right edge (the paths form a scannable column).
+/// The NAME owns the space: `label` truncates only if the name alone exceeds
+/// the whole candidate column, and it is `detail` that truncates (keeping its
+/// tail — the file name — so the repetitive path prefix is dropped). When
+/// `detail` is empty the renderer draws `display` as a single left-anchored
+/// string (today's shape for the palette / file / buffer / imenu / branch
+/// pickers).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerCandidate {
     pub name: String,
     pub display: String,
+    /// Left-anchored row text (the name-first label); empty when the row
+    /// renders `display` as a single string.
+    pub label: String,
+    /// Right-aligned detail column (`[kind] path:line`); empty = no split.
+    pub detail: String,
     pub docs: String,
     pub category: String,
 }
@@ -3747,6 +3763,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|c| PickerCandidate {
                 name: c.name.to_string(),
                 display: c.name.to_string(),
+                label: String::new(),
+                detail: String::new(),
                 docs: c.docs.to_string(),
                 category: c.category.to_string(),
             })
@@ -3773,6 +3791,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 out.push(PickerCandidate {
                     name: rel.clone(),
                     display: rel.clone(),
+                    label: String::new(),
+                    detail: String::new(),
                     docs: String::new(),
                     category: "recent".to_string(),
                 });
@@ -3785,6 +3805,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         self.buffers.list().into_iter().map(|(key, _)| PickerCandidate {
             name: key.to_string(),
             display: self.buffer_display(key),
+            label: String::new(),
+            detail: String::new(),
             docs: String::new(),
             category: "buffer".to_string(),
         }).collect()
@@ -3801,6 +3823,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|p| PickerCandidate {
                 name: p.root.to_string_lossy().into_owned(),
                 display: p.name.clone(),
+                label: String::new(),
+                detail: String::new(),
                 docs: p.root.to_string_lossy().into_owned(),
                 category: "project".to_string(),
             })
@@ -3832,6 +3856,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|b| PickerCandidate {
                 name: b.name.clone(),
                 display: format!("{}{}", if b.current { "*" } else { " " }, b.name),
+                label: String::new(),
+                detail: String::new(),
                 docs: if b.current {
                     "current branch".to_string()
                 } else {
@@ -3850,6 +3876,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|s| PickerCandidate {
                 name: s.index.to_string(),
                 display: format!("stash@{{{}}} {}", s.index, s.subject),
+                label: String::new(),
+                detail: String::new(),
                 docs: String::new(),
                 category: "stash".to_string(),
             })
@@ -3874,6 +3902,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|d| PickerCandidate {
                 name: format!("{}:{}", d.file, d.symbol.line + 1),
                 display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
+                label: d.symbol.name.clone(),
+                detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
                 docs: String::new(),
                 category: "xref".to_string(),
             })
@@ -3915,6 +3945,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                         key,
                         l.self_type
                     ),
+                    label: String::new(),
+                    detail: String::new(),
                     docs: String::new(),
                     category: "impls".to_string(),
                 });
@@ -3959,6 +3991,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         PickerCandidate {
             name: format!("{}:{}", s.name, s.line + 1),
             display: format!("{indent}{}  [{}]", s.name, s.kind.tag()),
+            label: String::new(),
+            detail: String::new(),
             docs: String::new(),
             category: "imenu".to_string(),
         }
@@ -4018,6 +4052,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|loc| PickerCandidate {
                 name: format!("{}:{}", loc.file, loc.symbol.line + 1),
                 display: format!("{}  [{}]  {}", loc.symbol.name, loc.symbol.kind.tag(), loc.file),
+                label: loc.symbol.name.clone(),
+                detail: format!("[{}] {}", loc.symbol.kind.tag(), loc.file),
                 docs: String::new(),
                 category: "symbol".to_string(),
             })
@@ -8102,6 +8138,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 .map(|d| PickerCandidate {
                     name: format!("{}:{}", d.file, d.symbol.line + 1),
                     display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
+                    label: d.symbol.name.clone(),
+                    detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
                     docs: String::new(),
                     category: "xref".to_string(),
                 })
@@ -9866,6 +9904,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                             d.symbol.kind.tag(),
                             d.symbol.name
                         ),
+                        label: d.symbol.name.clone(),
+                        detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
                         docs: String::new(),
                         category: "xref".to_string(),
                     })
@@ -10352,6 +10392,8 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             .map(|loc| PickerCandidate {
                 name: format!("{}:{}", loc.file, loc.symbol.line + 1),
                 display: format!("{}  [{}]  {}", loc.symbol.name, loc.symbol.kind.tag(), loc.file),
+                label: loc.symbol.name.clone(),
+                detail: format!("[{}] {}", loc.symbol.kind.tag(), loc.file),
                 docs: String::new(),
                 category: "symbol".to_string(),
             })
@@ -11607,6 +11649,8 @@ fn file_candidate(rel: &str) -> PickerCandidate {
     PickerCandidate {
         name: rel.to_string(),
         display: rel.to_string(),
+        label: String::new(),
+        detail: String::new(),
         docs: String::new(),
         category: "file".to_string(),
     }

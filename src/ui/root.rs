@@ -765,6 +765,7 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 candidates: snap.candidates.clone(),
                                 total: snap.total,
                                 preview: snap.preview,
+                                viewport: snap.file_view_viewport_lines as u32,
                             )
                         })
                     } else {
@@ -1186,6 +1187,119 @@ mod tests {
         assert!(s.contains("Find file: m"), "prompt+query missing:\n{s}");
         assert!(s.contains("src/main.rs"), "candidate missing:\n{s}");
         assert!(s.contains("fn main"), "preview missing:\n{s}");
+    }
+
+    // ── issue picker-density: render80 twins for the new layout ─────────
+
+    /// B: the picker canvas is sized to content + viewport, not a fixed
+    /// 12 rows. 3 candidates => prompt + 3 rows + count = a 5-row box.
+    #[test]
+    fn picker_canvas_sized_to_content() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path()); // Cargo.toml, README.md, src/main.rs => 3 files
+        let mut store = pty_store(dir.path());
+        store.open_find_file();
+        assert_eq!(store.picker_count().0, 3, "3 file candidates");
+        let frame = render_at_width(store, 80);
+        let lines: Vec<&str> = frame.lines().collect();
+        let prompt_row = lines
+            .iter()
+            .position(|l| l.contains("Find file:"))
+            .expect("picker prompt row");
+        let count_row = lines
+            .iter()
+            .position(|l| l.trim() == "3 of 3")
+            .unwrap_or_else(|| panic!("count line '3 of 3' missing:\n{frame}"));
+        assert_eq!(
+            count_row - prompt_row,
+            4,
+            "5-row box (prompt + 3 + count) for 3 candidates:\n{frame}"
+        );
+    }
+
+    /// A: name-first rows — the symbol NAME sits left and OWNS the space; the
+    /// `[kind] path` detail is right-aligned and is what truncates. Asserts
+    /// the store's structured fields AND that the 80-col frame renders a name
+    /// LONGER than the old 32-cell label budget in full.
+    #[test]
+    fn symbol_picker_name_first_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("src/very/deep/nested/directory/path")).unwrap();
+        std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+        let long = "src/very/deep/nested/directory/path/mod.rs";
+        // A name LONGER than the old 32-cell label budget (62% of the 53-cell
+        // candidate column at 80 cols with a preview): it must render in full.
+        let name = "alpha_symbol_name_that_is_really_quite_long";
+        std::fs::write(p.join(long), format!("fn {name}() {{}}\n")).unwrap();
+        let mut store = pty_store(p);
+        let files_list = crate::model::files::FileList::build(p).unwrap();
+        store.set_index(crate::nav::index::build_index(p, &files_list.files, None));
+        store.open_symbol_picker();
+        assert!(store.picker_open(), "symbol picker open");
+        let cand = store
+            .picker_filtered()
+            .iter()
+            .find(|(c, _)| c.label == name)
+            .expect("candidate with the symbol name as its label");
+        // Name-first: label = the name, detail = `[fn] <long path>`.
+        assert_eq!(cand.0.label, name);
+        assert_eq!(cand.0.detail, format!("[fn] {long}"), "right-aligned detail");
+        assert!(
+            crate::model::text_width::display_width(name) > 32,
+            "name must exceed the old 32-cell label budget: len {}",
+            crate::model::text_width::display_width(name)
+        );
+        // The 80-col frame renders the FULL name at the left (the old code
+        // left-truncated it at 32 cells) and keeps the detail's tail (the file
+        // name) — the repetitive path prefix is what the detail drops.
+        let frame = render_at_width(store, 80);
+        assert!(frame.contains(name), "name not truncated (exceeds old budget):\n{frame}");
+        assert!(frame.contains("mod.rs"), "detail tail (file name) survives:\n{frame}");
+    }
+
+    /// D: no dead preview space — when the selected candidate has an empty
+    /// preview the candidate rows take the FULL width. A branch longer than
+    /// the 2/3 (col 53) split must not be clipped when no preview is shown.
+    #[test]
+    fn picker_empty_preview_uses_full_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(p.join("README.md"), "# readme\n").unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        // A branch long enough to exceed the 2/3 (col 53) split point.
+        let branch = format!("feature/{:0>50}", "");
+        run(&["checkout", "-q", "-b", branch.as_str()]);
+
+        let mut store = pty_store(p);
+        store.key_event(crate::app::keymap::Key::ctrl_char('x'));
+        store.key_event(crate::app::keymap::Key::char('g'));
+        store.key_event(crate::app::keymap::Key::char('y'));
+        assert!(store.picker_open(), "branch picker open");
+        // No preview pane for the branch picker (empty preview).
+        assert!(store.picker_preview().is_empty(), "branch preview is empty");
+        let frame = render_at_width(store, 80);
+        // The full branch name (past col 53) must survive — a dead 2/3
+        // preview split would clip it.
+        assert!(
+            frame.contains(&branch),
+            "full-width row (no dead preview) must not clip the long branch:\n{frame}"
+        );
     }
 
     /// The buffer-list view renders open buffers with the current one
