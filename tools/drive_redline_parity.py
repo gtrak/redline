@@ -40,13 +40,17 @@ if __name__ == '__main__':
     step(s, 'C-v (page down, 2-row overlap)', b'\x16')
     step(s, 'M-v (page up, 2-row overlap)', b'\x1bv')
     step(s, 'M-<', b'\x1b<')
-    step(s, 'M->', b'\x1b>')
+    # jump-ambiguity: redline's point-buffer-end moved M-> -> M-End
+    # (M-> now forces the Xref candidate list); CSI End +
+    # crossterm's ALT modifier (mask 3 = End+ALT, crossterm's own
+    # scheme — the xterm `;5` scheme reads as CTRL under crossterm 0.29).
+    step(s, 'M-End (redline point-buffer-end)', b'\x1b[1;3F')
     # ── plan 004 row 11: position segment in status line ──
     # Observe the status line: at top it shows "Top", after C-n x5 it
     # shows "L6,8%"-style, at bottom it shows "Bot".
     step(s, 'position: after M-< (should show Top)', b'\x1b<')
     step(s, 'position: C-n x5 (should show L6,~8%)', b'\x0e' * 5)
-    step(s, 'position: M-> (should show Bot)', b'\x1b>')
+    step(s, 'position: M-End (should show Bot)', b'\x1b[1;3F')
     # ── plan 004 row 8: C-l recenter cycle (top → middle → bottom → top) ──
     step(s, 'C-l cycle 1: at top → middle', b'\x0c')
     step(s, 'C-l cycle 2: at middle → bottom', b'\x0c')

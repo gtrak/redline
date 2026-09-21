@@ -103,7 +103,15 @@ def main():
         app.key("RET", 0.8)    # line 3: top-level `dumps('x')`
         app.key("M-f", 0.8)    # point to the END of the `dumps` run
         app.key("M-.", 0.5)
-        ok, screen = poll_screen(app, ["def dumps"], timeout=120.0)
+        # (jump-ambiguity) the tooling hit joins the Xref picker as the
+        # `tooling`-marked row (never a silent jump): wait for the
+        # picker prompt, verify the marker, then accept the top guess.
+        ok, prompt = poll_screen(app, ["Definition:"], timeout=120.0)
+        marked = "tooling" in app.screen_text()
+        rec("L1: the tooling hit joins the Xref picker (marked row)",
+            ok and marked, f"prompt={ok!r} marker={marked}")
+        app.key("RET", 1.0)
+        ok, screen = poll_screen(app, ["def dumps"], timeout=30.0)
         rec("L1: M-. on the bare import lands in the json stdlib source",
             ok, f"screen has 'def dumps'={ok}")
         miss, msg = poll_minibuffer(app, "no provider resolution", timeout=3.0)

@@ -559,10 +559,26 @@ use super::*;
     #[test]
     fn position_display_bot() {
         let (mut s, _dir) = store_with_lines(100);
-        // M-> (point-buffer-end): the point lands on the last line; the
-        // window follows, so the position display reports "Bot".
+        // M-END (point-buffer-end; jump-ambiguity moved it from M->,
+        // which now forces the Xref candidate list): the point lands on
+        // the last line; the window follows, so the position display
+        // reports "Bot".
         s.point_buffer_end();
         assert_eq!(s.file_view_position_display(), "Bot");
+    }
+
+    #[test]
+    fn point_buffer_end_reachable_via_mend_and_g() {
+        // (jump-ambiguity, test f) the rebind through the KEY PATH:
+        // `point-buffer-end` is now `M-END` (it used to be `M->`, which
+        // forces the Xref candidate list), and `G` still binds it —
+        // nothing becomes unreachable.
+        let (mut s, _dir) = store_with_lines(100);
+        s.key_event(crate::app::keymap::parse_key("M-END").unwrap());
+        assert_eq!(s.point_line(), 100, "M-END moves the point to the last line");
+        s.set_point_line(0);
+        s.key_event(crate::app::keymap::parse_key("G").unwrap());
+        assert_eq!(s.point_line(), 100, "G still binds point-buffer-end");
     }
 
     #[test]

@@ -268,7 +268,14 @@ def main():
             app.key("RET", 0.8)    # line 3: top-level `dumps('x')`
             app.key("M-f", 0.8)    # point to the END of the `dumps` run
             app.key("M-.", 0.5)
-            ok, screen = poll_screen(app, "def dumps", timeout=120.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-P1: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, screen = poll_screen(app, "def dumps", timeout=30.0)
             rec("L-P1: M-. on the bare import lands in the json stdlib source",
                 ok, f"screen has 'def dumps'={ok}")
             ok2, mini = poll_minibuffer(app, "jumped to", timeout=5.0)
@@ -307,7 +314,14 @@ def main():
             app.key("M-f", 0.6)    # end of the `json` run
             app.key("M-f", 0.6)    # end of the `dumps` run
             app.key("M-.", 0.5)
-            ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-P2: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, msg = poll_minibuffer(app, "jumped to", timeout=30.0)
             rec("L-P2: plain-import path-shaped `json.dumps` LANDS in the stdlib (011-06)",
                 ok and "no provider resolution" not in msg,
                 f"minibuffer={msg!r}")
@@ -330,7 +344,14 @@ def main():
             app.key("M-f", 0.6)    # end of the `fakelib` run
             app.key("M-f", 0.6)    # end of the `apply` run
             app.key("M-.", 0.5)
-            ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-J1a: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, msg = poll_minibuffer(app, "jumped to", timeout=30.0)
             rec("L-J1a: a namespace member LANDS in the package (011-06 dotted token)",
                 ok and "no provider resolution" not in msg,
                 f"minibuffer={msg!r}")
@@ -344,7 +365,14 @@ def main():
             app.key("RET", 0.8)    # line 3: top-level `fakelib(5);`
             app.key("M-f", 0.8)    # point to the END of the `fakelib` run
             app.key("M-.", 0.5)
-            ok, screen = poll_screen(app, "import { clamp }", timeout=120.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-J1b: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, screen = poll_screen(app, "import { clamp }", timeout=30.0)
             rec("L-J1b: the bare namespace lands on the package entry (index.js)",
                 ok, f"screen has the index.js import line={ok}")
             ok2, mini = poll_minibuffer(app, "jumped to", timeout=5.0)
@@ -365,7 +393,11 @@ def main():
             app.key("M-f", 0.5)    # end of the `return` run
             app.key("M-f", 0.5)    # end of the `clamp` run
             app.key("M-.", 0.5)
-            ok, msg = poll_minibuffer(app, "jumped to util.js", timeout=90.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=90.0)
+            app.key("RET", 1.0)
+            ok, msg = poll_minibuffer(app, "jumped to util.js", timeout=30.0)
             rec("L-J3: M-. inside the dependency lands in util.js (in-crate index)",
                 ok, f"minibuffer={msg!r}")
             rec("L-J3: NOT a resolver bail (the index answered)",
@@ -378,7 +410,14 @@ def main():
             app.key("RET", 0.8)    # line 3: top-level `clamp(1, 0, 10);`
             app.key("M-f", 0.8)    # point to the END of the `clamp` run
             app.key("M-.", 0.5)
-            ok, screen = poll_screen(app, "function clamp", timeout=120.0)
+                    # (jump-ambiguity) the hit joins the Xref picker (never a silent
+        # jump): wait for the picker prompt, then accept the top guess.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-J2: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, screen = poll_screen(app, "function clamp", timeout=30.0)
             rec("L-J2: M-. on the bare named import lands in util.js",
                 ok, f"screen has 'function clamp'={ok}")
             ok2, mini = poll_minibuffer(app, "jumped to", timeout=5.0)

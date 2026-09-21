@@ -64,9 +64,17 @@ use super::*;
         s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
         let origin_key = s.buffers.current().unwrap().to_string();
         // Line 1: "    helper();" — `helper` starts at col 4.
+        // (jump-ambiguity) a cross-file unique candidate goes to the
+        // picker (best preselected); RET accepts the top guess.
         s.set_point(1, 4, 4);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique cross-file: no picker");
+        assert!(s.picker_open(), "unique cross-file: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/other.rs:"),
+            "the cross-file candidate is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert!(
             s.message.contains("jumped to src/other.rs:1"),
             "crate-relative display, got: {}",
@@ -304,9 +312,17 @@ use super::*;
             ordered.contains(&root_a),
             "crate A (the current buffer's crate) survived eviction: {ordered:?}"
         );
-        // The next M-. in A still jumps in-crate.
+        // The next M-. in A still resolves in-crate (jump-ambiguity:
+        // cross-file unique → the picker; RET accepts the top guess).
         s.set_point(1, 4, 4); // "    helper();" — `helper` starts at col 4.
         s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/other.rs:"),
+            "the in-crate candidate is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert!(
             s.message.contains("jumped to src/other.rs:1"),
             "in-crate jump intact, got: {}",
@@ -394,9 +410,18 @@ use super::*;
         });
         s.open_path("src/main.rs");
         // Line 0: "fn main() { target(); }" — `target` starts at col 12.
+        // (jump-ambiguity) the project candidate is UNIQUE CROSS-FILE →
+        // the picker; the PROJECT definition must be the preselected
+        // row (the crate index's same-named one must not leak in).
         s.set_point(0, 12, 12);
         s.xref_find_definitions();
-        assert!(!s.picker_open());
+        let filtered = s.picker_filtered();
+        assert!(
+            filtered[0].0.name.starts_with("src/lib.rs:"),
+            "the PROJECT definition is preselected (not the crate's): {:?}",
+            filtered[0].0.name
+        );
+        s.run_selected();
         assert_eq!(
             s.view_name_display(),
             "src/lib.rs",

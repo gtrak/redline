@@ -274,7 +274,7 @@ pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("M-s o", "occur"),
 ];
 
-/// Buffer view bindings: 46 entries.
+/// Buffer view bindings: 47 entries.
 pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // Bare `q` closes the view (issue 05, finding 5): consistent
     // with the list views. When the main buffer view is the only
@@ -314,12 +314,22 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     ("C-d", "scroll-half-page-down"),
     ("C-u", "scroll-half-page-up"),
     // `g` = force-reload the current file buffer (issue 04's
-    // refresh role; M-< / M-> / G move the point to start/end).
+    // refresh role; M-< / M-END / G move the point to start/end).
     ("g", "reload-buffer"),
     ("G", "point-buffer-end"),
     ("M-g g", "goto-line"),
     ("M-<", "point-buffer-start"),
-    ("M->", "point-buffer-end"),
+    // jump-ambiguity: `M->` frees up the force-definition-list hotkey
+    // (user request: "a hotkey to force the list, M-Shift .?" — M-Shift .
+    // is M-> in a terminal). `point-buffer-end` moves to `M-END` —
+    // verified against the parity reference (vanilla emacs -Q 30.2):
+    // `M->` is `end-of-buffer`, but `M-<end>` is
+    // `end-of-buffer-OTHER-WINDOW` — a window-splitting command,
+    // meaningless under redline's locked single-pane design — so the
+    // rebind costs no parity; `G` still binds `point-buffer-end`, so
+    // nothing becomes unreachable.
+    ("M-END", "point-buffer-end"),
+    ("M->", "xref-find-definitions-picker"),
     // Plan 004 row 8: recenter cycle (top → middle → bottom → top).
     ("C-l", "recenter"),
     // Plan 004 issue 03: mark/region + kill ring.
@@ -458,6 +468,11 @@ pub const BLAME_BINDINGS: &[(&str, &str)] = &[
     ("C-v", "blame-page-down"),
     ("M-v", "blame-page-up"),
     ("M-<", "blame-top"),
+    // View-local: the BUFFER view's `M->` now forces the Xref candidate
+    // list (jump-ambiguity, the user-requested binding; point-buffer-end
+    // moved to `M-END`/`G`). Here `M->` keeps its emacs end-of-buffer
+    // analogue — blame-bottom / commit-diff-scroll-bottom below — which is
+    // parity-preserving and intentional.
     ("M->", "blame-bottom"),
 ];
 
@@ -1489,6 +1504,25 @@ pub struct AppStore {
     /// The symbol name being looked up by the Xref picker (set by
     /// `xref_find_definitions` when the lookup is ambiguous).
     xref_lookup_name: String,
+    // ── jump-ambiguity: the tooling fall-through joins the Xref picker ──
+    /// The tooling-resolver result PENDING in the Xref picker: set by
+    /// `apply_resolve_event` when a hit lands, cleared when the picker
+    /// closes (RET / C-g) or a new M-. press / request supersedes it.
+    /// While `Some`, the Xref picker prepends the marked `tooling` row
+    /// (preselected), and RET lands through the stored source (the
+    /// project-relative or the external read-only open) instead of the
+    /// candidate's `file:line` parsing.
+    xref_tooling_pending: Option<(ResolvedSource, String)>,
+    /// The jump origin captured when the fall-through REQUEST STARTED
+    /// (jump-ambiguity: the tooling path is asynchronous, so the picker's
+    /// origin is the point at `M-.` time, not at RET time — `M-,` must
+    /// return to where the keypress was pressed).
+    xref_tooling_origin: Option<JumpEntry>,
+    /// The tooling landing's picker index keying (006-03): `None` (the
+    /// project index) for the project path's M-., the origin crate's root
+    /// for M-. inside an external buffer. Set with `xref_tooling_origin`
+    /// in `start_symbol_resolution`.
+    xref_tooling_crate_root: Option<PathBuf>,
     /// The trait keys the find-implementations picker was opened with
     /// (010-04 — the M-. path token and/or the bare identifier), so query
     /// re-computation inside the picker stays against the same name-keyed
@@ -1720,6 +1754,9 @@ impl AppStore {
             index_generation: 0,
             pending_index_changes: HashSet::new(),
             xref_lookup_name: String::new(),
+            xref_tooling_pending: None,
+            xref_tooling_origin: None,
+            xref_tooling_crate_root: None,
             impls_keys: Vec::new(),
             resolve_bus: ResolveBus::new(),
             resolve_generation: 0,
@@ -2363,6 +2400,9 @@ impl AppStore {
         }
         if self.picker.take().is_some() {
             did = true;
+            // (jump-ambiguity) closing the picker drops the pending tooling
+            // landing (its row belonged to that picker instance).
+            self.xref_tooling_pending = None;
         }
         // Clear the mark on the current buffer (plan 004 issue 03).
         if let Some(key) = self.buffers.current().map(String::from)

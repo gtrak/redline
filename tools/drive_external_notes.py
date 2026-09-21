@@ -8,7 +8,9 @@ Two of the original sections stay PTY (only a live app proves them):
       cursor sits at the end of `ropey` in `ropey::Rope::new()`. M-. misses
       the project symbol index and the rust provider resolves via
       `cargo metadata` (the registry source is cached, so it is fast and
-      offline) → lands READ-ONLY in
+      offline) → (jump-ambiguity: the tooling hit joins the Xref picker as
+      the `tooling`-marked row, never a silent jump; RET accepts the top
+      guess) → lands READ-ONLY in
       ~/.cargo/registry/src/<hash>/ropey-1.6.1/src/rope.rs.
   E1b ownership guard (006-02b item 1): C-x C-q AND C-x C-s are REFUSED on
       the external buffer ("external buffer is read-only (not
@@ -100,6 +102,20 @@ def open_main(app):
     app.key("RET", 1.2)
 
 
+def poll_screen(app, needle, timeout=30.0):
+    """Wait until `needle` appears in the main screen (the Xref picker's
+    prompt row is the top of the main area — the picker is a canvas,
+    jump-ambiguity: the tooling hit joins it, never a silent jump)."""
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        app.wait(0.4)
+        last = app.screen_text()
+        if needle in last:
+            return True, last
+    return False, last
+
+
 def poll(app, needle, timeout=30.0):
     """Wait until `needle` appears in the minibuffer row."""
     deadline = time.time() + timeout
@@ -147,7 +163,16 @@ def main():
         app.key("RET", 0.8)   # line 5: top-level `ropey::Rope::new();` probe call
         app.key("M-f", 0.8)   # point to the END of the `ropey` run on the line-5 probe
         app.key("M-.", 1.5)
-        ok, msg = poll(app, "jumped to", timeout=40.0)
+        # (jump-ambiguity) the tooling hit joins the Xref picker as the
+        # `tooling`-marked row (the weak resolve is visible, not a
+        # mystery): wait for the picker prompt, verify the marker, then
+        # accept the preselected row.
+        ok, msg = poll_screen(app, "Definition:", timeout=40.0)
+        marked = "tooling" in app.screen_text()
+        rec("E1: the tooling hit joins the Xref picker (marked row)",
+            ok and marked, f"prompt={ok} marker={marked}")
+        app.key("RET", 1.5)
+        ok, msg = poll(app, "jumped to", timeout=15.0)
         m = re.search(r"jumped to (\S+):(\d+)", msg)
         landed, landed_line = None, 0
         if m:

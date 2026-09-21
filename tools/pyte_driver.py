@@ -146,6 +146,13 @@ def encode_key(seq):
             out += bytes([ord(tok[2].lower()) & 0x1F])
         elif tok.startswith("M-") and len(tok) == 3:
             out += b"\x1b" + tok[2].encode()
+        elif tok.upper() == "M-END":
+            # CSI End with crossterm's own modifier scheme (mask-1:
+            # 1=shift, 2=alt, 4=ctrl → mask 3 = ALT): End + ALT = the
+            # app's `M-END` (point-buffer-end, freed from M-> by
+            # jump-ambiguity). The xterm `;5` scheme reads as CTRL under
+            # crossterm 0.29's parser — do not use it.
+            out += b"\x1b[1;3F"
         else:
             out += tok.encode()
     return out

@@ -286,8 +286,15 @@ impl CommandRegistry {
         )); // ── plan 004 issue 05b: file-view point (line, col) + emacs motion ─
         // These move the read-focused file-view's point; the window follows.
         // They supersede the window-scroll bindings on C-n/C-p/arrows and add
-        // C-f/C-b/C-a/C-e and M-</M-> point motion (the plan-001 item-4
+        // C-f/C-b/C-a/C-e and M-< / M-END point motion (the plan-001 item-4
         // arrows-scroll stopgap is retired by explicit user directive).
+        // `M->` no longer moves the point: jump-ambiguity bound it to the
+        // force-definition-list hotkey (`xref-find-definitions-picker`),
+        // and `point-buffer-end` moved to `M-END` (verified against the
+        // parity reference — vanilla emacs -Q 30.2: `M-<end>` is
+        // end-of-buffer-OTHER-WINDOW, meaningless under the locked
+        // single-pane design; `G` still binds the end, so nothing is
+        // unreachable).
         self.register(Command::new(
             "scroll-bottom",
             "Scroll to the bottom of the buffer (G / M->)",
@@ -338,7 +345,7 @@ impl CommandRegistry {
         ));
         self.register(Command::new(
             "point-buffer-end",
-            "Point to the end of the buffer; the window follows (M-> / G)",
+            "Point to the end of the buffer; the window follows (M-END / G)",
             "motion",
             |store, _arg| store.point_buffer_end(),
         ));
@@ -675,9 +682,15 @@ impl CommandRegistry {
     fn register_symbol_navigation(&mut self) {
         self.register(Command::new(
             "xref-find-definitions",
-            "Jump to the definition of the symbol at the cursor (same-file first; workspace misses fall through to the language tooling, e.g. cargo — M-.)",
+            "Jump to the definition of the symbol at the cursor (silent only for a same-file unique candidate; everything else opens the definition list, preselected — M-.)",
             "navigation",
             |store, _arg| store.xref_find_definitions(),
+        ));
+        self.register(Command::new(
+            "xref-find-definitions-picker",
+            "Force the definition list for the symbol at the cursor (jump-ambiguity escape hatch: always opens the candidate picker, bypassing the silent-jump rule even for a same-file unique candidate — M->; M-Shift . in a terminal)",
+            "navigation",
+            |store, _arg| store.xref_find_definitions_picker(),
         ));
         self.register(Command::new(
             "jump-back",
@@ -891,7 +904,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 109, "expected 109 seed commands: {names:?}");
+        assert_eq!(names.len(), 110, "expected 110 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -973,6 +986,7 @@ mod tests {
             "reload-buffer",
             "toggle-watcher",
             "xref-find-definitions",
+            "xref-find-definitions-picker",
             "jump-back",
             "jump-forward",
             "imenu",

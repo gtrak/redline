@@ -107,6 +107,17 @@ def goto(app, n):
     app.key("RET", 0.8)
 
 
+def poll_screen(app, needle, timeout=120.0):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        app._read(0.3, quiet=0.2)
+        last = app.screen_text()
+        if needle in last:
+            return True, last
+    return False, last
+
+
 def poll_minibuffer(app, needle, timeout=120.0):
     deadline = time.time() + timeout
     last = ""
@@ -153,7 +164,16 @@ def main():
         goto(app, 2)          # "let d = Deserialize;"
         app.key("M-f M-f M-f", 1.0)  # end of the `Deserialize` run
         app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+        # (jump-ambiguity) the tooling hit joins the Xref picker as the
+        # `tooling`-marked row (the weak resolve is visible, never a
+        # silent jump): wait for the picker prompt, verify the marker,
+        # then accept the preselected row.
+        ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+        marked = "tooling" in app.screen_text()
+        rec("L1: the tooling hit joins the Xref picker (marked row)",
+            bool(ok and marked), f"prompt={ok!r} marker={marked}")
+        app.key("RET", 1.5)
+        ok, msg = poll_minibuffer(app, "jumped to", timeout=15.0)
         m = re.search(r"jumped to (\S+):(\d+)", msg) if ok else None
         landed = m.group(1) if m else None
         rec("L1: M-. reports the jump", bool(ok and landed), f"minibuffer={msg!r}")

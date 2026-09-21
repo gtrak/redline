@@ -9,7 +9,13 @@ use super::*;
     /// and a mixed CamelCase type in a generic-argument position.
     #[test]
     fn xref_uppercase_type_and_const_shapes_jump_directly() {
-        let (mut s, _d) = store_with_index(&[
+        // Watchlist item 1 (U-D3 / U-K, review 05): `M-.` on a
+        // type/constant name — the end-to-end jump pinned per name shape.
+        // (jump-ambiguity) the cross-file shapes now open the picker
+        // (best preselected; RET lands in one keystroke); the same-file
+        // SCREAMING constant stays a silent jump — you can see the
+        // target.
+        let (mut s, _dir) = store_with_index(&[
             (
                 "src/lib.rs",
                 "mod widget;\nconst LOCAL_CONST: u32 = 2;\nfn use_it() {\n    let w = Widget { x: 1 };\n    let v: Vec<OtherThing> = vec![];\n    let _ = LOCAL_CONST;\n}\n",
@@ -21,25 +27,36 @@ use super::*;
         ]);
         s.open_path("src/lib.rs");
         // Line 3: "    let w = Widget { x: 1 };" — cursor inside `Widget`
-        // (CamelCase type, defined in another file).
+        // (CamelCase type, defined in another file) → picker, RET lands.
         s.set_point(3, 13, 13);
         s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file type: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/widget.rs:"),
+            "the cross-file candidate is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/widget.rs", "CamelCase type: cross-file jump");
         assert_eq!(s.point_line(), 0, "to the struct's definition line");
 
         // Line 5: "    let _ = LOCAL_CONST;" — cursor inside `LOCAL_CONST`
-        // (SCREAMING constant).
+        // (SCREAMING constant, SAME FILE): silent jump (unchanged).
         s.open_path("src/lib.rs");
         s.set_point(5, 16, 16);
         s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file constant: no picker");
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 1, "to the const's definition line");
 
         // Line 4: "    let v: Vec<OtherThing> = vec![];" — cursor inside
-        // `OtherThing` (mixed CamelCase, generic-argument position).
+        // `OtherThing` (mixed CamelCase, generic-argument position,
+        // cross-file) → picker, RET lands.
         s.open_path("src/lib.rs");
         s.set_point(4, 18, 18);
         s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file type: picker");
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/widget.rs");
         assert_eq!(s.point_line(), 1, "to the mixed CamelCase type");
     }
@@ -142,7 +159,13 @@ use super::*;
     }
 
     #[test]
-    fn xref_cross_file_definition_jumps_directly() {
+    fn xref_cross_file_unique_opens_picker_best_preselected() {
+        // (jump-ambiguity, test b) a cross-file UNIQUE candidate is not
+        // "the" definition — the picker opens with the cross-file
+        // candidate preselected (row 0), and RET lands on it (one
+        // keystroke, the top guess). Pre-jump-ambiguity this was a
+        // silent jump on count alone (a same-named symbol in another
+        // file was trusted).
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "fn main() { lib::target(); }\n"),
             ("src/lib.rs", "pub fn target() {}\npub fn other() {}\n"),
@@ -152,11 +175,37 @@ use super::*;
         // `::` is NOT the lookup, `target` is).
         s.open_path("src/main.rs");
         s.set_point(0, 17, 17);
-        // `target` is only defined in lib.rs: unique → jump directly.
+        // `target` is only defined in lib.rs: unique, cross-file → picker.
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique cross-file: no picker");
+        assert!(s.picker_open(), "unique cross-file: picker (not a silent jump)");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 1, "one candidate: {filtered:?}");
+        // Preselected (row 0) and source-marked `other` (not the current
+        // file).
+        assert!(
+            filtered[0].0.name.starts_with("src/lib.rs:"),
+            "the cross-file candidate is the preselected row: {}",
+            filtered[0].0.name
+        );
+        assert!(
+            filtered[0].0.detail.contains("other"),
+            "the row is marked other-file: {:?}",
+            filtered[0].0.detail
+        );
+        // RET accepts the top guess: lands on the definition.
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "target is at line 0 in lib.rs");
+        assert!(
+            s.message.contains("jumped to src/lib.rs:1"),
+            "jump report (msg: {})",
+            s.message
+        );
+        // The landing recorded a jump (M-, label) — back returns to the
+        // call site.
+        s.jump_back();
+        assert_eq!(s.view_name_display(), "src/main.rs");
         // 006-02b item 2: the hit bumped the generation (superseding any
         // in-flight resolve) but started no job — exactly one bump.
         assert_eq!(s.resolve_generation, 1, "a workspace hit supersedes in-flight resolves");
@@ -174,14 +223,30 @@ use super::*;
             ("src/b.rs", "pub fn bar() {}\n"),
         ]);
         s.open_path("src/main.rs");
-        // Cursor on `foo` (col 12): jumps to a.rs, not b.rs.
+        // Cursor on `foo` (col 12): foo is a UNIQUE cross-file candidate
+        // (jump-ambiguity: the picker, best preselected) — RET lands on
+        // foo's definition in a.rs, not b.rs.
         s.set_point(0, 12, 12);
         s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/a.rs:"),
+            "the preselected row is foo's candidate: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/a.rs", "cursor on foo → foo's definition");
-        // Back to the call site, cursor on `bar` (col 20): jumps to b.rs.
+        // Back to the call site, cursor on `bar` (col 20): the preselected
+        // row is bar's — RET lands on b.rs.
         s.open_path("src/main.rs");
         s.set_point(0, 20, 20);
         s.xref_find_definitions();
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/b.rs:"),
+            "the preselected row is bar's candidate: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/b.rs", "cursor on bar → bar's definition");
     }
 
@@ -321,7 +386,11 @@ use super::*;
         s.open_path("src/lib.rs");
         s.set_point(2, 12, 12); // "    alpha();" line_len 12
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "S2: unique def");
+        // (jump-ambiguity) end-of-line: no symbol AT the point → the
+        // enclosing fallback (a by-LINE guess) → the picker (best
+        // preselected); RET accepts the top guess.
+        assert!(s.picker_open(), "S2: enclosing fallback → picker");
+        s.run_selected();
         s.jump_back();
         assert_eq!((s.point_line(), s.point_col()), (2, 12), "S2: end-of-line origin restored");
 
@@ -354,7 +423,10 @@ use super::*;
         s.open_path("src/lib.rs");
         s.set_point(2, 0, 0); // comment line: no symbol at point → enclosing = wrapper
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "S4: direct jump");
+        // (jump-ambiguity) the by-LINE enclosing guess goes to the
+        // picker (best preselected); RET accepts the top guess.
+        assert!(s.picker_open(), "S4: enclosing fallback → picker");
+        s.run_selected();
         s.jump_back();
         assert_eq!((s.point_line(), s.point_col()), (2, 0), "S4: enclosing-fallback M-, restores origin");
 
@@ -434,7 +506,9 @@ use super::*;
     fn xref_trait_definition_jumps() {
         // The user's report: on a Trait, jump into the trait definition.
         // `trait_item` is captured by the index, so a cursor on the trait
-        // name at a use site lands on the definition.
+        // name at a use site reaches the definition — jump-ambiguity: the
+        // cross-file unique candidate goes through the picker (best
+        // preselected), and RET lands on the definition.
         let (mut s, _dir) = store_with_index(&[
             ("src/lib.rs", "pub trait Tr {\n    fn m(&self);\n}\n"),
             ("src/main.rs", "fn use_it<T: Tr>() {}\n"),
@@ -443,7 +517,13 @@ use super::*;
         // "fn use_it<T: Tr>() {}" — the `Tr` bound starts at col 13.
         s.set_point(0, 13, 13);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique trait: no picker");
+        assert!(s.picker_open(), "cross-file unique trait: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/lib.rs:"),
+            "the trait definition is the preselected row: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "jumped to `pub trait Tr` (msg: {})", s.message);
     }
@@ -515,7 +595,16 @@ use super::*;
         s.open_path("src/main.rs");
         s.set_point(0, 13, 13);
         s.find_implementations();
-        assert!(!s.picker_open(), "degraded to the M-. path: {}", s.message);
+        // (jump-ambiguity) the degraded M-. lookup: `Tr` is a UNIQUE
+        // CROSS-FILE candidate → the picker (best preselected), not a
+        // silent jump; RET lands on the trait definition.
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/lib.rs:"),
+            "the trait definition is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "the trait definition (msg: {})", s.message);
         assert!(s.message.contains("jumped"), "the M-. jump message: {}", s.message);
@@ -536,8 +625,15 @@ use super::*;
         s.set_point(0, 13, 13);
         s.find_implementations();
         // No entry for the bare `Tr` (the map key is `Tr<Foo>`) — the
-        // bare-symbol M-. lookup lands on the trait definition instead.
-        assert!(!s.picker_open(), "generic trait text never matches: {:?}", s.message);
+        // bare-symbol M-. lookup degrades to the (cross-file unique)
+        // `Tr` candidate, through the picker (jump-ambiguity).
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/lib.rs:"),
+            "the trait definition is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 0, "the trait definition (msg: {})", s.message);
     }
@@ -681,7 +777,15 @@ use super::*;
         // at col 36.
         s.set_point(2, 36, 36);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique cross-file field: no picker");
+        // (jump-ambiguity) a cross-file unique candidate is not "the"
+        // definition → the picker (best preselected); RET lands.
+        assert!(s.picker_open(), "unique cross-file field: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/model.rs:"),
+            "the cross-file candidate is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/model.rs");
         assert_eq!(
             s.point_line(),
@@ -760,9 +864,18 @@ use super::*;
         // col 31.
         s.set_point(2, 31, 31);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "degraded: no picker");
-        // The enclosing-symbol fallback landed on `f` itself (its only
-        // indexed definition) — today's behavior, byte-for-byte.
+        // (jump-ambiguity) the enclosing-symbol fallback is a by-LINE
+        // guess → the picker (best preselected), never a silent jump.
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
+        // The enclosing-symbol fallback lands on `f` itself (its only
+        // indexed definition) — today's target, through the picker: RET
+        // accepts the top guess.
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/lib.rs:3"),
+            "enclosing `f` (line 2, 1-based 3) is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(
             s.point_line(),
@@ -775,6 +888,8 @@ use super::*;
     /// 010-01 (pin): `self.a` with NO enclosing impl (top-level / outside
     /// every impl block) degrades to the exact pre-010-01 behavior — and a
     /// non-Rust buffer is never touched by the pre-step at all.
+    /// (jump-ambiguity) the enclosing fallback is by line → the picker,
+    /// RET accepts the top guess.
     #[test]
     fn xref_self_without_enclosing_impl_degrades_to_today() {
         let (mut s, _dir) = store_with_index(&[(
@@ -785,9 +900,11 @@ use super::*;
         // Line 1: "fn free() { let _ = self; }" — no member after `self`
         // (the token is `self`, not `self.<member>`): the pre-step never
         // fires; `self` has no definition → the enclosing `free` takes
-        // over (today's behavior).
+        // over (today's behavior) through the picker.
         s.set_point(1, 24, 24);
         s.xref_find_definitions();
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(s.point_line(), 1, "enclosing `free` (msg: {})", s.message);
     }
@@ -907,7 +1024,15 @@ use super::*;
         s.open_path("src/main.rs");
         s.set_point(3, 14, 14);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "unique cross-file field: no picker");
+        // (jump-ambiguity) a cross-file unique candidate is not "the"
+        // definition → the picker (best preselected); RET lands.
+        assert!(s.picker_open(), "unique cross-file field: picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/model.rs:"),
+            "the cross-file candidate is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/model.rs");
         assert_eq!(
             s.point_line(),
@@ -1053,6 +1178,11 @@ use super::*;
 
     #[test]
     fn xref_no_symbol_under_point_falls_back_to_enclosing() {
+        // (jump-ambiguity, test c) the enclosing-symbol fallback is a
+        // by-LINE guess: it is NEVER a silent jump — even the unique
+        // same-file candidate goes to the picker (best preselected), and
+        // RET accepts the top guess in one keystroke. Pre-jump-ambiguity
+        // the unique enclosing hit was a silent jump.
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "fn main() {\n    let x = 1;\n}\n"),
         ]);
@@ -1061,8 +1191,18 @@ use super::*;
         // Fall back to enclosing symbol: `main` (unchanged behavior).
         s.set_point_line(1);
         s.xref_find_definitions();
-        // `main` is defined only in main.rs: unique → jump to main's definition (line 0).
-        assert!(!s.picker_open());
+        // `main` is defined only in main.rs — unique same-file, but the
+        // fallback is by line → the picker (never a silent jump).
+        assert!(s.picker_open(), "the enclosing fallback goes to the picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let filtered = s.picker_filtered();
+        assert!(
+            filtered[0].0.name.starts_with("src/main.rs:1"),
+            "`main` (line 0, 1-based line 1) is the preselected row: {:?}",
+            filtered[0].0.name
+        );
+        // RET: lands on main's definition (line 0).
+        s.run_selected();
         assert_eq!(s.point_line(), 0, "jumped to main's definition");
         // 006-02b item 2: the enclosing hit bumps the generation (one
         // supersede bump, no job).
@@ -1087,7 +1227,10 @@ use super::*;
         // jumped to `D`'s `c` (line 1) through the misattributed `b`.
         s.set_point(6, 16, 16);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "no candidates: no picker");
+        // (jump-ambiguity) the enclosing fallback is a by-LINE guess →
+        // the picker; RET lands on the enclosing `main` — NOT `D`'s `c`.
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs");
         assert_eq!(
             s.point_line(),
@@ -1520,8 +1663,10 @@ use super::*;
         s.xref_find_definitions();
         // The whole path `p.x` (and the bare `x`) has no indexed
         // definition — the enclosing-symbol fall-through lands on
-        // `use_it` (line 1).
-        assert!(!s.picker_open(), "no picker: {}", s.message);
+        // `use_it` (line 1), through the picker (jump-ambiguity: a
+        // by-LINE guess is never a silent jump).
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
+        s.run_selected();
         assert_eq!(s.view_name_display(), "c/main.c");
         assert_eq!(s.point_line(), 1, "the enclosing function (msg: {})", s.message);
     }
@@ -1542,7 +1687,10 @@ use super::*;
         // Line 3 (0-based): "        int x = A.c;" — `c` at col 18.
         s.set_point(3, 18, 18);
         s.xref_find_definitions();
-        assert!(!s.picker_open(), "no picker: {}", s.message);
+        // (jump-ambiguity) the enclosing fallback is a by-LINE guess →
+        // the picker (best preselected); RET accepts the top guess.
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/A.java");
         assert_eq!(
             s.point_line(),
@@ -1601,3 +1749,46 @@ use super::*;
             s.message
         );
     }
+
+    #[test]
+    fn xref_force_list_opens_picker_for_same_file_unique() {
+        // (jump-ambiguity, test e) `M->` (xref-find-definitions-picker)
+        // bypasses the silent-jump rule: even the SAME-FILE UNIQUE
+        // candidate — the one case `M-.` jumps silently — opens the
+        // picker (the best candidate preselected; RET lands on it).
+        let (mut s, _dir) = store_with_index(&[
+            ("src/main.rs", "fn target() {}\nfn main() { target(); }\n"),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 1: "fn main() { target(); }" — `target` starts at col 13.
+        s.set_point(1, 13, 13);
+        // `M-.`: same-file unique → the silent jump (the unchanged case).
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "M-. same-file unique: silent jump");
+        assert_eq!(s.point_line(), 0, "M-. landed on the definition");
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (1, 13), "M-, back to the call site");
+        // `M->`: forces the candidate list.
+        s.xref_find_definitions_picker();
+        assert!(s.picker_open(), "M-> forces the picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let filtered = s.picker_filtered();
+        assert_eq!(filtered.len(), 1, "one candidate: {filtered:?}");
+        assert!(
+            filtered[0].0.name.starts_with("src/main.rs:"),
+            "the same-file candidate is preselected: {:?}",
+            filtered[0].0.name
+        );
+        assert!(
+            filtered[0].0.detail.contains("here"),
+            "the row is marked same-file (here): {:?}",
+            filtered[0].0.detail
+        );
+        // RET accepts the top guess: the same definition M-. would have.
+        s.run_selected();
+        assert_eq!(s.point_line(), 0, "RET landed on the definition");
+        // The forced-list landing recorded a jump too (M-, round trip).
+        s.jump_back();
+        assert_eq!((s.point_line(), s.point_col()), (1, 13), "M-, back after RET");
+    }
+

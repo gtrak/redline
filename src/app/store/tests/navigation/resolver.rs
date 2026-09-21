@@ -189,7 +189,7 @@ use super::*;
             ("main.py", "import os\nx = os.path.join('a', 'b')\n"),
         ]);
         s.open_path("main.py");
-        s.start_symbol_resolution("os.path.join", "main.py");
+        s.start_symbol_resolution("os.path.join", "main.py", None);
         assert_eq!(s.resolve_generation, 1, "the fall-through fired exactly once");
         assert!(s.resolving_display().is_empty());
         // 011-01 review P2-1: the pre-fix assertion was non-discriminating —

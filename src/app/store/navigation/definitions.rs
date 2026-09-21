@@ -11,6 +11,102 @@ struct XrefPointContext<'a> {
     col: usize,
 }
 
+/// (jump-ambiguity) The M-. candidate lookup's outcome, shared by `M-.`
+/// (which applies the silent-jump rule) and `M->` (which always opens
+/// the picker). The guard messages are delivered here; the caller just
+/// returns.
+enum XrefMdotOutcome {
+    /// Definition candidates (symbol-at-point, or the enclosing-symbol
+    /// fallback — `from_enclosing` says which: the fallback is a by-
+    /// LINE guess and is therefore never a silent jump).
+    Candidates {
+        lookup_name: String,
+        defs: Vec<crate::nav::index::Location>,
+        rel: String,
+        from_enclosing: bool,
+    },
+    /// The (4) tooling-resolver seam: `(path-shaped token, from file)`.
+    Resolver(String, String),
+    /// The enclosing name has no indexed definition (no symbol under the
+    /// point either): the "no definition for X" report.
+    NoDefinition(String),
+    /// No symbol under the point and no enclosing symbol: the "no symbol
+    /// under point" report.
+    NoSymbol,
+    /// A guard message ("no buffer", "no file…", …) was already
+    /// reported; the caller returns.
+    Guarded,
+}
+
+/// (jump-ambiguity) The Xref picker row for one definition location:
+/// the SOURCE of the row is visible — `"here"` when `d` is in the
+/// current file (`cur`, keyed the way the picker's index keys it: project-
+/// relative, or crate-relative when the picker is crate-rooted),
+/// `"other"` when it is not; no marker when there is no current-file
+/// context. `display` (the match target) and `detail` carry the
+/// `[<kind>·<here|other>]` tag; `name` stays `file:line` byte-for-byte.
+pub(in crate::app::store) fn xref_location_candidate(d: &crate::nav::index::Location, cur: Option<&str>) -> PickerCandidate {
+    let marker = match cur {
+        Some(c) if c == d.file => "here",
+        Some(_) => "other",
+        None => "",
+    };
+    let tag = format!("[{}{}{}]", d.symbol.kind.tag(), if marker.is_empty() { "" } else { "·" }, marker);
+    let name = format!("{}:{}", d.file, d.symbol.line + 1);
+    PickerCandidate {
+        name: name.clone(),
+        display: format!("{}  {} {}", name, tag, d.symbol.name),
+        label: d.symbol.name.clone(),
+        detail: format!("{} {}:{}", tag, d.file, d.symbol.line + 1),
+        docs: String::new(),
+        category: "xref".to_string(),
+    }
+}
+
+/// (jump-ambiguity) The tooling row's `file` display string in the
+/// picker's keying: crate-relative when the file sits under the
+/// picker's crate root (006-03 keying — a registry landing IS a file of
+/// its crate), project-relative inside the project, absolute otherwise.
+pub(in crate::app::store) fn tooling_file_display(
+    source: &ResolvedSource,
+    crate_root: &Option<PathBuf>,
+    project: &Option<Project>,
+) -> String {
+    if let Some(root) = crate_root
+        && let Ok(rel) = source.file.strip_prefix(root)
+    {
+        return rel.to_string_lossy().into_owned();
+    }
+    if let Some(p) = project
+        && let Ok(rel) = source.file.strip_prefix(&p.root)
+    {
+        return rel.to_string_lossy().into_owned();
+    }
+    source.file.display().to_string()
+}
+
+/// (jump-ambiguity) The tooling row's `name` ("file:line", 1-based line,
+/// file in the picker's keying): the pure derivation shared by
+/// `xref_tooling_candidate` and `run_selected`'s landing discriminator.
+pub(in crate::app::store) fn tooling_candidate_name(
+    source: &ResolvedSource,
+    crate_root: &Option<PathBuf>,
+    project: &Option<Project>,
+) -> String {
+    let file = tooling_file_display(source, crate_root, project);
+    format!("{file}:{}", tooling_landing_line(source) + 1)
+}
+
+/// (jump-ambiguity) The tooling landing line, 0-based: a provider
+/// emitting 0 is "no line" (006-02b item 6) — the top of the file.
+pub(in crate::app::store) fn tooling_landing_line(source: &ResolvedSource) -> usize {
+    source
+        .line
+        .filter(|l| *l > 0)
+        .map(|l| (l - 1) as usize)
+        .unwrap_or(0)
+}
+
 impl AppStore {
     /// `M-.`: jump to the definition of the symbol UNDER THE POINT
     /// (plan 006 issue 02 selection rule).
@@ -41,15 +137,83 @@ impl AppStore {
     ///    symbol: <path-shaped token>, from_file }` runs OFF the input path
     ///    (`spawn_blocking` + `ResolveBus`, like the symbol indexer) because
     ///    `cargo fetch` is a network shell-out that must never block a keypress.
+    ///
+    /// Selection rule 5 (jump-ambiguity): a silent jump happens IFF there
+    /// is EXACTLY ONE candidate AND it is in the CURRENT file — the one
+    /// case where you can see the target yourself. Everything else opens
+    /// the Xref picker with the best candidate preselected (`open_picker`
+    /// starts at index 0 and the candidates are same-file-first, so RET
+    /// accepts the top guess in one keystroke): a cross-file unique
+    /// candidate (a same-named symbol in another file is not "the" one),
+    /// 2+ candidates, and the enclosing-symbol fallback (a by-LINE guess,
+    /// never a silent jump). A tooling resolve never jumps silently either
+    /// (see `apply_resolve_event` → `xref_tooling_resolve_to_picker`).
     pub fn xref_find_definitions(&mut self) {
+        match self.xref_mdot_candidates() {
+            XrefMdotOutcome::Candidates { lookup_name, defs, rel, from_enclosing } => {
+                let silent = defs.len() == 1
+                    && !from_enclosing
+                    && defs[0].file == rel;
+                if silent {
+                    self.xref_jump_unique_definition(defs);
+                } else {
+                    self.xref_open_ambiguous_picker(lookup_name, defs);
+                }
+            }
+            XrefMdotOutcome::Resolver(token, rel) => {
+                self.start_symbol_resolution(&token, &rel, None)
+            }
+            XrefMdotOutcome::NoDefinition(name) => {
+                self.minibuffer_message(&format!("no definition for `{name}`"))
+            }
+            XrefMdotOutcome::NoSymbol => {
+                self.minibuffer_message("no symbol under point")
+            }
+            XrefMdotOutcome::Guarded => {}
+        }
+    }
+
+    /// (M->, jump-ambiguity) Force the candidate list: the SAME lookup as
+    /// `M-.` but the selection rule is BYPASSED — the Xref picker opens
+    /// even for a same-file unique candidate (the "when I know I want to
+    /// search for the jump point" escape hatch). No candidates at all
+    /// keeps the M-. fall-through discipline (resolver when the point
+    /// sits on a symbol, the same guard messages otherwise).
+    pub fn xref_find_definitions_picker(&mut self) {
+        match self.xref_mdot_candidates() {
+            XrefMdotOutcome::Candidates { lookup_name, defs, .. } => {
+                self.xref_open_ambiguous_picker(lookup_name, defs);
+            }
+            XrefMdotOutcome::Resolver(token, rel) => {
+                self.start_symbol_resolution(&token, &rel, None)
+            }
+            XrefMdotOutcome::NoDefinition(name) => {
+                self.minibuffer_message(&format!("no definition for `{name}`"))
+            }
+            XrefMdotOutcome::NoSymbol => {
+                self.minibuffer_message("no symbol under point")
+            }
+            XrefMdotOutcome::Guarded => {}
+        }
+    }
+
+    /// (jump-ambiguity) The M-. / M-> shared candidate lookup: the guards
+    /// (no buffer / scratch / no project / external-buffer redirect / not
+    /// in project), the supersede bump (006-02b item 2), the symbol-at-
+    /// point candidate gather, and the enclosing-symbol fallback (3).
+    /// A superseded tooling row is dropped here (a new M-. press means the
+    /// previous request's pending landing is no longer live).
+    fn xref_mdot_candidates(&mut self) -> XrefMdotOutcome {
+        // A new M-. / M-> press supersedes any pending tooling landing.
+        self.xref_tooling_pending = None;
         // Get the current file's project-relative path.
         let Some(key) = self.buffers.current().map(String::from) else {
             self.minibuffer_message("no buffer");
-            return;
+            return XrefMdotOutcome::Guarded;
         };
         let Some(buf) = self.buffers.get(&key) else {
             self.minibuffer_message("no buffer");
-            return;
+            return XrefMdotOutcome::Guarded;
         };
         // An OWNED path: the `buf` borrow must not span the `&mut self`
         // calls below (the external-buffer navigation, 006-03).
@@ -57,12 +221,12 @@ impl AppStore {
             Some(p) => p.clone(),
             None => {
                 self.minibuffer_message("no file (scratch buffer)");
-                return;
+                return XrefMdotOutcome::Guarded;
             }
         };
         let Some(project) = self.project.as_ref() else {
             self.minibuffer_message("no project");
-            return;
+            return XrefMdotOutcome::Guarded;
         };
         let Ok(rel) = path.strip_prefix(&project.root) else {
             // 006-03: an EXTERNAL (registry / tooling) buffer navigates
@@ -76,7 +240,7 @@ impl AppStore {
             } else {
                 self.minibuffer_message("buffer not in project");
             }
-            return;
+            return XrefMdotOutcome::Guarded;
         };
         let rel = rel.to_string_lossy().into_owned();
 
@@ -119,48 +283,53 @@ impl AppStore {
             })
             .unwrap_or_default();
 
-        let lookup_name: String;
-        let defs: Vec<crate::nav::index::Location> = if !defs.is_empty() {
+        if !defs.is_empty() {
             // (2) Symbol-at-point with definitions: first candidate after the
             // same-file-first order (the picker's lookup label).
-            lookup_name = defs[0].symbol.name.clone();
-            defs
-        } else {
-            // (3) Enclosing-symbol fallback (unchanged: by line, not by the
-            // point's column).
-            match self.xref_enclosing_symbol_fallback(&rel, line) {
-                Some((name, defs)) => {
-                    lookup_name = name;
-                    defs
-                }
-                None => {
-                    // (4) Nothing the workspace knows about under/near the point:
-                    // fall through to the tooling resolver when the point sits on
-                    // a symbol (otherwise behave as before: no symbol under point).
-                    match &at {
-                        Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
-                        None => self.minibuffer_message("no symbol under point"),
-                    }
-                    return;
-                }
-            }
-        };
-
-        if defs.is_empty() {
-            // The enclosing symbol has no indexed definition: same (4) seam,
-            // but the point's own token (path-shaped) is what the resolver
-            // gets — not the enclosing name.
-            match &at {
-                Some((_, path_token)) => self.start_symbol_resolution(path_token, &rel),
-                None => self.minibuffer_message(&format!("no definition for `{lookup_name}`")),
-            }
-            return;
+            let lookup_name = defs[0].symbol.name.clone();
+            return XrefMdotOutcome::Candidates {
+                lookup_name,
+                defs,
+                rel,
+                from_enclosing: false,
+            };
         }
 
-        if defs.len() == 1 {
-            self.xref_jump_unique_definition(defs);
-        } else {
-            self.xref_open_ambiguous_picker(lookup_name, defs);
+        // (3) Enclosing-symbol fallback (unchanged: by line, not by the
+        // point's column). Same-file-first order so the picker's
+        // preselected row (index 0) is the best guess — the fallback's
+        // defs come out of `definitions_of` unsorted.
+        match self.xref_enclosing_symbol_fallback(&rel, line) {
+            Some((name, mut defs)) if !defs.is_empty() => {
+                defs.sort_by(|a, b| {
+                    (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                        (a.file.as_str(), a.symbol.line, &a.symbol.name)
+                            .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+                    })
+                });
+                XrefMdotOutcome::Candidates {
+                    lookup_name: name,
+                    defs,
+                    rel,
+                    from_enclosing: true,
+                }
+            }
+            other => {
+                // (4) Nothing the workspace knows about under/near the
+                // point: fall through to the tooling resolver when the
+                // point sits on a symbol (the point's own path-shaped
+                // token — not the enclosing name — is what the resolver
+                // gets); the enclosing name with no indexed definition
+                // keeps its "no definition for X" report; neither, "no
+                // symbol under point".
+                if let Some((_, token)) = at {
+                    XrefMdotOutcome::Resolver(token, rel)
+                } else if let Some((name, _)) = other {
+                    XrefMdotOutcome::NoDefinition(name)
+                } else {
+                    XrefMdotOutcome::NoSymbol
+                }
+            }
         }
     }
 
@@ -273,30 +442,50 @@ impl AppStore {
         self.minibuffer_message(&format!("jumped to {}: {}", def.file, def.symbol.line + 1));
     }
 
-    /// (M-., dispatch) The ambiguous-definition picker (the
-    /// `defs.len() > 1` case).
+    /// (M-., dispatch) The Xref picker for the index candidates (every
+    /// non-silent M-. / M-> outcome: ambiguous, cross-file unique, the
+    /// enclosing-symbol fallback, the forced list). The jump entry is
+    /// recorded when the user selects a candidate (run_selected for
+    /// Xref).
     fn xref_open_ambiguous_picker(
         &mut self,
         lookup_name: String,
         defs: Vec<crate::nav::index::Location>,
     ) {
-        // Ambiguous: open the Xref picker (same-file candidates first).
-        // The jump entry is recorded when the user selects a candidate
-        // (run_selected for Xref).
+        // Index candidates only: the tooling row belongs to the tooling
+        // picker (the supersede at the M-. entry already dropped a
+        // pending one; drop it here too — belt and braces, since this is
+        // the only other Xref-open seam).
+        self.xref_tooling_pending = None;
         self.xref_crate_root = None;
         self.xref_lookup_name = lookup_name;
-        let candidates: Vec<PickerCandidate> = defs
+        let cur = self.xref_current_file_rel(None);
+        let candidates = defs
             .iter()
-            .map(|d| PickerCandidate {
-                    name: format!("{}:{}", d.file, d.symbol.line + 1),
-                    display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
-                    label: d.symbol.name.clone(),
-                    detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
-                    docs: String::new(),
-                    category: "xref".to_string(),
-                })
+            .map(|d| xref_location_candidate(d, cur.as_deref()))
             .collect();
         self.open_picker(PickerKind::Xref, "Definition: ", candidates);
+    }
+
+    /// (jump-ambiguity) The current buffer's file key in the Xref
+    /// picker's keying: project-relative (the project index's keys) or,
+    /// when the picker is crate-rooted (006-03), crate-relative (the
+    /// crate index's keys). The rows' `here`/`other` source marker
+    /// compares against this.
+    pub(in crate::app::store) fn xref_current_file_rel(
+        &mut self,
+        root: Option<&PathBuf>,
+    ) -> Option<String> {
+        let key = self.buffers.current()?.to_string();
+        let path = self.buffers.get(&key)?.path.clone()?;
+        match root {
+            Some(root) => Self::crate_rel(&path, root),
+            None => self
+                .project
+                .as_ref()
+                .and_then(|p| path.strip_prefix(&p.root).ok())
+                .map(|r| r.to_string_lossy().into_owned()),
+        }
     }
 
     /// (010-04, plan 010 Shape A rung 4) find-implementations — the
@@ -648,7 +837,7 @@ impl AppStore {
     /// imported via `use` resolves instead of hitting the providers'
     /// "needs scope info" bail; without a hint the context stays empty and
     /// the providers behave exactly as before (byte-for-byte).
-    pub fn start_symbol_resolution(&mut self, symbol: &str, from_file: &str) {
+    pub fn start_symbol_resolution(&mut self, symbol: &str, from_file: &str, crate_root: Option<&PathBuf>) {
         let Some(project) = self.project.as_ref() else {
             self.minibuffer_message("no project");
             return;
@@ -657,6 +846,18 @@ impl AppStore {
         let symbol_owned = symbol.to_string();
         self.resolve_generation += 1;
         let generation = self.resolve_generation;
+        // (jump-ambiguity) the async origin: capture the jump origin NOW,
+        // when the keypress started the request — the tooling path is
+        // asynchronous (006-02b), so by the time the resolve lands the
+        // point may have moved; a picker recording its origin at open
+        // time would make `M-,` return to the wrong place. The pending
+        // tooling row is superseded too (this request replaces it), and
+        // `crate_root` is the picker's index keying for the landing
+        // (None — the project index — for the project path, the origin
+        // crate's root for M-. inside an external buffer, 006-03).
+        self.xref_tooling_origin = self.current_jump_entry();
+        self.xref_tooling_pending = None;
+        self.xref_tooling_crate_root = crate_root.cloned();
         self.resolving = Some((format!("resolving `{symbol}`…"), generation));
         if tokio::runtime::Handle::try_current().is_err() {
             self.resolving = None;
@@ -702,25 +903,31 @@ impl AppStore {
     /// Install a resolve event into the store (called by the UI's ResolveBus
     /// drain in `Root`). Discards events from a stale generation (a
     /// superseded M-. request or a previous project — mirroring
-    /// `apply_index_event`); otherwise clears the status activity and lands
-    /// the result (jump) or reports the miss.
+    /// `apply_index_event`); otherwise clears the status activity and
+    /// either joins a resolve HIT to the Xref picker (jump-ambiguity)
+    /// or reports the miss.
     pub fn apply_resolve_event(&mut self, event: &ResolveEvent) {
         if event.generation != self.resolve_generation {
             // A stale event (a superseded request or a previous project):
-            // its result is discarded. The drain is latest-wins — this
-            // stale send may have OVERWRITTEN the current generation's
-            // event in the watch channel (006-02b item 3); if so the
-            // current job's event never reaches us and its `resolving`
-            // indicator would stick until the next action. Clearing it here
-            // is always safe: a still-in-flight current-generation event
-            // lands its jump when it arrives (its generation still matches)
-            // — at worst the indicator hides a few moments early.
+            // its result is discarded (it must never open a picker, jump,
+            // or report — 006-02b). The drain is latest-wins — this stale
+            // send may have OVERWRITTEN the current generation's event in
+            // the watch channel (006-02b item 3); if so the current job's
+            // event never reaches us and its `resolving` indicator would
+            // stick until the next action. Clearing it here is always
+            // safe: a still-in-flight current-generation event lands its
+            // picker when it arrives (its generation still matches) — at
+            // worst the indicator hides a few moments early.
             self.resolving = None;
             return;
         }
         self.resolving = None;
         match (&event.source, &event.error) {
-            (Some(source), _) => self.open_resolved_source(source, &event.symbol),
+            (Some(source), _) => {
+                // jump-ambiguity: the hit joins the Xref picker (marked
+                // `tooling`, preselected) instead of jumping silently.
+                self.xref_tooling_resolve_to_picker(source, &event.symbol)
+            }
             (None, Some(e)) => {
                 self.minibuffer_message(&format!(
                     "no provider resolution for `{}`: {}",

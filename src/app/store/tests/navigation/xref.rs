@@ -1,11 +1,13 @@
 use super::*;
 
     #[tokio::test]
-    async fn xref_resolver_hit_lands_read_only_jump() {
-        // A resolve event with a resolved source (outside the project root,
-        // external) lands as a jump: read-only buffer, point on the
-        // resolved line, jump entry recorded, status cleared, and the
-        // external path never enters the project recents.
+    async fn xref_resolver_hit_opens_tooling_picker_and_ret_lands_read_only() {
+        // (jump-ambiguity, test d) a resolve event with a resolved source
+        // (outside the project root, external) does NOT jump silently —
+        // it joins the Xref picker as the preselected, `tooling`-marked
+        // row; RET lands read-only: point on the resolved line, jump
+        // entry recorded, status cleared, and the external path never
+        // enters the project recents.
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "tokio::spawn(f);\n"),
         ]);
@@ -20,6 +22,10 @@ use super::*;
         s.xref_find_definitions();
         assert_eq!(s.resolve_generation, 2, "xref supersede bump + start bump");
         assert!(s.resolving_display().contains("`tokio::spawn`"), "status activity while pending");
+        // (jump-ambiguity) the ASYNC origin: the point moves while the
+        // resolve is in flight — the picker's origin must be the M-.
+        // press position (line 0, col 2), not this moved point.
+        s.set_point(0, 1, 1);
         // Land a fabricated (provider-shaped) hit for the in-flight job.
         let event = ResolveEvent {
             generation: 2,
@@ -33,21 +39,43 @@ use super::*;
             error: None,
         };
         s.apply_resolve_event(&event);
+        // The tooling row: the picker is open, the row is PRESELECTED
+        // (row 0) and marked `tooling` (the weak resolve is visible, not
+        // a mystery).
+        assert!(s.picker_open(), "the tooling hit joins the picker");
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        let abs = ext.path().to_string_lossy().into_owned();
+        let filtered = s.picker_filtered();
+        assert!(
+            filtered[0].0.name == format!("{abs}:2"),
+            "the tooling row is preselected: {:?}",
+            filtered[0].0.name
+        );
+        assert!(
+            filtered[0].0.detail.contains("tooling"),
+            "the row is marked tooling: {:?}",
+            filtered[0].0.detail
+        );
+        assert!(s.resolving_display().is_empty(), "status activity cleared");
+        // RET accepts the top guess: the external source lands read-only.
+        s.run_selected();
         let key = s.buffers.current().map(String::from).unwrap();
-        assert_eq!(key, ext.path().to_string_lossy().into_owned(), "external buffer is current");
+        assert_eq!(key, abs, "external buffer is current");
         let buf = s.buffers.get(&key).unwrap();
         assert!(!buf.editable, "external source is read-only");
         assert_eq!(s.point_line(), 1, "point on the resolved (1-based line 2) definition");
         assert!(s.message.contains("jumped to"), "jump report, got: {}", s.message);
-        assert!(s.resolving_display().is_empty(), "status activity cleared");
         assert_eq!(
             s.project_store.recents.list(&root).to_vec(),
             recents_before,
             "external landing never records a recent"
         );
-        // Jump entry recorded: back lands on the origin buffer/line.
+        // The jump origin is the M-. PRESS position (line 0, col 2) —
+        // not the moved point (line 0, col 1) the picker was opened
+        // under.
         s.jump_back();
         assert_eq!(s.buffers.current().map(String::from).unwrap(), origin_key, "jump-back returns to the origin");
+        assert_eq!((s.point_line(), s.point_col()), (0, 2), "jump-back lands at the M-. press point (async origin)");
     }
 
     #[tokio::test]
@@ -199,7 +227,7 @@ use super::*;
         let mut rx = s.resolve_bus.subscribe();
         s.open_path("src/main.rs");
         s.set_point(0, 9, 9); // on `Deserialize` (bare, use-imported)
-        s.start_symbol_resolution("Deserialize", "src/main.rs");
+        s.start_symbol_resolution("Deserialize", "src/main.rs", None);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(120), rx.changed())
             .await
             .expect("resolve event published within 120s");
@@ -223,7 +251,7 @@ use super::*;
         // keeps today's byte-for-byte "needs scope info" behavior — the
         // provider never gets a hint, so the whole chain reports a miss
         // naming the symbol (the bare bail fires before any cargo work).
-        s.start_symbol_resolution("plain_local_name", "src/main.rs");
+        s.start_symbol_resolution("plain_local_name", "src/main.rs", None);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(60), rx.changed())
             .await
             .expect("second resolve event published within 60s");
@@ -268,7 +296,7 @@ use super::*;
         let line = src[..at].matches('\n').count();
         let col = at - src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
         s.set_point(line, col, col);
-        s.start_symbol_resolution("legacyJoin", "src/app.js");
+        s.start_symbol_resolution("legacyJoin", "src/app.js", None);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(60), rx.changed())
             .await
             .expect("resolve event published within 60s");
@@ -284,7 +312,17 @@ use super::*;
             Some(1),
             "the member definition line (1-based)")
         ;
+        // (jump-ambiguity) the tooling hit joins the Xref picker
+        // (marked row, preselected) — RET accepts it and the view is now
+        // the sibling file.
         s.apply_resolve_event(&event);
+        assert!(s.picker_open(), "the tooling hit joins the picker");
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/legacy-util.js:"),
+            "the sibling's tooling row is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(
             s.view_name_display(),
             "src/legacy-util.js",
@@ -293,7 +331,7 @@ use super::*;
         let cur: &str = s.buffers.current().expect("a current buffer");
         assert!(
             !s.external_buffers.contains(cur),
-            "the landed sibling is an EDITABLE project buffer (the project branch of open_resolved_source), never the read-only external one"
+            "the landed sibling is an EDITABLE project buffer (the project branch of the tooling landing), never the read-only external one"
         );
     }
 
@@ -354,9 +392,13 @@ use super::*;
         let in_flight = s.resolve_generation;
         assert!(!s.resolving_display().is_empty(), "resolver in flight");
         // The user's NEXT M-. is a workspace hit (line 1: `target();`).
+        // (jump-ambiguity) `target` is a UNIQUE CROSS-FILE candidate →
+        // the picker (best preselected); the supersede bump still fires.
         s.set_point_line(1);
         s.xref_find_definitions();
         assert_eq!(s.resolve_generation, in_flight + 1, "the hit superseded the in-flight resolve");
+        assert!(s.picker_open(), "cross-file unique: picker");
+        s.run_selected();
         assert_eq!(s.view_name_display(), "src/lib.rs", "the hit landed");
         let before = s.view_name_display();
         // Now the stale job's event (a registry-source hit) arrives.
@@ -373,12 +415,15 @@ use super::*;
         };
         s.apply_resolve_event(&stale);
         assert_eq!(s.view_name_display(), before, "the stale hit did not open the registry source");
+        assert!(!s.picker_open(), "a stale resolve must not open a picker");
     }
 
     #[tokio::test]
-    async fn xref_resolver_line_zero_lands_at_top() {
-        // 006-02b item 6: a provider emitting line 0 is treated as "no
-        // line" — the landing is the top of the file (no underflow).
+    async fn xref_resolver_line_zero_opens_tooling_picker_top_of_file() {
+        // 006-02b item 6 + jump-ambiguity: a provider emitting line 0 is
+        // treated as "no line" — the row shows the TOP OF THE FILE as the
+        // (visible, weak) landing, preselected; RET lands there (no
+        // underflow, no silent jump).
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "tokio::spawn(f);\n"),
         ]);
@@ -399,6 +444,14 @@ use super::*;
             error: None,
         };
         s.apply_resolve_event(&event);
+        let abs = ext.path().to_string_lossy().into_owned();
+        assert!(s.picker_open(), "the tooling hit joins the picker");
+        assert!(
+            s.picker_filtered()[0].0.name == format!("{abs}:1"),
+            "the weak resolve shows the top of the file, preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
         assert_eq!(s.point_line(), 0, "line 0 lands at the top of the file");
         assert!(s.message.contains("jumped to"), "msg: {}", s.message);
     }

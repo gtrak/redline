@@ -178,7 +178,15 @@ def main():
             app.key("M-f", 0.6)    # end of the `json` run
             app.key("M-f", 0.6)    # end of the `dumps` run
             app.key("M-.", 0.5)
-            ok, screen = poll_screen(app, "def dumps", timeout=120.0)
+                        # (jump-ambiguity) the tooling hit joins the Xref picker as
+            # the `tooling`-marked row (never a silent jump): wait for
+            # the picker prompt, verify the marker, then accept it.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-P1: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, screen = poll_screen(app, "def dumps", timeout=30.0)
             rec("L-P1: M-. on the dotted `json.dumps` lands in the json stdlib",
                 ok, f"screen has 'def dumps'={ok}")
             ok2, mini = poll_minibuffer(app, "jumped to", timeout=5.0)
@@ -199,7 +207,15 @@ def main():
             app.key("M-f", 0.6)    # end of the `fakelib` run
             app.key("M-f", 0.6)    # end of the `apply` run
             app.key("M-.", 0.5)
-            ok, screen = poll_screen(app, "function apply", timeout=120.0)
+                        # (jump-ambiguity) the tooling hit joins the Xref picker as
+            # the `tooling`-marked row (never a silent jump): wait for
+            # the picker prompt, verify the marker, then accept it.
+            ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+            marked = "tooling" in app.screen_text()
+            rec("L-J1: the tooling hit joins the Xref picker (marked row)",
+                ok and marked, f"prompt={ok!r} marker={marked}")
+            app.key("RET", 1.0)
+            ok, screen = poll_screen(app, "function apply", timeout=30.0)
             rec("L-J1: M-. on the dotted `fakelib.apply` lands in the package",
                 ok, f"screen has 'function apply'={ok}")
             ok2, mini = poll_minibuffer(app, "jumped to", timeout=5.0)

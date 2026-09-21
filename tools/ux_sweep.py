@@ -92,8 +92,11 @@ def main():
     try:
         drive(app, "buffer-view", ["C-x C-f lib.rs RET"],
               ["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b",
-               "M-<", "M->", "C-v", "M-v", "C-d", "C-u", "C-l", "j", "k",
-               "q"], settle=0.4)
+               "M-<", "M-END", "M->", "C-g", "C-v", "M-v", "C-d", "C-u",
+               "C-l", "j", "k", "q"], settle=0.4)
+        # ^ jump-ambiguity: point-buffer-end moved M-> -> M-END; M-> now
+        # forces the Xref candidate list (the C-g closes it before the
+        # remaining buffer-view keys sweep as before).
         drive(app, "magit", ["C-x g"],
               ["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"],
               settle=0.7)

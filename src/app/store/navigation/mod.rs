@@ -3,6 +3,14 @@ mod imports;
 mod xref;
 
 use super::*;
+// (jump-ambiguity) the shared xref row/landing helpers (definitions.rs):
+// re-exported for the picker (its re-derivation + the tooling row) and
+// for the navigation mod itself — they are `pub(in crate::app::store)`
+// items of the (private) definitions module, so the picker cannot name
+// the module path itself.
+pub(in crate::app::store) use definitions::{
+    tooling_candidate_name, tooling_landing_line, xref_location_candidate,
+};
 
 impl AppStore {
     /// Open an ABSOLUTE path as a READ-ONLY buffer (plan 006 issue 02):
@@ -29,14 +37,20 @@ impl AppStore {
         Some(key)
     }
 
-    /// Land a tooling-resolver result (plan 006 issue 02): open the resolved
-    /// source and record a jump like any M-. landing. A source inside the
-    /// workspace opens through the project-relative path (recents, tree
-    /// follow); an external source opens READ-ONLY via
-    /// `open_external_path` (never in the project recents / file walk). On a
-    /// load failure the failure is reported and no jump is recorded.
-    fn open_resolved_source(&mut self, source: &ResolvedSource, symbol: &str) {
-        let origin = self.current_jump_entry();
+    /// Land a tooling-resolver result (plan 006 issue 02, jump-
+    /// ambiguity) — the RET on the tooling row of the Xref picker: the
+    /// source inside the workspace opens through the project-relative
+    /// path (recents, tree follow); an external source opens READ-ONLY
+    /// via `open_external_path` (never in the project recents / file
+    /// walk). On a load failure the failure is reported and no jump is
+    /// recorded. The origin is the jump entry captured when `M-.` was
+    /// PRESSED (`xref_tooling_origin`, set in `start_symbol_resolution`)
+    /// — the tooling path is asynchronous, so capturing it at RET time
+    /// could record a moved point and `M-,` would return to the wrong
+    /// place (the synchronous index picker captures at open/selection
+    /// time, which is the same instant there).
+    pub(in crate::app::store) fn land_tooling_resolved_source(&mut self, source: &ResolvedSource, symbol: &str) {
+        let origin = self.xref_tooling_origin.clone();
         let (display, opened) = if let Some(project) = self.project.as_ref()
             && let Ok(rel) = source.file.strip_prefix(&project.root)
         {
@@ -55,26 +69,41 @@ impl AppStore {
             return;
         }
         // Land on the resolved line (1-based; when the provider could not
-        // pin one, the top of the file) and record the jump. A provider
-        // emitting 0 is treated as "no line" (006-02b item 6) so the
-        // `(l - 1) as usize` below can never underflow.
-        let line = source
-            .line
-            .filter(|l| *l > 0)
-            .map(|l| (l - 1) as usize)
-            .unwrap_or(0);
-        // 006-03: an external (registry / tooling) landing registers its
-        // crate's source tree for background indexing (off the input
-        // path; the LRU cap governs) so M-. / imenu work INSIDE it. The
-        // landing itself is never blocked on the index.
-        if source.external {
-            self.start_crate_indexing(&source.source_root, &source.file);
-        }
+        // pin one, the top of the file — a provider emitting 0 is treated
+        // as "no line", 006-02b item 6, so no underflow).
+        let line = tooling_landing_line(source);
         self.set_point_line(line);
         self.recenter_landing();
         self.ensure_highlight();
         self.record_jump(origin, "M-.");
         self.minibuffer_message(&format!("jumped to {display}:{}", line + 1));
+    }
+
+    /// (jump-ambiguity) A tooling-resolver HIT joins the Xref picker
+    /// instead of jumping silently: a tooling resolve is the weakest kind
+    /// of answer — a "top of file" landing must read as a weak resolve
+    /// (the marked `tooling` row, preselected), not a mystery. Keeps the
+    /// 006-03 external-buffer registration (`start_crate_indexing` for
+    /// `source.external` — off the input path, the LRU cap governs; the
+    /// landing itself never blocks on the index) and the read-only
+    /// external open (the RET's `land_tooling_resolved_source` branch).
+    /// The index candidates for the same symbol (project or origin-crate
+    /// index) join the list; `open_picker` starts at index 0, so RET
+    /// accepts the tooling row in one keystroke.
+    fn xref_tooling_resolve_to_picker(&mut self, source: &ResolvedSource, symbol: &str) {
+        // 006-03: an external (registry / tooling) landing registers its
+        // crate's source tree for background indexing.
+        if source.external {
+            self.start_crate_indexing(&source.source_root, &source.file);
+        }
+        self.xref_tooling_pending = Some((source.clone(), symbol.to_string()));
+        self.xref_lookup_name = symbol.to_string();
+        // The picker's index keying follows the request's origin: the
+        // project index for the project path, the origin crate's index
+        // for M-. inside an external buffer (006-03).
+        self.xref_crate_root = self.xref_tooling_crate_root.clone();
+        let candidates = self.xref_candidates();
+        self.open_picker(PickerKind::Xref, "Definition: ", candidates);
     }
 
     /// Capture the current position as a `JumpEntry` (for use as the

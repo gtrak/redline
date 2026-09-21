@@ -7,7 +7,9 @@ One of the original sections stays PTY (only a live app proves it):
      graph) the cursor sits at the end of `ropey` in the top-level
      `ropey::Rope::new()` probe. M-. misses the project symbol index and
      the rust provider resolves via `cargo metadata` (the registry source
-     is cached, so it is fast and offline) → lands READ-ONLY in
+     is cached, so it is fast and offline) → (jump-ambiguity: the tooling
+     hit joins the Xref picker as the `tooling`-marked row, never a
+     silent jump; RET accepts the top guess) → lands READ-ONLY in
      ~/.cargo/registry/src/<hash>/ropey-1.6.1/src/rope.rs.
 
 The rest is store-level now (unit twins in src/app/flow_tests.rs, loop-04 —
@@ -128,17 +130,32 @@ def main():
         app.key("RET", 0.8)   # line 5: top-level `ropey::Rope::new();` probe
         app.key("M-f", 0.8)   # point to the END of the `ropey` run
         app.key("M-.", 0.5)    # the M-. that drives the whole leg
-        # Poll the minibuffer for the landing (the `indexing crate`
-        # indicator may share the status line meanwhile — that timing half
-        # is the unit twin's now).
+        # (jump-ambiguity) the tooling hit joins the Xref picker as the
+        # `tooling`-marked row (the weak resolve is visible, not a
+        # mystery): wait for the picker prompt, verify the marker, then
+        # accept the preselected row. (The `indexing crate` indicator may
+        # share the status line meanwhile — that timing half is the unit
+        # twin's now.)
         deadline = time.time() + 60.0
         ok = False
+        while time.time() < deadline:
+            app._read(0.3, quiet=0.2)
+            # the picker's prompt row is the top of the MAIN AREA (the
+            # picker is a canvas, not the minibuffer).
+            if "Definition:" in app.screen_text():
+                ok = True
+                break
+        marked = "tooling" in app.screen_text()
+        rec("L1: the tooling hit joins the Xref picker (marked row)",
+            ok and marked, f"prompt={ok} marker={marked}")
+        app.key("RET", 1.5)
         msg = ""
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             app._read(0.3, quiet=0.2)
             if "jumped to" in app.row_text(MINI):
-                ok = True
                 msg = app.row_text(MINI)
+                ok = True
                 break
         m = re.search(r"jumped to (\S+):(\d+)", msg)
         landed = m.group(1) if m else None

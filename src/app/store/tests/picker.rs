@@ -288,7 +288,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 109);
+        assert_eq!(store.picker_count().0, 110);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -346,7 +346,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        assert_eq!(store.picker_count().0, 109);
+        assert_eq!(store.picker_count().0, 110);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

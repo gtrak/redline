@@ -795,8 +795,10 @@ fn unit_flow_c6() {
         .map(|r| r.text == "line 1")
         .unwrap_or(false),
         "top row line 1");
-    // M->: bottom anchor — the last content row reads the final line.
-    s.key_event(key("M->"));
+    // M-END: bottom anchor — the last content row reads the final line.
+    // (jump-ambiguity: point-buffer-end moved from M-> to M-END; M-> is
+    // now the Xref force-list hotkey, which here would open the picker.)
+    s.key_event(key("M-END"));
     let m_gt_bottom_anchor = s
         .file_view_rows()
         .iter()
@@ -2576,7 +2578,11 @@ fn unit_flow_xref_l2() {
     let origin_line = s.point_line();
     let origin_col = s.point_col();
     s.key_event(key("M-."));
-    let msg_ok = s.message == "jumped to src/lib.rs: 1";
+    // (jump-ambiguity) a cross-file UNIQUE candidate opens the picker
+    // (best preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "cross-file unique: picker");
+    s.key_event(key("RET"));
+    let msg_ok = s.message == "jumped to src/lib.rs:1";
     let in_lib = s
         .buffers
         .current()
@@ -2674,6 +2680,10 @@ fn unit_flow_xref_l5() {
     s.key_event(key("M-f")); // end of the `extdep` run
     s.key_event(key("M-.")); // fall-through (path dep outside the root)
     land_resolved(&mut s, &target, ext.path(), 1);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     let abs = target.to_string_lossy().into_owned();
     let landed = s.message.contains(&format!("jumped to {abs}:1"));
     let read_only = s.buffer_mode_display() == "Read-only";
@@ -2703,7 +2713,11 @@ fn unit_flow_xref_l6() {
     goto_line(&mut s, 2); // "    far_target();"
     s.key_event(key("M-f")); // end of the `far_target` run
     s.key_event(key("M-."));
-    let msg_ok = s.message.contains("jumped to src/long.rs: 160");
+    // (jump-ambiguity) a cross-file UNIQUE candidate opens the picker
+    // (best preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "cross-file unique: picker");
+    s.key_event(key("RET"));
+    let msg_ok = s.message.contains("jumped to src/long.rs:160");
     let def = s
         .file_view_rows()
         .iter()
@@ -2734,6 +2748,10 @@ fn unit_flow_ext_notes_landing_guard() {
     s.key_event(key("M-f")); // end of the `ropey` run
     s.key_event(key("M-.")); // fall-through to the resolver
     land_resolved(&mut s, &rope, ext.path(), 3);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     let abs = rope.to_string_lossy().into_owned();
     let reported = s.message.contains(&format!("jumped to {abs}:3"));
     let external = s.buffers.current().map(String::from) == Some(abs.clone());
@@ -2774,6 +2792,10 @@ fn unit_flow_ext_notes_annotate() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3); // point on the landing line
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     s.key_event(key("A"));
     assert!(s.note_prompt_active(), "annotation prompt active");
     for c in "external note".chars() {
@@ -2813,6 +2835,10 @@ fn unit_flow_ext_notes_delete() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     s.key_event(key("A"));
     for c in "external note".chars() {
         s.key_event(key_char(c));
@@ -2849,6 +2875,10 @@ fn unit_flow_ext_notes_dump() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     s.key_event(key("A"));
     for c in "external note".chars() {
         s.key_event(key_char(c));
@@ -2888,6 +2918,10 @@ async fn unit_flow_ext_crate_landing_indicator() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     // L1: the landing report, the external read-only buffer, the window on
     // the source.
     let abs = rope.to_string_lossy().into_owned();
@@ -2935,10 +2969,17 @@ fn unit_flow_ext_crate_in_crate_mdot() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3); // lands on the RopeBuilder call line
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     // L4: M-. WITHIN the crate — cross-file, crate-relative report.
+    // (jump-ambiguity) cross-file unique → the picker; RET accepts.
     goto_line(&mut s, 3); // "    RopeBuilder::new();"
     s.key_event(key("M-f")); // end of the `RopeBuilder` run
     s.key_event(key("M-."));
+    assert!(s.picker_open(), "cross-file unique: picker");
+    s.key_event(key("RET"));
     let rel_msg = s.message.contains("jumped to src/rope_builder.rs:1");
     let struct_visible = s.buffer_text().contains("pub struct RopeBuilder");
     let in_crate = s.buffers.current().map(String::from)
@@ -2978,11 +3019,18 @@ fn unit_flow_ext_crate_imenu() {
     s.key_event(key("M-f"));
     s.key_event(key("M-."));
     land_resolved(&mut s, &rope, ext.path(), 3);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     // L4's landing first (the PTY leg order): the current file becomes the
     // crate's rope_builder.rs, whose outline imenu must list.
+    // (jump-ambiguity) cross-file unique → the picker; RET accepts.
     goto_line(&mut s, 3); // "    RopeBuilder::new();"
     s.key_event(key("M-f")); // end of the `RopeBuilder` run
     s.key_event(key("M-."));
+    assert!(s.picker_open(), "cross-file unique: picker");
+    s.key_event(key("RET"));
     let in_crate = s.message.contains("jumped to src/rope_builder.rs:1");
     s.key_event(key("M-i"));
     let open = s.picker_open() && s.picker_kind() == Some(PickerKind::Imenu);
@@ -3023,6 +3071,10 @@ fn unit_flow_ext_use_l1() {
         && !s.message.contains("serde::Deserialize");
     assert!(bare, "fall-through carries the BARE symbol: {:?}", s.message);
     land_resolved(&mut s, &trait_file, serde.path(), 1);
+    // (jump-ambiguity) the tooling hit joins the Xref picker (the
+    // `tooling`-marked row, preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "the tooling hit joins the picker");
+    s.key_event(key("RET"));
     let abs = trait_file.to_string_lossy().into_owned();
     let msg = s.message.contains(&format!("jumped to {abs}:1"));
     let trait_view = s.buffer_text().contains("trait Deserialize");
@@ -3125,7 +3177,8 @@ fn unit_flow_synleg_reanchor() {
     let reloaded = s.message.contains("reloaded");
     // Jump to the end so the function (now at line 100) is in view
     // (the PTY leg does the same before its S5 assert).
-    s.key_event(key("M->"));
+    // (jump-ambiguity: point-buffer-end moved M-> → M-END.)
+    s.key_event(key("M-END"));
     let rows = s.file_view_rows();
     let fn_row = rows.iter().position(|r| r.text == "fn target_one()");
     let marker = fn_row.map(|i| rows[i].annotated).unwrap_or(false);
@@ -3247,8 +3300,13 @@ fn unit_flow_ux_keymap_coverage() {
         (
             "buffer-view",
             &["C-x", "C-f", "lib.rs", "RET"],
+            // (jump-ambiguity: point-buffer-end moved M-> -> M-END; M->
+            // now forces the Xref candidate list — the C-g after it
+            // closes the picker before the remaining buffer-view keys
+            // sweep as before.)
             &["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b", "M-<",
-              "M->", "C-v", "M-v", "C-d", "C-u", "C-l", "j", "k"],
+              "M-END", "M->", "C-g", "C-v", "M-v", "C-d", "C-u", "C-l",
+              "j", "k"],
             &[],
         ),
         ("magit", &["C-x", "g"], &["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"], &[]),
@@ -3492,6 +3550,10 @@ fn unit_flow_xref_uppercase_type_m_dot() {
         s.key_event(key("C-f"));
     }
     s.key_event(key("M-."));
+    // (jump-ambiguity) a cross-file UNIQUE candidate opens the picker
+    // (best preselected); RET accepts the top guess.
+    assert!(s.picker_open(), "cross-file unique: picker");
+    s.key_event(key("RET"));
     assert_eq!(s.top_view(), ViewId::Buffer);
     assert_eq!(s.view_name_display(), "src/widget.rs", "the CamelCase type jumps cross-file");
     assert_eq!(s.point_line(), 0, "on the struct's definition line");

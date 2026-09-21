@@ -81,6 +81,17 @@ def json_import_decoder_line():
                      "'from .decoder import JSONDecoder' line in json/__init__.py")
 
 
+def poll_screen(app, needle, timeout=90.0):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        app._read(0.3, quiet=0.2)
+        last = app.screen_text()
+        if needle in last:
+            return True, last
+    return False, last
+
+
 def poll_minibuffer(app, needle, timeout=90.0):
     deadline = time.time() + timeout
     last = ""
@@ -115,27 +126,42 @@ def main():
         app.key("RET", 0.8)    # line 3: top-level `dumps('x')`
         app.key("M-f", 0.8)    # point to the END of the `dumps` run
         app.key("M-.", 0.5)
-        # Poll tightly from the keypress: the index build is armed the
-        # moment the landing event applies (before `def dumps` is on
-        # screen), and the stdlib-root build is fast — a slow poll
-        # would miss the `indexing crate` window entirely.
+        # Poll tightly from the keypress itself (as before the change):
+        # the index build is armed the moment the landing event applies —
+        # jump-ambiguity: that is the tooling row's PICKER open (never a
+        # silent jump) — and the stdlib-root build is fast: the watch
+        # must run from the keypress or the `indexing crate` window is
+        # missed. Accept the top guess (RET) the moment the picker
+        # appears, under the same watch.
         landed = False
         indicator_seen = False
         refused = False
         last_status = ""
+        ret_pressed = False
+        picker_ok = False
+        marker_ok = False
         deadline = time.time() + 120.0
         while time.time() < deadline:
             app._read(0.15, quiet=0.1)
             last_status = app.row_text(STATUS)
+            screen = app.screen_text()
             if "indexing crate" in last_status:
                 indicator_seen = True
             if "crate too large" in last_status or \
                     "crate too large" in app.row_text(MINI):
                 refused = True
-            if not landed and "def dumps" in app.screen_text():
+            if not ret_pressed and "Definition:" in screen:
+                picker_ok = True
+                marker_ok = "tooling" in screen
+                app.key("RET", 0.2)
+                ret_pressed = True
+            if not landed and "def dumps" in screen:
                 landed = True
             if landed and "indexing crate" not in last_status:
                 break
+        rec("L1: the tooling hit joins the Xref picker (marked row)",
+            picker_ok and marker_ok,
+            f"prompt={picker_ok!r} marker={marker_ok!r}")
         rec("L1: M-. on the bare import lands in the json stdlib source",
             landed)
         rec("L1: the landing is a resolved-source jump",
@@ -165,7 +191,11 @@ def main():
         for _ in range(4):
             app.key("M-f", 0.4)
         app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "jumped to json/decoder.py", timeout=90.0)
+        # (jump-ambiguity) cross-file unique → the Xref picker (best
+        # preselected); RET accepts the top guess.
+        ok, prompt = poll_screen(app, "Definition:", timeout=90.0)
+        app.key("RET", 1.0)
+        ok, msg = poll_minibuffer(app, "jumped to json/decoder.py", timeout=30.0)
         rec("L3: M-. inside the dependency lands in decoder.py (in-crate index)",
             ok, f"minibuffer={msg!r}")
         rec("L3: NOT a resolver bail (the index answered)",

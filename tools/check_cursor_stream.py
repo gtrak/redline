@@ -437,7 +437,7 @@ def file_view_checks():
     """plan 004 issue 05b: the file-view cursor tracks a real (line, col)
     point step by step under C-n/C-p/C-f/C-b/arrows/C-a/C-e, with EOL/BOL
     wrapping, goal-column across short/long lines, C-v holding the point's
-    screen row, M->/M-< landing the point at the buffer end/start (window
+    screen row, M-END/M-< landing the point at the buffer end/start (window
     follows), and the status line tracking the point line."""
     import os as _os
     src_dir = _os.path.join(REPO, "src")
@@ -521,10 +521,12 @@ def file_view_checks():
         r == before_row and before_row == 6,
         f"cup_row={r} before={before_row}")
 
-    # M-> lands the point at the buffer end; the window follows (screen row
-    # 20 of the 21-line window -> terminal row 22, col 3 on the 2-char line).
-    r, c = do("M->")
-    rec("M-> buffer end (window follows)", (r, c) == (22, 3),
+    # M-END lands the point at the buffer end; the window follows (screen
+    # row 20 of the 21-line window -> terminal row 22, col 3 on the 2-char
+    # line). (jump-ambiguity: point-buffer-end moved M-> -> M-END; M-> now
+    # forces the Xref candidate list.)
+    r, c = do("M-END")
+    rec("M-END buffer end (window follows)", (r, c) == (22, 3),
         f"cup=({r},{c}) want (22,3)")
     # M-< lands the point at the buffer start.
     r, c = do("M-<")

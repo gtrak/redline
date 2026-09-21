@@ -1,4 +1,5 @@
 use super::*;
+use super::definitions::xref_location_candidate;
 
 impl AppStore {
     /// M-. inside an EXTERNAL (registry / tooling) buffer (plan 006
@@ -36,9 +37,11 @@ impl AppStore {
             // resolver fall-through (or "no symbol under point").
             match &at {
                 // 006-03b item 2: a root-relative `from_file` (never the
-                // absolute path).
+                // absolute path). The origin project's metadata keys the
+                // picker too (jump-ambiguity: no crate index here, so no
+                // crate keying either — the origin project's candidates).
                 Some((_, path_token)) => {
-                    self.start_symbol_resolution(path_token, &self.resolver_from_file(path))
+                    self.start_symbol_resolution(path_token, &self.resolver_from_file(path), None)
                 }
                 None => self.minibuffer_message("no symbol under point"),
             }
@@ -62,31 +65,30 @@ impl AppStore {
                 }
             }
             ExternalXrefOutcome::Picker { lookup, defs } => {
+                // (jump-ambiguity) the tooling row belongs to the tooling
+                // picker only; a new Xref picker carries index rows.
+                self.xref_tooling_pending = None;
+                // Compute the current-file key against the crate root
+                // BEFORE moving `root` into `xref_crate_root` (a `&mut
+                // self` call can't take the same field's reference as an
+                // argument).
+                let cur = self.xref_current_file_rel(Some(&root));
                 self.xref_crate_root = Some(root);
                 self.xref_lookup_name = lookup;
                 let candidates: Vec<PickerCandidate> = defs
                     .iter()
-                    .map(|d| PickerCandidate {
-                        name: format!("{}:{}", d.file, d.symbol.line + 1),
-                        display: format!(
-                            "{}:{}  [{}] {}",
-                            d.file,
-                            d.symbol.line + 1,
-                            d.symbol.kind.tag(),
-                            d.symbol.name
-                        ),
-                        label: d.symbol.name.clone(),
-                        detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
-                        docs: String::new(),
-                        category: "xref".to_string(),
-                    })
+                    .map(|d| xref_location_candidate(d, cur.as_deref()))
                     .collect();
                 self.open_picker(PickerKind::Xref, "Definition: ", candidates);
             }
             ExternalXrefOutcome::Resolver(token) => {
                 // 006-03b item 2: a root-relative `from_file` (never the
                 // absolute path).
-                self.start_symbol_resolution(&token, &self.resolver_from_file(path))
+                // (jump-ambiguity) the tooling picker's index keying
+                // follows the origin: the OWNING crate's index (006-03),
+                // so the landing's rows are crate candidates, not the
+                // origin project's.
+                self.start_symbol_resolution(&token, &self.resolver_from_file(path), Some(&root))
             }
             ExternalXrefOutcome::NoDefinition(name) => {
                 self.minibuffer_message(&format!("no definition for `{name}`"))
@@ -164,7 +166,11 @@ impl AppStore {
             .unwrap_or_default();
         let outcome = if !defs.is_empty() {
             let lookup = defs[0].symbol.name.clone();
-            if defs.len() == 1 {
+            // (jump-ambiguity) the tightened rule, the same as the
+            // project path: silent jump IFF exactly one candidate AND it
+            // is in the current (crate-relative) file; a cross-file
+            // unique candidate goes to the picker, best preselected.
+            if defs.len() == 1 && defs[0].file == rel {
                 ExternalXrefOutcome::Jump {
                     file: defs[0].file.clone(),
                     line: defs[0].symbol.line,
@@ -173,13 +179,21 @@ impl AppStore {
                 ExternalXrefOutcome::Picker { lookup, defs }
             }
         } else {
-            // (3) Enclosing-symbol fallback (unchanged: by line, not by the
-            // point's column).
+            // (3) Enclosing-symbol fallback (unchanged: by line, not by
+            // the point's column). Same-file-first order so the picker's
+            // preselected row (index 0) is the best guess — the fallback's
+            // defs come out of `definitions_of` unsorted.
             let outline = idx.outline(&rel).to_vec();
             match crate::nav::index::enclosing_symbol(&outline, line) {
                 Some(sym) => {
                     let lookup = sym.name.clone();
-                    let defs = idx.definitions_of(&lookup);
+                    let mut defs = idx.definitions_of(&lookup);
+                    defs.sort_by(|a, b| {
+                        (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                            (a.file.as_str(), a.symbol.line, &a.symbol.name)
+                                .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+                        })
+                    });
                     if defs.is_empty() {
                         // (4) The point's own (path-shaped) token is what
                         // the resolver gets — not the enclosing name.
@@ -189,12 +203,11 @@ impl AppStore {
                             }
                             None => ExternalXrefOutcome::NoDefinition(lookup),
                         }
-                    } else if defs.len() == 1 {
-                        ExternalXrefOutcome::Jump {
-                            file: defs[0].file.clone(),
-                            line: defs[0].symbol.line,
-                        }
                     } else {
+                        // (jump-ambiguity) the enclosing fallback is a
+                        // by-LINE guess: it is NEVER a silent jump —
+                        // even the same-file unique case goes to the
+                        // picker, best preselected.
                         ExternalXrefOutcome::Picker { lookup, defs }
                     }
                 }

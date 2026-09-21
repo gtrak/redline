@@ -654,9 +654,13 @@ mod tests {
     /// keymap as the old imperative `bind()` calls. For every table entry,
     /// `km.lookup(parse_sequence(seq))` resolves to the named command, and
     /// the total binding count is the A2 pre-change count (142) plus the
-    /// bindings added since (143 today: the `C-c n a` annotations picker) —
-    /// restate the history, never renumber it, or a future lane can "fix"
-    /// drift by bumping this number again.
+    /// bindings added since: 143 (the `C-c n a` annotations picker), then
+    /// 144 (jump-ambiguity's `M-END` → point-buffer-end, the binding that
+    /// frees `M->` for the force-definition-list hotkey — it lands in the
+    /// BUFFER view next to `M-.`, not in the global table, so the global
+    /// count stays 23 and the per-view total moves 120 → 121) — restate
+    /// the history, never renumber it, or a future lane can "fix" drift by
+    /// bumping this number again.
     #[test]
     fn load_bindings_equivalence() {
         use crate::app::store::{
@@ -677,7 +681,8 @@ mod tests {
             );
         }
 
-        // Per-view maps: 120 total bindings across 9 views.
+        // Per-view maps: 121 total bindings across 9 views (120 plus the
+        // jump-ambiguity `M-END` buffer-view binding).
         let views: &[(&str, &[(&str, &str)])] = &[
             ("Buffer", BUFFER_BINDINGS),
             ("BufferList", BUFFER_LIST_BINDINGS),
@@ -690,7 +695,7 @@ mod tests {
             ("Search", SEARCH_BINDINGS),
         ];
         let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
-        assert_eq!(total_per_view, 120, "total per-view bindings must be 120");
+        assert_eq!(total_per_view, 121, "total per-view bindings must be 121");
         for (name, table) in views {
             let km = load_bindings(table);
             assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");

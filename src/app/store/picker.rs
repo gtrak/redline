@@ -1,3 +1,4 @@
+use super::navigation::{tooling_candidate_name, xref_location_candidate};
 use super::*;
 
 impl AppStore {
@@ -249,7 +250,14 @@ impl AppStore {
     /// Candidates for the Xref picker (definition locations for the
     /// current lookup name — the project index, or the crate index the
     /// picker was opened with, 006-03).
-    fn xref_candidates(&mut self) -> Vec<PickerCandidate> {
+    /// Candidates for the Xref picker (definition locations for the
+    /// current lookup name — the project index, or the crate index the
+    /// picker was opened with, 006-03), with the source marker per row
+    /// (`here`/`other`, jump-ambiguity), and the pending tooling row
+    /// (jump-ambiguity) prepended so it stays preselected under query
+    /// re-derivation (the initial open and the filtered re-derivation
+    /// cannot drift apart).
+    pub(super) fn xref_candidates(&mut self) -> Vec<PickerCandidate> {
         let name = self.xref_lookup_name.clone();
         let root = self.xref_crate_root.clone();
         let defs: Vec<crate::nav::index::Location> = match root.as_ref() {
@@ -259,17 +267,42 @@ impl AppStore {
                 .unwrap_or_default(),
             None => self.index.definitions_of(&name),
         };
-        defs
-            .iter()
-            .map(|d| PickerCandidate {
-                name: format!("{}:{}", d.file, d.symbol.line + 1),
-                display: format!("{}:{}  [{}] {}", d.file, d.symbol.line + 1, d.symbol.kind.tag(), d.symbol.name),
-                label: d.symbol.name.clone(),
-                detail: format!("[{}] {}:{}", d.symbol.kind.tag(), d.file, d.symbol.line + 1),
-                docs: String::new(),
-                category: "xref".to_string(),
-            })
-            .collect()
+        let mut out: Vec<PickerCandidate> = Vec::new();
+        let cur = self.xref_current_file_rel(root.as_ref());
+        for d in &defs {
+            out.push(xref_location_candidate(d, cur.as_deref()));
+        }
+        // (jump-ambiguity) the pending tooling row joins the list
+        // preselected (row 0) — unless an index candidate already covers
+        // the same (file, line), in which case that row IS the top guess
+        // (RET lands on the same location through the index path).
+        if let Some(tooling) = self.xref_tooling_candidate()
+            && !out.iter().any(|c| c.name == tooling.name)
+        {
+            out.insert(0, tooling);
+        }
+        out
+    }
+
+    /// (jump-ambiguity) The pending tooling row, or `None` when the
+    /// picker carries index candidates only. The `name` ("file:line",
+    /// 1-based, file in the picker's keying — crate-relative when the
+    /// landing is a file of its own crate, project-relative inside the
+    /// project, else absolute) doubles as the RET's landing
+    /// discriminator (`run_selected` compares the selected row's name
+    /// against it); the `tooling` tag keeps the weak resolve visible
+    /// ("top of file" reads as a weak answer, not a mystery).
+    pub(super) fn xref_tooling_candidate(&self) -> Option<PickerCandidate> {
+        let (source, symbol) = self.xref_tooling_pending.as_ref()?;
+        let name = tooling_candidate_name(source, &self.xref_crate_root, &self.project);
+        Some(PickerCandidate {
+            name: name.clone(),
+            display: format!("{name}  [tooling] {symbol}"),
+            label: symbol.clone(),
+            detail: format!("[tooling] {name}"),
+            docs: String::new(),
+            category: "xref".to_string(),
+        })
     }
 
     /// Candidates for the find-implementations picker (010-04, plan 010
@@ -480,6 +513,12 @@ impl AppStore {
     }
 
     pub(super) fn open_picker(&mut self, kind: PickerKind, prompt: &str, candidates: Vec<PickerCandidate>) {
+        // (jump-ambiguity) opening a non-Xref picker closes any pending
+        // tooling landing (its row belongs to the Xref picker only; the
+        // Xref seams set/clear it explicitly around their own state).
+        if !matches!(kind, PickerKind::Xref) {
+            self.xref_tooling_pending = None;
+        }
         let files = matches!(kind, PickerKind::FindFile | PickerKind::RecentFiles);
         let mut picker = Picker {
             kind,
@@ -574,17 +613,11 @@ impl AppStore {
             Some(PickerKind::Buffers | PickerKind::KillBuffer) => self.buffers.len(),
             Some(PickerKind::Projects) => self.project_store.registry.len(),
             // 006-03: the Xref picker's total follows its root — the
-            // project index, or the crate index it was opened with.
-            Some(PickerKind::Xref) => {
-                let name = self.xref_lookup_name.clone();
-                match self.xref_crate_root.clone().as_ref() {
-                    Some(root) => self
-                        .crate_index_arc(root)
-                        .map(|arc| arc.lock().unwrap().definitions_of(&name).len())
-                        .unwrap_or(0),
-                    None => self.index.definitions_of(&name).len(),
-                }
-            }
+            // project index, or the crate index it was opened with — and
+            // the pending tooling row (jump-ambiguity). Re-deriving
+            // through `xref_candidates` keeps the count in step with the
+            // rows (incl. the dedup case: tooling row == an index row).
+            Some(PickerKind::Xref) => self.xref_candidates().len(),
             Some(PickerKind::Imenu) => self.current_buffer_outline().len(),
             Some(PickerKind::Impls) => self.impls_candidates().len(),
             Some(PickerKind::Annotations) => self.annotations_candidates().len(),
@@ -708,10 +741,16 @@ impl AppStore {
     /// The absolute path of a picker file candidate: crate-relative when
     /// the Xref picker lists an external crate (006-03 — the
     /// `source_root` recorded when the picker opened), project-relative
-    /// otherwise.
+    /// otherwise. An ABSOLUTE path (the jump-ambiguity tooling row for an
+    /// external landing — `tooling_candidate_name` keys registry files by
+    /// absolute path when they are outside both the project root and the
+    /// picker's crate root) passes through as itself.
     fn picker_file_abs(&self, rel: &str) -> Option<PathBuf> {
         if let Some(root) = self.xref_crate_root.as_ref() {
             return Some(root.join(rel));
+        }
+        if Path::new(rel).is_absolute() {
+            return Some(rel.into());
         }
         self.project.as_ref().map(|p| p.root.join(rel))
     }
@@ -787,7 +826,12 @@ impl AppStore {
                     .get(p.selected)
                     .map(|(c, _)| (p.kind, c.name.clone(), c.detail.clone()))
             });
+        // (jump-ambiguity) the pending tooling landing travels with the
+        // selection (cleared below, with the picker — every picker close
+        // drops it).
+        let tooling = self.xref_tooling_pending.clone();
         self.picker = None;
+        self.xref_tooling_pending = None;
         let Some((kind, name, detail)) = choice else {
             self.minibuffer_message("no candidate selected");
             return;
@@ -808,10 +852,33 @@ impl AppStore {
             PickerKind::Projects => self.switch_project_root(&name),
             PickerKind::Xref | PickerKind::Symbols | PickerKind::Impls => {
                 // name is "file:line" (1-based line number).
-                if let Some((file, line_str)) = name.rsplit_once(':')
+                // (jump-ambiguity) the SELECTED row is the pending
+                // tooling row (name comparison — in the dedup case the
+                // tooling name equals an index row's, so the index path
+                // below lands the same location) → land through the
+                // stored source (project-relative open, or the external
+                // read-only open), with the origin captured when `M-.`
+                // was pressed.
+                let tooling_name = tooling.as_ref().map(|(src, _)| {
+                    tooling_candidate_name(src, &self.xref_crate_root, &self.project)
+                });
+                if kind == PickerKind::Xref && tooling_name.as_deref() == Some(name.as_str()) {
+                    if let Some((source, symbol)) = tooling {
+                        self.land_tooling_resolved_source(&source, &symbol);
+                    }
+                } else if let Some((file, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
-                    let origin = self.current_jump_entry();
+                    // (jump-ambiguity) a tooling picker's INDEX rows carry
+                    // the M-. time origin too (the whole path is async —
+                    // the point may have moved between the keypress and
+                    // this RET); a plain index picker captures now (the
+                    // same instant the picker opened, synchronously).
+                    let origin = if tooling.is_some() {
+                        self.xref_tooling_origin.clone()
+                    } else {
+                        self.current_jump_entry()
+                    };
                     if let Some(root) = self.xref_crate_root.clone() {
                         // 006-03: the candidate is CRATE-relative — open
                         // READ-ONLY via the external path (the landing

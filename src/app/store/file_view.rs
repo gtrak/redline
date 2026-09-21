@@ -822,8 +822,12 @@ impl AppStore {
         self.set_point(0, 0, 0);
     }
 
-    /// M->: point to the buffer end (last line, last col); the window
-    /// follows.
+    /// M-END: point to the buffer end (last line, last col); the window
+    /// follows. (jump-ambiguity: `M->` moved to the force-definition-list
+    /// hotkey — verified against the parity reference, vanilla emacs -Q
+    /// 30.2: `M-<end>` is end-of-buffer-OTHER-WINDOW, a window-splitting
+    /// command meaningless under the locked single-pane design, so the
+    /// rebind costs no parity; `G` still binds this command.)
     pub fn point_buffer_end(&mut self) {
         let total = self.current_line_count();
         if total == 0 {

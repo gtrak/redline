@@ -66,6 +66,17 @@ def setup_repo():
                    check=True, capture_output=True)
 
 
+def poll_screen(app, needle, timeout=90.0):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        app._read(0.3, quiet=0.2)
+        last = app.screen_text()
+        if needle in last:
+            return True, last
+    return False, last
+
+
 def poll_minibuffer(app, needle, timeout=90.0):
     deadline = time.time() + timeout
     last = ""
@@ -93,7 +104,15 @@ def main():
         app.key("M-f", 0.8)   # point to the END of the `os` run
         print("=== L1: M-. in a python buffer LANDS via python ONLY (011-06) ===")
         app.key("M-.", 0.5)
-        ok, msg = poll_minibuffer(app, "jumped to", timeout=120.0)
+        # (jump-ambiguity) the tooling hit joins the Xref picker as the
+        # `tooling`-marked row (never a silent jump): wait for the
+        # picker prompt, verify the marker, then accept the top guess.
+        ok, prompt = poll_screen(app, "Definition:", timeout=120.0)
+        marked = "tooling" in app.screen_text()
+        rec("L1: the tooling hit joins the Xref picker (marked row)",
+            ok and marked, f"prompt={ok!r} marker={marked}")
+        app.key("RET", 1.5)
+        ok, msg = poll_minibuffer(app, "jumped to", timeout=15.0)
         rec("L1: M-. on `os.path.join` LANDS (011-06 dotted token; not a bail)",
             ok and "no provider resolution" not in msg
             and "no background runtime" not in msg,
