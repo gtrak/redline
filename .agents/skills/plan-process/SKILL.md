@@ -359,6 +359,12 @@ evidence.
 
 ## Landing a lane includes updating the tracker
 
+**Creating a spec also includes adding its row** — this rule is not only for
+landings. A spec written after the table was built has no row, and a spec with no row
+is invisible to the next "what is open?" audit. (Found the hard way: a spec created
+one session after `STATUS.md` was built was missing from it, and only a coverage grep
+caught it.)
+
 Landing a lane includes flipping the lane's state everywhere it is recorded,
 in the same commit as the code: the plan's `Status:` line
 (`.agents/plans/*/PLAN.md`), the lane's worklist entry ("SPECD" / "in
