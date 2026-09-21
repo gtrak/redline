@@ -83,11 +83,19 @@ accurate mode ①–④; **undo gets its own plan**.
 
 | Issue | Depends on | Notes |
 |---|---|---|
-| `01-annotations-picker.md` | — | temporary picker over all annotations; reuses `PickerKind`/`run_selected`; **independent of the point model** |
-| `02-honest-point-and-modes.md` | — | honest `current_point_byte()` + the per-buffer mode flag + `C-x C-q` opt-in (not yet specced) |
-| `03-accurate-editing.md` | 02 | the chosen cutline's commands (not yet specced) |
-| `04-yank-semantics.md` | 02 | append in annotation / insert at point in edit (not yet specced) |
-| — | — | **undo: its own plan** (an undo stack over rope edits) |
+| `01-annotations-picker.md` | — | temporary picker over all annotations; reuses `PickerKind`/`run_selected`; **independent of the point model**. Task spec: `.agents/tasks/issue-015-01-annotations-picker.md` |
+| `02-honest-point-and-modes.md` | — | honest `current_point_byte()` + the per-buffer mode + `C-x C-q` opt-in. Task spec: `.agents/tasks/issue-015-02-point-and-modes.md` |
+| `03-accurate-editing.md` | 02 | the cutline's commands: insert at point · backspace-before-point · `RET` · `C-k`. Task spec: `.agents/tasks/issue-015-03-accurate-editing.md` |
+| `04-yank-semantics.md` | 02 | append in annotation / insert at point in accurate. Task spec: `.agents/tasks/issue-015-04-yank-semantics.md` |
+| — | — | **undo: its own plan — `.agents/plans/016-undo/PLAN.md`** (an undo stack over rope edits; deliberately not a command) |
+
+**A design resolution found while speccing 02**, which simplifies the plan: `editable`
+*already is* the per-buffer opt-in (file buffers open `false`; the notes buffer opens
+`true`; `C-x C-q` already toggles it). So 02 adds **no second editability flag** — it adds
+a mode that selects *how* modification behaves, with the invariant `Accurate ⟹ editable`.
+And because the user ruled that a fine mark is meaningful in annotation mode, the region
+becomes **exact in both modes** (the honest point does it); coarse now applies only to
+editing shape and to motion.
 
 ## 6. Risks
 
