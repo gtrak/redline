@@ -69,30 +69,12 @@ use super::*;
         // a tracked-path change must update the dirty counts.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fn git_cli(d: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(d)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "T")
-                .env("GIT_AUTHOR_EMAIL", "t@e.com")
-                .env("GIT_COMMITTER_NAME", "T")
-                .env("GIT_COMMITTER_EMAIL", "t@e.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        git_cli(root, &["init", "-q", "-b", "main"]);
-        git_cli(root, &["config", "user.name", "T"]);
-        git_cli(root, &["config", "user.email", "t@e.com"]);
+        // The magit windowing test's short "T"/"t@e.com" identity, kept
+        // verbatim (it only sets commit metadata).
+        git_repo_init(root, "T", "t@e.com", false);
         std::fs::write(root.join("tracked.rs"), "fn a() {}\n").unwrap();
-        git_cli(root, &["add", "tracked.rs"]);
-        git_cli(root, &["commit", "-q", "-m", "init"]);
+        git_cli(root, &["add", "tracked.rs"], "T", "t@e.com");
+        git_cli(root, &["commit", "-q", "-m", "init"], "T", "t@e.com");
 
         let mut s = store(root);
         // Prime the repo (git=Some) and refresh (clean repo → all-zero counts).
@@ -118,10 +100,7 @@ use super::*;
     fn tree_toggle_builds_rows_and_navigates() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        project_with_files(root);
         let mut store = store(root);
         // Ensure the file list is cached.
         store.ensure_files();
@@ -222,27 +201,10 @@ use super::*;
     fn any_tracked_skips_untracked_files() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        git_cli(root, &["init", "-q", "-b", "main"]);
-        git_cli(root, &["config", "user.name", "Test"]);
-        git_cli(root, &["config", "user.email", "test@example.com"]);
-        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(root, "Test", "test@example.com", true);
         std::fs::write(root.join("tracked.txt"), "x\n").unwrap();
-        git_cli(root, &["add", "tracked.txt"]);
-        git_cli(root, &["commit", "-q", "-m", "init"]);
+        git_cli(root, &["add", "tracked.txt"], "Test", "test@example.com");
+        git_cli(root, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         // An untracked file.
         std::fs::write(root.join("untracked.txt"), "y\n").unwrap();
         // Use the git repo directly.
@@ -257,30 +219,13 @@ use super::*;
     fn unstage_hunk_fully_staged_add_removes_index_entry() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        git_cli(root, &["init", "-q", "-b", "main"]);
-        git_cli(root, &["config", "user.name", "Test"]);
-        git_cli(root, &["config", "user.email", "test@example.com"]);
-        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(root, "Test", "test@example.com", true);
         std::fs::write(root.join("initial.txt"), "init\n").unwrap();
-        git_cli(root, &["add", "initial.txt"]);
-        git_cli(root, &["commit", "-q", "-m", "init"]);
+        git_cli(root, &["add", "initial.txt"], "Test", "test@example.com");
+        git_cli(root, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         // Create a new file and stage it (fully-staged addition).
         std::fs::write(root.join("newfile.txt"), "line1\nline2\nline3\n").unwrap();
-        git_cli(root, &["add", "newfile.txt"]);
+        git_cli(root, &["add", "newfile.txt"], "Test", "test@example.com");
         // The hunk new_start for a new file is 1 (first line).
         let repo = crate::git::GitRepo::discover(root).unwrap();
         repo.unstage_hunk("newfile.txt", 1).unwrap();
@@ -306,32 +251,16 @@ use super::*;
     #[test]
     fn magit_status_window_keeps_cursor_visible() {
         let dir = tempfile::tempdir().unwrap();
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir).args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "t@e.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "t@e.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        git_cli(dir.path(), &["init", "-q", "-b", "main"]);
-        git_cli(dir.path(), &["config", "user.name", "Test"]);
-        git_cli(dir.path(), &["config", "user.email", "t@e.com"]);
-        git_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git_repo_init(dir.path(), "Test", "test@example.com", true);
         for i in 0..20 {
             std::fs::write(dir.path().join(format!("f{i}.txt")), "x\n").unwrap();
         }
-        git_cli(dir.path(), &["add", "-A"]);
-        git_cli(dir.path(), &["commit", "-q", "-m", "init"]);
+        git_cli(dir.path(), &["add", "-A"], "Test", "test@example.com");
+        git_cli(dir.path(), &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         for i in 0..20 {
             std::fs::write(dir.path().join(format!("f{i}.txt")), format!("x\nchanged {i}\n")).unwrap();
         }
-        git_cli(dir.path(), &["add", "-A"]);
+        git_cli(dir.path(), &["add", "-A"], "Test", "test@example.com");
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
@@ -496,33 +425,11 @@ use super::*;
     fn discard_acts_on_cursor_row() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        git_cli(root, &["init", "-q", "-b", "main"]);
-        git_cli(root, &["config", "user.name", "Test"]);
-        git_cli(root, &["config", "user.email", "test@example.com"]);
-        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(root, "Test", "test@example.com", true);
         std::fs::write(root.join("a.txt"), "A\n").unwrap();
         std::fs::write(root.join("b.txt"), "B\n").unwrap();
-        git_cli(root, &["add", "a.txt", "b.txt"]);
-        git_cli(root, &["commit", "-q", "-m", "init"]);
+        git_cli(root, &["add", "a.txt", "b.txt"], "Test", "test@example.com");
+        git_cli(root, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         std::fs::write(root.join("a.txt"), "A2\n").unwrap();
         std::fs::write(root.join("b.txt"), "B2\n").unwrap();
         let base = tempfile::tempdir().unwrap();
@@ -564,24 +471,10 @@ use super::*;
         // pre-conversion shape.
         let dir = tempfile::tempdir().unwrap();
         let mut s = git_store(dir.path());
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
         let root = dir.path();
-        git_cli(root, &["branch", "feature"]);
+        git_cli(root, &["branch", "feature"], "Test", "test@example.com");
         std::fs::write(root.join("a.txt"), "a\nb\n").unwrap();
-        git_cli(root, &["stash", "push", "-m", "wip subject"]);
+        git_cli(root, &["stash", "push", "-m", "wip subject"], "Test", "test@example.com");
         s.open_magit_status(); // prime the repo handle
 
         let branches = s.branch_candidates();

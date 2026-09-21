@@ -3,6 +3,7 @@
 //! app layer (`src/app`) and the theme stay plain Rust.
 
 pub mod blame_view;
+pub mod buffer_view;
 pub mod commit_editor;
 pub mod diff_view;
 pub mod file_view;
@@ -15,7 +16,6 @@ pub mod root;
 pub mod rows_view;
 pub mod tree;
 pub mod transient_menu;
-pub mod views;
 
 use iocraft::prelude::*;
 

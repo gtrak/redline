@@ -165,26 +165,10 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         // A repo with a committed file but nothing staged.
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        git_cli(root, &["init", "-q", "-b", "main"]);
-        git_cli(root, &["config", "user.name", "Test"]);
-        git_cli(root, &["config", "user.email", "test@example.com"]);
-        git_cli(root, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(root, "Test", "test@example.com", true);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        git_cli(root, &["add", "a.txt"]);
-        git_cli(root, &["commit", "-q", "-m", "init"]);
+        git_cli(root, &["add", "a.txt"], "Test", "test@example.com");
+        git_cli(root, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
 
         let base = tempfile::tempdir().unwrap();
         let mut store = crate::app::store::AppStore::at(
@@ -320,17 +304,15 @@ use super::*;
     #[test]
     fn blame_cursor_stays_in_window_on_moves() {
         let dir = tempfile::tempdir().unwrap();
-        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
-        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
-        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
-        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        // The original windowing fixture identity ("Test"/"t@e.com"), kept verbatim.
+        git_repo_init(dir.path(), "Test", "t@e.com", true);
         let mut content = String::new();
         for i in 1..=60 {
             content.push_str(&format!("line {i}\n"));
         }
         std::fs::write(dir.path().join("big.txt"), content).unwrap();
-        git_test_cli(dir.path(), &["add", "-A"]);
-        git_test_cli(dir.path(), &["commit", "-q", "-m", "one"]);
+        git_cli(dir.path(), &["add", "-A"], "Test", "t@e.com");
+        git_cli(dir.path(), &["commit", "-q", "-m", "one"], "Test", "t@e.com");
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
@@ -391,14 +373,12 @@ use super::*;
     #[test]
     fn log_in_page_selection_stays_in_window() {
         let dir = tempfile::tempdir().unwrap();
-        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
-        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
-        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
-        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        // The original windowing fixture identity ("Test"/"t@e.com"), kept verbatim.
+        git_repo_init(dir.path(), "Test", "t@e.com", true);
         for i in 0..30 {
             std::fs::write(dir.path().join(format!("f{i}.txt")), "x\n").unwrap();
-            git_test_cli(dir.path(), &["add", "-A"]);
-            git_test_cli(dir.path(), &["commit", "-q", "-m", &format!("commit {i}")]);
+            git_cli(dir.path(), &["add", "-A"], "Test", "t@e.com");
+            git_cli(dir.path(), &["commit", "-q", "-m", &format!("commit {i}")], "Test", "t@e.com");
         }
 
         let base = tempfile::tempdir().unwrap();

@@ -12,49 +12,6 @@ pub struct BufferListViewProps {
     pub selected: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::store::AppStore;
-    use std::sync::{Arc, Mutex};
-
-    /// Structural regression: the buffer list title and buffer rows must
-    /// render on separate lines (not overprinted on the same row).
-    #[test]
-    fn buffer_list_title_and_rows_on_separate_lines() {
-        use crate::ui::root::Root;
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-
-        let base = tempfile::tempdir().unwrap();
-        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
-        store.set_viewport_lines(24);
-        store.open_path("src/main.rs");
-        store.push_view(crate::app::store::ViewId::BufferList);
-
-        let mut app = element! {
-            ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
-                Root
-            }
-        };
-        let s = app.to_string();
-
-        let lines: Vec<&str> = s.lines().collect();
-        let title_idx = lines
-            .iter()
-            .position(|l| l.contains("*list-buffers*"))
-            .unwrap_or_else(|| panic!("title line missing\n{s}"));
-        // A buffer row (e.g. "src/main.rs") must not be on the same line.
-        assert!(
-            !lines[title_idx].contains("src/main.rs"),
-            "buffer row 'src/main.rs' overprinted on title line:\n{s}"
-        );
-    }
-}
-
 /// The `C-x C-b` list-buffers view: open buffers, MRU order, with the
 /// current buffer marked.
 #[component]
@@ -100,3 +57,48 @@ pub fn BufferListView(props: &BufferListViewProps, mut _hooks: Hooks) -> impl In
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::store::AppStore;
+    use std::sync::{Arc, Mutex};
+
+    /// Structural regression: the buffer list title and buffer rows must
+    /// render on separate lines (not overprinted on the same row).
+    #[test]
+    fn buffer_list_title_and_rows_on_separate_lines() {
+        use crate::ui::root::Root;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/main.rs");
+        store.push_view(crate::app::store::ViewId::BufferList);
+
+        let mut app = element! {
+            ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
+                Root
+            }
+        };
+        let s = app.to_string();
+
+        let lines: Vec<&str> = s.lines().collect();
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains("*list-buffers*"))
+            .unwrap_or_else(|| panic!("title line missing\n{s}"));
+        // A buffer row (e.g. "src/main.rs") must not be on the same line.
+        assert!(
+            !lines[title_idx].contains("src/main.rs"),
+            "buffer row 'src/main.rs' overprinted on title line:\n{s}"
+        );
+    }
+}
+

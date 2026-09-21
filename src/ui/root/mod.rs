@@ -29,7 +29,7 @@ use crate::ui::results_view::ResultsView;
 use crate::ui::rows_view::MagitRowsView;
 use crate::ui::transient_menu::TransientMenuView;
 use crate::ui::tree::TreeSidebar;
-use crate::ui::views::buffer::BufferListView;
+use crate::ui::buffer_view::BufferListView;
 
 use geometry::click_pane;
 use geometry::cursor_cell;

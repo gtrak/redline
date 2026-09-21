@@ -3,6 +3,44 @@ use crate::app::keymap::parse_key;
 use crate::git::blame::BlameLine;
 use crate::git::log::LogEntry;
 
+    /// Shared git CLI for the store tests. The author identity is
+    /// parameterized: the standard fixture is "Test"/"test@example.com"; the
+    /// magit windowing test historically used the short "T"/"t@e.com" (it only
+    /// sets commit metadata, so it is kept verbatim rather than collapsed).
+    /// The GIT_CONFIG_* vars make every call hermetic: host identity/config
+    /// can never leak in.
+    fn git_cli(dir: &std::path::Path, args: &[&str], name: &str, email: &str) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Shared repo-priming sequence (init + identity config). `gpgsign_false`
+    /// mirrors which tests configured `commit.gpgsign` — the magit windowing
+    /// test never did, so it stays honest to its original body.
+    fn git_repo_init(dir: &std::path::Path, name: &str, email: &str, gpgsign_false: bool) {
+        git_cli(dir, &["init", "-q", "-b", "main"], name, email);
+        git_cli(dir, &["config", "user.name", name], name, email);
+        git_cli(dir, &["config", "user.email", email], name, email);
+        if gpgsign_false {
+            git_cli(dir, &["config", "commit.gpgsign", "false"], name, email);
+        }
+    }
+
     /// A store rooted in `dir` as the project start, with persistence
     /// under a throwaway sibling base (never the project dir itself —
     /// the walk must not see the persistence files — and never the
@@ -245,30 +283,13 @@ use crate::git::log::LogEntry;
     /// Helper: create a tempdir git repo with one committed file and a
     /// staged change, return the store rooted there.
     fn git_store_with_staged(dir: &std::path::Path) -> AppStore {
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        git_cli(dir, &["init", "-q", "-b", "main"]);
-        git_cli(dir, &["config", "user.name", "Test"]);
-        git_cli(dir, &["config", "user.email", "test@example.com"]);
-        git_cli(dir, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(dir, "Test", "test@example.com", true);
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-        git_cli(dir, &["add", "a.txt"]);
-        git_cli(dir, &["commit", "-q", "-m", "init"]);
+        git_cli(dir, &["add", "a.txt"], "Test", "test@example.com");
+        git_cli(dir, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         // Stage a change so the commit editor has a file list.
         std::fs::write(dir.join("a.txt"), "a\nA\n").unwrap();
-        git_cli(dir, &["add", "a.txt"]);
+        git_cli(dir, &["add", "a.txt"], "Test", "test@example.com");
         let base = tempfile::tempdir().unwrap();
         AppStore::at(dir, base.path().to_path_buf())
     }
@@ -298,36 +319,17 @@ use crate::git::log::LogEntry;
         set
     }
 
-    /// Shared git CLI helper for the windowing tests (isolated env, like the
-    /// magit windowing test above).
+    /// Shared git CLI wrapper for the windowing tests (the original windowing
+    /// fixture identity "Test"/"t@e.com", kept verbatim).
     fn git_test_cli(dir: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "t@e.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "t@e.com")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        git_cli(dir, args, "Test", "t@e.com");
     }
 
     /// A git repo with a base commit and one "tall" commit that grows a file
     /// to 60 lines, so the selected commit's diff overflows a small viewport.
     fn tall_commit_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        git_test_cli(dir.path(), &["init", "-q", "-b", "main"]);
-        git_test_cli(dir.path(), &["config", "user.name", "Test"]);
-        git_test_cli(dir.path(), &["config", "user.email", "t@e.com"]);
-        git_test_cli(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git_repo_init(dir.path(), "Test", "t@e.com", true);
         std::fs::write(dir.path().join("big.txt"), "l1\n").unwrap();
         git_test_cli(dir.path(), &["add", "-A"]);
         git_test_cli(dir.path(), &["commit", "-q", "-m", "base"]);
@@ -342,32 +344,10 @@ use crate::git::log::LogEntry;
     }
 
     fn git_store(dir: &std::path::Path) -> AppStore {
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        git_cli(dir, &["init", "-q", "-b", "main"]);
-        git_cli(dir, &["config", "user.name", "Test"]);
-        git_cli(dir, &["config", "user.email", "test@example.com"]);
-        git_cli(dir, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(dir, "Test", "test@example.com", true);
         std::fs::write(dir.join("a.txt"), "keep\n").unwrap();
-        git_cli(dir, &["add", "a.txt"]);
-        git_cli(dir, &["commit", "-q", "-m", "init"]);
+        git_cli(dir, &["add", "a.txt"], "Test", "test@example.com");
+        git_cli(dir, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir, base.path().to_path_buf());
         s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));

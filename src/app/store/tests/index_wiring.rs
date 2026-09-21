@@ -1305,32 +1305,11 @@ use super::*;
         // dirty-tree guard requires a clean tree; the branch must exist).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        fn git_cli(dir: &std::path::Path, args: &[&str]) {
-            let out = std::process::Command::new("git")
-                .arg("-C").arg(dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("run git");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        git_cli(&root, &["init", "-q", "-b", "main"]);
-        git_cli(&root, &["config", "user.name", "Test"]);
-        git_cli(&root, &["config", "user.email", "test@example.com"]);
-        git_cli(&root, &["config", "commit.gpgsign", "false"]);
+        git_repo_init(&root, "Test", "test@example.com", true);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
-        git_cli(&root, &["add", "a.txt"]);
-        git_cli(&root, &["commit", "-q", "-m", "init"]);
-        git_cli(&root, &["branch", "feature"]);
+        git_cli(&root, &["add", "a.txt"], "Test", "test@example.com");
+        git_cli(&root, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
+        git_cli(&root, &["branch", "feature"], "Test", "test@example.com");
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(&root, base.path().to_path_buf());
