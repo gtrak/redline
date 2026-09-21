@@ -644,14 +644,15 @@ repo), so what remains is organization, not rot. Written up as:
 |---|---|
 | `.agents/plans/014-crate-extraction/PLAN.md` | **crate extraction** — measured from the import graph: `syntax` is a TRUE LEAF (its row is empty) and `git` is a production leaf whose only inbound edge is TEST-ONLY (`git/repo/tests.rs:8`), so both extract cleanly; `model` is contingent (it reads git types in production via `sections.rs`); **`ui` must NOT be extracted** (it depends on `app::store` — the edge is inverted). |
 | `.agents/tasks/issue-git-test-harness.md` | the **second git-harness cluster** the store dedup couldn't see: 4 × `git()` + 3 × `init_repo()` + 2 × `git_cli()` in `git/{blame,log,refs,repo/tests}.rs` and `ui/{magit_status,rows_view}.rs`, all `#[cfg(test)]`. Nine copies of the hermetic env block = nine chances to forget it. |
-| `.agents/tasks/issue-hygiene-sweep.md` | 4 dead `pub` constructors · the 46 `#[allow(dead_code)]` audit · stale refs (`queries.rs:8`, 2 insta `.snap` sources, `point_byte_offset`) · the `model::file()` twins. |
+| `.agents/tasks/issue-hygiene-sweep.md` | 4 dead `pub` constructors · the `#[allow(dead_code)]` audit (**48** at spec time, not 46 — A2 added two) · stale refs (`queries.rs:8`, 2 insta `.snap` sources, `point_byte_offset`) · the `model::file()` twins. |
+| `.agents/tasks/issue-guardrails.md` | **the guardrails** (Tier 1, specced) — measured 8 `unsafe` sites with **zero** `SAFETY:` comments (6 production in `main.rs`'s tty reroute, 2 test-only `set_var` in `git/commit.rs`), no `[lints]` table, no crate-level lint attrs, no hook and no CI. The `set_var` sites get an **investigation, not a comment** (cargo's threaded harness may make them genuinely unsound). `gate.sh fast` verified PTY-free, so it is a legitimate pre-push payload. |
 
-Not yet specced (Tier 1, evidence already gathered): the **guardrails** —
-8 `unsafe` blocks with purpose comments but no per-block `// SAFETY:`, no
-`[lints]` table and no crate-level lint attributes, and **no CI or hook** at all
-(`gate.sh` runs clippy `-D warnings`, but nothing forces it to run). A pre-push
-hook for `gate.sh fast` (~30 s) plus `undocumented_unsafe_blocks` is the cheap
-version.
+**User-requested features specced this session** (both from the hands-on UX loop):
+
+| Doc | Scope |
+|---|---|
+| `.agents/tasks/issue-match-highlight.md` | **match highlighting in the buffer view** — all visible matches one colour, the selected one another ("the cursor is hard to see when I jump to a search result"). No highlighting exists today, but `render_row` is segment-based and the store already pre-computes visible rows, so the overlay is a second pass over the segment list. Sources: isearch or the persisted search state after a jump. |
+| `.agents/tasks/issue-index-gitignore.md` | **the indexer's incremental path must respect `.gitignore`** — diagnosed precisely: the *full* build already does (it consumes the gitignore-filtered `FileList`), but `refresh_in_place` `set_file()`s **any** changed path the watcher reports, so ignored files enter the index after the fact. The fix extracts one `is_gitignored` helper for the ancestor `.gitignore` chain and makes the indexer the **third walker** in R3's agreement invariant. |
 
 ## The logic-organization round (measured, per the user's criterion)
 

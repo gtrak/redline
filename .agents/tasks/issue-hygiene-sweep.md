@@ -39,7 +39,7 @@ two more**, so the count is now 48. Two of them are already adjudicated by a gat
 cluster in `nav/index.rs` (removed by the `nav-index` lane), so the class is real:
 an allow outlives the reason it was added, and it silently hides the next dead item.
 
-For **each** of the 46, decide and record:
+For **each** of the 48, decide and record:
 - **(a) stale** — the item now has callers → **remove the allow** (clippy/rustc will
   verify; if it then warns, the allow was not stale after all — put it back and
   report the discrepancy).
