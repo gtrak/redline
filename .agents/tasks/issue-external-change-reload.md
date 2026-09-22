@@ -70,3 +70,45 @@ disk must **clear the undo history** because recorded offsets become invalid. So
 policy chosen here is the one 016 must build on: if this lands first, 016 inherits a
 defined reload semantics; if 016 lands first, this must honour its history-clearing
 rule. Say which you assumed.
+
+## Follow-ups from the gate (all after the fix landed as `28aa9e9`)
+
+**F1 — `open_external_path` calls `insert_rope` UNCONDITIONALLY (a guard is wanted).**
+Unlike `open_notes`, which is `is_none`-guarded so an already-open buffer is never
+replaced, `open_external_path` (`src/app/store/navigation/mod.rs:23-29`) replaces
+whatever buffer holds that key. The gate probed it directly: calling it on a key that is
+an open, **dirty**, `Accurate` project buffer lost the unsaved text and reset the mode to
+`Annotation` — the exact pre-fix failure mode, now guarded everywhere *except* here.
+
+**User-path reachability is UNVERIFIED.** The gate tried to construct a landing whose
+file lies inside the project root and could not get a picker to open at all
+(`picker_open=false`) — inconclusive, not a disproof. Note the sibling tooling route
+*does* handle in-project resolved sources explicitly
+(`navigation/mod.rs:55-62`: `strip_prefix(project.root)` → `open_project_path`), which
+shows the shape is anticipated. **Fix:** `is_none`-guard it, or use `reload_in_place` for
+an existing key. Prove reachability or prove it unreachable — do not leave "probably
+unreachable" as the justification, since that is the same reasoning that made this bug
+latent until Accurate-mode editing existed.
+
+**F2 — one thin PTY leg for the new confirm.** No PTY flow exercises it, so its on-screen
+rendering is uncovered. The store tests drive the same entry point the PTY path uses
+(`src/ui/root/input.rs::to_app_key` → the same `AppKey`/`Key` that `AppKey::key_event`
+consumes), so the *logic* is proven; what is not is that the prompt actually renders in
+the live flow. `sweep_flows.flow_banner_hint` is the closest leg and exercises only the
+*clean* watcher path. Given this project just spent a day on exactly "user-visible
+behaviour, no PTY assertion, two bug reports with every gate green", and this prompt is
+destructive-adjacent, add one leg: edit → external write → reopen → assert the prompt
+text → `n` → assert the edits and marker survive → `y` → assert the disk text.
+
+**F3 — `toggle_ro_accept` is the fifth rope-replacing route (for plan 016).** It assigns
+`buf.rope` directly (`src/app/store/buffers.rs:990-1009`) and so bypasses
+`reload_in_place`. It is an explicit user command, so the *requirement* holds, but 016's
+"a disk reload clears the undo history" rule must hook **both** sites — the chokepoint and
+this one. Recorded in the `reload_in_place` doc comment too.
+
+**F4 — the `locally_modified` gate depends on an invariant.** The fix treats
+`locally_modified == false` as "holds no in-memory work", which the gate verified by
+enumerating all 12 rope-mutation sites (each sets the flag). 016's dirty-flag contract
+("undoing to the saved state clears `locally_modified`") is what keeps that meaning true,
+so 016 must preserve it — a flag that can be false while the text differs from disk would
+re-open this hole.

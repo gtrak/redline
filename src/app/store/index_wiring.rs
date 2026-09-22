@@ -190,11 +190,19 @@ impl AppStore {
     /// tree is dropped, and the highlight + annotation-anchor caches are
     /// refreshed.
     ///
-    /// Every disk reload flows through this one chokepoint: the watcher's
-    /// auto-reload (`reload_buffer`), the reopen re-stat
+    /// Every **in-place** disk reload flows through this one chokepoint: the
+    /// watcher's auto-reload (`reload_buffer`), the reopen re-stat
     /// (`open_project_path`), the external-change confirm's `y`
     /// (`reload_confirm_accept`), and the `g` force-reload
     /// (`reload_current_buffer`).
+    ///
+    /// NOT exhaustive — one route replaces the rope directly and therefore
+    /// does NOT come through here: `toggle_ro_accept` (`buffers.rs`, the
+    /// toggle-read-only discard/reload confirm, which also flips `mode` and
+    /// `editable` by design) assigns `buf.rope` itself. It is an explicit user
+    /// command, so the requirement (no *silent* loss) still holds, but it
+    /// invalidates rope-relative state the same way — **016 (undo) must hook
+    /// that site too**, not this one alone.
     ///
     /// Plan 016 (undo) seam — STATED ORDER: this issue lands FIRST, so
     /// 016 inherits these reload semantics and must honour its own rule
