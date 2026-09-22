@@ -63,7 +63,14 @@ def reset():
                   # killed by the mandated `timeout` (SIGTERM/SIGKILL skips its
                   # finally), the leftovers change every later suite's
                   # tree/status/file-listing renders (backlog-#12 class).
-                  "Cargo.toml", "Cargo.lock"):
+                  "Cargo.toml", "Cargo.lock",
+                  # The external-crate suites' probe buffer: a `timeout`-killed
+                  # run leaves src/probe.rs untracked, and its `target_one`
+                  # symbol makes drive_xref L1's M-. see TWO same-named
+                  # definitions -> the ambiguity picker opens instead of the
+                  # silent jump (observed live 2026-09-22: every lane's gate
+                  # failed drive_xref identically until the stray was removed).
+                  "src/probe.rs"):
         p = os.path.join(REPO, stray)
         try:
             os.remove(p)

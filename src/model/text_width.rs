@@ -108,4 +108,47 @@ mod tests {
         assert_eq!(display_col_to_char_index(line, 14), 13, "'g'");
         assert_eq!(display_col_to_char_index(line, 16), 15, "at width → EOL");
     }
+
+    #[test]
+    fn width_table_pins_022_delta_and_stable_anchors() {
+        // deps batch B (unicode-width 0.1.14 -> 0.2.2, Unicode 17.0 tables):
+        // the FULL-DOMAIN sweep (examples/unicode_width_sweep.rs; recorded
+        // raw output in tools/unicode_width_sweep.md) found 458 of
+        // 1,112,064 scalars changed width. The delta is EAST ASIAN WIDTH
+        // RECLASSIFICATION, not ambiguous-width handling: Neutral -> Wide
+        // (1 -> 2; e.g. musical symbols U+1D300-U+1D356, Cyrillic
+        // U+4DC0-U+4DFF), mark -> zero-width (2 -> 0; Kanbun
+        // U+16FF0-U+16FF1; 1 -> 0; e.g. Kangxi components U+1ACF-U+1ADD /
+        // U+1AE0-U+1AEB), and reclassified spacing (0 -> 1; U+1171E,
+        // U+11A3A). 0 of the 458 deltas are in the East-Asian-Width
+        // "Ambiguous" class, and that class changed ZERO widths across the
+        // bump (n=138,197 -> 138,232, all still 1-cell in the default,
+        // non-CJK table) — so it is pinned below as a STABLE anchor, not
+        // as the delta.
+        //
+        // First half: one anchor per MEASURED 0.2.2 delta bucket, so a
+        // table regression that restores an old width on these scalars
+        // would fail here before it could silently shift cursor placement,
+        // truncation, or the gutter math for a buffer line containing one.
+        assert_eq!(char_display_width('\u{2630}'), 2, "1->2: U+2630 (Neutral -> Wide)");
+        assert_eq!(char_display_width('\u{1acf}'), 0, "1->0: U+1ACF (now combining)");
+        assert_eq!(char_display_width('\u{16ff0}'), 0, "2->0: U+16FF0 Kanbun pou (now zero-width)");
+        assert_eq!(char_display_width('\u{1171e}'), 1, "0->1: U+1171E (now spacing)");
+        //
+        // Second half: the stable anchors across the same table update —
+        // the Ambiguous class stays 1-cell in the non-CJK table, and the
+        // unambiguous narrow / wide / emoji / combining anchors stay put.
+        let ambiguous: [(char, &str); 3] = [
+            ('\u{00a9}', "© COPYRIGHT SIGN"),
+            ('\u{0100}', "Ā A WITH MACRON"),
+            ('\u{2261}', "≡ IDENTICAL TO"),
+        ];
+        for (c, name) in ambiguous {
+            assert_eq!(char_display_width(c), 1, "{name} stays 1 cell in the non-CJK table");
+        }
+        assert_eq!(char_display_width('a'), 1, "narrow stays 1");
+        assert_eq!(char_display_width('\u{4e2d}'), 2, "中 stays 2");
+        assert_eq!(char_display_width('\u{1f980}'), 2, "🦀 stays 2");
+        assert_eq!(char_display_width('\u{0301}'), 0, "combining acute stays 0");
+    }
 }

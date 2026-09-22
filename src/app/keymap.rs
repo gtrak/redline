@@ -722,7 +722,10 @@ mod tests {
         // REMOVED (gate P1: a `KeyCode::Modifier` event is unreachable — crossterm requires both
         // DISAMBIGUATE_ESCAPE_CODES and REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         // iocraft 0.9.1 pushes only REPORT_EVENT_TYPES — so the binding
-        // could never fire on any terminal). Net +3 stands.
+        // could never fire on any terminal). It was added and then removed,
+        // a net of 0, so the total above (net +2 → 125) stands — the
+        // `assert_eq!(total_per_view, 125, ...)` below is the count of
+        // record.
         let views: &[(&str, &[(&str, &str)])] = &[
             ("Buffer", BUFFER_BINDINGS),
             ("BufferList", BUFFER_LIST_BINDINGS),

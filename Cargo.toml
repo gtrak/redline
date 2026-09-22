@@ -13,9 +13,10 @@ description = "Read-focused, emacs-flavored TUI code browser for the agent-codin
 iocraft = "0.9.1"          # declarative TUI (latest 0.9.1; re-exports crossterm events)
 crossterm = "0.29"         # pinned to match iocraft's `^0.29` requirement exactly
 # Display-width (wide/CJK + combining) math at the render/input boundary
-# (plan 004 issue 05d). Already in the tree as a transitive dep of iocraft
-# (v0.1.14); the standard crate for terminal cell widths.
-unicode-width = "0.1.14"
+# (plan 004 issue 05d). deps batch B bumped the direct dep 0.1.14 -> 0.2.2
+# (Unicode 17.0 tables); iocraft 0.9.1 still pins ^0.1.13, so 0.1.14 stays
+# in the lock as its transitive dep (see tools/unicode_width_sweep.md).
+unicode-width = "0.2.2"
 
 # ── async runtime + observability ──────────────────────────────────────────
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
@@ -72,3 +73,8 @@ redline-resolve = { path = "crates/redline-resolve" }
 [dev-dependencies]
 tempfile = "3.27"
 insta = "1.48"
+# The OLD unicode-width table, dev-only: the full-domain sweep example
+# (examples/unicode_width_sweep.rs, deps batch B) diffs 0.1.14 against the
+# current table so the recorded 458-scalar delta is regeneratable from the
+# repo. Dev-only — never linked into the shipped binary.
+unicode-width-old = { package = "unicode-width", version = "=0.1.14" }

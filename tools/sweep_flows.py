@@ -542,7 +542,8 @@ def flow_annotation_fold(app):
     record("ann-fold", "M-<,4x C-n;C-c a h (x2 toggle)", ok,
            f"at-L5={at_l5} hidden-msg={hidden_msg} position-stable={pos_stable} "
            f"note-gone={note_gone} folded-marker={folded_marker} shown-msg={shown_msg} "
-           f"note-back={note_back} marker-back={marker_back}")
+           f"note-back={note_back} marker-back={marker_back} "
+           f"no-jitter={no_jitter} folded-col={folded_col} shown-col={shown_col}")
 
 def flow_annotation_aliases(app):
     """The C-c a tree (annotations-render-fold): C-c a n opens the

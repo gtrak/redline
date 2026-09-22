@@ -156,6 +156,46 @@ use super::*;
     }
 
     #[test]
+    fn mouse_click_annotated_line_pins_gutter_column_mapping() {
+        // annot-visual gate P3 pin: the gutter widened 1 -> 2 cells, so an
+        // annotated line's code renders at cell 2 and the click handler's
+        // `col.saturating_sub(2)` is the load-bearing inverse (mirroring
+        // the gutter of 2 in src/ui/root/geometry.rs::cursor_cell). Nothing
+        // but col-0 clicks on annotated rows was pinned, so pin the FULL
+        // column mapping here: cell 2 -> char 0, cell 3 -> char 1, gutter
+        // cells (0, 1) -> char 0; unannotated lines keep cell 0 -> char 0.
+        // A `saturating_sub(1)` (or any other offset) desyncs a click from
+        // the rendered column on annotated lines; this test catches it.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annpin.rs", "c0\nc1\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annpin.rs".to_string(),
+            line: 1,
+            col: 0,
+            anchor: "c1".to_string(),
+            text: "note".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // Rendered rows: 0=c0, 1=note row (above c1), 2=c1 (annotated code
+        // row), 3=c2, 4=trailing empty line.
+        s.mouse_click_position(2, 2);
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "annotated code cell 2 -> char 0");
+        s.mouse_click_position(2, 3);
+        assert_eq!((s.point_line(), s.point_col()), (1, 1), "annotated code cell 3 -> char 1");
+        s.mouse_click_position(2, 0);
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "gutter cell 0 -> char 0");
+        s.mouse_click_position(2, 1);
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "gutter cell 1 -> char 0");
+        // Unannotated line: no gutter, cell 0 -> char 0 unchanged.
+        s.mouse_click_position(0, 0);
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "unannotated cell 0 -> char 0");
+    }
+
+    #[test]
     fn mouse_click_empty_line_lands_col_zero() {
         let dir = tempfile::tempdir().unwrap();
         // Line 1 is empty.
