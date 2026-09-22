@@ -567,6 +567,21 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    evidence": if the measurement depends on an artifact that is not in the repo, either commit
    the artifact or the number is unverifiable. (Ask a lane to commit its measuring snippet or
    harness alongside the result.)
+   **And a sample can be unrepresentative in a way that looks conclusive.** A dependency bump's
+   fixed sample of seven characters (narrow / wide / emoji / combining / ambiguous) showed
+   **zero** width changes; a full-domain sweep of all **1,112,064** scalars found **458** — 355
+   reclassified 1→2 cells, 99 newly combining, 2 now zero-width, 2 now spacing. The sample would
+   have concluded "no behaviour change, safe" and been wrong. When a change's blast radius is a
+   **domain** (codepoints, files, inputs), sweep the domain or bound it explicitly: "I measured a
+   few" is not "it did not change".
+   **A non-vacuous test can still be aimed at NOTHING.** A new pin guarded the EAW-Ambiguous class
+   and genuinely failed under a CJK-table flip mutation — yet it covered **0 of the 458** real
+   changes, because the delta was EAW reclassification (Neutral→Wide, combining→0) and *no*
+   changed scalar was ambiguous-class. Its comment asserted the opposite as the reason it existed.
+   So "would this test fail if the thing broke?" is necessary but not sufficient: the test must be
+   aimed at the property that actually **changed**, and its stated reason is part of the claim — a
+   false rationale in prose cannot be caught by any assertion, only by measuring the class it
+   names.
    **And name the flake.** `queries::tests::default_budget_does_not_abort_a_normal_file` is
    load-sensitive (observed panic: "parse 788ms + query 358ms must fit the default budget
    1.19s") and has now flaked twice under concurrent builds while passing serially. **Capture a
