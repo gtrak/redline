@@ -43,7 +43,7 @@ pub enum KeyCode {
     /// send no bare-Shift bytes at all). The input handler maps a
     /// `Modifier(LeftShift)`/`Modifier(RightShift)` event to this code
     /// (inert today; a guard for a future stack that enables the flags),
-    /// and this code is deliberately UNBOUND — `C-c a h` / `C-c a s` is
+    /// and this code is deliberately UNBOUND — the `C-c a h` toggle is
     /// the fold path.
     Shift,
 }
@@ -710,15 +710,16 @@ mod tests {
             );
         }
 
-        // Per-view maps: 126 total bindings across 9 views (121 minus the
+        // Per-view maps: 125 total bindings across 9 views (121 minus the
         // 015-03 `C-d` freeing from the Buffer view → 120, then plan 016
         // issue 01 added `C-x u` and `C-/` → undo to the Buffer view, a net
         // +2 → 122, then plan 016 issue 02 added `C-7` → undo (the byte-based
         // terminal's Ctrl+/), a net +1 → 123, then annotations-render-fold
         // replaced the `C-c a` → annotate-toggle leaf with the `C-c a` tree
-        // (`C-c a n`/`h`/`s`/`l`), a net +3 → 126. A 5th leaf — bare `SHIFT`
-        // → annotate-fold — was added and then REMOVED (gate P1: a
-        // `KeyCode::Modifier` event is unreachable — crossterm requires both
+        // (`C-c a n`/`h`/`l` — annotations-fold-visual collapsed the `C-c a
+        // s` show leaf into the `C-c a h` toggle, so 3 leaves), a net +2 →
+        // 125. A 5th leaf — bare `SHIFT` → annotate-fold — was added and then
+        // REMOVED (gate P1: a `KeyCode::Modifier` event is unreachable — crossterm requires both
         // DISAMBIGUATE_ESCAPE_CODES and REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         // iocraft 0.9.1 pushes only REPORT_EVENT_TYPES — so the binding
         // could never fire on any terminal). Net +3 stands.
@@ -734,7 +735,7 @@ mod tests {
             ("Search", SEARCH_BINDINGS),
         ];
         let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
-        assert_eq!(total_per_view, 126, "total per-view bindings must be 126");
+        assert_eq!(total_per_view, 125, "total per-view bindings must be 125");
         for (name, table) in views {
             let km = load_bindings(table);
             assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");

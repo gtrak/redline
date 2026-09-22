@@ -403,11 +403,13 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // line at point (a message on an unannotated line — and in
     // EDIT buffers `A`/`d` self-insert as printables, the
     // printable-leaf rule).
-    // annotations-render-fold: the `C-c a` command tree — the bare
+    // annotations-fold-visual: the `C-c a` command tree — the bare
     // `C-c a` toggle is gone (the engine forbids a command on a
     // strict prefix of a longer binding, and the user's decision is the
     // tree): `C-c a n` new (genuine alias of `A` → annotate), `C-c a h`
-    // hide the note blocks, `C-c a s` show them, `C-c a l` list (genuine
+    // TOGGLE the note blocks (genuine alias of `annotate-toggle` — the
+    // single fold control; the separate `C-c a s` show is REMOVED, the
+    // user asked for one toggle, not a pair), `C-c a l` list (genuine
     // alias of `C-c n a` → annotations-picker). Bare Shift is DELIBERATELY
     // UNBOUND (gate P1 on this lane): crossterm 0.29 only decodes a
     // `KeyCode::Modifier(...)` event when BOTH
@@ -416,13 +418,12 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // pushes ONLY `REPORT_EVENT_TYPES` (2) — so no bare-Shift event ever
     // reaches the app, on ANY terminal (byte-based terminals send no
     // bare-Shift bytes at all, kitty-protocol ones included). A binding
-    // that never fires is worse than none, so `C-c a h` / `C-c a s` is the
-    // fold path. `C-a` was declined (emacs point-line-start).
+    // that never fires is worse than none, so `C-c a h` is the fold path.
+    // `C-a` was declined (emacs point-line-start).
     ("A", "annotate"),
     ("d", "annotate-delete"),
     ("C-c a n", "annotate"),
-    ("C-c a h", "annotate-hide"),
-    ("C-c a s", "annotate-show"),
+    ("C-c a h", "annotate-toggle"),
     ("C-c a l", "annotations-picker"),
     // Navigation (issue 05).
     ("M-.", "xref-find-definitions"),
@@ -926,7 +927,7 @@ pub struct FileViewRow {
     /// True for a virtual annotation note row (not a buffer line).
     pub is_note: bool,
     /// Code rows only: the line carries at least one annotation (the
-    /// margin marker — independent of note-row visibility, `C-c a`).
+    /// margin fold arrow — independent of note-row visibility, `C-c a h`).
     pub annotated: bool,
     /// The row's text (without trailing newline; an orphaned note row
     /// carries an `(orphaned)` tag in its text).
@@ -1804,11 +1805,11 @@ pub struct AppStore {
     note_prompt_input: String,
     note_prompt_line: usize,
     /// Whether the inline annotation note rows render above annotated
-    /// lines (annotations-render-fold: `C-c a h` hides them / `C-c a s`
-    /// shows them; the `annotate-fold` command toggles them in read-only
+    /// lines (annotations-fold-visual: `C-c a h` → `annotate-toggle`
+    /// toggles them; the `annotate-fold` command toggles them in read-only
     /// mode — reachable from the M-x palette only, bare Shift is
-    /// deliberately unbound — the margin markers stay either way, the
-    /// folded marker carrying the state).
+    /// deliberately unbound — the margin arrows stay either way, the
+    /// folded ▸ carrying the state).
     show_note_rows: bool,
     // ── plan 004 issue 03: mark/region + kill ring ──────────────────────
     /// The shared kill ring (emacs depth 60; shared across all buffers).

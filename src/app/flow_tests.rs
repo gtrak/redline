@@ -1855,10 +1855,10 @@ fn unit_flow_ann_create() {
     );
 }
 
-/// ann-toggle: C-c a h hides the note rows (the margin indicator switches
-/// to its folded state — the thin bar) and C-c a s shows them again.
-/// (annotations-render-fold: the bare `C-c a` toggle is gone — it is the
-/// tree prefix now.)
+/// ann-toggle (annotations-fold-visual): `C-c a h` is the TOGGLE — it
+/// hides the note rows (the margin arrow switches ▾→▸) and `C-c a h`
+/// again shows them (▸→▾). There is no separate `C-c a s`: one toggle,
+/// not a pair.
 #[test]
 fn unit_flow_ann_toggle() {
     let (repo, _ann, _ann2) = ann_repo();
@@ -1888,9 +1888,10 @@ fn unit_flow_ann_toggle() {
         .iter()
         .any(|r| r.text == "ann line three" && r.annotated);
     let folded_state = s.note_rows_folded();
+    // C-c a h again: the same key TOGGLES back (no separate C-c a s).
     s.key_event(key("C-c"));
     s.key_event(key("a"));
-    s.key_event(key("s"));
+    s.key_event(key("h"));
     let shown_msg = s.message.contains("note rows: shown");
     let note_back = with_note(&mut s);
     let unfolded_state = !s.note_rows_folded();
@@ -1968,8 +1969,8 @@ fn unit_flow_ann_fold() {
         "the note row is emitted (unfolded): {:?}",
         rows_shown.iter().map(|r| (r.line, r.is_note)).collect::<Vec<_>>()
     );
-    // C-c a h: hide. The cursor's code row and the scroll window must both
-    // survive the row-count change untouched.
+    // C-c a h: hide (toggle). The cursor's code row and the scroll window
+    // must both survive the row-count change untouched.
     s.key_event(key("C-c"));
     s.key_event(key("a"));
     s.key_event(key("h"));
@@ -1994,11 +1995,12 @@ fn unit_flow_ann_fold() {
         && rows_hidden
             .iter()
             .any(|r| r.text == "ann line three" && r.annotated);
-    // C-c a s: show. Same invariants back, and the note row is immediately
-    // ABOVE its code row again.
+    // C-c a h again: show (toggle back — the single toggle, no C-c a s).
+    // Same invariants back, and the note row is immediately ABOVE its code
+    // row again.
     s.key_event(key("C-c"));
     s.key_event(key("a"));
-    s.key_event(key("s"));
+    s.key_event(key("h"));
     let shown = s.message.contains("note rows: shown");
     let rows_shown2 = s.file_view_rows();
     let note_back_above = rows_shown2.iter().enumerate().any(|(i, r)| {

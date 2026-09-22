@@ -899,11 +899,12 @@ def list_view_cup_checks():
 
 
 def annotation_gutter_checks():
-    """plan 005 issue 02b + annotations-render-fold: the marker has its own
-    1-cell gutter (annotated code starts at cell 1, marker at cell 0), the
-    note row's arrow aligns in the same gutter ABOVE the anchored code row,
-    the cursor column adds the gutter on annotated lines, and note rows do
-    not push the point's line off-canvas.
+    """plan 005 issue 02b + annotations-fold-visual: the annotated line has a
+    2-cell gutter (the fold arrow at cell 0, the tree-line branch/blank at
+    cell 1, code at cell 2 — the SAME column folded and shown), the note row
+    carries the 2-branch tree-line's diagonal (╱ at cell 0, note text at
+    cell 2) ABOVE the anchored code row, the cursor column adds the gutter on
+    annotated lines, and note rows do not push the point's line off-canvas.
 
     Legs:
       * Open a >viewport file, `A` on line 0, C-n to the window bottom:
@@ -945,52 +946,56 @@ def annotation_gutter_checks():
     s.key("RET", 1.2)
 
     # ── Leg 1: annotated line renders source text VERBATIM after gutter ──
-    # After `A` on line 0, the rendered row should be "\u258efn target_one() {}"
-    # (marker at cell 0, code at cell 1 — the full string, not a prefix).
+    # After `A` on line 0 (note SHOWN by default), the code row is
+    # "\u25be\u2500fn target_one() {}" — the ▾ fold arrow at cell 0, the ─
+    # tree-line branch at cell 1, code at cell 2 (the full string, not a
+    # prefix; the 2-cell gutter is the no-jitter leading width).
     s.key("A", 0.5)
     # Type the note text and commit with RET.
     os.write(s.master, b"regression check\r")
     s.cup_settle(s._read(0.8, quiet=0.15))
-    # Find the row with the marker and verify the full text after the gutter.
+    # Find the row with the SHOWN arrow (▾) and verify the full text after the
+    # gutter.
     row_text = None
     for r in range(1, s.rows - 2):
         t = s.row_text(r)
-        if "\u258e" in t:
+        if "\u25be" in t:
             row_text = t
             break
     verbatim = row_text is not None and "fn target_one() {}" in row_text
-    # The marker is at cell 0 and the code starts at cell 1:
-    # the row should have "\u258e" followed by "fn target_one() {}".
-    gutter_correct = row_text is not None and row_text.startswith("\u258efn target_one() {}")
-    rec("annotated line: source text VERBATIM after the gutter", verbatim,
-        f"row={row_text[:40]!r}" if row_text else "marker row not found")
-    rec("annotated line: marker at cell 0, code at cell 1 (full-string)",
+    # The arrow is at cell 0, the branch at cell 1, the code at cell 2:
+    # the row starts with "\u25be\u2500" followed by "fn target_one() {}".
+    gutter_correct = row_text is not None and row_text.startswith("\u25be\u2500fn target_one() {}")
+    rec("annotated line: source text VERBATIM after the 2-cell gutter", verbatim,
+        f"row={row_text[:40]!r}" if row_text else "arrow row not found")
+    rec("annotated line: ▾ at cell 0, ─ at cell 1, code at cell 2 (full-string)",
         gutter_correct,
-        f"row starts with marker+code: {gutter_correct}")
-    # annotations-render-fold: the note row is directly ABOVE the marker
-    # row (the note is the code row's header, not its trailer).
+        f"row starts with arrow+branch+code: {gutter_correct}")
+    # annotations-fold-visual: the note row is directly ABOVE the arrow row,
+    # carrying the tree-line's diagonal (╱ at cell 0) and the note text at
+    # cell 2 (the note is the code row's header, not its trailer).
     marker_row_idx = next((r for r in range(1, s.rows - 2)
-                           if "\u258e" in s.row_text(r)), None)
+                           if "\u25be" in s.row_text(r)), None)
     note_above = marker_row_idx is not None and marker_row_idx > 1 and (
-        "\u25b8 regression check" in s.row_text(marker_row_idx - 1)
+        "\u2571 regression check" in s.row_text(marker_row_idx - 1)
     )
-    rec("note row sits directly ABOVE the annotated code row",
-        note_above, f"marker_row={marker_row_idx}")
+    rec("note row (diagonal) sits directly ABOVE the annotated code row",
+        note_above, f"arrow_row={marker_row_idx}")
 
     # ── Leg 2: cursor column on an annotated line adds the gutter ──────
     # Point is at line 0, col 0 (after the annotation commit, the point
     # stays on the anchored line). Before the commit the CUP was at (2, 2)
     # (1-based); the note row ABOVE the code row pushed the code row down
     # by 1, so the CUP row is now 3 — the CUP stream is consistent with
-    # the note above. Terminal col: gutter(1) + display_col(0) = 1
-    # (0-based) = 2 (1-based).
+    # the note above. Terminal col: gutter(2) + display_col(0) = 2
+    # (0-based) = 3 (1-based).
     r, c = do("C-a", 0.6)
     rec("cursor on annotated line: CUP row moved +1 (note above), col = gutter + 0",
-        (r, c) == (3, 2), f"cup=({r},{c}) want (3,2)")
-    # C-f x3: display col 3, terminal col = 1 + 3 = 4 (0-based) = 5 (1-based).
+        (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
+    # C-f x3: display col 3, terminal col = 2 + 3 = 5 (0-based) = 6 (1-based).
     r, c = do("C-f C-f C-f")
-    rec("cursor on annotated line: C-f x3 → CUP col = gutter + 3 (1-based col 5)",
-        (r, c) == (3, 5), f"cup=({r},{c}) want (3,5)")
+    rec("cursor on annotated line: C-f x3 → CUP col = gutter + 3 (1-based col 6)",
+        (r, c) == (3, 6), f"cup=({r},{c}) want (3,6)")
 
     # ── Leg 3: note rows do not push the point off-canvas ─────────────
     # 30-line file, viewport 21. Note on line 0 (already created). C-n x20
@@ -1029,41 +1034,54 @@ def annotation_gutter_checks():
     rec("C-n x20: C-p,C-n round-trips to the same row (point stable)",
         r3 == r, f"original row={r}, after C-p row={r2}, after C-n row={r3}")
 
-    # ── Leg 4: C-c a h / C-c a s (annotations-render-fold): hide → the
-    # note row goes and the margin indicator folds to the thin bar (▏);
-    # show → the note row and the ordinary marker (▎) come back. The code
-    # row's text is unchanged in both states.
+    # ── Leg 4: C-c a h (annotations-fold-visual): the TOGGLE. h → the note
+    # row (diagonal) goes and the margin arrow folds ▾→▸; h again → the note
+    # row and the ▾ arrow + ─ branch come back. The code row's TEXT and its
+    # START COLUMN are unchanged in both states (no jitter).
     s.key("M-<", 0.8)  # go to top so the annotated line is visible
     s._read(0.5, quiet=0.15)
+
+    def code_start_col(row_text):
+        idx = row_text.find("fn target_one() {}")
+        if idx < 0:
+            return None
+        # every char before the code is single-cell here (▾/▸/─/space)
+        return sum(1 for _ in row_text[:idx])
+
     s.key("C-c a h", 0.6)
     folded_row = None
     note_row_gone = True
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
-        if "\u25b8 regression check" in t:
+        if "\u2571 regression check" in t:
             note_row_gone = False
-        if "\u258f" in t:
+        if "\u25b8" in t and "fn target_one() {}" in t:
             folded_row = t
             break
     hidden_msg = "note rows: hidden" in s.row_text(s.rows - 2)
     code_unchanged_hidden = folded_row is not None and "fn target_one() {}" in folded_row
-    s.key("C-c a s", 0.6)
+    folded_col = code_start_col(folded_row) if folded_row else None
+    s.key("C-c a h", 0.6)  # the SAME key toggles back (no separate C-c a s)
     s.cup_settle(s._read(0.4, quiet=0.15))
     shown_row = None
     note_row_back = False
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
-        if "\u258e" in t:
+        if "\u25be" in t and "fn target_one() {}" in t:
             shown_row = t
-        if "\u25b8 regression check" in t:
+        if "\u2571 regression check" in t:
             note_row_back = True
     shown_msg = "note rows: shown" in s.row_text(s.rows - 2)
     code_unchanged_shown = shown_row is not None and "fn target_one() {}" in shown_row
-    rec("C-c a h / C-c a s: fold keeps the code row, marker carries the state",
+    shown_col = code_start_col(shown_row) if shown_row else None
+    # NO JITTER: the code's start column is identical folded and shown.
+    no_jitter = (folded_col is not None and folded_col == shown_col)
+    rec("C-c a h toggle: fold keeps the code row, arrow carries the state",
         hidden_msg and code_unchanged_hidden and note_row_gone
-        and shown_msg and note_row_back and code_unchanged_shown,
+        and shown_msg and note_row_back and code_unchanged_shown and no_jitter,
         f"hidden-msg={hidden_msg} folded-marker={code_unchanged_hidden} "
-        f"note-gone={note_row_gone} shown-msg={shown_msg} note-back={note_row_back}")
+        f"note-gone={note_row_gone} shown-msg={shown_msg} note-back={note_row_back} "
+        f"no-jitter={no_jitter} (folded-col={folded_col} shown-col={shown_col})")
 
     # ── Leg 5: all-annotated canvas FILL (02c) ────────────────────
     # plan 005 issue 02c: the 02b floor (span = 1) left a 25-line
@@ -1097,8 +1115,8 @@ def annotation_gutter_checks():
     canvas_rows = [s.row_text(r) for r in range(1, s.rows - 2)]
     title = s.row_text(0).strip()
     filled = [t for t in canvas_rows if t.strip()]
-    marker_rows = [t for t in canvas_rows if "\u258e" in t]
-    note_rows = [t for t in canvas_rows if "\u25b8" in t]
+    marker_rows = [t for t in canvas_rows if "\u25be" in t]
+    note_rows = [t for t in canvas_rows if "\u2571" in t]
     # FILL, not merely non-blank: >= 18 of 21 content rows, specifically
     # the 10 code + 10 note shape.
     rec("all-annotated fill: >= 18 of 21 content rows emitted",
@@ -1109,7 +1127,7 @@ def annotation_gutter_checks():
         f"filled={len(filled)}")
     # The point's line (line 0, "dense line 0") is drawn with its marker
     # and its note row directly above it.
-    point_drawn = any("dense line 0" in t and "\u258e" in t for t in canvas_rows)
+    point_drawn = any("dense line 0" in t and "\u25be" in t for t in canvas_rows)
     rec("all-annotated fill: point's line (line 0) drawn with marker",
         point_drawn,
         f"row0={[t for t in canvas_rows if 'dense line 0' in t][:1]}")

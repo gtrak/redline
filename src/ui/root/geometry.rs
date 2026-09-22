@@ -80,14 +80,17 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 // The terminal cursor is positioned in CELLS, not char
                 // indexes: the display column is the width of the point
                 // line's prefix [0, point_col) (plan 004 issue 05d). For an
-                // annotated line the code starts at cell 1 (the 1-cell
-                // gutter for the \u{258e} marker, plan 005 issue 02b), so
-                // add the gutter offset. Fall back to the char index when
-                // the point line is outside the pre-computed visible slice.
+                // annotated line the code starts at cell 2 (the 2-cell
+                // gutter — the fold arrow at cell 0 and the tree-line
+                // branch/blank at cell 1; plan 005 issue 02b, annotations-
+                // fold-visual), so add the gutter offset. The leading width
+                // is the same folded and shown (no fold-state branch), and
+                // the fallback is the char index when the point line is
+                // outside the pre-computed visible slice.
                 FileViewRow::row_for_line(rows, target_line)
                     .and_then(|i| rows.get(i))
                     .map(|r| {
-                        let gutter = if r.annotated { 1 } else { 0 };
+                        let gutter = if r.annotated { 2 } else { 0 };
                         gutter
                             + crate::model::text_width::char_index_to_display_col(
                                 &r.text,
@@ -280,7 +283,7 @@ mod tests {
                         line: l,
                         is_note: true,
                         annotated: false,
-                        text: format!("  \u{25b8} note {l}"),
+                        text: format!("note {l}"),
                         spans: Vec::new(),
                         matches: Vec::new(),
                         highlight: None,
@@ -369,17 +372,18 @@ mod tests {
         }
     }
 
-    /// plan 005 issue 02b: the cursor column on an annotated line adds the
-    /// 1-cell gutter (the \u{258e}/\u{258f} marker at cell 0 pushes code to
-    /// cell 1). Point at char 0 of an annotated line → display col 1
-    /// (gutter + 0). (annotations-render-fold: the note row emits BEFORE
+    /// plan 005 issue 02b + annotations-fold-visual: the cursor column on an
+    /// annotated line adds the 2-cell gutter (the fold arrow at cell 0 and the
+    /// tree-line branch/blank at cell 1 push the code to cell 2). Point at
+    /// char 0 of an annotated line → display col 2 (gutter + 0).
+    /// (annotations-render-fold: the note row emits BEFORE
     /// the code row, so an annotated point's code row sits at slice row 1
     /// — terminal row 2.)
     #[test]
     fn cursor_cell_annotated_line_adds_gutter_to_column() {
         // One annotated line, point at char 3 (display col 3 in the code).
-        // With the gutter, the terminal cursor is at col 1 + 3 = 4; the
-        // note row above occupies slice row 0, so the code row is at
+        // With the 2-cell gutter, the terminal cursor is at col 2 + 3 = 5;
+        // the note row above occupies slice row 0, so the code row is at
         // terminal row 1 (title) + 1 = 2.
         let snap = annotated_snapshot(
             &[("fn target_one() {}", true)],
@@ -388,12 +392,12 @@ mod tests {
         );
         assert_eq!(
             cursor_cell(&snap),
-            Some((4, 2)),
-            "annotated: gutter(1) + display_col(3) = 4; note row above → terminal row 2"
+            Some((5, 2)),
+            "annotated: gutter(2) + display_col(3) = 5; note row above → terminal row 2"
         );
-        // Point at char 0 → col 1 (just the gutter).
+        // Point at char 0 → col 2 (just the 2-cell gutter).
         let snap = annotated_snapshot(&[("fn target_one() {}", true)], &[0], 0, 0, 1);
-        assert_eq!(cursor_cell(&snap), Some((1, 2)), "char 0 → col 1 (gutter only); note row above");
+        assert_eq!(cursor_cell(&snap), Some((2, 2)), "char 0 → col 2 (gutter only); note row above");
         // Non-annotated line: no gutter (no note row → terminal row 1).
         let snap = annotated_snapshot(&[("plain line", false)], &[], 0, 3, 1);
         assert_eq!(cursor_cell(&snap), Some((3, 1)), "non-annotated: no gutter");

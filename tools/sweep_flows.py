@@ -108,6 +108,20 @@ def rows_containing(app, token):
     return [r for r in range(app.rows) if token in app.row_text(r)]
 
 
+def _code_start_col(app, token):
+    """The display column (in cells) where `token` begins in the first row
+    that contains it — the code text's start column (the no-jitter pin).
+    Returns None when the token is not on screen. Every char before the
+    code is single-cell here (▾/▸/─/space/ascii), so a char count IS the
+    cell count."""
+    for r in range(app.rows):
+        line = app.row_text(r)
+        idx = line.find(token)
+        if idx >= 0:
+            return sum(1 for _ in line[:idx])
+    return None
+
+
 def pump(app, secs):
     """Drain the PTY for `secs` on a real wall clock, no quiet-exit.
 
@@ -399,9 +413,10 @@ def flow_quit_prompt_y():
             pass
 
 def flow_annotation_create(app):
-    """A on a line: the minibuffer prompt, RET commits — a ▎ marker on the
-    code row, the note as a dim row directly ABOVE it (annotations-render-
-    fold), the status count, and a real record in .redline-notes.md."""
+    """A on a line: the minibuffer prompt, RET commits — a ▾ fold arrow on
+    the code row, the note as a dim row (with its ╱ diagonal) directly ABOVE
+    it (annotations-fold-visual), the status count, and a real record in
+    .redline-notes.md."""
     for _ in range(2):
         app.key("C-n")
         app.wait(0.3)
@@ -420,8 +435,8 @@ def flow_annotation_create(app):
     app.wait(0.6)
     saved = "note saved" in app.row_text(app.rows - 2)
     code_rows = rows_containing(app, "line three")
-    marker = any("\u258e" in app.row_text(r) for r in code_rows)
-    note_rows = rows_containing(app, "\u25b8 check bounds")
+    marker = any("\u25be" in app.row_text(r) for r in code_rows)
+    note_rows = rows_containing(app, "\u2571 check bounds")
     # The note row sits directly ABOVE the annotated code row (annotations-
     # render-fold) — and nowhere below it (the old ordering's row).
     above = bool(code_rows) and bool(note_rows) and note_rows[0] == code_rows[0] - 1
@@ -437,24 +452,24 @@ def flow_annotation_create(app):
            f"disk-record={disk_rec}")
 
 def flow_annotation_toggle(app):
-    """C-c a h / C-c a s hide / show the annotation note rows (annotations-
-    render-fold — the bare C-c a is the tree prefix now). The marker does
-    not vanish: it switches to the folded thin bar (▏) while the notes are
-    hidden, and back to the ordinary bar (▎) when they return."""
+    """C-c a h is the TOGGLE (annotations-fold-visual — no separate C-c a s):
+    h hides the note rows (the margin arrow ▾→▸, the tree-line arms vanish),
+    h again shows them (▸→▾, the ╱ note row and ─ branch come back). The code
+    row's text and start column stay put (no jitter)."""
     app.key("C-c a h")
     app.wait(0.4)
     hidden_msg = "note rows: hidden" in app.row_text(app.rows - 2)
-    note_gone = not rows_containing(app, "\u25b8 check bounds")
+    note_gone = not rows_containing(app, "\u2571 check bounds")
     marker_stays = bool(rows_containing(app, "line three"))
-    folded_marker = any("\u258f" in app.row_text(r) for r in rows_containing(app, "line three"))
-    app.key("C-c a s")
+    folded_marker = any("\u25b8" in app.row_text(r) for r in rows_containing(app, "line three"))
+    app.key("C-c a h")  # the SAME key toggles back
     app.wait(0.4)
     shown_msg = "note rows: shown" in app.row_text(app.rows - 2)
-    note_back = bool(rows_containing(app, "\u25b8 check bounds"))
-    marker_back = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
+    note_back = bool(rows_containing(app, "\u2571 check bounds"))
+    marker_back = any("\u25be" in app.row_text(r) for r in rows_containing(app, "line three"))
     ok = (hidden_msg and note_gone and marker_stays and folded_marker
           and shown_msg and note_back and marker_back)
-    record("ann-toggle", "C-c a h / C-c a s", ok,
+    record("ann-toggle", "C-c a h (x2 toggle)", ok,
            f"hidden-msg={hidden_msg} note-gone={note_gone} marker-stays={marker_stays} "
            f"folded-marker={folded_marker} shown-msg={shown_msg} note-back={note_back} "
            f"marker-back={marker_back}")
@@ -476,18 +491,19 @@ def flow_annotation_crossing(app):
     r3 = rows_containing(app, "line three")
     r4 = rows_containing(app, "line four")
     adjacent = bool(r3) and bool(r4) and r4[0] == r3[0] + 1
-    note_above = bool(r3) and r3[0] > 0 and "\u25b8 check bounds" in app.row_text(r3[0] - 1)
+    note_above = bool(r3) and r3[0] > 0 and "\u2571 check bounds" in app.row_text(r3[0] - 1)
     ok = l4 and l3 and adjacent and note_above
     record("ann-crossing", "C-n,C-p on annotated line", ok,
            f"c-n-lands-L4={l4} c-p-back-L3={l3} code-rows-adjacent={adjacent} "
            f"note-row-above={note_above}")
 
 def flow_annotation_fold(app):
-    """Fold with the cursor mid-file (annotations-render-fold): the cursor
-    stays on the same CODE line across C-c a h / C-c a s (the row count
+    """Fold with the cursor mid-file (annotations-fold-visual): the cursor
+    stays on the same CODE line across the C-c a h toggle (the row count
     changed, the point's buffer line did not — the status position is
-    unchanged), and the margin indicator carries the folded state (▏ while
-    hidden, ▎ when back)."""
+    unchanged), the margin arrow carries the folded state (▸ while hidden,
+    ▾ when back), and the code row's start column is unchanged (no
+    jitter)."""
     app.key("M-<")
     app.wait(0.3)
     for _ in range(4):
@@ -495,31 +511,35 @@ def flow_annotation_fold(app):
         app.wait(0.3)
     pos_before = app.row_text(app.rows - 1)
     at_l5 = "L5," in pos_before
-    app.key("C-c a h")
+    app.key("C-c a h")  # toggle: hide
     app.wait(0.4)
     pos_hidden = app.row_text(app.rows - 1)
     hidden_msg = "note rows: hidden" in app.row_text(app.rows - 2)
     pos_stable = pos_hidden == pos_before
-    note_gone = not rows_containing(app, "\u25b8 check bounds")
+    note_gone = not rows_containing(app, "\u2571 check bounds")
     code_rows = rows_containing(app, "line three")
     folded_marker = bool(code_rows) and any(
-        "\u258f" in app.row_text(r) for r in code_rows
+        "\u25b8" in app.row_text(r) for r in code_rows
     )
-    app.key("C-c a s")
+    folded_col = _code_start_col(app, "ann line three")
+    app.key("C-c a h")  # toggle: show back (no separate C-c a s)
     app.wait(0.4)
     pos_shown = app.row_text(app.rows - 1)
     shown_msg = "note rows: shown" in app.row_text(app.rows - 2)
-    note_back = bool(rows_containing(app, "\u25b8 check bounds"))
+    note_back = bool(rows_containing(app, "\u2571 check bounds"))
     # The note row came back ABOVE the code row: the code row's terminal
     # index shifted again, so re-find it for the marker check (the row
     # index captured during the hidden state is stale by construction).
     code_rows_shown = rows_containing(app, "line three")
     marker_back = bool(code_rows_shown) and any(
-        "\u258e" in app.row_text(r) for r in code_rows_shown
+        "\u25be" in app.row_text(r) for r in code_rows_shown
     )
+    shown_col = _code_start_col(app, "ann line three")
+    no_jitter = (folded_col is not None and folded_col == shown_col)
     ok = (at_l5 and hidden_msg and pos_stable and note_gone and folded_marker
-          and shown_msg and pos_shown == pos_before and note_back and marker_back)
-    record("ann-fold", "M-<,4x C-n;C-c a h;C-c a s", ok,
+          and shown_msg and pos_shown == pos_before and note_back and marker_back
+          and no_jitter)
+    record("ann-fold", "M-<,4x C-n;C-c a h (x2 toggle)", ok,
            f"at-L5={at_l5} hidden-msg={hidden_msg} position-stable={pos_stable} "
            f"note-gone={note_gone} folded-marker={folded_marker} shown-msg={shown_msg} "
            f"note-back={note_back} marker-back={marker_back}")
@@ -598,10 +618,10 @@ def flow_annotation_drift(app):
     with open(ANN_PATH, "w") as f:
         f.write("top extra line\n" + old)
     reloaded = wait_for(app, lambda: "top extra line" in text(app), 4.0)
-    marker_moved = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
+    marker_moved = any("\u25be" in app.row_text(r) for r in rows_containing(app, "line three"))
     code_rows = rows_containing(app, "line three")
     note_above = bool(code_rows) and code_rows[0] > 0 and (
-        "\u25b8 check bounds" in app.row_text(code_rows[0] - 1)
+        "\u2571 check bounds" in app.row_text(code_rows[0] - 1)
     )
     count = "1 note" in app.row_text(app.rows - 1)
     ok = reloaded and marker_moved and note_above and count
@@ -637,7 +657,7 @@ def flow_annotation_delete(app):
                     in app.row_text(app.rows - 2), 4.0)
     # Content rows only: the minibuffer's echo legitimately contains the
     # note text, so the cue check excludes it.
-    cue_gone = not any("\u25b8 check bounds" in app.row_text(r)
+    cue_gone = not any("\u2571 check bounds" in app.row_text(r)
                        for r in range(1, app.rows - 2))
     count_gone = "1 note" not in app.row_text(app.rows - 1)
     disk_gone = "check bounds" not in open(NOTES_PATH).read()

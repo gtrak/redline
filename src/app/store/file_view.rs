@@ -142,14 +142,16 @@ impl AppStore {
         else {
             return;
         };
-        // plan 005 issue 02b: annotated lines render their code at cell 1
-        // (the 1-cell gutter for the \u{258e} marker). A click in the gutter
-        // (col 0) maps to char 0; a click at code cell k maps to char
-        // display_col_to_char_index(text, k - 1).
+        // plan 005 issue 02b + annotations-fold-visual: annotated lines
+        // render their code at cell 2 (the 2-cell gutter for the fold arrow
+        // at cell 0 and the tree-line branch/blank at cell 1). A click in
+        // the gutter (col 0 or 1) maps to char 0; a click at code cell k
+        // maps to char display_col_to_char_index(text, k - 2). The leading
+        // width is the same folded and shown, so no fold-state branch here.
         let annotated = rows
             .iter()
             .any(|r| !r.is_note && r.line == target_line && r.annotated);
-        let code_col = if annotated { col.saturating_sub(1) } else { col };
+        let code_col = if annotated { col.saturating_sub(2) } else { col };
         let line_len = self.line_char_len(target_line);
         // Display column -> char index (plan 004 issue 05d).
         let char_col = self
@@ -265,11 +267,11 @@ impl AppStore {
     /// canvas — a 25-line all-annotated file in a 21-row viewport emits
     /// 10 code + 10 note rows, not a 1-row span),
     /// with a virtual annotation note row directly ABOVE each annotated
-    /// line as the note-row budget allows (annotations-render-fold: the
+    /// line as the note-row budget allows (annotations-fold-visual: the
     /// note reads as a header for the code it annotates; `show_note_rows`
-    /// folds the blocks in and out via `C-c a h` / `C-c a s` — the
+    /// folds the blocks in and out via the `C-c a h` toggle — the
     /// `annotated` flag on the code rows is independent, so the margin
-    /// marker stays, in its folded state when the note rows are hidden).
+    /// arrow stays, in its folded ▸ state when the note rows are hidden).
     /// Every row
     /// carries its buffer-line index: the dense 1:1 "row i == line top+i"
     /// assumption is gone, and the renderer / `cursor_cell` /
@@ -378,7 +380,11 @@ impl AppStore {
                         break; // the note-row budget is final: stop here
                     }
                     notes_left -= 1;
-                    let mut note = format!("  \u{25b8} {}", a.text);
+                    // annotations-fold-visual: the note row's text is now the
+                    // BARE note content — the old `  ▸ ` text prefix is gone
+                    // (the tree-line's diagonal, drawn by the canvas at cell
+                    // 0, carries the "this is a note" meaning now).
+                    let mut note = a.text.clone();
                     if a.orphaned {
                         note.push_str(" (orphaned)");
                     }
@@ -423,40 +429,19 @@ impl AppStore {
         out
     }
 
-    /// `C-c a h` (annotations-render-fold): hide the inline annotation note
-    /// rows (all of them — the fold is global, not per-annotation; `C-c a l`
-    /// is the per-note navigation path). The margin indicators stay, in
-    /// their folded state. No-op outside the buffer view (M-x reachability).
-    pub fn annotate_hide(&mut self) {
-        if self.top_view() != ViewId::Buffer {
-            return;
-        }
-        self.show_note_rows = false;
-        self.minibuffer_message("note rows: hidden");
-    }
-
-    /// `C-c a s` (annotations-render-fold): show the inline annotation note
-    /// rows again (the inverse of `annotate_hide`).
-    pub fn annotate_show(&mut self) {
-        if self.top_view() != ViewId::Buffer {
-            return;
-        }
-        self.show_note_rows = true;
-        self.minibuffer_message("note rows: shown");
-    }
-
-    /// The `annotate-fold` command (annotations-render-fold): the
-    /// read-only-mode fold toggle (hide ↔ show), reachable from the M-x
-    /// palette only — deliberately UNBOUND (gate P1 on this lane): crossterm
+    /// The `annotate-fold` command (annotations-render-fold / annotations-
+    /// fold-visual): the read-only-mode fold toggle (hide ↔ show), reachable
+    /// from the M-x palette only — deliberately UNBOUND (gate P1 on this
+    /// lane): crossterm
     /// 0.29 only decodes a `KeyCode::Modifier(...)` event (CSI u keycodes
     /// 57441 → `LeftShift`, 57442 → `LeftControl`, 57447 → `RightShift`)
     /// when BOTH `DISAMBIGUATE_ESCAPE_CODES` (1) and
     /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) are enabled, and iocraft 0.9.1
     /// pushes ONLY `REPORT_EVENT_TYPES` (2) — so a bare Shift press never
     /// reaches the app, on any terminal (byte-based terminals send no
-    /// bare-Shift bytes at all). `C-c a h` / `C-c a s` is the fold path.
-    /// Read-only mode only: in Edit mode a bare Shift is part of normal
-    /// text entry and must never fire the fold.
+    /// bare-Shift bytes at all). `C-c a h` (→ annotate-toggle) is the fold
+    /// path. Read-only mode only: in Edit mode a bare Shift is part of
+    /// normal text entry and must never fire the fold.
     pub fn annotate_fold(&mut self) {
         if self.top_view() != ViewId::Buffer {
             return;
@@ -468,9 +453,9 @@ impl AppStore {
     }
 
     /// Whether the inline annotation note rows are folded away (the UI's
-    /// margin indicator carries the folded state on annotated lines — the
-    /// thin-bar marker instead of the ordinary one). The inverse of the
-    /// store's `show_note_rows` fold state.
+    /// margin arrow carries the folded state on annotated lines — ▸ instead
+    /// of ▾, and the tree-line arms disappear). The inverse of the store's
+    /// `show_note_rows` fold state.
     pub fn note_rows_folded(&self) -> bool {
         !self.show_note_rows
     }

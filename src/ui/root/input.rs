@@ -20,7 +20,7 @@ use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
 /// `REPORT_EVENT_TYPES` (2) — so no such event can ever arrive, on any
 /// terminal. The mapping is a guard for a future stack that enables the
 /// flags; the mapped `Shift` code is deliberately unbound (the fold path
-/// is `C-c a h` / `C-c a s`).
+/// is the `C-c a h` toggle).
 fn code_to_app_code(code: iocraft::KeyCode) -> Option<AppKeyCode> {
     use iocraft::KeyCode as K;
     Some(match code {
@@ -139,7 +139,7 @@ mod tests {
     /// terminals send no bare-Shift bytes at all). The mapped `Shift`
     /// code is deliberately UNBOUND — pinned in
     /// `annotation_tree_bindings_pin_the_aliases_and_fold_pair` (which now
-    /// asserts the absence); the fold path is `C-c a h` / `C-c a s`.
+    /// asserts the absence); the fold path is the `C-c a h` toggle.
     #[test]
     fn bare_shift_press_maps_to_the_shift_key() {
         for code in [

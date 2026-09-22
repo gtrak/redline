@@ -1308,17 +1308,17 @@ use super::*;
         assert_eq!(s2.point_line(), 3, "click on c3's rendered row → line 3");
         s2.mouse_click_position(1, 0); // note row above c1
         assert_eq!(s2.point_line(), 1, "click on a note row → anchored line");
-        // C-c a h hides the note rows: the map collapses back to 1:1, the
-        // marker flags stay (and note_rows_folded flips — the UI's margin
-        // indicator state).
-        s2.annotate_hide();
+        // C-c a h (the toggle) hides the note rows: the map collapses back
+        // to 1:1, the marker flags stay (and note_rows_folded flips — the
+        // UI's margin-arrow state).
+        s2.annotate_toggle();
         let rows2 = s2.file_view_rows();
         assert_eq!(rows2.len(), 6, "note rows hidden");
         assert!(rows2[1].annotated && rows2[3].annotated, "markers stay");
         assert!(s2.note_rows_folded(), "fold state reads folded");
         assert_eq!(s2.file_view_total_rows(), 6);
-        // C-c a s: back.
-        s2.annotate_show();
+        // toggle again: back to shown.
+        s2.annotate_toggle();
         assert!(!s2.note_rows_folded(), "fold state reads shown");
         assert_eq!(s2.file_view_rows().len(), 8);
     }

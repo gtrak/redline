@@ -288,9 +288,10 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        // annotations-render-fold: the seed registry gained annotate-hide /
-        // annotate-show / annotate-fold (118 → 121).
-        assert_eq!(store.picker_count().0, 121);
+        // annotations-fold-visual: the seed registry now carries annotate-fold
+        // (118 → 119; annotate-hide / annotate-show were removed — the fold
+        // is a single `C-c a h` toggle → annotate-toggle).
+        assert_eq!(store.picker_count().0, 119);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -348,9 +349,10 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let mut store = store(dir.path());
         store.open_palette();
-        // annotations-render-fold: the seed registry gained annotate-hide /
-        // annotate-show / annotate-fold (118 → 121).
-        assert_eq!(store.picker_count().0, 121);
+        // annotations-fold-visual: the seed registry now carries annotate-fold
+        // (118 → 119; annotate-hide / annotate-show were removed — the fold
+        // is a single `C-c a h` toggle → annotate-toggle).
+        assert_eq!(store.picker_count().0, 119);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

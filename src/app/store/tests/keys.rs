@@ -310,15 +310,17 @@ use super::*;
     /// pinned so a later refactor cannot silently drop one: `C-c a n` reaches
     /// the SAME command as `A` (annotate — the new-annotation prompt) and
     /// `C-c a l` reaches the SAME command as the global `C-c n a`
-    /// (annotations-picker); `C-c a h` / `C-c a s` are the fold pair. Bare
+    /// (annotations-picker); `C-c a h` is the fold TOGGLE (→ annotate-toggle)
+    /// and `C-c a s` is REMOVED (the user asked for one toggle, not a pair).
+    /// Bare
     /// `SHIFT` is pinned as DELIBERATELY UNBOUND (gate P1 on this lane): a
     /// `KeyCode::Modifier` event is unreachable under our stack — crossterm
     /// 0.29 requires BOTH `DISAMBIGUATE_ESCAPE_CODES` (1) and
     /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) for it, and iocraft 0.9.1
     /// pushes only `REPORT_EVENT_TYPES` (2) — so a Shift binding could
-    /// never fire on any terminal; the fold path is `C-c a h` / `C-c a s`.
+    /// never fire on any terminal; the fold path is `C-c a h` (the toggle).
     #[test]
-    fn annotation_tree_bindings_pin_the_aliases_and_fold_pair() {
+    fn annotation_tree_bindings_pin_the_aliases_and_toggle() {
         let km = load_bindings(BUFFER_BINDINGS);
         let expect = |seq: &str, cmd: &str, why: &str| {
             assert_eq!(
@@ -328,8 +330,14 @@ use super::*;
             );
         };
         // The tree leaves.
-        expect("C-c a h", "annotate-hide", "the fold hide leaf");
-        expect("C-c a s", "annotate-show", "the fold show leaf");
+        expect("C-c a h", "annotate-toggle", "the fold TOGGLE leaf (the single fold control — reuse annotate-toggle, not a second toggle)");
+        // `C-c a s` is REMOVED: it must resolve to NOTHING (the separate
+        // show leaf is gone; the toggle at `C-c a h` is the fold path).
+        assert_eq!(
+            km.lookup(&parse_sequence("C-c a s").unwrap()),
+            None,
+            "`C-c a s` must be unbound — the separate show leaf is removed"
+        );
         // The genuine aliases: the command NAMES are the ones the
         // pre-existing bindings carry (aliasing the command, not a new one).
         let a_cmd = km
@@ -370,7 +378,7 @@ use super::*;
         // CODES` (8) are enabled, and iocraft 0.9.1 pushes only
         // `REPORT_EVENT_TYPES` (2) — so the event never arrives on any
         // terminal, byte-based or kitty-protocol. A binding that never
-        // fires is worse than none; `C-c a h` / `C-c a s` is the fold
+        // fires is worse than none; `C-c a h` (the toggle) is the fold
         // path (pinned above). This assertion is the absence pin: it
         // fails if someone re-binds SHIFT without first proving the
         // event is reachable.

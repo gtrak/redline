@@ -29,10 +29,10 @@ struct FileViewCanvasProps {
     /// line indices, or `None` when no mark is set. The store computes this
     /// from the byte range using the rope (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
-    /// annotations-render-fold: the note blocks are folded away (`C-c a h`
-    /// hid them). The annotated-line margin indicator carries this state —
-    /// the thin-bar marker instead of the ordinary one — so the fact that
-    /// an annotation exists survives the fold.
+    /// annotations-fold-visual: the note blocks are folded away (`C-c a h`
+    /// toggles them). The annotated-line margin arrow carries this state —
+    /// ▸ (folded) instead of ▾ (shown) — so the fact that an annotation
+    /// exists survives the fold.
     pub notes_folded: bool,
 }
 
@@ -104,20 +104,34 @@ impl Component for FileViewCanvas {
             if r.is_note {
                 // A virtual annotation note row (plan 005 issue 02,
                 // annotations-render-fold: the note renders directly ABOVE
-                // the anchored code row, dim and italic). The note aligns
-                // in the same 1-cell gutter as the annotated code (plan
-                // 005 issue 02b): the `\u{25b8}` sits at cell 1, not
-                // cell 0, so the visual gutter reads as one column.
-                let style = text_style_italic(t.preview.foreground);
-                let display = truncate(&r.text, w.saturating_sub(1));
+                // the anchored code row, dim and italic; it is only emitted
+                // when the note blocks are SHOWN — a fold emits no note rows
+                // at all). The row carries the 2-branch tree-line's UP arm:
+                // the diagonal (\u{2571} "╱") at cell 0 slants up from the
+                // code row's ▾ junction to the note, and the note text
+                // begins at cell 2 — the SAME column the annotated code row's
+                // text begins at — so the note and the code read as the two
+                // aligned arms of one fork.
+                canvas.set_text(
+                    0,
+                    row as isize,
+                    "\u{2571}",
+                    text_style(t.preview.foreground, false, false),
+                );
+                let note_style = text_style_italic(t.preview.foreground);
+                let display = truncate(&r.text, w.saturating_sub(2));
                 if !display.is_empty() {
-                    canvas.set_text(1, row as isize, &display, style);
+                    canvas.set_text(2, row as isize, &display, note_style);
                 }
             } else {
-                // plan 005 issue 02b: annotated lines get a 1-cell left
-                // gutter (the marker at cell 0); code starts at
-                // cell 1. Non-annotated lines keep starting at cell 0.
-                let gutter = if r.annotated { 1 } else { 0 };
+                // annotations-fold-visual: annotated lines get a 2-cell left
+                // gutter — the fold ARROW at cell 0 and the tree-line branch
+                // (a ─ when shown, blank when folded) at cell 1 — so the
+                // code starts at cell 2 in BOTH the folded and the shown
+                // state. That constant leading width is the no-jitter
+                // guarantee: toggling a fold must not shift the code
+                // horizontally. Non-annotated lines keep starting at cell 0.
+                let gutter = if r.annotated { 2 } else { 0 };
                 draw_line(
                     &mut canvas,
                     row as isize,
@@ -127,20 +141,21 @@ impl Component for FileViewCanvas {
                     &t,
                 );
                 if r.annotated {
-                    // annotations-render-fold: the margin indicator carries
-                    // the fold state — visible note: the ordinary bar
-                    // (\u{258e}) in the view-title face (the pre-fold
-                    // marker, unchanged); folded note: the thin bar
-                    // (\u{258f}) in the preview face — the dim face that
-                    // already carries the note text and the scroll
-                    // indicators on this same dark background, so it stays
-                    // legible without shouting. The marker is present in
-                    // BOTH states: folding must not erase the fact that
-                    // an annotation exists.
+                    // annotations-fold-visual: the margin glyph is now the
+                    // fold ARROW (the annotation indicator — the old bar
+                    // ▎/▏ is gone): ▾ (\u{25be}) in the view-title face when
+                    // the note is SHOWN (bright, the content is right there),
+                    // ▸ (\u{25b8}) in the dim preview face when FOLDED (the
+                    // face that already carries the note text and the scroll
+                    // indicators on this same dark background — legible
+                    // without shouting). The arrow is present in BOTH states:
+                    // folding must not erase the fact that an annotation
+                    // exists; an unannotated line draws nothing (guarded by
+                    // `r.annotated`).
                     let (glyph, face) = if self.notes_folded {
-                        ("\u{258f}", &t.preview)
+                        ("\u{25b8}", &t.preview)
                     } else {
-                        ("\u{258e}", &t.view_title)
+                        ("\u{25be}", &t.view_title)
                     };
                     canvas.set_text(
                         0,
@@ -148,6 +163,20 @@ impl Component for FileViewCanvas {
                         glyph,
                         text_style(face.foreground, false, false),
                     );
+                    if !self.notes_folded {
+                        // The tree-line's straight OUT arm: a horizontal ─
+                        // (\u{2500}) from the ▾ junction (cell 0) into the
+                        // real text at cell 2. Together with the note row's
+                        // diagonal this is the 2-branch fork. Absent when
+                        // folded — cell 1 stays blank, so the code's start
+                        // column (cell 2) is identical in both states.
+                        canvas.set_text(
+                            1,
+                            row as isize,
+                            "\u{2500}",
+                            text_style(t.view_title.foreground, false, false),
+                        );
+                    }
                 }
             }
         }
@@ -526,8 +555,9 @@ pub struct FileViewProps {
     /// The region's line range (start_line, end_line inclusive) in buffer
     /// line indices, or `None` when no mark is set (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
-    /// annotations-render-fold: the note blocks are folded away (the
-    /// annotated-line margin indicator switches to its thin-bar state).
+    /// annotations-fold-visual: the note blocks are folded away (the
+    /// annotated-line margin arrow switches to its folded ▸ state, the
+    /// tree-line's up/out arms disappear, and no note rows are emitted).
     pub notes_folded: bool,
 }
 
@@ -1059,5 +1089,95 @@ mod tests {
         };
         let s = app.to_string();
         assert!(s.contains("src/main.rs"), "title missing:\n{s}");
+    }
+
+    /// annotations-fold-visual: NO JITTER — the code text's start column is
+    /// IDENTICAL with the note SHOWN and FOLDED. Folded is the ▸ arrow, a
+    /// blank cell, then the code; shown is the ▾ arrow, the ─ tree-line
+    /// branch, then the code (the 2-branch fork). Both put the code at cell
+    /// 2, so a fold toggle must not shift the code horizontally. This pins
+    /// the exact trap a row-map test cannot catch. The row map is
+    /// order/column agnostic, so it would pass even if the leading width
+    /// drifted on a fold.
+    #[test]
+    fn fold_arrow_no_jitter_code_start_column_constant() {
+        use crate::app::keymap::{parse_key, Key};
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        /// The display column (in cells) where `needle` begins in its line of
+        /// the rendered frame: the cell count of everything before it.
+        fn code_start_col(frame: &str, needle: &str) -> Option<usize> {
+            let line = frame.lines().find(|l| l.contains(needle))?;
+            let byte = line.find(needle)?;
+            Some(crate::model::text_width::display_width(&line[..byte]))
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/jit.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(dir.path(), base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/jit.rs");
+        // Annotate line 0 through the public key path (A, type, RET).
+        store.key_event(parse_key("A").unwrap());
+        for c in "my note".chars() {
+            store.key_event(if c == ' ' {
+                Key::char(' ')
+            } else {
+                parse_key(&c.to_string()).unwrap()
+            });
+        }
+        store.key_event(parse_key("RET").unwrap());
+        assert!(!store.note_rows_folded(), "notes shown by default");
+
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let shown = app.to_string();
+        let shown_col = code_start_col(&shown, "fn foo() {").unwrap_or_else(|| {
+            panic!("code line not found in the SHOWN frame:\n{shown}")
+        });
+
+        // Fold: the note row goes, the arrow ▾→▸, the tree-line arms vanish —
+        // but the code's start column must NOT move.
+        {
+            let mut st = shared.lock().unwrap();
+            st.key_event(parse_key("C-c").unwrap());
+            st.key_event(parse_key("a").unwrap());
+            st.key_event(parse_key("h").unwrap());
+        }
+        let folded = app.to_string();
+        let folded_col = code_start_col(&folded, "fn foo() {").unwrap_or_else(|| {
+            panic!("code line not found in the FOLDED frame:\n{folded}")
+        });
+
+        // The no-jitter invariant: same code start column, both states.
+        assert_eq!(
+            shown_col, folded_col,
+            "JITTER: the code's start column moved on a fold toggle — shown={shown_col} folded={folded_col}\nSHOWN line:\n{shown}\nFOLDED line:\n{folded}"
+        );
+        // And it is the 2-cell gutter (arrow + branch/blank), cell 2.
+        assert_eq!(shown_col, 2, "code must start at cell 2 (the 2-cell gutter): {shown_col}");
+        // The fold actually changed something (the note row / tree-line arms
+        // are gone) — otherwise this test would be vacuous (it would pass
+        // with the two frames identical).
+        let note_present_shown = shown.lines().any(|l| l.contains("my note"));
+        let note_present_folded = folded.lines().any(|l| l.contains("my note"));
+        assert!(
+            note_present_shown && !note_present_folded,
+            "the note row must be present SHOWN and absent FOLDED (otherwise the two frames are identical and this test is vacuous): shown={note_present_shown} folded={note_present_folded}"
+        );
     }
 }
