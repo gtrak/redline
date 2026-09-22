@@ -573,6 +573,16 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    test run's output to a FILE before inspecting it** — piping a run through `tail` costs you
    the failing test's name, which is how one flake went unattributed; I made that exact mistake
    twice *after* writing this rule, so treat it as a reflex, not a reminder.
+   **A child that dies mid-step with `exitCode: 0` and `resumable: true` is an INFRASTRUCTURE
+   failure until proven otherwise — read its log for the provider's error before blaming the
+   task, the context, or memory.** Six gate runs on this repo died exactly that way; the cause
+   turned out to be `503 "Error from inference backend: The request queue is full."`, i.e. a
+   saturated model backend (this box runs a 4-rank sglang stack, so the queue fills under load).
+   The lesson is operational: **my own concurrency feeds that queue**, so running three or four
+   children at once makes every one of them likelier to be killed mid-analysis. On a box like
+   this, run **one gate at a time** and treat a 503 death as transient (resume it) rather than
+   as a signal about the work. This is also why findings must go to a file as they are made:
+   the run is not the durable artifact, the file is.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
