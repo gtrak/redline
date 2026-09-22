@@ -357,6 +357,28 @@ not wrong, only thinner: treat their rows as a signpost into git history rather
 than as evidence. Do not rewrite them unless a row starts being relied on as
 evidence.
 
+## A plausible claim about a language is still a claim — settle it with the tool
+
+Twice in one session I promoted a wrong technical claim that a gate then disproved:
+
+* a lane asserted **"Rust has no nested block comments, so `/* /* x */ spawn */` closes
+  at the first `*/`"**, and I called it a good pushback and repeated it as fact. The
+  gate ran rustc: `fn main() { /* a /* b */ c */ let x = 1; }` **compiles** (so the
+  comment ran to the *second* `*/`), and `fn main() { /* /* */ let x = 1; }` gives
+  `error[E0758]: unterminated block comment … as last nested comment starts here`.
+  **Rust block comments nest.** The residual was a real under-mask, not a non-case.
+* I attributed a set of `gate.sh full` processes to a gate and wrote the incident (and
+  a corrective steer) into the record; they were another lane's, surfaced by its
+  `pgrep`. See rule 7 above.
+
+**The rule: when a claim is about what a language/compiler does, the compiler is the
+oracle, not the reasoning.** `rustc`/`emacs --batch`/`python3 -c` settle these in one
+command, and "it compiles" beats any argument about a grammar. The same applies to
+process attribution (`ps -o cwd`/PID lineage) and to file provenance (`strings`/`.d`).
+A plausible-sounding claim from a lane, from a gate, or from **me** earns a test before
+it earns a place in a doc, a commit message, or a skill — and the cost of not testing
+it is that the next agent builds on it.
+
 ## Landing a lane includes updating the tracker
 
 **Creating a spec also includes adding its row** — this rule is not only for
