@@ -495,6 +495,16 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    it by `export CARGO_TARGET_DIR=<scratch>/target` or `touch`-ing every source
    file before building. A discrimination run against a stale binary is not
    evidence, and it fails in the *safe-looking* direction.
+7. **A gate runs its battery in the worktree it was asked to gate — and two
+   batteries in the SAME worktree are worse than two in different ones.** A gate
+   was observed running `gate.sh full` inside a *different* lane's worktree while
+   that lane ran its own battery there; they share the fixture root, the
+   `target/debug/redline` binary and the PTY serialization lock, so the result was
+   a `GATE RESULT: FAIL` that belonged to neither lane. Different worktrees at
+   least have separate fixtures; the same worktree has nothing separating them.
+   Corollary: if a lane's suite fails in a way that contradicts its report, check
+   *who else was running in that tree* before believing the failure — and never
+   report a contended result as evidence about a lane, in either direction.
 6. **The shared target dir cuts BOTH ways, and the second direction is worse.**
    A scratch copy that builds a **modified** source tree (a reverted guard, a
    neutered function) into a *lane's* target dir leaves an artefact that cargo's
