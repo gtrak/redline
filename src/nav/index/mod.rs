@@ -335,6 +335,15 @@ mod tests {
         assert_eq!(tables.bindings.len(), 1, "{:?}", tables.bindings);
         assert_eq!(tables.bindings[0].binding, "p");
         assert_eq!(tables.bindings[0].type_name, "Pt");
+        // P3-B pin (gate of ddd58aa): `name_byte` (the binding's NAME node,
+        // distinct from the `let`'s own byte) was captured with zero
+        // consumers — a local binding has no jump path that lands on it
+        // (matrix: N/A), the record carries it so a future landing path has
+        // the byte at the source. Pin the value so the capture is
+        // documented and a regression (e.g. capturing the `let` node's byte
+        // instead — 16 — instead of the name's 20) is caught here.
+        assert_eq!(tables.bindings[0].let_byte, 16, "the `let`'s own start byte");
+        assert_eq!(tables.bindings[0].name_byte, 20, "the name node's byte, not the `let`'s");
 
         // Reparse the UNCHANGED file through the refresh path: the
         // same-content shortcut must restore, not strip.
@@ -386,6 +395,48 @@ mod tests {
         refresh_in_place(root, &[path], &mut index);
         assert!(index.tables("src/point.rs").is_none());
         assert!(index.field_locations("Point", "xx").is_empty());
+    }
+
+    // ── P3-A (gate of ddd58aa): field_start_byte determinism ──
+
+    /// P3-A: two structs on ONE line declaring a same-named field — the
+    /// picker row carries only (file, line) + the field name, so the
+    /// `(file, line, name)`-keyed fallback must answer ONE column,
+    /// deterministically: the MINIMUM byte (struct A's `x`, the earliest
+    /// declaration on the line). Pre-fix this was a `find_map` over
+    /// `rust_fields.values()` — per-process-seeded `HashMap` order — so the
+    /// same input answered A's byte in some processes and B's in others
+    /// (probe-verified: 12 processes split 7/5 across 19 and 47 pre-fix,
+    /// 12/12 on 19 post-fix; a single in-process assertion cannot show a
+    /// per-process seed, it pins the rule's exact value).
+    #[test]
+    fn field_start_byte_two_structs_one_line_is_the_minimum_byte() {
+        let dir = make_project();
+        let root = dir.path();
+        std::fs::write(
+            root.join("src/duo.rs"),
+            "pub struct A { pub x: i32 } pub struct B { pub x: i32 }\n",
+        )
+        .unwrap();
+        let files = rel_files(root);
+        let index = build_index(root, &files, None);
+
+        // Both declarations are recorded under their own struct (the maps
+        // are per-struct and correct: A's `x` at byte 19, B's at 47).
+        assert_eq!(
+            index.field_locations("A", "x"),
+            vec![FieldLocation { file: "src/duo.rs".into(), line: 0, start_byte: 19 }]
+        );
+        assert_eq!(
+            index.field_locations("B", "x"),
+            vec![FieldLocation { file: "src/duo.rs".into(), line: 0, start_byte: 47 }]
+        );
+        // The picker fallback answers the minimum (earliest) byte — never
+        // the other struct's.
+        assert_eq!(index.field_start_byte("src/duo.rs", 0, "x"), Some(19));
+        // Misses still degrade to None (no invented column upstream).
+        assert_eq!(index.field_start_byte("src/duo.rs", 1, "x"), None);
+        assert_eq!(index.field_start_byte("src/duo.rs", 0, "nope"), None);
     }
 
     // ── 010-04: the name-keyed trait map (find-implementations) ──

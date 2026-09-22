@@ -141,9 +141,13 @@ pub struct LocalBinding {
     /// `let` before the use site wins).
     pub let_byte: usize,
     /// Byte offset of the binding's name node (the query's `@bnd_name`
-    /// identifier — the table's data source for a landing on the binding
-    /// itself: a line-only record degrades to a col-0 landing, the same
-    /// shape as the pre-fix `StructField`/`ImplMethod`).
+    /// identifier). No current jump path lands on a binding itself (a
+    /// binding only resolves the receiver's written-down type — the
+    /// pre-step lands on the FIELD/METHOD cell, which carries its own
+    /// byte), so this is carried for a future landing path, source-side,
+    /// per the matrix (issue-all-symbol-jumps: the Rust tables carry the
+    /// name node's start byte); pinned by
+    /// `rust_tables_bindings_only_same_content_refresh_keeps_bindings`.
     pub name_byte: usize,
 }
 

@@ -139,17 +139,27 @@ impl SymbolIndex {
     }
 
     /// (jump-column-pty) The name-node start byte of the struct field
-    /// `field` (of ANY struct — the field-table map is keyed struct-first,
-    /// and the picker's RET row carries only the field name + (file, line))
-    /// declared at `(file, line)` — the picker-landing fallback for a field
-    /// row (fields are not outline symbols). `None` when no field of that
-    /// name is recorded at that (file, line) — the caller degrades to col 0.
+    /// `field` declared at `(file, line)` — the picker-landing fallback for
+    /// a field row (fields are not outline symbols). The field-table map is
+    /// keyed struct-first and the picker's RET row carries only the field
+    /// name + (file, line) (no struct), so when SEVERAL structs declare a
+    /// same-named field on the SAME line this answers the MINIMUM byte —
+    /// the earliest declaration on that line (the same "land on the first"
+    /// convention the outline path applies to a line hosting the same name
+    /// twice). Deterministic by construction: the minimum over the matching
+    /// entries never depends on the map's iteration order (pre-fix this was
+    /// `find_map` over `rust_fields.values()` — a per-process-seeded
+    /// `HashMap` order, so the same input answered different columns in
+    /// different processes).
+    /// `None` when no field of that name is recorded at that (file, line)
+    /// — the caller degrades to col 0.
     pub fn field_start_byte(&self, file: &str, line: usize, field: &str) -> Option<usize> {
         self.rust_fields
             .values()
             .filter_map(|by_field| by_field.get(field))
             .filter_map(|by_file| by_file.get(file))
-            .find_map(|locs| locs.iter().find(|&&(l, _)| l == line).map(|&(_, b)| b))
+            .filter_map(|locs| locs.iter().find(|&&(l, _)| l == line).map(|&(_, b)| b))
+            .min()
     }
 
     /// (010-04) Every `impl <trait_name> for <Type>` location in the
