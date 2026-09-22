@@ -123,11 +123,15 @@ impl AppStore {
     /// leading `*/` whose prefix is plain comment text). It does NOT cover a
     /// `//` or `#` line comment (deliberately, matching base) nor a
     /// string/comment that BEGAN on a prior line (a multi-line string
-    /// continuation, for example). So a mention the scan UNDER-masks can still
-    /// be returned — a WRONG column, not col 0; an OVER-mask that covers the
-    /// definition (the name occurrence the landing would use) yields `None` →
-    /// col 0, whether it ends mid-line or runs to the line's end (an
-    /// unterminated construct).
+    /// continuation, for example), and a CONTINUATION whose prefix holds a
+    /// `'` or `"` (prose punctuation, e.g. `it's spawn */ …`) — the proxy
+    /// declines that, so the leading mention can be returned. So a mention the
+    /// scan UNDER-masks can still be returned — a WRONG column, not col 0; an
+    /// OVER-mask that covers the definition (the name occurrence the landing
+    /// would use) yields `None` → col 0, whether it ends mid-line or runs to
+    /// the line's end (an unterminated construct) — PROVIDED no earlier
+    /// occurrence sits outside the mask, in which case that earlier one is
+    /// returned instead.
     pub(in crate::app::store) fn first_word_column(line_text: &str, item: &str) -> Option<usize> {
         if item.is_empty() {
             return None;
