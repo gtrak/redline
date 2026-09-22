@@ -530,6 +530,14 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    both sides wait on each other the pair livelocks. The check is a single
    `pgrep -af 'tools/gate.sh'`; if it shows no **full battery**, proceed (and if one
    appears mid-run, note the contention in the report rather than restarting).
+   **Beware the SELF-MATCH: the polling command line contains the pattern.** A lane
+   polling `pgrep -f 'tools/gate.sh'` inside its own shell matches *its own process*, so
+   it can never observe a clear window and burns the whole bounded loop — observed three
+   times in one session, once for ~20 minutes after the battery it awaited had already
+   exited. Match something your own command cannot contain (`pgrep -af 'timeout 900
+   tools/gate.sh'`), check the specific PID you already know, or simply look at `ps`.
+   Corollary: a wait whose condition can never hold is worse than no wait, because it
+   silently costs the budget instead of failing.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
