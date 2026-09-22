@@ -583,6 +583,20 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    this, run **one gate at a time** and treat a 503 death as transient (resume it) rather than
    as a signal about the work. This is also why findings must go to a file as they are made:
    the run is not the durable artifact, the file is.
+   **A supported keycode is not a REACHABLE event — read the codec's enabling preconditions, not
+   just its decode table.** A lane bound bare `SHIFT` as a fold toggle and asserted it "fires on
+   kitty, WezTerm, foot, Ghostty and kin". The decode table does map keycodes 57441/57447 to
+   `Modifier(LeftShift/RightShift)` — but crossterm 0.29's own docs for `KeyCode::Modifier` say
+   those keys "can only be read if **both** `DISAMBIGUATE_ESCAPE_CODES` and
+   `REPORT_ALL_KEYS_AS_ESCAPE_CODES` have been enabled", and iocraft 0.9.1 pushes **only**
+   `REPORT_EVENT_TYPES`. So the binding could never fire on **any** terminal, kitty included. The
+   lane's tests were honest and useless: one fed a synthetic `Modifier` event (proving the
+   *handler*), another checked the table resolves the name (proving *wiring*) — neither is
+   reachability. Two rules follow: (1) when a framework owns the terminal, check which flags it
+   actually pushes before binding anything exotic; (2) a handler test with a synthetic event plus
+   a keymap test over the table **cannot** establish reachability — that needs a PTY drive or
+   evidence about what the terminal can send. Same family as `C-/` decoding to `C-7`: the binding
+   looked present on every screen that had not read the codec.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
