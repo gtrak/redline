@@ -306,3 +306,88 @@ use super::*;
         );
     }
 
+    /// annotations-render-fold: the `C-c a` tree and its genuine aliases are
+    /// pinned so a later refactor cannot silently drop one: `C-c a n` reaches
+    /// the SAME command as `A` (annotate — the new-annotation prompt) and
+    /// `C-c a l` reaches the SAME command as the global `C-c n a`
+    /// (annotations-picker); `C-c a h` / `C-c a s` are the fold pair. Bare
+    /// `SHIFT` is pinned as DELIBERATELY UNBOUND (gate P1 on this lane): a
+    /// `KeyCode::Modifier` event is unreachable under our stack — crossterm
+    /// 0.29 requires BOTH `DISAMBIGUATE_ESCAPE_CODES` (1) and
+    /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) for it, and iocraft 0.9.1
+    /// pushes only `REPORT_EVENT_TYPES` (2) — so a Shift binding could
+    /// never fire on any terminal; the fold path is `C-c a h` / `C-c a s`.
+    #[test]
+    fn annotation_tree_bindings_pin_the_aliases_and_fold_pair() {
+        let km = load_bindings(BUFFER_BINDINGS);
+        let expect = |seq: &str, cmd: &str, why: &str| {
+            assert_eq!(
+                km.lookup(&parse_sequence(seq).unwrap()),
+                Some(Lookup::Command(cmd)),
+                "`{seq}` must bind `{cmd}` ({why})"
+            );
+        };
+        // The tree leaves.
+        expect("C-c a h", "annotate-hide", "the fold hide leaf");
+        expect("C-c a s", "annotate-show", "the fold show leaf");
+        // The genuine aliases: the command NAMES are the ones the
+        // pre-existing bindings carry (aliasing the command, not a new one).
+        let a_cmd = km
+            .lookup(&parse_sequence("A").unwrap())
+            .and_then(|l| match l { Lookup::Command(c) => Some(c), _ => None })
+            .expect("`A` must still bind its command");
+        assert_eq!(
+            km.lookup(&parse_sequence("C-c a n").unwrap()),
+            Some(Lookup::Command(a_cmd)),
+            "C-c a n must reach the SAME command as A (new-annotation prompt)"
+        );
+        assert_eq!(a_cmd, "annotate", "A must bind annotate");
+        let global = load_bindings(GLOBAL_BINDINGS);
+        let picker_cmd = global
+            .lookup(&parse_sequence("C-c n a").unwrap())
+            .and_then(|l| match l { Lookup::Command(c) => Some(c), _ => None })
+            .expect("the global C-c n a must bind its command");
+        assert_eq!(
+            km.lookup(&parse_sequence("C-c a l").unwrap()),
+            Some(Lookup::Command(picker_cmd)),
+            "C-c a l must reach the SAME command as C-c n a (annotations picker)"
+        );
+        assert_eq!(picker_cmd, "annotations-picker", "C-c n a must bind annotations-picker");
+        // `C-c a` is now a PREFIX, not a command (the old toggle leaf is
+        // gone — the engine forbids a command on a strict prefix of a longer
+        // binding). `C-c` alone stays pending; the global `C-c n a` is
+        // still reachable through the engine's dead-end fallthrough.
+        assert_eq!(km.lookup(&parse_sequence("C-c a").unwrap()), Some(Lookup::Pending));
+        assert!(!km.is_prefix(&parse_sequence("C-c a h").unwrap()), "C-c a h is a complete leaf");
+        let engine = global.lookup(&parse_sequence("C-c n a").unwrap());
+        assert_eq!(engine, Some(Lookup::Command("annotations-picker")));
+        // Bare SHIFT: deliberately UNBOUND (gate P1). A binding was
+        // added here once and removed because it could never fire:
+        // crossterm 0.29 decodes a bare-Shift press (CSI u keycodes
+        // 57441 → `LeftShift`, 57447 → `RightShift`; 57442 is
+        // `LeftControl`) to a `KeyCode::Modifier` event only when BOTH
+        // `DISAMBIGUATE_ESCAPE_CODES` (1) and `REPORT_ALL_KEYS_AS_ESCAPE_
+        // CODES` (8) are enabled, and iocraft 0.9.1 pushes only
+        // `REPORT_EVENT_TYPES` (2) — so the event never arrives on any
+        // terminal, byte-based or kitty-protocol. A binding that never
+        // fires is worse than none; `C-c a h` / `C-c a s` is the fold
+        // path (pinned above). This assertion is the absence pin: it
+        // fails if someone re-binds SHIFT without first proving the
+        // event is reachable.
+        let shift = parse_sequence("SHIFT").unwrap();
+        assert_eq!(
+            km.lookup(&shift),
+            None,
+            "bare SHIFT must be deliberately unbound (unreachable event — see doc)"
+        );
+        assert!(!km.is_prefix(&shift), "SHIFT must not prefix any binding");
+        // The app-level Key shape stays pinned (the `to_app_key` handler
+        // still maps a synthetic `Modifier(LeftShift)`/`Modifier(RightShift)`
+        // event to it, as an inert guard — pinned in ui/root/input.rs's
+        // `bare_shift_press_maps_to_the_shift_key`): code Shift, no modifier
+        // flags (the code IS the modifier — the event's SHIFT flag is not
+        // copied, the Char case rule).
+        assert_eq!(shift, vec![Key::new(KeyCode::Shift)]);
+        assert!(!shift[0].ctrl && !shift[0].alt && !shift[0].shift);
+    }
+

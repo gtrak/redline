@@ -899,10 +899,11 @@ def list_view_cup_checks():
 
 
 def annotation_gutter_checks():
-    """plan 005 issue 02b: the marker has its own 1-cell gutter
-    (annotated code starts at cell 1, marker at cell 0), the note row's
-    arrow aligns in the same gutter, the cursor column adds the gutter on
-    annotated lines, and note rows do not push the point's line off-canvas.
+    """plan 005 issue 02b + annotations-render-fold: the marker has its own
+    1-cell gutter (annotated code starts at cell 1, marker at cell 0), the
+    note row's arrow aligns in the same gutter ABOVE the anchored code row,
+    the cursor column adds the gutter on annotated lines, and note rows do
+    not push the point's line off-canvas.
 
     Legs:
       * Open a >viewport file, `A` on line 0, C-n to the window bottom:
@@ -910,7 +911,10 @@ def annotation_gutter_checks():
       * Assert the annotated line renders its source text VERBATIM after
         the gutter (full-string assertion, not prefix).
       * Cursor-column leg: the hardware cursor on an annotated line sits ON
-        the character (gutter + display col), not one cell left.
+        the character (gutter + display col), not one cell left — and the
+        note row ABOVE the code row moved the cursor's CUP row down by 1
+        when it committed (the CUP stream is consistent with the note
+        above).
       * All-annotated canvas FILL (02c): a 25-line file with every line
         annotated in the 21-row viewport emits ~20 of 21 rows (10 code +
         10 note — the LARGEST fitting span), not a handful of non-blank
@@ -963,21 +967,30 @@ def annotation_gutter_checks():
     rec("annotated line: marker at cell 0, code at cell 1 (full-string)",
         gutter_correct,
         f"row starts with marker+code: {gutter_correct}")
+    # annotations-render-fold: the note row is directly ABOVE the marker
+    # row (the note is the code row's header, not its trailer).
+    marker_row_idx = next((r for r in range(1, s.rows - 2)
+                           if "\u258e" in s.row_text(r)), None)
+    note_above = marker_row_idx is not None and marker_row_idx > 1 and (
+        "\u25b8 regression check" in s.row_text(marker_row_idx - 1)
+    )
+    rec("note row sits directly ABOVE the annotated code row",
+        note_above, f"marker_row={marker_row_idx}")
 
     # ── Leg 2: cursor column on an annotated line adds the gutter ──────
     # Point is at line 0, col 0 (after the annotation commit, the point
-    # stays on the anchored line). The cursor should be at terminal col
-    # 1 (gutter) + 0 (display col) = 1 (0-based) = 2 (1-based).
+    # stays on the anchored line). Before the commit the CUP was at (2, 2)
+    # (1-based); the note row ABOVE the code row pushed the code row down
+    # by 1, so the CUP row is now 3 — the CUP stream is consistent with
+    # the note above. Terminal col: gutter(1) + display_col(0) = 1
+    # (0-based) = 2 (1-based).
     r, c = do("C-a", 0.6)
-    # Terminal row: 1 (title) + 0 (banner) + 0 (content row 0) = 1 (0-based)
-    # = 2 (1-based). Terminal col: gutter(1) + display_col(0) = 1 (0-based)
-    # = 2 (1-based).
-    rec("cursor on annotated line: CUP col = gutter + 0 (1-based col 2)",
-        (r, c) == (2, 2), f"cup=({r},{c}) want (2,2)")
+    rec("cursor on annotated line: CUP row moved +1 (note above), col = gutter + 0",
+        (r, c) == (3, 2), f"cup=({r},{c}) want (3,2)")
     # C-f x3: display col 3, terminal col = 1 + 3 = 4 (0-based) = 5 (1-based).
     r, c = do("C-f C-f C-f")
     rec("cursor on annotated line: C-f x3 → CUP col = gutter + 3 (1-based col 5)",
-        (r, c) == (2, 5), f"cup=({r},{c}) want (2,5)")
+        (r, c) == (3, 5), f"cup=({r},{c}) want (3,5)")
 
     # ── Leg 3: note rows do not push the point off-canvas ─────────────
     # 30-line file, viewport 21. Note on line 0 (already created). C-n x20
@@ -1016,30 +1029,41 @@ def annotation_gutter_checks():
     rec("C-n x20: C-p,C-n round-trips to the same row (point stable)",
         r3 == r, f"original row={r}, after C-p row={r2}, after C-n row={r3}")
 
-    # ── Leg 4: C-c a toggling does not change the code row's text ──────
-    # Hide note rows: the marker stays, the code text is unchanged.
+    # ── Leg 4: C-c a h / C-c a s (annotations-render-fold): hide → the
+    # note row goes and the margin indicator folds to the thin bar (▏);
+    # show → the note row and the ordinary marker (▎) come back. The code
+    # row's text is unchanged in both states.
     s.key("M-<", 0.8)  # go to top so the annotated line is visible
     s._read(0.5, quiet=0.15)
-    s.key("C-c a", 0.6)
-    row_hidden = None
+    s.key("C-c a h", 0.6)
+    folded_row = None
+    note_row_gone = True
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
-        if "\u258e" in t:
-            row_hidden = t
+        if "\u25b8 regression check" in t:
+            note_row_gone = False
+        if "\u258f" in t:
+            folded_row = t
             break
-    code_unchanged_hidden = row_hidden is not None and "fn target_one() {}" in row_hidden
-    s.key("C-c a", 0.6)
+    hidden_msg = "note rows: hidden" in s.row_text(s.rows - 2)
+    code_unchanged_hidden = folded_row is not None and "fn target_one() {}" in folded_row
+    s.key("C-c a s", 0.6)
     s.cup_settle(s._read(0.4, quiet=0.15))
-    row_shown = None
+    shown_row = None
+    note_row_back = False
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
         if "\u258e" in t:
-            row_shown = t
-            break
-    code_unchanged_shown = row_shown is not None and "fn target_one() {}" in row_shown
-    rec("C-c a toggle: code row text unchanged (note rows hidden/shown)",
-        code_unchanged_hidden and code_unchanged_shown,
-        f"hidden={code_unchanged_hidden} shown={code_unchanged_shown}")
+            shown_row = t
+        if "\u25b8 regression check" in t:
+            note_row_back = True
+    shown_msg = "note rows: shown" in s.row_text(s.rows - 2)
+    code_unchanged_shown = shown_row is not None and "fn target_one() {}" in shown_row
+    rec("C-c a h / C-c a s: fold keeps the code row, marker carries the state",
+        hidden_msg and code_unchanged_hidden and note_row_gone
+        and shown_msg and note_row_back and code_unchanged_shown,
+        f"hidden-msg={hidden_msg} folded-marker={code_unchanged_hidden} "
+        f"note-gone={note_row_gone} shown-msg={shown_msg} note-back={note_row_back}")
 
     # ── Leg 5: all-annotated canvas FILL (02c) ────────────────────
     # plan 005 issue 02c: the 02b floor (span = 1) left a 25-line
@@ -1084,7 +1108,7 @@ def annotation_gutter_checks():
         f"title={title!r} markers={len(marker_rows)} notes={len(note_rows)} "
         f"filled={len(filled)}")
     # The point's line (line 0, "dense line 0") is drawn with its marker
-    # and its note row underneath.
+    # and its note row directly above it.
     point_drawn = any("dense line 0" in t and "\u258e" in t for t in canvas_rows)
     rec("all-annotated fill: point's line (line 0) drawn with marker",
         point_drawn,

@@ -9,8 +9,18 @@ use crate::app::keymap::{Key as AppKey, KeyCode as AppKeyCode};
 /// conversion; `app/` has no iocraft dependency). Codes with no app
 /// equivalent (`F(*)`, `Insert`, `Null`, `CapsLock`, `ScrollLock`,
 /// `NumLock`, `PrintScreen`, `Pause`, `Menu`, `KeypadBegin`,
-/// `Media(*)`, `Modifier(*)`) map to `None` so the event is dropped
-/// instead of fabricating a keypress.
+/// `Media(*)`, and the non-Shift `Modifier(*)`) map to `None` so the
+/// event is dropped instead of fabricating a keypress. The exception
+/// (annotations-render-fold): a bare Shift press — `Modifier(LeftShift)`
+/// (crossterm CSI u keycode 57441) / `Modifier(RightShift)` (57447; note
+/// 57442 is `LeftControl`) — maps to the app's `Shift` code. INERT under
+/// our stack: crossterm 0.29 only decodes a `Modifier(...)` event when
+/// BOTH `DISAMBIGUATE_ESCAPE_CODES` (1) and `REPORT_ALL_KEYS_AS_ESCAPE_
+/// CODES` (8) are enabled, and iocraft 0.9.1 pushes only
+/// `REPORT_EVENT_TYPES` (2) — so no such event can ever arrive, on any
+/// terminal. The mapping is a guard for a future stack that enables the
+/// flags; the mapped `Shift` code is deliberately unbound (the fold path
+/// is `C-c a h` / `C-c a s`).
 fn code_to_app_code(code: iocraft::KeyCode) -> Option<AppKeyCode> {
     use iocraft::KeyCode as K;
     Some(match code {
@@ -29,6 +39,11 @@ fn code_to_app_code(code: iocraft::KeyCode) -> Option<AppKeyCode> {
         K::Tab => AppKeyCode::Tab,
         K::BackTab => AppKeyCode::BackTab,
         K::Esc => AppKeyCode::Escape,
+        // annotations-render-fold: the bare Shift press (either side).
+        // Inert under the current stack (no `Modifier(...)` event can
+        // arrive — see the function doc); the mapped code is unbound.
+        K::Modifier(iocraft::ModifierKeyCode::LeftShift)
+        | K::Modifier(iocraft::ModifierKeyCode::RightShift) => AppKeyCode::Shift,
         _ => return None,
     })
 }
@@ -46,8 +61,11 @@ pub(crate) fn to_app_key(key: &KeyEvent) -> Option<AppKey> {
     app_key.ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     app_key.alt = key.modifiers.contains(KeyModifiers::ALT);
     // Char codes already self-encode case; crossterm 0.29 sets SHIFT on
-    // every uppercase char, so copy it only for non-Char codes.
-    if !matches!(code, AppKeyCode::Char(_)) {
+    // every uppercase char, so copy it only for non-Char codes. The bare
+    // Shift code is the same rule: the code IS the event, and no modifier
+    // flags ride along (the code is deliberately unbound, so a flag could
+    // only make a future binding unreachable).
+    if !matches!(code, AppKeyCode::Char(_) | AppKeyCode::Shift) {
         app_key.shift = key.modifiers.contains(KeyModifiers::SHIFT);
     }
     Some(app_key)
@@ -78,7 +96,9 @@ mod tests {
     }
 
     /// Carry-over #1: unmapped iocraft key codes are dropped (None)
-    /// instead of fabricating a `Space` keypress.
+    /// instead of fabricating a `Space` keypress. Bare Shift is the
+    /// deliberate exception (annotations-render-fold) — pinned in
+    /// `bare_shift_press_maps_to_the_shift_key` below.
     #[test]
     fn unmapped_key_codes_are_dropped() {
         for code in [
@@ -94,13 +114,53 @@ mod tests {
             KeyCode::Menu,
             KeyCode::KeypadBegin,
             KeyCode::Media(iocraft::MediaKeyCode::Play),
-            KeyCode::Modifier(iocraft::ModifierKeyCode::LeftShift),
+            KeyCode::Modifier(iocraft::ModifierKeyCode::LeftControl),
+            KeyCode::Modifier(iocraft::ModifierKeyCode::RightAlt),
         ] {
             assert!(to_app_key(&press(code)).is_none(), "{code:?} must drop");
         }
         // Mapped codes still convert.
         assert!(to_app_key(&press(KeyCode::Esc)).is_some());
         assert!(to_app_key(&press(KeyCode::Char('a'))).is_some());
+    }
+
+    /// annotations-render-fold, HANDLER test — what `to_app_key` does IF a
+    /// `Modifier(LeftShift)`/`Modifier(RightShift)` event ever arrives. It
+    /// is NOT evidence the key works: under our stack such an event can
+    /// never arrive. The chain of fact (verified against source, gate P1):
+    /// crossterm 0.29 decodes the bare-Shift CSI u keycodes (57441 →
+    /// `LeftShift`, 57447 → `RightShift`; 57442 is `LeftControl`) to a
+    /// `KeyCode::Modifier` event ONLY when BOTH
+    /// `DISAMBIGUATE_ESCAPE_CODES` (1) and `REPORT_ALL_KEYS_AS_ESCAPE_CODES`
+    /// (8) are enabled; iocraft 0.9.1 pushes only `REPORT_EVENT_TYPES`
+    /// (2) — conditionally, when the startup keyboard-enhancement probe
+    /// passes. Neither required flag is ever enabled, so a bare Shift
+    /// press produces no app keypress on ANY terminal (byte-based
+    /// terminals send no bare-Shift bytes at all). The mapped `Shift`
+    /// code is deliberately UNBOUND — pinned in
+    /// `annotation_tree_bindings_pin_the_aliases_and_fold_pair` (which now
+    /// asserts the absence); the fold path is `C-c a h` / `C-c a s`.
+    #[test]
+    fn bare_shift_press_maps_to_the_shift_key() {
+        for code in [
+            KeyCode::Modifier(iocraft::ModifierKeyCode::LeftShift),
+            KeyCode::Modifier(iocraft::ModifierKeyCode::RightShift),
+        ] {
+            // The synthetic event a terminal WOULD report if both required
+            // enhancement flags were ever enabled (the CSI u keycode + the
+            // terminal's modifier state).
+            let mut ev = KeyEvent::new(KeyEventKind::Press, code);
+            ev.modifiers = KeyModifiers::SHIFT;
+            let app_key = to_app_key(&ev).unwrap();
+            assert_eq!(
+                app_key,
+                crate::app::keymap::parse_sequence("SHIFT").unwrap()[0],
+                "{code:?} must map to the app-level key of the `SHIFT` token"
+            );
+            assert_eq!(app_key.code, crate::app::keymap::KeyCode::Shift);
+            assert!(!app_key.ctrl && !app_key.alt && !app_key.shift,
+                "the code IS the modifier: no flags may ride along");
+        }
     }
 
     /// Fix 3 lock-in: crossterm 0.29 sets SHIFT on every uppercase char.

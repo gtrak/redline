@@ -32,6 +32,20 @@ pub enum KeyCode {
     /// Named by `"SPC"` in emacs notation; also produced by Shift+Space.
     #[default]
     Space,
+    /// A bare Shift press. Named by `"SHIFT"` in emacs notation.
+    /// UNREACHABLE under our terminal stack (gate P1, annotations-
+    /// render-fold): crossterm 0.29 only decodes a `Modifier(...)` event
+    /// (CSI u keycodes 57441 → `LeftShift`, 57442 → `LeftControl`,
+    /// 57447 → `RightShift`) when BOTH `DISAMBIGUATE_ESCAPE_CODES` (1)
+    /// and `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) are enabled, and
+    /// iocraft 0.9.1 pushes ONLY `REPORT_EVENT_TYPES` (2) — so no bare-
+    /// Shift event can ever arrive, on any terminal (byte-based terminals
+    /// send no bare-Shift bytes at all). The input handler maps a
+    /// `Modifier(LeftShift)`/`Modifier(RightShift)` event to this code
+    /// (inert today; a guard for a future stack that enables the flags),
+    /// and this code is deliberately UNBOUND — `C-c a h` / `C-c a s` is
+    /// the fold path.
+    Shift,
 }
 
 impl fmt::Display for KeyCode {
@@ -53,6 +67,7 @@ impl fmt::Display for KeyCode {
             KeyCode::BackTab => "ISO-Backtab",
             KeyCode::Escape => "ESC",
             KeyCode::Space => "SPC",
+            KeyCode::Shift => "SHIFT",
         };
         f.write_str(name)
     }
@@ -217,6 +232,7 @@ fn parse_key_code(name: &str, key: &Key, token: &str) -> Result<Key, ParseKeyErr
     let code = match name {
         "RET" => KeyCode::Enter,
         "SPC" => KeyCode::Space,
+        "SHIFT" => KeyCode::Shift,
         "TAB" => KeyCode::Tab,
         "ESC" | "ESCAPE" => KeyCode::Escape,
         "UP" => KeyCode::Up,
@@ -485,6 +501,16 @@ mod tests {
         assert_eq!(parse_sequence("ESC").unwrap(), vec![Key::new(KeyCode::Escape)]);
         assert_eq!(parse_sequence("UP").unwrap(), vec![Key::up()]);
         assert_eq!(parse_sequence("DOWN").unwrap(), vec![Key::down()]);
+        // The bare-Shift token parses to the Shift code with no modifier
+        // flags (the code IS the modifier; the terminal event's SHIFT
+        // modifier is not copied for it, the Char case-fold rule). `S-`
+        // stays the shift-modifier prefix on other keys — `SHIFT` is a
+        // complete key name, not a dangling prefix. (Parsing `SHIFT` is a
+        // notation capability, not reachability: the code is deliberately
+        // unbound — no bare-Shift event can arrive under our stack, see the
+        // `KeyCode::Shift` doc.)
+        assert_eq!(parse_sequence("SHIFT").unwrap(), vec![Key::new(KeyCode::Shift)]);
+        assert!(parse_sequence("S-").is_err(), "dangling S- prefix must stay an error");
     }
 
     #[test]
@@ -684,11 +710,18 @@ mod tests {
             );
         }
 
-        // Per-view maps: 123 total bindings across 9 views (121 minus the
+        // Per-view maps: 126 total bindings across 9 views (121 minus the
         // 015-03 `C-d` freeing from the Buffer view → 120, then plan 016
         // issue 01 added `C-x u` and `C-/` → undo to the Buffer view, a net
         // +2 → 122, then plan 016 issue 02 added `C-7` → undo (the byte-based
-        // terminal's Ctrl+/), a net +1 → 123).
+        // terminal's Ctrl+/), a net +1 → 123, then annotations-render-fold
+        // replaced the `C-c a` → annotate-toggle leaf with the `C-c a` tree
+        // (`C-c a n`/`h`/`s`/`l`), a net +3 → 126. A 5th leaf — bare `SHIFT`
+        // → annotate-fold — was added and then REMOVED (gate P1: a
+        // `KeyCode::Modifier` event is unreachable — crossterm requires both
+        // DISAMBIGUATE_ESCAPE_CODES and REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        // iocraft 0.9.1 pushes only REPORT_EVENT_TYPES — so the binding
+        // could never fire on any terminal). Net +3 stands.
         let views: &[(&str, &[(&str, &str)])] = &[
             ("Buffer", BUFFER_BINDINGS),
             ("BufferList", BUFFER_LIST_BINDINGS),
@@ -701,7 +734,7 @@ mod tests {
             ("Search", SEARCH_BINDINGS),
         ];
         let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
-        assert_eq!(total_per_view, 123, "total per-view bindings must be 123");
+        assert_eq!(total_per_view, 126, "total per-view bindings must be 126");
         for (name, table) in views {
             let km = load_bindings(table);
             assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");

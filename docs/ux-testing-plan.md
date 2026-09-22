@@ -572,7 +572,7 @@ level where they live).
 | editable-keys | input encoding: multi-key sequences + self-insert through the REAL terminal encoder (C-x g dispatch vs self-insert) | `unit_flow_editable_keys` |
 | U-H2 search | in-flight cancel: C-g must land while a real rg walk over 6000 files is in flight (wall-clock race) | `search_c_g_cancels_without_closing (store.rs — the state half; the timing half stays in the kept PTY record)` |
 | U-BHN | banner debounce: the hint only lands after the watcher cadence (repaint-race class) | `changed_on_disk_hint_plain_says_g / changed_on_disk_hint_editable_says_reload_buffer (src/ui/file_view.rs — the state half; the timing half is the kept PTY record)` |
-| annotation suite (create/toggle/crossing/notes-editable/drift/orphan/delete/cu-scroll) | ann-delete's transient-echo / repaint race + the raw space-byte encoding through the PTY encoder | `unit_flow_ann_*` (8 twins) |
+| annotation suite (create/toggle/crossing/fold/aliases/notes-editable/drift/orphan/delete/cu-scroll) | ann-delete's transient-echo / repaint race + the raw space-byte encoding through the PTY encoder | `unit_flow_ann_*` (10 twins; fold + aliases are the annotations-render-fold additions) |
 | U-G6 | watcher SUSPENDED: a disk edit produces no reload — the gate is at the watcher source, which the store-level apply path deliberately bypasses | `unit_flow_g6` |
 | U-G1 | watcher delivery smoke: disk append → repaint + scroll anchor (one end-to-end watcher leg) | `unit_flow_g1` |
 | quit-prompt-y | quit lifecycle: prompt → y → on-disk write → exit 0 (process lifecycle) | `unit_flow_quit_prompt_*` (5 twins) |

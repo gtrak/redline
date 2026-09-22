@@ -52,7 +52,8 @@ pub(super) struct Snapshot {
     pub(super) dirty: Option<DirtyCounts>,
     // File view (issue 03).
     /// The pre-computed rendered rows: code rows + the virtual annotation
-    /// note rows (plan 005 issue 02). Each row carries its buffer-line
+    /// note rows (plan 005 issue 02 — the notes render ABOVE their anchored
+    /// code rows, annotations-render-fold). Each row carries its buffer-line
     /// index; the cursor/click math translate through them.
     pub(super) file_view_rows: Vec<FileViewRow>,
     /// The total number of rendered rows for the buffer (canvas bottom
@@ -62,6 +63,10 @@ pub(super) struct Snapshot {
     pub(super) file_view_top_line: usize,
     pub(super) file_view_total_lines: usize,
     pub(super) file_view_viewport_lines: usize,
+    // annotations-render-fold: the note blocks are folded away (the
+    // annotated-line margin indicator carries the state — the thin-bar
+    // marker instead of the ordinary one).
+    pub(super) file_view_notes_folded: bool,
     // plan 004 issue 05b: the file-view point (line, col) the cursor tracks.
     pub(super) file_view_point_line: usize,
     pub(super) file_view_point_col: usize,
@@ -205,6 +210,7 @@ pub(super) fn build(
         file_view_top_line: top_line,
         file_view_total_lines: total_lines,
         file_view_viewport_lines: viewport_lines,
+        file_view_notes_folded: s.note_rows_folded(),
         file_view_point_line: s.file_view_point().0,
         file_view_point_col: s.file_view_point().1,
         file_view_changed_on_disk: s.current_buffer_changed_on_disk(),

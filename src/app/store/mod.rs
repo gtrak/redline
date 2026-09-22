@@ -276,7 +276,7 @@ pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("M-s o", "occur"),
 ];
 
-/// Buffer view bindings: 46 entries.
+/// Buffer view bindings: 53 entries.
 pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // Bare `q` closes the view (issue 05, finding 5): consistent
     // with the list views. When the main buffer view is the only
@@ -402,11 +402,28 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // pre-fills for edit. `d` deletes the annotation on the
     // line at point (a message on an unannotated line — and in
     // EDIT buffers `A`/`d` self-insert as printables, the
-    // printable-leaf rule). `C-c a` toggles the inline note
-    // rows (the margin markers stay).
+    // printable-leaf rule).
+    // annotations-render-fold: the `C-c a` command tree — the bare
+    // `C-c a` toggle is gone (the engine forbids a command on a
+    // strict prefix of a longer binding, and the user's decision is the
+    // tree): `C-c a n` new (genuine alias of `A` → annotate), `C-c a h`
+    // hide the note blocks, `C-c a s` show them, `C-c a l` list (genuine
+    // alias of `C-c n a` → annotations-picker). Bare Shift is DELIBERATELY
+    // UNBOUND (gate P1 on this lane): crossterm 0.29 only decodes a
+    // `KeyCode::Modifier(...)` event when BOTH
+    // `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` (1) and
+    // `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) are enabled, and iocraft 0.9.1
+    // pushes ONLY `REPORT_EVENT_TYPES` (2) — so no bare-Shift event ever
+    // reaches the app, on ANY terminal (byte-based terminals send no
+    // bare-Shift bytes at all, kitty-protocol ones included). A binding
+    // that never fires is worse than none, so `C-c a h` / `C-c a s` is the
+    // fold path. `C-a` was declined (emacs point-line-start).
     ("A", "annotate"),
     ("d", "annotate-delete"),
-    ("C-c a", "annotate-toggle"),
+    ("C-c a n", "annotate"),
+    ("C-c a h", "annotate-hide"),
+    ("C-c a s", "annotate-show"),
+    ("C-c a l", "annotations-picker"),
     // Navigation (issue 05).
     ("M-.", "xref-find-definitions"),
     ("M-,", "jump-back"),
@@ -892,7 +909,9 @@ struct TreeState {
 
 /// One RENDERED row of the file view (plan 005 issue 02): either a code
 /// row (the buffer line `line` itself) or a virtual annotation note row
-/// (the note rendered directly under the anchored code row `line`). Every
+/// (the note rendered directly ABOVE the anchored code row `line`,
+/// annotations-render-fold — it reads as a header for the code it
+/// annotates). Every
 /// row carries its buffer-line index so the renderer, the hardware-cursor
 /// math, and the click mapping translate `buffer_line` ↔ `rendered_row`
 /// both ways — the dense 1:1 "row i == line top+i" assumption of the
@@ -900,7 +919,9 @@ struct TreeState {
 #[derive(Clone, Debug, Default)]
 pub struct FileViewRow {
     /// The buffer line this row belongs to: the code row itself for code
-    /// rows; the anchored line for a virtual note row.
+    /// rows; the anchored line for a virtual note row (a note row sits
+    /// IMMEDIATELY BEFORE its code row: for note row index `i`, `rows[i + 1]`
+    /// is that code row — annotations-render-fold).
     pub line: usize,
     /// True for a virtual annotation note row (not a buffer line).
     pub is_note: bool,
@@ -930,7 +951,7 @@ pub struct FileViewRow {
 
 impl FileViewRow {
     /// The rendered-row index of buffer line `line`'s CODE row (the note
-    /// rows under it never match: they are `is_note`).
+    /// rows above it never match: they are `is_note`).
     pub fn row_for_line(rows: &[FileViewRow], line: usize) -> Option<usize> {
         rows.iter().position(|r| !r.is_note && r.line == line)
     }
@@ -1782,8 +1803,12 @@ pub struct AppStore {
     note_prompt_active: bool,
     note_prompt_input: String,
     note_prompt_line: usize,
-    /// Whether the inline annotation note rows render under annotated
-    /// lines (C-c a toggles; the margin markers stay either way).
+    /// Whether the inline annotation note rows render above annotated
+    /// lines (annotations-render-fold: `C-c a h` hides them / `C-c a s`
+    /// shows them; the `annotate-fold` command toggles them in read-only
+    /// mode — reachable from the M-x palette only, bare Shift is
+    /// deliberately unbound — the margin markers stay either way, the
+    /// folded marker carrying the state).
     show_note_rows: bool,
     // ── plan 004 issue 03: mark/region + kill ring ──────────────────────
     /// The shared kill ring (emacs depth 60; shared across all buffers).

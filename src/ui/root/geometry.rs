@@ -217,6 +217,7 @@ mod tests {
             annotations: String::new(),
             region_lines: None,
             region_size: None,
+            file_view_notes_folded: false,
         }
     }
 
@@ -259,9 +260,11 @@ mod tests {
     /// A snapshot with annotated rows and interleaved note rows, shaped for
     /// the 02b regression: the point's line is at the window bottom, and a
     /// note row above it must not push the point off-canvas.
+    /// (annotations-render-fold: the note rows emit BEFORE their code row —
+    /// the helper mirrors the emitter's ordering.)
     fn annotated_snapshot(
         lines: &[(&str, bool)], // (text, annotated)
-        note_lines: &[usize],   // buffer lines that have a note row below
+        note_lines: &[usize],   // buffer lines that have a note row above
         point_line: usize,
         point_col: usize,
         total_lines: usize,
@@ -270,15 +273,6 @@ mod tests {
             .iter()
             .enumerate()
             .flat_map(|(i, (text, annotated))| {
-                let code_row = FileViewRow {
-                    line: i,
-                    is_note: false,
-                    annotated: *annotated,
-                    text: (*text).to_string(),
-                    spans: Vec::new(),
-                    matches: Vec::new(),
-                    highlight: None,
-                };
                 let notes: Vec<FileViewRow> = note_lines
                     .iter()
                     .filter(|&&l| l == i)
@@ -292,7 +286,16 @@ mod tests {
                         highlight: None,
                     })
                     .collect();
-                std::iter::once(code_row).chain(notes)
+                let code_row = FileViewRow {
+                    line: i,
+                    is_note: false,
+                    annotated: *annotated,
+                    text: (*text).to_string(),
+                    spans: Vec::new(),
+                    matches: Vec::new(),
+                    highlight: None,
+                };
+                notes.into_iter().chain(std::iter::once(code_row))
             })
             .collect();
         Snapshot {
@@ -362,16 +365,22 @@ mod tests {
             annotations: String::new(),
             region_lines: None,
             region_size: None,
+            file_view_notes_folded: false,
         }
     }
 
     /// plan 005 issue 02b: the cursor column on an annotated line adds the
-    /// 1-cell gutter (the \u{258e} marker at cell 0 pushes code to cell 1).
-    /// Point at char 0 of an annotated line → display col 1 (gutter + 0).
+    /// 1-cell gutter (the \u{258e}/\u{258f} marker at cell 0 pushes code to
+    /// cell 1). Point at char 0 of an annotated line → display col 1
+    /// (gutter + 0). (annotations-render-fold: the note row emits BEFORE
+    /// the code row, so an annotated point's code row sits at slice row 1
+    /// — terminal row 2.)
     #[test]
     fn cursor_cell_annotated_line_adds_gutter_to_column() {
         // One annotated line, point at char 3 (display col 3 in the code).
-        // With the gutter, the terminal cursor is at col 1 + 3 = 4.
+        // With the gutter, the terminal cursor is at col 1 + 3 = 4; the
+        // note row above occupies slice row 0, so the code row is at
+        // terminal row 1 (title) + 1 = 2.
         let snap = annotated_snapshot(
             &[("fn target_one() {}", true)],
             &[0],
@@ -379,13 +388,13 @@ mod tests {
         );
         assert_eq!(
             cursor_cell(&snap),
-            Some((4, 1)),
-            "annotated: gutter(1) + display_col(3) = 4; row 0 → terminal 1"
+            Some((4, 2)),
+            "annotated: gutter(1) + display_col(3) = 4; note row above → terminal row 2"
         );
         // Point at char 0 → col 1 (just the gutter).
         let snap = annotated_snapshot(&[("fn target_one() {}", true)], &[0], 0, 0, 1);
-        assert_eq!(cursor_cell(&snap), Some((1, 1)), "char 0 → col 1 (gutter only)");
-        // Non-annotated line: no gutter.
+        assert_eq!(cursor_cell(&snap), Some((1, 2)), "char 0 → col 1 (gutter only); note row above");
+        // Non-annotated line: no gutter (no note row → terminal row 1).
         let snap = annotated_snapshot(&[("plain line", false)], &[], 0, 3, 1);
         assert_eq!(cursor_cell(&snap), Some((3, 1)), "non-annotated: no gutter");
     }
@@ -480,6 +489,7 @@ mod tests {
             annotations: String::new(),
             region_lines: None,
             region_size: None,
+            file_view_notes_folded: false,
         };
         // The point (line 20) is at rendered row 19 (0-indexed in the rows
         // slice). Terminal row = 1 (title) + 0 (banner) + 19 = 20.

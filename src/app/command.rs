@@ -882,7 +882,7 @@ impl CommandRegistry {
     fn register_annotations(&mut self) {
         self.register(Command::new(
             "annotate",
-            "Annotate the line at point (A): prompts in the minibuffer, RET commits (a record in .redline-notes.md, the inline cue appears immediately); on an annotated line the existing note pre-fills for edit",
+            "Annotate the line at point (A / C-c a n): prompts in the minibuffer, RET commits (a record in .redline-notes.md, the inline cue appears immediately); on an annotated line the existing note pre-fills for edit",
             "annotations",
             |store, _arg| store.annotate(),
         ));
@@ -894,13 +894,34 @@ impl CommandRegistry {
         )); // ── plan 004 issue 03: mark/region + kill ring ─────────────────
         self.register(Command::new(
             "annotate-toggle",
-            "Show/hide the inline annotation note rows (C-c a); the margin markers stay",
+            "Show/hide the inline annotation note rows (the pre-tree `C-c a` toggle, kept for M-x); the margin markers stay",
             "annotations",
             |store, _arg| store.annotate_toggle(),
         ));
+        // annotations-render-fold: the `C-c a` tree's hide / show commands
+        // (the note blocks render ABOVE the anchored line; the margin
+        // indicator carries the folded state when hidden).
+        self.register(Command::new(
+            "annotate-hide",
+            "Hide the inline annotation note rows (C-c a h); the margin indicators stay, in their folded state",
+            "annotations",
+            |store, _arg| store.annotate_hide(),
+        ));
+        self.register(Command::new(
+            "annotate-show",
+            "Show the inline annotation note rows again (C-c a s; inverse of annotate-hide)",
+            "annotations",
+            |store, _arg| store.annotate_show(),
+        ));
+        self.register(Command::new(
+            "annotate-fold",
+            "Toggle the inline annotation note rows (M-x; read-only mode only — no key binding: a bare Shift press never reaches the app under our terminal stack, see the KeyCode::Shift doc; C-c a h / C-c a s is the fold path)",
+            "annotations",
+            |store, _arg| store.annotate_fold(),
+        ));
         self.register(Command::new(
             "annotations-picker",
-            "Open the annotations picker (C-c n a): a filterable list of every annotation in the notes document (document order); RET jumps to the selected annotation's file and line, d deletes it — then A on that line pre-fills for edit",
+            "Open the annotations picker (C-c n a / C-c a l): a filterable list of every annotation in the notes document (document order); RET jumps to the selected annotation's file and line, d deletes it — then A on that line pre-fills for edit",
             "annotations",
             |store, _arg| store.open_annotations_picker(),
         ));
@@ -975,7 +996,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 118, "expected 118 seed commands: {names:?}");
+        assert_eq!(names.len(), 121, "expected 121 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",

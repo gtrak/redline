@@ -400,8 +400,8 @@ def flow_quit_prompt_y():
 
 def flow_annotation_create(app):
     """A on a line: the minibuffer prompt, RET commits — a ▎ marker on the
-    code row, the note as a dim row directly under it, the status count,
-    and a real record in .redline-notes.md."""
+    code row, the note as a dim row directly ABOVE it (annotations-render-
+    fold), the status count, and a real record in .redline-notes.md."""
     for _ in range(2):
         app.key("C-n")
         app.wait(0.3)
@@ -422,36 +422,49 @@ def flow_annotation_create(app):
     code_rows = rows_containing(app, "line three")
     marker = any("\u258e" in app.row_text(r) for r in code_rows)
     note_rows = rows_containing(app, "\u25b8 check bounds")
-    under = bool(code_rows) and bool(note_rows) and note_rows[0] == code_rows[0] + 1
+    # The note row sits directly ABOVE the annotated code row (annotations-
+    # render-fold) — and nowhere below it (the old ordering's row).
+    above = bool(code_rows) and bool(note_rows) and note_rows[0] == code_rows[0] - 1
+    not_below = bool(code_rows) and not any(n == c + 1 for c in code_rows for n in note_rows)
     count = "1 note" in app.row_text(app.rows - 1)
     disk = open(NOTES_PATH).read() if os.path.exists(NOTES_PATH) else ""
     disk_rec = ("[annotation]" in disk and "note: check bounds" in disk
                 and "anchor: ann line three" in disk and "line: 2" in disk)
-    ok = prompt and typed and saved and marker and under and count and disk_rec
+    ok = prompt and typed and saved and marker and above and not_below and count and disk_rec
     record("ann-create", "C-n C-n,A,check bounds,RET", ok,
            f"prompt={prompt} typed={typed} saved-msg={saved} marker={marker} "
-           f"note-row-under={under} status-count={count} disk-record={disk_rec}")
+           f"note-row-above={above} note-not-below={not_below} status-count={count} "
+           f"disk-record={disk_rec}")
 
 def flow_annotation_toggle(app):
-    """C-c a hides the note rows (the marker stays) and shows them again."""
-    app.key("C-c a")
+    """C-c a h / C-c a s hide / show the annotation note rows (annotations-
+    render-fold — the bare C-c a is the tree prefix now). The marker does
+    not vanish: it switches to the folded thin bar (▏) while the notes are
+    hidden, and back to the ordinary bar (▎) when they return."""
+    app.key("C-c a h")
     app.wait(0.4)
     hidden_msg = "note rows: hidden" in app.row_text(app.rows - 2)
     note_gone = not rows_containing(app, "\u25b8 check bounds")
-    marker_stays = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
-    app.key("C-c a")
+    marker_stays = bool(rows_containing(app, "line three"))
+    folded_marker = any("\u258f" in app.row_text(r) for r in rows_containing(app, "line three"))
+    app.key("C-c a s")
     app.wait(0.4)
     shown_msg = "note rows: shown" in app.row_text(app.rows - 2)
     note_back = bool(rows_containing(app, "\u25b8 check bounds"))
-    ok = hidden_msg and note_gone and marker_stays and shown_msg and note_back
-    record("ann-toggle", "C-c a ×2", ok,
+    marker_back = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
+    ok = (hidden_msg and note_gone and marker_stays and folded_marker
+          and shown_msg and note_back and marker_back)
+    record("ann-toggle", "C-c a h / C-c a s", ok,
            f"hidden-msg={hidden_msg} note-gone={note_gone} marker-stays={marker_stays} "
-           f"shown-msg={shown_msg} note-back={note_back}")
+           f"folded-marker={folded_marker} shown-msg={shown_msg} note-back={note_back} "
+           f"marker-back={marker_back}")
 
 def flow_annotation_crossing(app):
     """Map correctness: with the cursor on the annotated line, C-n lands on
     the NEXT CODE line (L4, not the note row) and C-p returns (L3); the
-    note row still sits between the two code rows on screen. The file is
+    note row now sits directly ABOVE the annotated code row (the gap between
+    the two code rows on screen is 1 row, not 2, and that row is the note).
+    The file is
     30 lines so the position display reads L*, not Bot (Bot is the
     near-bottom position, viewport 21)."""
     app.key("C-n")
@@ -462,10 +475,93 @@ def flow_annotation_crossing(app):
     l3 = "L3," in app.row_text(app.rows - 1)
     r3 = rows_containing(app, "line three")
     r4 = rows_containing(app, "line four")
-    between = bool(r3) and bool(r4) and r4[0] == r3[0] + 2
-    ok = l4 and l3 and between
+    adjacent = bool(r3) and bool(r4) and r4[0] == r3[0] + 1
+    note_above = bool(r3) and r3[0] > 0 and "\u25b8 check bounds" in app.row_text(r3[0] - 1)
+    ok = l4 and l3 and adjacent and note_above
     record("ann-crossing", "C-n,C-p on annotated line", ok,
-           f"c-n-lands-L4={l4} c-p-back-L3={l3} note-row-between={between}")
+           f"c-n-lands-L4={l4} c-p-back-L3={l3} code-rows-adjacent={adjacent} "
+           f"note-row-above={note_above}")
+
+def flow_annotation_fold(app):
+    """Fold with the cursor mid-file (annotations-render-fold): the cursor
+    stays on the same CODE line across C-c a h / C-c a s (the row count
+    changed, the point's buffer line did not — the status position is
+    unchanged), and the margin indicator carries the folded state (▏ while
+    hidden, ▎ when back)."""
+    app.key("M-<")
+    app.wait(0.3)
+    for _ in range(4):
+        app.key("C-n")
+        app.wait(0.3)
+    pos_before = app.row_text(app.rows - 1)
+    at_l5 = "L5," in pos_before
+    app.key("C-c a h")
+    app.wait(0.4)
+    pos_hidden = app.row_text(app.rows - 1)
+    hidden_msg = "note rows: hidden" in app.row_text(app.rows - 2)
+    pos_stable = pos_hidden == pos_before
+    note_gone = not rows_containing(app, "\u25b8 check bounds")
+    code_rows = rows_containing(app, "line three")
+    folded_marker = bool(code_rows) and any(
+        "\u258f" in app.row_text(r) for r in code_rows
+    )
+    app.key("C-c a s")
+    app.wait(0.4)
+    pos_shown = app.row_text(app.rows - 1)
+    shown_msg = "note rows: shown" in app.row_text(app.rows - 2)
+    note_back = bool(rows_containing(app, "\u25b8 check bounds"))
+    # The note row came back ABOVE the code row: the code row's terminal
+    # index shifted again, so re-find it for the marker check (the row
+    # index captured during the hidden state is stale by construction).
+    code_rows_shown = rows_containing(app, "line three")
+    marker_back = bool(code_rows_shown) and any(
+        "\u258e" in app.row_text(r) for r in code_rows_shown
+    )
+    ok = (at_l5 and hidden_msg and pos_stable and note_gone and folded_marker
+          and shown_msg and pos_shown == pos_before and note_back and marker_back)
+    record("ann-fold", "M-<,4x C-n;C-c a h;C-c a s", ok,
+           f"at-L5={at_l5} hidden-msg={hidden_msg} position-stable={pos_stable} "
+           f"note-gone={note_gone} folded-marker={folded_marker} shown-msg={shown_msg} "
+           f"note-back={note_back} marker-back={marker_back}")
+
+def flow_annotation_aliases(app):
+    """The C-c a tree (annotations-render-fold): C-c a n opens the
+    new-annotation prompt (the A command) and C-c a l opens the
+    annotations picker (the C-c n a command) — genuine aliases through the
+    terminal, not a binding-table read. (C-g closes the picker; ESC is
+    unbound in a picker and does not close it.) The picker renders as a
+    content-sized box at the bottom of the file view: the `Annotations: `
+    prompt row + the candidate rows + the right-aligned `N of M` count row.
+    """
+    app.key("C-c a n")
+    app.wait(0.4)
+    prompt = "Note: " in app.row_text(app.rows - 2)
+    app.key("ESC")
+    app.wait(0.3)
+    cancelled = "Note: " not in app.row_text(app.rows - 2)
+    app.key("C-c a l")
+    app.wait(0.8)
+    # The picker's prompt row (bottom of the view) + the count row.
+    picker = "Annotations: " in text(app)
+    one_note = "1 of 1" in text(app)  # the ann-create record is the only one
+    listed = "check bounds" in text(app)
+    app.key("C-g")
+    app.wait(0.3)
+    closed = "Annotations: " not in text(app)
+    ok = prompt and cancelled and picker and one_note and listed and closed
+    record("ann-aliases", "C-c a n;ESC;C-c a l;C-g", ok,
+           f"prompt={prompt} cancelled={cancelled} picker={picker} 1of1={one_note} "
+           f"record-listed={listed} closed={closed}")
+    # Restore the cursor to the annotated line (L3): flow_annotation_fold
+    # moved it to L5, and the downstream notes-editable/drift/orphan/delete
+    # flows were written against the create→toggle→crossing sequence, which
+    # ends on L3 (they drive `d` from a C-n off that line).
+    app.key("M-<")
+    app.wait(0.2)
+    app.key("C-n")
+    app.wait(0.15)
+    app.key("C-n")
+    app.wait(0.15)
 
 def flow_annotation_notes_editable(app):
     """In the EDITABLE notes buffer `d`/`A` self-insert as printables (the
@@ -503,12 +599,15 @@ def flow_annotation_drift(app):
         f.write("top extra line\n" + old)
     reloaded = wait_for(app, lambda: "top extra line" in text(app), 4.0)
     marker_moved = any("\u258e" in app.row_text(r) for r in rows_containing(app, "line three"))
-    note_under = bool(rows_containing(app, "\u25b8 check bounds"))
+    code_rows = rows_containing(app, "line three")
+    note_above = bool(code_rows) and code_rows[0] > 0 and (
+        "\u25b8 check bounds" in app.row_text(code_rows[0] - 1)
+    )
     count = "1 note" in app.row_text(app.rows - 1)
-    ok = reloaded and marker_moved and note_under and count
+    ok = reloaded and marker_moved and note_above and count
     record("ann-drift", "disk prepend;top extra line", ok,
            f"auto-reload={reloaded} cue-follows-content={marker_moved} "
-           f"note-row={note_under} count-kept={count}")
+           f"note-row-above={note_above} count-kept={count}")
 
 def flow_annotation_orphan(app):
     """Delete the anchored line out-of-band: the annotation is NOT lost —
@@ -770,12 +869,13 @@ def flow_g6(app, path):
 
 
 def flow_annotation_suite():
-    """plan-005 issue 02: the inline-annotation legs (create → toggle →
-    C-n/C-p map crossing → notes-buffer editable semantics → drift
-    re-anchor → orphan → delete → C-u guard). Own App; the dedicated
-    files are created before startup (the find-file picker lists the
-    cached walk) and removed after (the fixture's .redline-notes.md is
-    swept by the reset)."""
+    """plan-005 issue 02 + annotations-render-fold: the inline-annotation
+    legs (create → fold h/s toggle → C-n/C-p map crossing → fold
+    cursor-preservation → C-c a n / C-c a l aliases → notes-buffer editable
+    semantics → drift re-anchor → orphan → delete → C-u guard). Own App;
+    the dedicated files are created before startup (the find-file picker
+    lists the cached walk) and removed after (the fixture's
+    .redline-notes.md is swept by the reset)."""
     with open(ANN_PATH, "w") as f:
         # 30 content lines: the four named lines + fillers (30 lines keeps
         # the annotated line far enough from the bottom that the status
@@ -791,6 +891,8 @@ def flow_annotation_suite():
         flow_annotation_create(app)
         flow_annotation_toggle(app)
         flow_annotation_crossing(app)
+        flow_annotation_fold(app)
+        flow_annotation_aliases(app)
         flow_annotation_notes_editable(app)
         flow_annotation_drift(app)
         flow_annotation_orphan(app)

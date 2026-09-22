@@ -1814,8 +1814,8 @@ fn ann_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// ann-create: A on a line → the prompt; typing + RET commits — a ▎ marker
-/// on the code row, the note as a row directly under it, the status
-/// count, and a real record in .redline-notes.md.
+/// on the code row, the note as a row directly ABOVE it (annotations-
+/// render-fold), the status count, and a real record in .redline-notes.md.
 #[test]
 fn unit_flow_ann_create() {
     let (repo, _ann, _ann2) = ann_repo();
@@ -1831,14 +1831,15 @@ fn unit_flow_ann_create() {
     s.key_event(key("RET"));
     let saved = s.message.contains("note saved");
     assert!(saved, "note saved echo (msg={:?})", s.message);
-    // Marker + note row directly under the annotated code row.
+    // Marker + note row directly ABOVE the annotated code row.
     let rows = s.file_view_rows();
     let code_idx = rows
         .iter()
         .position(|r| r.text == "ann line three")
         .expect("annotated code row present");
     let marker = rows[code_idx].annotated;
-    let under = rows.get(code_idx + 1).map(|r| r.text.contains("check bounds")).unwrap_or(false);
+    let above = rows.get(code_idx - 1).map(|r| r.text.contains("check bounds")).unwrap_or(false);
+    let not_below = rows.get(code_idx + 1).is_none_or(|r| !r.text.contains("check bounds"));
     // Status count.
     let count = s.annotation_count_display().contains("1 note");
     // The on-disk record.
@@ -1849,13 +1850,15 @@ fn unit_flow_ann_create() {
         && notes.contains("anchor: ann line three");
     let frame = render80(s);
     assert!(
-        marker && under && count && disk_rec,
-        "marker={marker} under={under} count={count} disk={disk_rec}\n{frame}"
+        marker && above && not_below && count && disk_rec,
+        "marker={marker} above={above} not-below={not_below} count={count} disk={disk_rec}\n{frame}"
     );
 }
 
-/// ann-toggle: C-c a hides the note rows (the marker stays) and shows
-/// them again.
+/// ann-toggle: C-c a h hides the note rows (the margin indicator switches
+/// to its folded state — the thin bar) and C-c a s shows them again.
+/// (annotations-render-fold: the bare `C-c a` toggle is gone — it is the
+/// tree prefix now.)
 #[test]
 fn unit_flow_ann_toggle() {
     let (repo, _ann, _ann2) = ann_repo();
@@ -1874,27 +1877,35 @@ fn unit_flow_ann_toggle() {
             .any(|r| r.text.contains("check bounds"))
     };
     assert!(with_note(&mut s), "note row present before toggle");
+    assert!(!s.note_rows_folded());
     s.key_event(key("C-c"));
     s.key_event(key("a"));
+    s.key_event(key("h"));
     let hidden_msg = s.message.contains("note rows: hidden");
     let note_gone = !with_note(&mut s);
     let marker_stays = s
         .file_view_rows()
         .iter()
         .any(|r| r.text == "ann line three" && r.annotated);
+    let folded_state = s.note_rows_folded();
     s.key_event(key("C-c"));
     s.key_event(key("a"));
+    s.key_event(key("s"));
     let shown_msg = s.message.contains("note rows: shown");
     let note_back = with_note(&mut s);
+    let unfolded_state = !s.note_rows_folded();
     assert!(
-        hidden_msg && note_gone && marker_stays && shown_msg && note_back,
-        "hidden={hidden_msg} gone={note_gone} marker={marker_stays} shown={shown_msg} back={note_back}"
+        hidden_msg && note_gone && marker_stays && folded_state
+            && shown_msg && note_back && unfolded_state,
+        "hidden={hidden_msg} gone={note_gone} marker={marker_stays} folded={folded_state} \
+         shown={shown_msg} back={note_back} unfolded={unfolded_state}"
     );
 }
 
 /// ann-crossing: with the cursor on the annotated line, C-n lands on the
 /// NEXT CODE line (L4, not the note row) and C-p returns (L3); the note
-/// row still sits between the two code rows on screen.
+/// row now sits directly ABOVE the annotated code row (the rendered slice
+/// reads note → code → next-code, not code → note).
 #[test]
 fn unit_flow_ann_crossing() {
     let (repo, _ann, _ann2) = ann_repo();
@@ -1914,11 +1925,140 @@ fn unit_flow_ann_crossing() {
     let rows = s.file_view_rows();
     let r3 = rows.iter().position(|r| r.text == "ann line three");
     let r4 = rows.iter().position(|r| r.text == "ann line four");
-    let between = r3.zip(r4).map(|(a, b)| b - a == 2).unwrap_or(false);
+    let note_above = r3
+        .zip(r4)
+        .and_then(|(a, b)| (b - a == 1).then(|| rows[a - 1].is_note && rows[a - 1].line == 2))
+        .unwrap_or(false);
     assert!(
-        l4 && l3 && between,
-        "L4={l4} L3={l3} note-row-between={between} (pos={:?})",
+        l4 && l3 && note_above,
+        "L4={l4} L3={l3} note-above={note_above} (pos={:?})",
         s.file_view_position_display()
+    );
+}
+
+/// ann-fold (annotations-render-fold): fold with the cursor mid-file — the
+/// cursor stays on the same CODE line across the toggle, the scroll window
+/// does not move (the row count changed but the point's buffer line is
+/// unchanged), and the row map round-trips after each toggle. This is the
+/// pinned trap: a fold that corrupted the map, the cursor line, or the
+/// scroll position would fail one of the three legs.
+#[test]
+fn unit_flow_ann_fold() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    s.key_event(key("A"));
+    for c in "check bounds".chars() {
+        s.key_event(key_char(c));
+    }
+    s.key_event(key("RET"));
+    // The cursor mid-file (line 10 of 30 — far from any note row).
+    s.key_event(key("M-<"));
+    for _ in 0..10 {
+        s.key_event(key("C-n"));
+    }
+    let code_line = s.point_line();
+    let scroll = s.scroll_top();
+    let rows_shown = s.file_view_rows();
+    assert_eq!(
+        rows_shown.iter().filter(|r| r.is_note).count(),
+        1,
+        "the note row is emitted (unfolded): {:?}",
+        rows_shown.iter().map(|r| (r.line, r.is_note)).collect::<Vec<_>>()
+    );
+    // C-c a h: hide. The cursor's code row and the scroll window must both
+    // survive the row-count change untouched.
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    s.key_event(key("h"));
+    let hidden = s.message.contains("note rows: hidden");
+    let rows_hidden = s.file_view_rows();
+    let cursor_same_code_line = s.point_line() == code_line;
+    let scroll_stable = s.scroll_top() == scroll;
+    let note_gone = rows_hidden.iter().all(|r| !r.is_note);
+    // The row map round-trips after the toggle: for every window line,
+    // line_for_row(row_for_line(l)) == l (the map must survive the
+    // row-count change, not merely stay non-empty).
+    let lines = s.buffers.current_buffer().unwrap().line_count();
+    let map_round_trips_hidden = (0..lines)
+        .filter_map(|l| {
+            crate::app::store::FileViewRow::row_for_line(&rows_hidden, l)
+                .map(|r| (l, r))
+        })
+        .all(|(l, r)| crate::app::store::FileViewRow::line_for_row(&rows_hidden, r) == Some(l));
+    // The margin indicator carries the folded state (the store side of the
+    // UI marker switch: the rows still flag the annotated line).
+    let marker_folded_state = s.note_rows_folded()
+        && rows_hidden
+            .iter()
+            .any(|r| r.text == "ann line three" && r.annotated);
+    // C-c a s: show. Same invariants back, and the note row is immediately
+    // ABOVE its code row again.
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    s.key_event(key("s"));
+    let shown = s.message.contains("note rows: shown");
+    let rows_shown2 = s.file_view_rows();
+    let note_back_above = rows_shown2.iter().enumerate().any(|(i, r)| {
+        r.is_note
+            && r.text.contains("check bounds")
+            && rows_shown2.get(i + 1).is_some_and(|n| !n.is_note && n.line == r.line)
+    });
+    let lines2 = s.buffers.current_buffer().unwrap().line_count();
+    let map_round_trips_shown = (0..lines2)
+        .filter_map(|l| {
+            crate::app::store::FileViewRow::row_for_line(&rows_shown2, l)
+                .map(|r| (l, r))
+        })
+        .all(|(l, r)| crate::app::store::FileViewRow::line_for_row(&rows_shown2, r) == Some(l));
+    assert!(
+        hidden && cursor_same_code_line && scroll_stable && note_gone
+            && map_round_trips_hidden && marker_folded_state
+            && shown && s.point_line() == code_line && s.scroll_top() == scroll
+            && note_back_above && map_round_trips_shown && !s.note_rows_folded(),
+        "hidden={hidden} cursor-same-code-line={cursor_same_code_line} \
+         scroll-stable={scroll_stable} note-gone={note_gone} map-hidden={map_round_trips_hidden} \
+         marker-folded={marker_folded_state} shown={shown} \
+         note-back-above={note_back_above} map-shown={map_round_trips_shown}"
+    );
+}
+
+/// ann-aliases (annotations-render-fold): `C-c a n` reaches the
+/// new-annotation prompt (the `A` command) and `C-c a l` reaches the
+/// annotations picker (the `C-c n a` command) — the genuine aliases through
+/// the store's own key_event path, not a binding-table read.
+#[test]
+fn unit_flow_ann_aliases() {
+    let (repo, _ann, _ann2) = ann_repo();
+    let mut s = store_in(repo.path());
+    open_via_finder(&mut s, "notes_ann.rs");
+    s.key_event(key("C-n"));
+    s.key_event(key("C-n"));
+    // C-c a n: the new-annotation prompt on the line at point.
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    s.key_event(key("n"));
+    let prompt = s.note_prompt_active();
+    let prompt_text = s.message.contains("Note: ");
+    s.key_event(key("C-g")); // cancel (no record written)
+    let cancelled = !s.note_prompt_active();
+    // C-c a l: the annotations picker (zero annotations at this point —
+    // the picker opens empty, 0/0).
+    s.key_event(key("C-c"));
+    s.key_event(key("a"));
+    s.key_event(key("l"));
+    let picker = s.picker_open();
+    let picker_kind = s.picker_kind() == Some(crate::app::store::PickerKind::Annotations);
+    let empty_list = s.picker_count() == (0, 0);
+    s.key_event(key("C-g"));
+    let closed = !s.picker_open();
+    assert!(
+        prompt && prompt_text && cancelled && picker && picker_kind && empty_list && closed,
+        "prompt={prompt} prompt-text={prompt_text} cancelled={cancelled} \
+         picker={picker} kind={picker_kind} empty={empty_list} closed={closed} (msg={:?})",
+        s.message
     );
 }
 
@@ -1971,14 +2111,20 @@ fn unit_flow_ann_drift() {
         .file_view_rows()
         .iter()
         .any(|r| r.text == "ann line three" && r.annotated);
-    let note_under = s
-        .file_view_rows()
-        .iter()
-        .any(|r| r.text.contains("check bounds"));
+    // annotations-render-fold: the note row renders ABOVE the anchored line
+    // (the drift re-anchor keeps the cue attached to the content — now as
+    // a header, not a trailer).
+    let note_above = s.file_view_rows().iter().enumerate().any(|(i, r)| {
+        r.is_note
+            && r.text.contains("check bounds")
+            && s.file_view_rows()
+                .get(i + 1)
+                .is_some_and(|n| n.text == "ann line three" && !n.is_note)
+    });
     let count = s.annotation_count_display().contains("1 note");
     assert!(
-        reloaded && marker_moved && note_under && count,
-        "reloaded={reloaded} marker={marker_moved} note={note_under} count={count}"
+        reloaded && marker_moved && note_above && count,
+        "reloaded={reloaded} marker={marker_moved} note={note_above} count={count}"
     );
 }
 
@@ -2824,17 +2970,18 @@ fn unit_flow_ext_notes_annotate() {
         .iter()
         .position(|r| r.text.contains("RopeBuilder::new"));
     let marker = code_idx.map(|code| rows[code].annotated).unwrap_or(false);
-    let under = code_idx
-        .and_then(|code| rows.get(code + 1))
-        .map(|r| r.text.contains("external note"))
-        .unwrap_or(false);
+    // annotations-render-fold: the note row sits directly ABOVE the code row.
+    let above = code_idx
+        .and_then(|code| rows.get(code - 1))
+        .filter(|r| r.text.contains("external note"))
+        .is_some();
     let disk = std::fs::read_to_string(repo.path().join(".redline-notes.md"))
         .expect("notes file created")
         .contains(&format!("path: {abs}"));
     let frame = render80(s);
     assert!(
-        saved && marker && under && disk,
-        "saved={saved} marker={marker} under={under} disk={disk}\n{frame}"
+        saved && marker && above && disk,
+        "saved={saved} marker={marker} above={above} disk={disk}\n{frame}"
     );
 }
 
@@ -3198,10 +3345,12 @@ fn unit_flow_synleg_reanchor() {
     let rows = s.file_view_rows();
     let fn_row = rows.iter().position(|r| r.text == "fn target_one()");
     let marker = fn_row.map(|i| rows[i].annotated).unwrap_or(false);
-    let note_under = fn_row
-        .and_then(|i| rows.get(i + 1))
-        .map(|r| r.text.contains("follow fn"))
-        .unwrap_or(false);
+    // annotations-render-fold: the note row renders directly ABOVE the
+    // re-anchored function header.
+    let note_above = fn_row
+        .and_then(|i| rows.get(i - 1))
+        .filter(|r| r.text.contains("follow fn"))
+        .is_some();
     let no_orphan_tag = !rows.iter().any(|r| r.text.contains("(orphaned)"));
     let disk = std::fs::read_to_string(repo.path().join(".redline-notes.md")).unwrap();
     let reanchored = disk.contains("line: 100")
@@ -3209,8 +3358,8 @@ fn unit_flow_synleg_reanchor() {
         && disk.contains("syntax_name: target_one");
     let frame = render80(s);
     assert!(
-        reloaded && marker && note_under && no_orphan_tag && reanchored,
-        "reloaded={reloaded} marker={marker} note-under={note_under} \n         no-orphan-tag={no_orphan_tag} reanchored={reanchored}\ndisk={disk}\n{frame}"
+        reloaded && marker && note_above && no_orphan_tag && reanchored,
+        "reloaded={reloaded} marker={marker} note-above={note_above} \n         no-orphan-tag={no_orphan_tag} reanchored={reanchored}\ndisk={disk}\n{frame}"
     );
 }
 

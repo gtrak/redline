@@ -15,9 +15,10 @@ use crate::ui::{color, text_style};
 #[derive(Default, Props)]
 struct FileViewCanvasProps {
     /// The pre-computed rendered rows (code rows + the virtual annotation
-    /// note rows, plan 005 issue 02). Each row carries its buffer-line
-    /// index (`r.line`), NOT its slice offset — the rows are no longer a
-    /// dense 1:1 slice of buffer lines.
+    /// note rows, plan 005 issue 02 — the notes render ABOVE their
+    /// anchored code row, annotations-render-fold). Each row carries its
+    /// buffer-line index (`r.line`), NOT its slice offset — the rows are no
+    /// longer a dense 1:1 slice of buffer lines.
     pub rows: Vec<FileViewRow>,
     /// The total number of RENDERED rows for the buffer (buffer lines +
     /// visible note rows; the bottom scroll indicator's bound).
@@ -28,6 +29,11 @@ struct FileViewCanvasProps {
     /// line indices, or `None` when no mark is set. The store computes this
     /// from the byte range using the rope (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
+    /// annotations-render-fold: the note blocks are folded away (`C-c a h`
+    /// hid them). The annotated-line margin indicator carries this state —
+    /// the thin-bar marker instead of the ordinary one — so the fact that
+    /// an annotation exists survives the fold.
+    pub notes_folded: bool,
 }
 
 /// Canvas-backed file view: renders the visible rows with colored
@@ -37,6 +43,7 @@ struct FileViewCanvas {
     total_rows: usize,
     top_line: usize,
     region_lines: Option<(usize, usize)>,
+    notes_folded: bool,
 }
 
 impl FileViewCanvas {
@@ -46,6 +53,7 @@ impl FileViewCanvas {
             total_rows: props.total_rows,
             top_line: props.top_line,
             region_lines: props.region_lines,
+            notes_folded: props.notes_folded,
         }
     }
 }
@@ -94,11 +102,12 @@ impl Component for FileViewCanvas {
                 canvas.set_background_color(0, row as isize, w, 1, bg);
             }
             if r.is_note {
-                // A virtual annotation note row (plan 005 issue 02): dim
-                // and italic, directly under the anchored code row. The
-                // note aligns under the same 1-cell gutter as annotated
-                // code (plan 005 issue 02b): the `\u{25b8}` sits at cell 1,
-                // not cell 0, so the visual gutter reads as one column.
+                // A virtual annotation note row (plan 005 issue 02,
+                // annotations-render-fold: the note renders directly ABOVE
+                // the anchored code row, dim and italic). The note aligns
+                // in the same 1-cell gutter as the annotated code (plan
+                // 005 issue 02b): the `\u{25b8}` sits at cell 1, not
+                // cell 0, so the visual gutter reads as one column.
                 let style = text_style_italic(t.preview.foreground);
                 let display = truncate(&r.text, w.saturating_sub(1));
                 if !display.is_empty() {
@@ -106,7 +115,7 @@ impl Component for FileViewCanvas {
                 }
             } else {
                 // plan 005 issue 02b: annotated lines get a 1-cell left
-                // gutter (the \u{258e} marker at cell 0); code starts at
+                // gutter (the marker at cell 0); code starts at
                 // cell 1. Non-annotated lines keep starting at cell 0.
                 let gutter = if r.annotated { 1 } else { 0 };
                 draw_line(
@@ -118,11 +127,26 @@ impl Component for FileViewCanvas {
                     &t,
                 );
                 if r.annotated {
+                    // annotations-render-fold: the margin indicator carries
+                    // the fold state — visible note: the ordinary bar
+                    // (\u{258e}) in the view-title face (the pre-fold
+                    // marker, unchanged); folded note: the thin bar
+                    // (\u{258f}) in the preview face — the dim face that
+                    // already carries the note text and the scroll
+                    // indicators on this same dark background, so it stays
+                    // legible without shouting. The marker is present in
+                    // BOTH states: folding must not erase the fact that
+                    // an annotation exists.
+                    let (glyph, face) = if self.notes_folded {
+                        ("\u{258f}", &t.preview)
+                    } else {
+                        ("\u{258e}", &t.view_title)
+                    };
                     canvas.set_text(
                         0,
                         row as isize,
-                        "\u{258e}",
-                        text_style(t.view_title.foreground, false, false),
+                        glyph,
+                        text_style(face.foreground, false, false),
                     );
                 }
             }
@@ -484,7 +508,8 @@ fn truncate(s: &str, max: usize) -> String {
 pub struct FileViewProps {
     pub title: String,
     /// The pre-computed rendered rows (code rows + virtual annotation note
-    /// rows; each carries its buffer-line index — plan 005 issue 02).
+    /// rows ABOVE their anchored code rows; each carries its buffer-line
+    /// index — plan 005 issue 02, annotations-render-fold).
     pub rows: Vec<FileViewRow>,
     /// The total number of rendered rows for the buffer (the canvas's
     /// bottom scroll indicator; plan 005 issue 02).
@@ -501,6 +526,9 @@ pub struct FileViewProps {
     /// The region's line range (start_line, end_line inclusive) in buffer
     /// line indices, or `None` when no mark is set (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
+    /// annotations-render-fold: the note blocks are folded away (the
+    /// annotated-line margin indicator switches to its thin-bar state).
+    pub notes_folded: bool,
 }
 
 /// The "changed on disk" banner hint, accurate per buffer kind: on an
@@ -547,6 +575,7 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                     total_rows: props.total_rows,
                     top_line: props.top_line,
                     region_lines: props.region_lines,
+                    notes_folded: props.notes_folded,
                 )
             }
         }
@@ -892,12 +921,19 @@ mod tests {
         );
     }
 
-    /// plan 005 issue 02: the rendered-row map round-trips buffer_line ↔
-    /// rendered_row with interleaved note rows, both directions.
+    /// plan 005 issue 02 + annotations-render-fold: the rendered-row map
+    /// round-trips buffer_line ↔ rendered_row with interleaved note rows,
+    /// both directions — with the note rows ABOVE their code rows.
+    /// The ordering assertion is what makes this test mean something: a
+    /// test that only checked "a note row exists" would pass under either
+    /// ordering and prove nothing (the row map itself is order-agnostic —
+    /// it keys on `line`), so the note row's position relative to its code
+    /// row is pinned here, immediately-before, per row.
     #[test]
     fn file_view_row_map_round_trips_with_note_rows() {
-        // Rows: code 0, code 1 + note (line 1), code 2, code 3 + note (line
-        // 3) + note (line 3), code 4.
+        // Rows (note BEFORE its code row): code 0, code 1 with note (line
+        // 1) above it, code 2, code 3 + note (line 3) + note (line 3) above
+        // it, code 4.
         let code = |line: usize| FileViewRow {
             line,
             is_note: false,
@@ -918,25 +954,42 @@ mod tests {
         };
         let rows = vec![
             code(0),
-            code(1),
             note(1),
+            code(1),
             code(2),
+            note(3),
+            note(3),
             code(3),
-            note(3),
-            note(3),
             code(4),
         ];
+        // annotations-render-fold DISCRIMINATOR: every note row sits
+        // IMMEDIATELY BEFORE its own code row (the note is the header, not
+        // the trailer) — the nearest subsequent CODE row is the note's own
+        // line. This fails under the old note-below ordering (where the
+        // next code row after a note is the NEXT line's code row) — a mere
+        // "a note row exists" assertion would pass either way.
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_note {
+                let next_code = rows[i + 1..]
+                    .iter()
+                    .find(|r| !r.is_note)
+                    .unwrap_or_else(|| panic!(
+                        "note row {i} has no code row after it — it cannot be ABOVE its code row"
+                    ));
+                assert_eq!(next_code.line, r.line, "note row {i} must sit directly above its own code row (the nearest code row below it)");
+            }
+        }
         // buffer_line → rendered_row (code rows only).
         assert_eq!(FileViewRow::row_for_line(&rows, 0), Some(0));
-        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(1));
+        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(2));
         assert_eq!(FileViewRow::row_for_line(&rows, 2), Some(3));
-        assert_eq!(FileViewRow::row_for_line(&rows, 3), Some(4));
+        assert_eq!(FileViewRow::row_for_line(&rows, 3), Some(6));
         assert_eq!(FileViewRow::row_for_line(&rows, 4), Some(7));
         assert_eq!(FileViewRow::row_for_line(&rows, 5), None);
         // rendered_row → buffer_line (a note row maps to its anchored line).
         assert_eq!(FileViewRow::line_for_row(&rows, 0), Some(0));
-        assert_eq!(FileViewRow::line_for_row(&rows, 1), Some(1));
-        assert_eq!(FileViewRow::line_for_row(&rows, 2), Some(1), "note row → anchored line");
+        assert_eq!(FileViewRow::line_for_row(&rows, 1), Some(1), "note row → anchored line");
+        assert_eq!(FileViewRow::line_for_row(&rows, 2), Some(1));
         assert_eq!(FileViewRow::line_for_row(&rows, 3), Some(2));
         assert_eq!(FileViewRow::line_for_row(&rows, 4), Some(3));
         assert_eq!(FileViewRow::line_for_row(&rows, 5), Some(3));

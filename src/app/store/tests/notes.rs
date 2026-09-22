@@ -1257,8 +1257,10 @@ use super::*;
         s.set_viewport_lines(10);
         s.set_scroll_top(0);
         let rows = s.file_view_rows();
-        // Row list: c0, c1, note1, c2, c3, note3, c4, (empty last line
-        // from the trailing newline — ropey's len_lines counts it).
+        // Row list (annotations-render-fold: each note row sits directly
+        // ABOVE its own code row): c0, note1, c1, c2, note3, c3, c4, (empty
+        // last line from the trailing newline — ropey's len_lines counts
+        // it).
         let shape: Vec<(usize, bool)> = rows
             .iter()
             .map(|r| (r.line, r.is_note))
@@ -1267,46 +1269,57 @@ use super::*;
             shape,
             vec![
                 (0, false),
-                (1, false),
                 (1, true),
+                (1, false),
                 (2, false),
-                (3, false),
                 (3, true),
+                (3, false),
                 (4, false),
                 (5, false)
             ],
-            "row shape: {shape:?}"
+            "row shape (note above its code row): {shape:?}"
         );
+        // The note row sits directly ABOVE its own code row (the ordering
+        // discriminator: the old note-below shape would fail this).
+        for (i, r) in rows.iter().enumerate() {
+            if r.is_note {
+                let next_code = rows[i + 1..].iter().find(|r| !r.is_note).expect("a code row after a note");
+                assert_eq!(next_code.line, r.line, "note row {i} must sit directly above its own code row: {shape:?}");
+            }
+        }
         // Marker flags: code rows 1 and 3 annotated, others not.
-        assert!(rows[1].annotated && rows[4].annotated);
+        assert!(rows[2].annotated && rows[5].annotated);
         assert!(!rows[0].annotated && !rows[3].annotated);
         // Both directions of the map.
         for line in 0..6 {
             let r = FileViewRow::row_for_line(&rows, line).unwrap();
             assert_eq!(FileViewRow::line_for_row(&rows, r), Some(line));
         }
-        assert_eq!(FileViewRow::line_for_row(&rows, 2), Some(1), "note row → anchored line");
-        assert_eq!(FileViewRow::line_for_row(&rows, 5), Some(3));
+        assert_eq!(FileViewRow::line_for_row(&rows, 1), Some(1), "note row → anchored line");
+        assert_eq!(FileViewRow::line_for_row(&rows, 4), Some(3));
         // Total rendered rows = 6 code + 2 note.
         assert_eq!(s.file_view_total_rows(), 8);
-        // Click mapping: rendered row 4 (c3, the code row UNDER a note row
-        // above it… here row 2) and rendered row 2 (the note row) both map
-        // to their line; the old dense math (scroll_top + row) would have
-        // sent row 4 to line 4.
+        // Click mapping: rendered row 5 (c3, the code row DIRECTLY UNDER its
+        // note row at row 4) and rendered row 1 (the note row above c1) both
+        // map to their line; the old dense math (scroll_top + row) would
+        // have sent row 5 to line 5.
         let mut s2 = s;
-        s2.mouse_click_position(4, 0); // c3
+        s2.mouse_click_position(5, 0); // c3
         assert_eq!(s2.point_line(), 3, "click on c3's rendered row → line 3");
-        s2.mouse_click_position(2, 0); // note row under c1
+        s2.mouse_click_position(1, 0); // note row above c1
         assert_eq!(s2.point_line(), 1, "click on a note row → anchored line");
-        // C-c a hides the note rows: the map collapses back to 1:1, the
-        // marker flags stay.
-        s2.annotate_toggle();
+        // C-c a h hides the note rows: the map collapses back to 1:1, the
+        // marker flags stay (and note_rows_folded flips — the UI's margin
+        // indicator state).
+        s2.annotate_hide();
         let rows2 = s2.file_view_rows();
         assert_eq!(rows2.len(), 6, "note rows hidden");
         assert!(rows2[1].annotated && rows2[3].annotated, "markers stay");
+        assert!(s2.note_rows_folded(), "fold state reads folded");
         assert_eq!(s2.file_view_total_rows(), 6);
-        // C-c a again: back.
-        s2.annotate_toggle();
+        // C-c a s: back.
+        s2.annotate_show();
+        assert!(!s2.note_rows_folded(), "fold state reads shown");
         assert_eq!(s2.file_view_rows().len(), 8);
     }
 
@@ -1344,11 +1357,14 @@ use super::*;
         s.point_up();
         assert_eq!(s.point_line(), 1, "C-p back onto the annotated line");
         assert_eq!(s.file_view_position_display(), "L2,3%");
-        // The rendered slice has 4 rows (3 code + 1 note) and the cursor
-        // row for point line 1 is 1 (not 2 — the note row comes AFTER it).
+        // The rendered slice has 4 rows in the annotated region (3 code +
+        // 1 note) and the cursor row for point line 1 is 2 (the note row
+        // now comes BEFORE it — annotations-render-fold; it was 1 when the
+        // note rendered after).
         let rows = s.file_view_rows();
-        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(1));
-        assert!(rows[2].is_note);
+        assert_eq!(FileViewRow::row_for_line(&rows, 1), Some(2));
+        assert!(rows[1].is_note, "the note row sits above the code row");
+        assert_eq!(rows[2].line, 1, "the code row is directly below its note");
     }
 
     /// plan 005 issue 02b (round 2) + 02c (span fill): the budget counts
@@ -1402,16 +1418,20 @@ use super::*;
         assert_eq!(rows.len(), 20, "10 code + 10 note rows of 21");
         assert_eq!(rows.iter().filter(|r| !r.is_note).count(), 10);
         assert_eq!(rows.iter().filter(|r| r.is_note).count(), 10);
-        // The point's line IS drawn (as a code row, with its text intact).
-        assert_eq!(FileViewRow::row_for_line(&rows, 0), Some(0));
-        assert!(!rows[0].is_note);
-        assert_eq!(rows[0].text, "line0");
-        assert!(rows[0].annotated);
-        // Every note row sits directly under its anchored code row.
+        // The point's line IS drawn (as a code row, with its text intact;
+        // annotations-render-fold: its note row sits directly ABOVE it, so
+        // the code row is at index 1, not 0).
+        assert_eq!(FileViewRow::row_for_line(&rows, 0), Some(1));
+        assert!(!rows[1].is_note);
+        assert_eq!(rows[1].text, "line0");
+        assert!(rows[1].annotated);
+        // Every note row sits directly ABOVE its own code row (the nearest
+        // subsequent code row is its own line — the ordering discriminator:
+        // this fails under the old note-below ordering).
         for (i, r) in rows.iter().enumerate() {
             if r.is_note {
-                assert!(!rows[i - 1].is_note);
-                assert_eq!(rows[i - 1].line, r.line);
+                let next_code = rows[i + 1..].iter().find(|r| !r.is_note).expect("a code row after a note");
+                assert_eq!(next_code.line, r.line);
             }
         }
 
@@ -1442,12 +1462,12 @@ use super::*;
         assert!(!rows.is_empty(), "view must not blank: {rows:?}");
         assert_eq!(
             FileViewRow::row_for_line(&rows, 10),
-            Some(18),
-            "point's line is the last code row: {:?}",
+            Some(19),
+            "point's line is the last code row (note rows above shift it to index 19): {:?}",
             rows.iter().map(|r| (r.line, r.is_note)).collect::<Vec<_>>()
         );
-        assert_eq!(rows[18].text, "line10");
-        assert!(!rows[18].is_note);
+        assert_eq!(rows[19].text, "line10");
+        assert!(!rows[19].is_note);
         assert_eq!(rows.len(), 20, "advanced window still fills: 10 + 10");
         // The emitted window's first buffer line (1) is above scroll_top
         // (0) — the \u{2191} indicator keys off rows[0].line.
@@ -1478,7 +1498,11 @@ use super::*;
         s3.set_point_line(5);
         let rows = s3.file_view_rows();
         assert_eq!(rows.len(), 21, "5 code rows + 16 capped note rows (<= 21)");
-        assert_eq!(FileViewRow::row_for_line(&rows, 5), Some(4), "point's line drawn");
+        // annotations-render-fold: the 16 capped note rows (16 of the 22 on
+        // line 5 — the budget is final) sit ABOVE their code row, so the
+        // code row is at index 4 + 16 = 20 (4 code rows for lines 1–4, then
+        // the notes, then the code row last).
+        assert_eq!(FileViewRow::row_for_line(&rows, 5), Some(20), "point's line drawn");
         assert_eq!(rows.iter().filter(|r| r.is_note).count(), 16);
 
         // Leg 4 (non-degenerate regression): a single note in a 31-line
@@ -1507,8 +1531,8 @@ use super::*;
             vec![
                 (0, false),
                 (1, false),
-                (2, false),
                 (2, true),
+                (2, false),
                 (3, false),
                 (4, false),
                 (5, false),

@@ -133,8 +133,9 @@ impl AppStore {
         // Map-aware (plan 005 issue 02): with note rows visible a rendered
         // row is NOT `scroll_top + row` buffer lines — translate through
         // the rendered-row list (a note row maps to its anchored code
-        // row). A click past the last rendered row maps to the last CODE
-        // row in the slice.
+        // row; the note rows sit ABOVE their code row — the map is
+        // order-agnostic, annotations-render-fold). A click past the last
+        // rendered row maps to the last CODE row in the slice.
         let rows = self.file_view_rows();
         let Some(target_line) = FileViewRow::line_for_row(&rows, row)
             .or_else(|| rows.iter().rev().find(|r| !r.is_note).map(|r| r.line))
@@ -263,10 +264,13 @@ impl AppStore {
     /// always drawn, and a densely-annotated window still fills the
     /// canvas — a 25-line all-annotated file in a 21-row viewport emits
     /// 10 code + 10 note rows, not a 1-row span),
-    /// with a virtual annotation note row directly under each annotated
-    /// line as the note-row budget allows (`show_note_rows`; `C-c a`
-    /// toggles — the `annotated` flag on the code rows is independent, so
-    /// the margin marker stays). Every row
+    /// with a virtual annotation note row directly ABOVE each annotated
+    /// line as the note-row budget allows (annotations-render-fold: the
+    /// note reads as a header for the code it annotates; `show_note_rows`
+    /// folds the blocks in and out via `C-c a h` / `C-c a s` — the
+    /// `annotated` flag on the code rows is independent, so the margin
+    /// marker stays, in its folded state when the note rows are hidden).
+    /// Every row
     /// carries its buffer-line index: the dense 1:1 "row i == line top+i"
     /// assumption is gone, and the renderer / `cursor_cell` /
     /// `mouse_click_position` translate `buffer_line` ↔ `rendered_row`
@@ -363,6 +367,32 @@ impl AppStore {
 
         let mut out = Vec::with_capacity(end.saturating_sub(start) + notes_left);
         for line in start..end {
+            // annotations-render-fold: the note rows emit BEFORE the code
+            // row — the note reads as a header for the code it annotates,
+            // not a trailer under it. The budget bookkeeping is unchanged
+            // (the code rows are never reduced; the note-row budget is
+            // final).
+            if self.show_note_rows {
+                for a in records.iter().filter(|a| a.line == line) {
+                    if notes_left == 0 {
+                        break; // the note-row budget is final: stop here
+                    }
+                    notes_left -= 1;
+                    let mut note = format!("  \u{25b8} {}", a.text);
+                    if a.orphaned {
+                        note.push_str(" (orphaned)");
+                    }
+                    out.push(FileViewRow {
+                        line,
+                        is_note: true,
+                        annotated: false,
+                        matches: Vec::new(),
+                        highlight: None,
+                        text: note,
+                        spans: Vec::new(),
+                    });
+                }
+            }
             let text = buf.line_text(line).unwrap_or_default().to_string();
             let spans = highlight
                 .and_then(|h| h.lines.get(line))
@@ -389,37 +419,69 @@ impl AppStore {
                 text,
                 spans,
             });
-            if self.show_note_rows {
-                for a in records.iter().filter(|a| a.line == line) {
-                    if notes_left == 0 {
-                        break; // the note-row budget is final: stop here
-                    }
-                    notes_left -= 1;
-                    let mut note = format!("  \u{25b8} {}", a.text);
-                    if a.orphaned {
-                        note.push_str(" (orphaned)");
-                    }
-                    out.push(FileViewRow {
-                        line,
-                        is_note: true,
-                        annotated: false,
-                        matches: Vec::new(),
-                        highlight: None,
-                        text: note,
-                        spans: Vec::new(),
-                    });
-                }
-            }
         }
         out
     }
 
+    /// `C-c a h` (annotations-render-fold): hide the inline annotation note
+    /// rows (all of them — the fold is global, not per-annotation; `C-c a l`
+    /// is the per-note navigation path). The margin indicators stay, in
+    /// their folded state. No-op outside the buffer view (M-x reachability).
+    pub fn annotate_hide(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            return;
+        }
+        self.show_note_rows = false;
+        self.minibuffer_message("note rows: hidden");
+    }
+
+    /// `C-c a s` (annotations-render-fold): show the inline annotation note
+    /// rows again (the inverse of `annotate_hide`).
+    pub fn annotate_show(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            return;
+        }
+        self.show_note_rows = true;
+        self.minibuffer_message("note rows: shown");
+    }
+
+    /// The `annotate-fold` command (annotations-render-fold): the
+    /// read-only-mode fold toggle (hide ↔ show), reachable from the M-x
+    /// palette only — deliberately UNBOUND (gate P1 on this lane): crossterm
+    /// 0.29 only decodes a `KeyCode::Modifier(...)` event (CSI u keycodes
+    /// 57441 → `LeftShift`, 57442 → `LeftControl`, 57447 → `RightShift`)
+    /// when BOTH `DISAMBIGUATE_ESCAPE_CODES` (1) and
+    /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (8) are enabled, and iocraft 0.9.1
+    /// pushes ONLY `REPORT_EVENT_TYPES` (2) — so a bare Shift press never
+    /// reaches the app, on any terminal (byte-based terminals send no
+    /// bare-Shift bytes at all). `C-c a h` / `C-c a s` is the fold path.
+    /// Read-only mode only: in Edit mode a bare Shift is part of normal
+    /// text entry and must never fire the fold.
+    pub fn annotate_fold(&mut self) {
+        if self.top_view() != ViewId::Buffer {
+            return;
+        }
+        if self.current_buffer_editable() {
+            return;
+        }
+        self.annotate_toggle();
+    }
+
+    /// Whether the inline annotation note rows are folded away (the UI's
+    /// margin indicator carries the folded state on annotated lines — the
+    /// thin-bar marker instead of the ordinary one). The inverse of the
+    /// store's `show_note_rows` fold state.
+    pub fn note_rows_folded(&self) -> bool {
+        !self.show_note_rows
+    }
+
     /// The total number of rendered rows for the current buffer
     /// (plan 005 issue 02): the buffer's line count plus the visible
-    /// annotation note rows (zero when `C-c a` hid them). The renderer's
-    /// bottom scroll indicator compares the slice length against this in
-    /// rendered-row space.
-    pub fn file_view_total_rows(&mut self) -> usize {        let total = self
+    /// annotation note rows (zero when the fold hid them — `C-c a h`). The
+    /// renderer's bottom scroll indicator compares the slice length against
+    /// this in rendered-row space.
+    pub fn file_view_total_rows(&mut self) -> usize {
+        let total = self
             .buffers
             .current_buffer()
             .map(|b| b.line_count())
