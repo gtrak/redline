@@ -496,15 +496,29 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    file before building. A discrimination run against a stale binary is not
    evidence, and it fails in the *safe-looking* direction.
 7. **A gate runs its battery in the worktree it was asked to gate — and two
-   batteries in the SAME worktree are worse than two in different ones.** A gate
-   was observed running `gate.sh full` inside a *different* lane's worktree while
-   that lane ran its own battery there; they share the fixture root, the
-   `target/debug/redline` binary and the PTY serialization lock, so the result was
-   a `GATE RESULT: FAIL` that belonged to neither lane. Different worktrees at
-   least have separate fixtures; the same worktree has nothing separating them.
-   Corollary: if a lane's suite fails in a way that contradicts its report, check
-   *who else was running in that tree* before believing the failure — and never
-   report a contended result as evidence about a lane, in either direction.
+   batteries in the SAME worktree are worse than two in different ones.** They share
+   the fixture root, the `target/debug/redline` binary and the PTY serialization
+   lock, so a contended result belongs to neither lane.
+   **And be careful who you blame for a stray process.** A gate whose log contained
+   `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
+   of running batteries in another lane's worktree. It had not: those processes were
+   the *other lane's own*, surfaced by the `pgrep`, and the `GATE RESULT: FAIL` quoted
+   in its log was read out of that lane's output file while it waited for the tree to
+   clear. The rule stands; the incident that prompted it never happened. **Attribute a
+   process to a lane by its cwd and PID lineage before writing it into the record** —
+   a false incident in the skill is worse than no incident, because the next reader
+   treats it as evidence and may steer work on it.
+8. **A lane that keeps working after its first commit has landed cannot be
+   re-squashed.** If a branch was squash-landed and then gains more commits on the
+   same branch, `git merge --squash <branch>` re-applies the already-landed commits
+   and conflicts with the very squash that landed them — observed as six conflicted
+   files including an add/add on a test file that both sides added, with the squash
+   reporting "Squash commit -- not updating HEAD" and `git status` clean *before* it
+   ran (so a chained `&& git commit` silently had nothing to commit and the landing
+   vanished). Land the delta instead: `git cherry-pick -n <new-commit>` and commit,
+   or recreate the branch from main before continuing. **Always confirm the landing
+   happened** — read the new `git log` line and check the test count moved, rather
+   than trusting the command chain's exit status.
 6. **The shared target dir cuts BOTH ways, and the second direction is worse.**
    A scratch copy that builds a **modified** source tree (a reverted guard, a
    neutered function) into a *lane's* target dir leaves an artefact that cargo's
