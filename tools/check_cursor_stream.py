@@ -902,8 +902,9 @@ def annotation_gutter_checks():
     """plan 005 issue 02b + annotations-fold-visual: the annotated line has a
     2-cell gutter (the fold arrow at cell 0, the tree-line branch/blank at
     cell 1, code at cell 2 — the SAME column folded and shown), the note row
-    carries the 2-branch tree-line's diagonal (╱ at cell 0, note text at
-    cell 2) ABOVE the anchored code row, the cursor column adds the gutter on
+    carries the 2-branch tree-line's curved corner (╭ at cell 0, ─ bend at
+    cell 1, note text at cell 2) ABOVE the anchored code row, the cursor
+    column adds the gutter on
     annotated lines, and note rows do not push the point's line off-canvas.
 
     Legs:
@@ -971,15 +972,19 @@ def annotation_gutter_checks():
     rec("annotated line: ▾ at cell 0, ─ at cell 1, code at cell 2 (full-string)",
         gutter_correct,
         f"row starts with arrow+branch+code: {gutter_correct}")
-    # annotations-fold-visual: the note row is directly ABOVE the arrow row,
-    # carrying the tree-line's diagonal (╱ at cell 0) and the note text at
-    # cell 2 (the note is the code row's header, not its trailer).
+    # annotations-curve-glyphs (design A): the note row is directly ABOVE
+    # the arrow row, carrying the tree-line's curved corner (╭ at cell 0 —
+    # the SAME cell as the ▾ on the code row below — with its ─ bend at
+    # cell 1) and the note text at cell 2 (the note is the code row's
+    # header, not its trailer). The per-cell "\u256d\u2500regression
+    # check" string is the ANCHOR assertion: it is false if the corner
+    # moves one cell or if the cell-1 bend is dropped.
     marker_row_idx = next((r for r in range(1, s.rows - 2)
                            if "\u25be" in s.row_text(r)), None)
     note_above = marker_row_idx is not None and marker_row_idx > 1 and (
-        "\u2571 regression check" in s.row_text(marker_row_idx - 1)
+        "\u256d\u2500regression check" in s.row_text(marker_row_idx - 1)
     )
-    rec("note row (diagonal) sits directly ABOVE the annotated code row",
+    rec("note row (╭ corner at cell 0, ─ at cell 1) sits directly ABOVE the code row",
         note_above, f"arrow_row={marker_row_idx}")
 
     # ── Leg 2: cursor column on an annotated line adds the gutter ──────
@@ -1035,7 +1040,7 @@ def annotation_gutter_checks():
         r3 == r, f"original row={r}, after C-p row={r2}, after C-n row={r3}")
 
     # ── Leg 4: C-c a h (annotations-fold-visual): the TOGGLE. h → the note
-    # row (diagonal) goes and the margin arrow folds ▾→▸; h again → the note
+    # row (curved corner) goes and the margin arrow folds ▾→▸; h again → the note
     # row and the ▾ arrow + ─ branch come back. The code row's TEXT and its
     # START COLUMN are unchanged in both states (no jitter).
     s.key("M-<", 0.8)  # go to top so the annotated line is visible
@@ -1053,7 +1058,7 @@ def annotation_gutter_checks():
     note_row_gone = True
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
-        if "\u2571 regression check" in t:
+        if "\u256d\u2500regression check" in t:
             note_row_gone = False
         if "\u25b8" in t and "fn target_one() {}" in t:
             folded_row = t
@@ -1069,7 +1074,7 @@ def annotation_gutter_checks():
         t = s.row_text(r2)
         if "\u25be" in t and "fn target_one() {}" in t:
             shown_row = t
-        if "\u2571 regression check" in t:
+        if "\u256d\u2500regression check" in t:
             note_row_back = True
     shown_msg = "note rows: shown" in s.row_text(s.rows - 2)
     code_unchanged_shown = shown_row is not None and "fn target_one() {}" in shown_row
@@ -1116,7 +1121,7 @@ def annotation_gutter_checks():
     title = s.row_text(0).strip()
     filled = [t for t in canvas_rows if t.strip()]
     marker_rows = [t for t in canvas_rows if "\u25be" in t]
-    note_rows = [t for t in canvas_rows if "\u2571" in t]
+    note_rows = [t for t in canvas_rows if "\u256d" in t]
     # FILL, not merely non-blank: >= 18 of 21 content rows, specifically
     # the 10 code + 10 note shape.
     rec("all-annotated fill: >= 18 of 21 content rows emitted",

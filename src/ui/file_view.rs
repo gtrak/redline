@@ -106,16 +106,28 @@ impl Component for FileViewCanvas {
                 // annotations-render-fold: the note renders directly ABOVE
                 // the anchored code row, dim and italic; it is only emitted
                 // when the note blocks are SHOWN — a fold emits no note rows
-                // at all). The row carries the 2-branch tree-line's UP arm:
-                // the diagonal (\u{2571} "╱") at cell 0 slants up from the
-                // code row's ▾ junction to the note, and the note text
-                // begins at cell 2 — the SAME column the annotated code row's
-                // text begins at — so the note and the code read as the two
-                // aligned arms of one fork.
+                // at all). The row carries the 2-branch tree-line's UP arm —
+                // design A (annotations-curve-glyphs): the CURVED corner
+                // (\u{256d} "╭") at cell 0, the SAME cell as the code row's ▾
+                // directly below (the anchor relationship that makes the
+                // branch read as attached), whose stroke comes up from that
+                // junction and bends right into the straight ─ (\u{2500}) at
+                // cell 1, then the note text at cell 2 — the SAME column the
+                // annotated code row's text begins at — so the note and the
+                // code read as the two aligned arms of one fork.
                 canvas.set_text(
                     0,
                     row as isize,
-                    "\u{2571}",
+                    "\u{256d}",
+                    text_style(t.preview.foreground, false, false),
+                );
+                // The corner's rightward bend: the note row's ─ at cell 1
+                // (mirroring the code row's own cell-1 branch), so the curve
+                // connects to the note text at cell 2.
+                canvas.set_text(
+                    1,
+                    row as isize,
+                    "\u{2500}",
                     text_style(t.preview.foreground, false, false),
                 );
                 let note_style = text_style_italic(t.preview.foreground);
@@ -1178,6 +1190,114 @@ mod tests {
         assert!(
             note_present_shown && !note_present_folded,
             "the note row must be present SHOWN and absent FOLDED (otherwise the two frames are identical and this test is vacuous): shown={note_present_shown} folded={note_present_folded}"
+        );
+    }
+
+    /// annotations-curve-glyphs (design A): the ANCHOR RELATIONSHIP, asserted
+    /// per cell. The note row's curved corner ╭ (\u{256d}) must sit at the
+    /// SAME cell as the ▾ on the code row DIRECTLY BELOW it — that adjacency
+    /// is what makes the branch read as attached. A presence assertion (does
+    /// the note row contain a glyph?) cannot catch a misplacement: the old
+    /// ╱ passed a gate while attached to nothing. This test instead pins,
+    /// per cell: the code row ▾@0 / ─@1 / source@2, the note row directly
+    /// above it ╭@0 / ─@1 / note text@2, and ╭'s column == ▾'s column. It is
+    /// RED if the corner moves one cell either way (or if the cell-1 ─
+    /// bend is dropped).
+    #[test]
+    fn note_corner_anchored_to_code_row_same_cell() {
+        use crate::app::keymap::{parse_key, Key};
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        /// The display column (in cells) where `needle` begins in `line`.
+        fn col_of(line: &str, needle: &str) -> Option<usize> {
+            let b = line.find(needle)?;
+            Some(crate::model::text_width::display_width(&line[..b]))
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/jit.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(dir.path(), base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/jit.rs");
+        // Annotate line 0 through the public key path (A, type, RET).
+        store.key_event(parse_key("A").unwrap());
+        for c in "my note".chars() {
+            store.key_event(if c == ' ' {
+                Key::char(' ')
+            } else {
+                parse_key(&c.to_string()).unwrap()
+            });
+        }
+        store.key_event(parse_key("RET").unwrap());
+
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // The EXPANDED code row: ▾ (cell 0) + ─ (cell 1) + source (cell 2).
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains('\u{25be}') && l.contains("fn foo() {"))
+            .unwrap_or_else(|| panic!("expanded code row not found:\n{frame}"));
+        let code = lines[code_idx];
+        let arrow_col = col_of(code, "\u{25be}").unwrap();
+        assert_eq!(arrow_col, 0, "▾ must be at cell 0 (the anchor column): {code:?}");
+        assert!(
+            code.chars().nth(1) == Some('\u{2500}'),
+            "code row cell 1 must be ─: {code:?}"
+        );
+        assert_eq!(
+            col_of(code, "fn foo() {").unwrap(),
+            2,
+            "source must start at cell 2: {code:?}"
+        );
+
+        // The note row is the row DIRECTLY ABOVE the code row (adjacency).
+        assert!(
+            code_idx > 0,
+            "no row above the code row — the note row is missing:\n{frame}"
+        );
+        let note = lines[code_idx - 1];
+        assert!(
+            note.contains("my note"),
+            "the row directly above the code row must be the note row: {note:?}\n{frame}"
+        );
+
+        // ANCHOR: the note row's ╭ sits at the SAME cell as the code row's
+        // ▾ directly below it — asserted per cell, so a corner that moved
+        // one cell either way is RED.
+        let corner_col = col_of(note, "\u{256d}")
+            .unwrap_or_else(|| panic!("no ╭ on the note row: {note:?}"));
+        assert_eq!(
+            corner_col, arrow_col,
+            "the note row's ╭ (cell {corner_col}) must anchor at the SAME cell as the code row's ▾ (cell {arrow_col}): note={note:?} code={code:?}"
+        );
+        assert_eq!(corner_col, 0, "the corner must be at cell 0 (the anchor column): {note:?}");
+        // The cell-1 ─ is the corner's rightward bend (the look depends on
+        // it — a later edit that drops it must be caught here).
+        assert!(
+            note.chars().nth(1) == Some('\u{2500}'),
+            "note row cell 1 must be ─ (the corner's bend into the note): {note:?}"
+        );
+        assert_eq!(
+            col_of(note, "my note").unwrap(),
+            2,
+            "note text must start at cell 2: {note:?}"
         );
     }
 }
