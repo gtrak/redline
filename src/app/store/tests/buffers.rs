@@ -1812,8 +1812,8 @@ use super::*;
     #[test]
     fn accurate_transpose_chars() {
         // (item 8): C-t is emacs `transpose-chars`: mid-line it swaps the
-        // char before and at the point and moves the point forward one
-        // (between the swapped chars, on the far side). The line-edge cases
+        // char before and at the point and moves the point forward one,
+        // past both swapped chars. The line-edge cases
         // emacs folds in: at a line end (char at point is \n) the PREVIOUS
         // TWO chars are exchanged and the point does not move; at a line
         // start (char before is \n) the first char of the line moves to the
@@ -1831,7 +1831,7 @@ use super::*;
             assert_eq!(
                 s.point_col(),
                 2,
-                "the point moves forward one, between the swapped chars"
+                "the point moves forward one, past both swapped chars"
             );
         }
         // At EOL (char at point is \n): emacs exchanges the PREVIOUS TWO

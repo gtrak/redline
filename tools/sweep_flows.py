@@ -598,8 +598,9 @@ def flow_accurate_suite():
     multi-char word "aZ" with surviving text on the row, and (a) the row
     must read EXACTLY " cd" — a mis-routed plain backspace (one char) leaves
     "a cd", which the exact-row assertion rejects; (b) the "2 chars killed"
-    echo names the extent; (c) the final on-disk read-back corroborates
-    both. C-u stays half-page scroll (universal-argument is 015 item 9, out
+    echo names the extent; (c) the final on-disk read-back corroborates the
+    ROW (the disk cannot corroborate a minibuffer echo). C-u stays half-page
+    scroll (universal-argument is 015 item 9, out
     of scope): it must scroll, not self-insert 'u'. Own App + a dedicated
     file (created before startup so
     the find-file picker lists it, removed after)."""
