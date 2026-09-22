@@ -548,6 +548,17 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    line that mentions it. Corollary: a wait whose condition can
    never hold is worse than no wait, because it silently costs the budget instead of
    failing.
+   **A long-running gate must persist its findings to a file AS IT GOES.** Twice today a
+   gate run ended mid-work with `exitCode: 0`, no signal and `resumable: true` — and the
+   entire analysis so far lived only in its context, so the run died and took the verdict
+   with it (the second time, only the on-disk scratch tree and one narration line
+   survived). Have the gate append each claim's verdict, the command and the observed
+   result to a file (e.g. `/tmp/<name>_verdict.md`) immediately after verifying it; then a
+   resumed run can skip what the file already records, and a third failure still leaves
+   usable evidence. Related: when the battery is ALREADY proven green by a previous pass,
+   do not make the resumed gate repeat it — the expensive half adds no information and is
+   what threatens memory on this box (swap 100%, ~1 GB free), so the mutations are where
+   the remaining budget belongs.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
