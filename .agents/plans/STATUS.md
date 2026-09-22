@@ -294,3 +294,16 @@ Spot-checks named, per the task's instruction:
 | 008 (external annotations) | `issue-008-01-impl` | LANDED | spot-checked: annotations on external buffers store the absolute path (`src/app/store/notes.rs:104`) |
 | 011 (resolver parity) | all (see the 011 table — every task spec named there) | LANDED | full table above |
 | 012 (project organization) | all (see the 012 tables — every spec named there) | LANDED | full tables in this section — verified at landing, not sampled |
+
+## Governing criterion added 2026-09-21 (user directive)
+
+**"ALL symbols should jump to the right definition."** Recorded as
+`.agents/tasks/issue-all-symbol-jumps.md`: right file, right symbol, right **column**,
+checkable as a **symbol-kind × jump-path matrix** with a test per cell. It exists because
+the same defect class was reported twice (line-start jumps, then field jumps landing at
+column 0) while every gate stayed green — the PTY tier has **one** column pin in the
+whole suite, so a col-0 landing on an `M-.` path could not fail the battery.
+
+It **supersedes** one-off fixes for individual jump paths: if a cell is wrong, fix it
+there. The justified col-0 exceptions (goto-line, annotations-anchored, impl-block
+headers) must be listed and defended in that issue; everything else is a bug.
