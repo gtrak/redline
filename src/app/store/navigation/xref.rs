@@ -29,7 +29,7 @@ impl AppStore {
         // behavior is uniform by construction).
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
         let at = Self::symbol_at_point(lang, &line_text, self.point_col());
-        let Some((root, outcome)) =
+        let Some((root, outcome, jump_name)) =
             self.crate_xref_outcome(key, path, line, lang, at.as_ref())
         else {
             // No crate index for this root yet (build in flight, refused,
@@ -54,13 +54,19 @@ impl AppStore {
                 // (jump-column-landings) land on the definition's name
                 // column, not the line start: the crate index recorded the
                 // name's start_byte for this (file, line); re-read it. The
-                // outcome enum carries only a line, and re-querying the
-                // index avoids a mod.rs change to the outcome type (making
-                // `ExternalXrefOutcome::Jump` carry a column is the
-                // deferred follow-up). `None` (a stale index) degrades
+                // outcome enum carries only a line — the definition NAME
+                // travels alongside it in `crate_xref_outcome`'s return
+                // (`jump_name`), so the re-read matches by (name, line)
+                // rather than line alone (P2-2 — a line can host two
+                // symbols); a mod.rs change to the outcome type is still
+                // the deferred follow-up. `None` (a stale index) degrades
                 // honestly to col 0.
-                let start_byte =
-                    self.definition_start_byte(Some(root.as_path()), &file, line);
+                let start_byte = self.definition_start_byte(
+                    Some(root.as_path()),
+                    &file,
+                    line,
+                    jump_name.as_deref().unwrap_or(""),
+                );
                 if self.open_external_path(&abs).is_some() {
                     let col = self.landing_column_from_start_byte(start_byte);
                     self.set_point(line, col, col);
@@ -121,7 +127,7 @@ impl AppStore {
         line: usize,
         lang: LanguageId,
         at: Option<&(String, String)>,
-    ) -> Option<(PathBuf, ExternalXrefOutcome)> {
+    ) -> Option<(PathBuf, ExternalXrefOutcome, Option<String>)> {
         let (root, arc) = self.crate_index_arc_for_path(path)?;
         let idx = arc.lock().unwrap();
         // 006-03b item 3: the index key shape (forward-slash normalized).
@@ -175,6 +181,11 @@ impl AppStore {
                 Self::xref_definition_candidates(&idx, ident, token, &rel)
             })
             .unwrap_or_default();
+        // (jump-column-landings P2-2) the silent-jump's definition NAME, so
+        // the landing's outline re-read can match by (name, line) rather
+        // than line alone (a line can host two symbols). `None` for every
+        // non-Jump outcome (those never do a silent same-file landing).
+        let mut jump_name: Option<String> = None;
         let outcome = if !defs.is_empty() {
             let lookup = defs[0].symbol.name.clone();
             // (jump-ambiguity) the tightened rule, the same as the
@@ -182,6 +193,7 @@ impl AppStore {
             // is in the current (crate-relative) file; a cross-file
             // unique candidate goes to the picker, best preselected.
             if defs.len() == 1 && defs[0].file == rel {
+                jump_name = Some(defs[0].symbol.name.clone());
                 ExternalXrefOutcome::Jump {
                     file: defs[0].file.clone(),
                     line: defs[0].symbol.line,
@@ -228,7 +240,7 @@ impl AppStore {
                 },
             }
         };
-        Some((root, outcome))
+        Some((root, outcome, jump_name))
     }
 
     /// The identifier run at the point's column (char offset) on `text`, plus

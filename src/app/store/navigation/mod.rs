@@ -74,14 +74,15 @@ impl AppStore {
         let line = tooling_landing_line(source);
         // App-side refinement the `ResolvedSource.line` doc promises
         // (jump-column-landings): a provider pins a LINE but never a
-        // column — locate the resolved item's name on that line and land
+        // column — locate the resolved item's name on that line (its first
+        // whole-word occurrence outside a comment or string, P2-3) and land
         // on its first char column (the item is the path's last segment,
         // `tokio::spawn` → `spawn`), so an M-. on a function lands on the
         // name, not the line start. A whole-word match only (never
         // `respawn`/`spawned`); the scan is char-based, so a multibyte
         // prefix yields a CHAR column, not a byte offset. The honest col-0
-        // fallback when the name is not a whole word on the line — never
-        // an invented column.
+        // fallback when the name is not a whole word on the line (or only
+        // appears inside a comment/string) — never an invented column.
         let line_text = self
             .buffers
             .current_buffer()
@@ -100,12 +101,16 @@ impl AppStore {
     }
 
     /// (jump-column-landings) The 0-based CHAR column of the first whole-word
-    /// occurrence of `item` on `line_text` — the app-side refinement for a
-    /// tooling landing whose provider pinned a line but no column. A word
-    /// char immediately before or after `item` disqualifies that occurrence
-    /// (`spawn` never matches `respawn`/`spawned`), so the landing sits on
-    /// the definition's own name, not a substring inside a longer
-    /// identifier. `None` when `item` is empty or absent as a whole word —
+    /// occurrence of `item` on `line_text` OUTSIDE a comment or string
+    /// literal — the app-side refinement for a tooling landing whose provider
+    /// pinned a line but no column. A word char immediately before or after
+    /// `item` disqualifies that occurrence (`spawn` never matches
+    /// `respawn`/`spawned`), so the landing sits on the definition's own name,
+    /// not a substring inside a longer identifier. A leading inline comment
+    /// or string that mentions the name (`/* spawn */ pub fn spawn()`,
+    /// `let s = "spawn"; fn spawn()`) is skipped (P2-3) so the landing sits on
+    /// the live definition's name, not the mention. `None` when `item` is
+    /// empty or every whole-word occurrence sits inside a comment/string —
     /// the caller degrades to column 0 (never an invented column). The scan
     /// is char-based, so a multibyte prefix yields a CHAR column, not a byte
     /// offset (a byte scan would be off-by-N on such a line).
@@ -119,6 +124,7 @@ impl AppStore {
         if n > chars.len() {
             return None;
         }
+        let mask = Self::comment_or_string_mask(&chars);
         for i in 0..=chars.len() - n {
             if chars[i..i + n] != target[..] {
                 continue;
@@ -126,27 +132,99 @@ impl AppStore {
             let before_ok = i == 0 || !is_word_char(chars[i - 1]);
             let j = i + n;
             let after_ok = j >= chars.len() || !is_word_char(chars[j]);
-            if before_ok && after_ok {
+            // Every char of the name must sit outside a comment/string region
+            // (the name is a contiguous word, so its start decides, but a
+            // full-range check is the belt-and-braces form).
+            let clean = !(i..j).any(|k| mask[k]);
+            if before_ok && after_ok && clean {
                 return Some(i);
             }
         }
         None
     }
 
+    /// (jump-column-landings P2-3) For each char index on `chars`, `true`
+    /// when that char lies inside an inline block comment (`/* … */`; an
+    /// unterminated one extends to end of line) or a string literal
+    /// (`'…'`, `"…``, or backtick; a backslash escapes the next char). `//`
+    /// and `#` are deliberately NOT masked: such a marker comments the
+    /// definition itself out (so the name is not a live definition on that
+    /// line), and `#` is a Rust ATTRIBUTE marker in `#[…]`/`#![…]`, not a
+    /// comment. A pure helper (no state), shared by the tooling-resolver
+    /// landing.
+    fn comment_or_string_mask(chars: &[char]) -> Vec<bool> {
+        let n = chars.len();
+        let mut mask = vec![false; n];
+        let mut i = 0;
+        while i < n {
+            // Inline block comment: `/* … */` (unterminated → to end of line).
+            if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
+                let start = i;
+                i += 2;
+                let closed = loop {
+                    if i + 1 < n && chars[i] == '*' && chars[i + 1] == '/' {
+                        i += 2;
+                        break true;
+                    }
+                    if i >= n {
+                        break false;
+                    }
+                    i += 1;
+                };
+                mask[start..i.min(n)].fill(true);
+                if !closed {
+                    mask[start..n].fill(true);
+                    break;
+                }
+                continue;
+            }
+            // String literal: `'…'`, `"…``, or backtick… (backslash escapes).
+            if matches!(chars[i], '\'' | '"' | '`') {
+                let quote = chars[i];
+                let start = i;
+                i += 1; // past the opening quote
+                loop {
+                    if i >= n {
+                        // Unterminated: the rest of the line is string.
+                        mask[start..n].fill(true);
+                        break;
+                    }
+                    if chars[i] == '\\' {
+                        i += 2; // backslash + the escaped char are string
+                        continue;
+                    }
+                    if chars[i] == quote {
+                        i += 1; // past the closing quote
+                        break;
+                    }
+                    i += 1;
+                }
+                mask[start..i].fill(true);
+                continue;
+            }
+            i += 1;
+        }
+        mask
+    }
+
     /// (jump-column-landings) The index-recorded `start_byte` (an absolute
-    /// file byte offset) of the symbol at `(file, line)` in the picker's
+    /// file byte offset) of the symbol `(symbol_name, line)` in the picker's
     /// current index: the project index when `crate_root` is `None`, the
-    /// crate's index otherwise. `None` when no symbol on that line is in the
-    /// index (a stale index after an external edit) — the caller degrades to
-    /// column 0. Re-reading the index uses the SAME byte the candidate row
-    /// was built from (no re-derivation of a position, no file re-parse) —
-    /// the picker candidate carries only the line ("file:line"), so the byte
-    /// is fetched, not re-derived.
+    /// crate's index otherwise. `None` when no such symbol is in the index
+    /// (a stale index after an external edit) — the caller degrades to
+    /// column 0. Matching the NAME as well as the line (P2-2) is what keeps
+    /// a line that hosts two symbols (`fn a() {} fn b() {}`) from always
+    /// returning the first; the imenu path already matches name AND line.
+    /// Re-reading the index uses the SAME byte the candidate row was built
+    /// from (no re-derivation of a position, no file re-parse) — the picker
+    /// candidate carries only the line ("file:line"), so the byte is
+    /// fetched, not re-derived.
     pub(in crate::app::store) fn definition_start_byte(
         &mut self,
         crate_root: Option<&Path>,
         file: &str,
         line: usize,
+        symbol_name: &str,
     ) -> Option<usize> {
         match crate_root {
             Some(root) => self
@@ -156,14 +234,14 @@ impl AppStore {
                         .unwrap()
                         .outline(file)
                         .iter()
-                        .find(|s| s.line == line)
+                        .find(|s| s.line == line && s.name == symbol_name)
                         .map(|s| s.start_byte)
                 }),
             None => self
                 .index
                 .outline(file)
                 .iter()
-                .find(|s| s.line == line)
+                .find(|s| s.line == line && s.name == symbol_name)
                 .map(|s| s.start_byte),
         }
     }

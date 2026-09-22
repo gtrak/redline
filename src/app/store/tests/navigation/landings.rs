@@ -313,3 +313,133 @@ fn goto_line_lands_line_start_not_a_symbol() {
         "goto-line is a bare-line landing (col 0), not a symbol landing"
     );
 }
+
+// ── jump-column-landings follow-up (P2-1/2/3) ──────────────────────────
+// P2-1: the annotation record DOES carry a column (Annotation.col, the
+// point's column at creation, written to the notes file) — the landing uses
+// it instead of col 0. P2-2: a line that hosts two symbols must land on the
+// chosen one's name, not the line's first. P2-3: a leading comment or string
+// that mentions the resolved item's name is skipped, not landed on.
+
+/// P2-2 (in-project Xref picker): a definition line that hosts two symbols
+/// (`fn a() {} fn b() {}`) — M-. on `b` must land on `b`'s name column
+/// (col 13), not `a`'s (col 3, the line-only match's result) and not col 0.
+/// The picker row's `label` (the resolved symbol's name) is what
+/// `definition_start_byte` now matches on.
+#[test]
+fn xref_picker_two_symbols_one_line_lands_right_one() {
+    let (mut s, _dir) = store_with_index(&[
+        ("src/main.rs", "fn main() { b(); }\n"),
+        ("src/lib.rs", "fn a() {} fn b() {}\n"),
+    ]);
+    s.open_path("src/main.rs");
+    // Line 0: `fn main() { b(); }` — cursor on `b` (col 12).
+    s.set_point(0, 12, 12);
+    s.xref_find_definitions();
+    assert!(s.picker_open(), "cross-file unique: picker");
+    assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+    s.run_selected();
+    assert_eq!(s.point_line(), 0, "the definition's line");
+    assert_eq!(
+        s.point_col(),
+        13,
+        "the `b` name's column (fn a() {{}} fn |b), not `a`'s (3) or col 0 (msg: {})",
+        s.message
+    );
+}
+
+/// P2-2 (external/crate silent jump, xref.rs): the same two-symbol line, but
+/// the M-. resolves to a unique same-crate-file def — a silent jump. The
+/// definition NAME travels alongside the outcome (`jump_name` from
+/// `crate_xref_outcome`), so the re-read matches by (name, line). Lands on
+/// `b` (col 13), not `a` (col 3).
+#[test]
+fn external_crate_two_symbols_one_line_lands_right_one() {
+    let (mut s, _dir, root) = store_with_crate_index(&[(
+        "src/lib.rs",
+        "fn a() {} fn b() {}\nfn caller() { b(); }\n",
+    )]);
+    s.open_external_path(&root.path().join("src/lib.rs")).unwrap();
+    // Line 1: `fn caller() { b(); }` — cursor on `b` (col 14).
+    s.set_point(1, 14, 14);
+    s.xref_find_definitions();
+    assert!(!s.picker_open(), "unique same-crate-file: silent jump, no picker");
+    assert_eq!(s.point_line(), 0, "the definition's line");
+    assert_eq!(
+        s.point_col(),
+        13,
+        "the `b` name's column (fn a() {{}} fn |b), not `a`'s (3) (msg: {})",
+        s.message
+    );
+}
+
+/// P2-3 (pure seam): `first_word_column` skips a leading inline block comment
+/// or string literal that mentions the item's name, landing on the live
+/// definition's name. When the name appears ONLY inside a comment/string, it
+/// returns `None` (the caller degrades to col 0; never a comment's column).
+#[test]
+fn first_word_column_skips_leading_comment_and_string_mention() {
+    // Leading block comment: the first `spawn` (col 3) is inside `/* … */`;
+    // the definition's `spawn` (col 19) is the landing.
+    assert_eq!(
+        AppStore::first_word_column("/* spawn */ pub fn spawn() {}", "spawn"),
+        Some(19),
+        "the leading block-comment mention is skipped"
+    );
+    // Leading string literal: the first `spawn` (col 9) is inside `\"…\"`;
+    // the definition's `spawn` (col 20) is the landing.
+    assert_eq!(
+        AppStore::first_word_column("let s = \"spawn\"; fn spawn() {}", "spawn"),
+        Some(20),
+        "the leading string mention is skipped"
+    );
+    // Name only inside a comment → no live occurrence → None (honest col 0).
+    assert_eq!(
+        AppStore::first_word_column("/* spawn */", "spawn"),
+        None,
+        "a name only inside a comment is not a landing"
+    );
+    // Name only inside a string → None.
+    assert_eq!(
+        AppStore::first_word_column("let s = \"spawn\";", "spawn"),
+        None,
+        "a name only inside a string is not a landing"
+    );
+    // A Rust attribute is NOT a comment (`#[…]`): the name after it lands
+    // (guards against masking `#` as a line comment, which would wrongly
+    // swallow `#[doc = \"…\"] pub fn spawn()`).
+    assert_eq!(
+        AppStore::first_word_column("#[doc = \"x\"] pub fn spawn() {}", "spawn"),
+        Some(20),
+        "`#[…]` is an attribute, not a comment"
+    );
+}
+
+/// P2-1 (Annotations picker RET): the record carries a column —
+/// `Annotation.col`, the point's column at creation, written to the notes
+/// file. The offer encodes only "path:line", so the column is looked up in
+/// the notes document (not re-derived) and the landing sits there, not at
+/// the line start.
+#[test]
+fn annotations_picker_lands_recorded_column() {
+    let (mut s, dir) = store_with_index(&[("src/lib.rs", "fn target() {}\n")]);
+    // A record on (src/lib.rs, line 0) whose recorded column is 7 (the
+    // `target` name). Required fields: path, line, anchor, note; `col` is
+    // optional metadata carried here.
+    std::fs::write(
+        dir.path().join(".redline-notes.md"),
+        "<!-- redline-annotations:begin -->\n[annotation]\npath: src/lib.rs\nline: 0\ncol: 7\nanchor: fn target() {}\nnote: a note\n<!-- redline-annotations:end -->\n",
+    )
+    .unwrap();
+    s.open_path("src/lib.rs");
+    s.open_annotations_picker();
+    assert_eq!(s.picker_kind(), Some(PickerKind::Annotations));
+    s.run_selected();
+    assert_eq!(s.point_line(), 0, "the annotated line");
+    assert_eq!(
+        s.point_col(),
+        7,
+        "the recorded column (Annotation.col), not the line start (msg: {})",
+        s.message
+    );
+}

@@ -141,6 +141,22 @@ impl AppStore {
         rows.into_iter().map(|(_, _, c)| c).collect()
     }
 
+    /// (jump-column-landings P2-1) The recorded column of the annotation at
+    /// `(path, line)` in the notes document — its `Annotation.col`, the
+    /// point's column at creation — or `0` when no such record is loaded.
+    /// The annotations picker offer encodes only "path:line", so the column
+    /// is looked up here rather than re-derived. Reads the notes document
+    /// directly (already loaded when the picker was populated).
+    fn annotation_col(&self, path: &str, line: usize) -> usize {
+        self.notes_doc
+            .entries
+            .iter()
+            .filter_map(|e| e.as_record())
+            .find(|a| a.path == path && a.line == line)
+            .map(|a| a.col)
+            .unwrap_or(0)
+    }
+
     /// `C-c n a` (015-01): open the annotations picker — a temporary,
     /// filterable list of every annotation record in the notes document.
     /// RET jumps to the selected annotation's `(path, line)`; editing
@@ -824,7 +840,14 @@ impl AppStore {
             .and_then(|p| {
                 p.filtered
                     .get(p.selected)
-                    .map(|(c, _)| (p.kind, c.name.clone(), c.detail.clone()))
+                    .map(|(c, _)| {
+                        (
+                            p.kind,
+                            c.name.clone(),
+                            c.detail.clone(),
+                            c.label.clone(),
+                        )
+                    })
             });
         // (jump-ambiguity) the pending tooling landing travels with the
         // selection (cleared below, with the picker — every picker close
@@ -832,7 +855,7 @@ impl AppStore {
         let tooling = self.xref_tooling_pending.clone();
         self.picker = None;
         self.xref_tooling_pending = None;
-        let Some((kind, name, detail)) = choice else {
+        let Some((kind, name, detail, label)) = choice else {
             self.minibuffer_message("no candidate selected");
             return;
         };
@@ -883,10 +906,19 @@ impl AppStore {
                     // recorded name byte (the candidate row carries only
                     // "file:line") so the landing sits on the name's
                     // column, not the line start. `None` (a stale index)
-                    // degrades honestly to col 0.
+                    // degrades honestly to col 0. (P2-2) the row's `label`
+                    // IS the resolved symbol's name — matching name AND
+                    // line keeps a line that hosts two symbols from
+                    // landing on the first. The Impls picker's "impl X for
+                    // Y" label matches no outline symbol → col 0, as when
+                    // an impl header had none.
                     let crate_root = self.xref_crate_root.clone();
-                    let start_byte =
-                        self.definition_start_byte(crate_root.as_deref(), file, line - 1);
+                    let start_byte = self.definition_start_byte(
+                        crate_root.as_deref(),
+                        file,
+                        line - 1,
+                        &label,
+                    );
                     if let Some(root) = crate_root {
                         // 006-03: the candidate is CRATE-relative — open
                         // READ-ONLY via the external path (the landing
@@ -953,16 +985,21 @@ impl AppStore {
             // picker (open, point to the line, recenter, record the jump).
             PickerKind::Annotations => {
                 // detail is "path:line" (1-based line number, as shown).
-                // (jump-column-landings) col 0 is CORRECT here: an
-                // annotation is anchored to a LINE (the record carries no
-                // column/symbol), so the landing sits at the line start —
-                // there is no name column to land on (never invent one).
+                // (jump-column-landings P2-1) the annotation record DOES
+                // carry a column — `Annotation.col`, the point's column at
+                // creation, written to the notes file. The offer encodes
+                // only "path:line", so it is looked up in the notes
+                // document here (not re-derived) and the landing sits on
+                // that column, not the line start. A record absent from the
+                // loaded notes document degrades to col 0, and `set_point`
+                // clamps a stale column to the line's end (never OOB).
                 if let Some((file, line_str)) = detail.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();
+                    let col = self.annotation_col(file, line - 1);
                     self.open_path(file);
-                    self.set_point_line(line - 1);
+                    self.set_point(line - 1, col, col);
                     self.recenter_landing();
                     self.ensure_highlight();
                     self.record_jump(origin, "C-c n a");

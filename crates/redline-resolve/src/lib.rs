@@ -102,9 +102,10 @@ pub struct ResolvedSource {
     /// `None` when a file was located but no definition line could be pinned
     /// down. A provider emits a line, never a column — the app refines
     /// placement precisely later (jump-column-landings): after landing on
-    /// the line it locates the resolved item's name on that line and lands
-    /// on its first char column, degrading to column 0 when the name is not
-    /// a whole word on the line (never an invented column).
+    /// the line it locates the resolved item's first whole-word occurrence
+    /// on that line (outside a comment or string) and lands on its first
+    /// char column, degrading to column 0 when the name is not a whole word
+    /// on the line (never an invented column).
     pub line: Option<u32>,
 }
 
