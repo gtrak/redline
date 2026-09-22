@@ -47,7 +47,7 @@ impl AppStore {
                 && let Some(buf) = self.buffers.get(&key)
                 && new_mtime != buf.mtime
             {
-                if buf.locally_modified {
+                if buf.locally_modified() {
                     // Unsaved edits are never discarded silently (the
                     // emacs `revert-buffer` policy: a modified buffer is
                     // not reverted without asking). Keep the text and

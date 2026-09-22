@@ -66,7 +66,7 @@ use super::*;
         store.notes_insert_char('H');
         store.notes_insert_char('i');
         let buf = store.buffers.get(&key).unwrap();
-        assert!(buf.locally_modified, "editing must set locally_modified");
+        assert!(buf.locally_modified(), "editing must set locally_modified");
         assert!(buf.text().contains("Hi"));
         // Save: writes to disk.
         store.save_buffer();
@@ -76,7 +76,7 @@ use super::*;
         assert!(content.contains("Hi"), "saved content must contain the edit");
         // After save, locally_modified is cleared.
         let buf = store.buffers.get(&key).unwrap();
-        assert!(!buf.locally_modified);
+        assert!(!buf.locally_modified());
     }
 
     #[test]
@@ -255,7 +255,7 @@ use super::*;
         // Type first, so the buffer is locally owned when the (late) watcher
         // event for our own file creation lands.
         s.key_event(key("a"));
-        assert!(s.buffers.get(&bkey).unwrap().locally_modified);
+        assert!(s.buffers.get(&bkey).unwrap().locally_modified());
 
         // The self-inflicted creation event must NOT flag a conflict.
         s.apply_project_change(&change(vec![notes_path.clone()]));
@@ -1568,7 +1568,10 @@ use super::*;
         // flag, record NOT lost.
         let key = s.buffers.current().unwrap().to_string();
         s.buffers.get_mut(&key).unwrap().rope = Rope::from_str("x\np1\n");
-        s.buffers.get_mut(&key).unwrap().locally_modified = true;
+        // plan 016 issue 03: the flag is DERIVED from the saved-state
+        // marker — out-of-band text changed without a save is the
+        // no-evidence state (`None` proves nothing → modified).
+        s.buffers.get_mut(&key).unwrap().saved_marker = None;
         s.save_buffer();
         let recs = ann_records(&s);
         assert_eq!(recs.len(), 2, "orphaned records are not lost");

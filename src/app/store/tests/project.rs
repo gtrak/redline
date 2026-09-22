@@ -238,7 +238,7 @@ use super::*;
         let key = s.buffers.current().unwrap().to_string();
         // Simulate a local edit (the light-editing flag path).
         s.mark_locally_modified(&key);
-        assert!(s.buffers.get(&key).unwrap().locally_modified);
+        assert!(s.buffers.get(&key).unwrap().locally_modified());
 
         // A disk change arrives while locally owned → NO auto-reload; marker set.
         s.apply_project_change(&change(vec![path.clone()]));
@@ -260,7 +260,7 @@ use super::*;
             "marker cleared after g"
         );
         assert!(
-            !s.buffers.get(&key).unwrap().locally_modified,
+            !s.buffers.get(&key).unwrap().locally_modified(),
             "local flag cleared after g"
         );
         assert!(
@@ -358,7 +358,7 @@ use super::*;
 
         // Type to make the buffer locally owned (the bug's precondition).
         s.key_event(key("a"));
-        assert!(s.buffers.get(&bkey).unwrap().locally_modified);
+        assert!(s.buffers.get(&bkey).unwrap().locally_modified());
 
         // Simulate the old bug path: access events for the notes file go
         // through summarize. After the fix, summarize drops them, producing
@@ -428,7 +428,7 @@ use super::*;
             s.message
         );
         s.insert_text("zz");
-        assert!(s.buffers.get(&bufk).unwrap().locally_modified);
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified());
         // The external change (a build / formatter / background agent):
         // the file's content AND mtime move on under the buffer.
         std::fs::write(&path, "fn externally() {}\n").unwrap();
@@ -451,7 +451,7 @@ use super::*;
             s.buffer_text()
         );
         assert!(
-            s.buffers.get(&bufk).unwrap().locally_modified,
+            s.buffers.get(&bufk).unwrap().locally_modified(),
             "no decision made yet: the local flag stays set"
         );
         assert_eq!(
@@ -510,7 +510,7 @@ use super::*;
             "y re-reads the disk content"
         );
         let buf = s.buffers.get(&bufk).unwrap();
-        assert!(!buf.locally_modified, "y clears the local flag");
+        assert!(!buf.locally_modified(), "y clears the local flag");
         assert!(!buf.changed_on_disk, "y clears the conflict marker");
         assert!(buf.editable, "the edit-mode state survives the reload");
         assert_eq!(
@@ -579,7 +579,7 @@ use super::*;
             "precondition (msg: {})",
             s.message
         );
-        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified());
         std::fs::write(&path, "fn fresh() {}\n").unwrap();
         force_mtime_divergence(&mut s, &bufk, &path);
         s.open_path("src/t.rs");
@@ -600,6 +600,140 @@ use super::*;
         assert!(
             s.buffers.get(&bufk).unwrap().editable,
             "editability survives the clean reopen"
+        );
+    }
+
+    // ── plan 016 issue 03: the reload contract, composed with the landed
+    // ask policy (issue-external-change-reload) ────────────────────────────
+
+    /// plan 016 issue 03 (the `y` half of the reload contract): after an
+    /// external-change confirm answered `y`, the history MUST be cleared
+    /// and the marker reset — the recorded offsets referred to content that
+    /// no longer exists, so no step may survive (and undo is a no-op with a
+    /// message). Composed with the landed ask policy: the confirm arms only
+    /// because the buffer was dirty; `y` re-reads from disk and the buffer
+    /// proves clean again.
+    #[test]
+    fn reload_confirm_y_clears_history_and_resets_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        // Two edits so a live history exists at the confirm.
+        s.insert_text("z");
+        s.insert_text("z");
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().undo.len(),
+            2,
+            "precondition: a live undo history"
+        );
+        std::fs::write(&path, "fn externally() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        s.open_path("src/t.rs");
+        assert!(
+            s.reload_confirm_active(),
+            "dirty reopen must arm the confirm (msg: {})",
+            s.message
+        );
+        // `y`: the explicit discard + reload.
+        s.key_event(key("y"));
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(
+            buf.undo.len(),
+            0,
+            "y reload: the recorded offsets referred to content that no longer exists — the history is cleared"
+        );
+        assert_eq!(
+            buf.saved_marker,
+            Some(0),
+            "y reload: the marker resets to the fresh sentinel (content re-read from disk)"
+        );
+        assert!(
+            !buf.locally_modified(),
+            "y reload: the buffer proves clean (disk truth)"
+        );
+        assert_eq!(s.buffer_text(), "fn externally() {}\n");
+        // Undo after the clear is a no-op with a message, not a stale apply.
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to undo"),
+            "a cleared history has nothing to undo: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().text(),
+            "fn externally() {}\n",
+            "the no-op undo must not touch the text"
+        );
+    }
+
+    /// plan 016 issue 03 (the `n` half of the reload contract): after the
+    /// external-change confirm is cancelled with `n`, the history stays
+    /// INTACT (the user kept their edits — the recorded offsets are still
+    /// valid) and the buffer stays modified. Undo must still work: stepping
+    /// back through the surviving history to the saved position proves the
+    /// buffer clean again (the marker survived the cancel untouched).
+    #[test]
+    fn reload_confirm_n_preserves_history_and_stays_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        // Two edits, a SAVE (the marker lands on the post-save position),
+        // then one more edit: the buffer is dirty at the confirm.
+        s.insert_text("a");
+        s.insert_text("a");
+        assert!(s.save_buffer_key(&bufk), "the save must land");
+        assert!(
+            !s.buffers.get(&bufk).unwrap().locally_modified(),
+            "saved: clean before the last edit"
+        );
+        s.insert_text("b");
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified());
+        std::fs::write(&path, "fn externally() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        s.open_path("src/t.rs");
+        assert!(
+            s.reload_confirm_active(),
+            "dirty reopen must arm the confirm (msg: {})",
+            s.message
+        );
+        // `n`: cancel — the edits and the history are kept.
+        s.key_event(key("n"));
+        assert!(!s.reload_confirm_active());
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(
+            buf.undo.len(),
+            3,
+            "n cancel: the history stays INTACT (the user kept their edits)"
+        );
+        assert!(
+            buf.locally_modified(),
+            "n cancel: the buffer stays modified"
+        );
+        assert_eq!(
+            s.buffer_text(),
+            "fn old() {}\naab",
+            "n cancel: the unsaved text survives: {:?}",
+            s.buffer_text()
+        );
+        // The intact history still undoes: the recorded offsets are valid
+        // (the content was never replaced). One undo removes the "b".
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            !s.buffers.get(&bufk).unwrap().locally_modified(),
+            "undo back to the saved position proves the buffer clean (the marker survived the cancel)"
+        );
+        assert_eq!(
+            s.buffer_text(),
+            "fn old() {}\naa",
+            "the intact history restores the pre-last-edit (saved) text"
         );
     }
 

@@ -181,14 +181,17 @@ impl AppStore {
 
     /// Re-read `path` into the buffer at `key` IN PLACE: the rope and the
     /// mtime are replaced, but the buffer's IDENTITY survives the reload —
-    /// `mode`, `editable`, `is_notes`, `mark` and `locally_modified` are
-    /// NOT reset (a disk reload changes the buffer's CONTENT, not its
-    /// identity; a replace via `insert_rope` would rebuild the buffer via
-    /// `Buffer::new` and silently drop both the mode and any unsaved
-    /// edits — the data-loss path this exists to close). Scroll anchor is
-    /// preserved (same line if it still exists, else clamp), the retained
-    /// tree is dropped, and the highlight + annotation-anchor caches are
-    /// refreshed.
+    /// `mode`, `editable`, `is_notes` and `mark` are NOT reset (a disk
+    /// reload changes the buffer's CONTENT, not its identity; a replace via
+    /// `insert_rope` would rebuild the buffer via `Buffer::new` and
+    /// silently drop both the mode and any unsaved edits — the data-loss
+    /// path this exists to close). The undo history IS dropped and the
+    /// saved-state marker re-established at the fresh sentinel (plan 016
+    /// issue 03): the recorded inverse char ranges referred to the rope
+    /// that no longer exists, and the new content IS the disk truth, so
+    /// the buffer proves clean again. Scroll anchor is preserved (same
+    /// line if it still exists, else clamp), the retained tree is dropped,
+    /// and the highlight + annotation-anchor caches are refreshed.
     ///
     /// Every **in-place** disk reload flows through this one chokepoint: the
     /// watcher's auto-reload (`reload_buffer`), the reopen re-stat
@@ -205,16 +208,15 @@ impl AppStore {
     /// (all of which invalidate rope-relative state, so none silently loses
     /// undo).
     ///
-    /// Plan 016 (undo) seam — STATED ORDER: this issue lands FIRST, so
-    /// 016 inherits these reload semantics and must honour its own rule
-    /// that a reloaded/replaced rope clears the undo history (the recorded
-    /// offsets become invalid). 03 does that by calling the single
-    /// `drop_undo_history` helper from each of the three sites (this one —
-    /// one place covers all four in-place reload routes — plus
-    /// `toggle_ro_accept` and `replace_buffer_text`), so 03 hooks ONE
-    /// function, not three sites to discover. Until then `undo()`'s
-    /// stale-step guard is the safety net (a stale step is dropped and
-    /// reported, never a panic).
+    /// Plan 016 (undo) issue 03 — WIRE SITE 1 OF 3 (the chokepoint): every
+    /// in-place disk reload re-reads the file into the rope, so the
+    /// recorded inverse char ranges are invalid. This calls the single
+    /// `drop_undo_history` helper (which clears the history AND resets the
+    /// marker to no evidence), then `mark_fresh` — this site replaces the
+    /// content with DISK TRUTH, so the fresh sentinel re-proves the buffer
+    /// clean. The other two rope-assigning sites are `toggle_ro_accept`
+    /// (`buffers.rs`) and `replace_buffer_text` (`buffers.rs`); the
+    /// `undo()` stale-step guard stays as a backstop.
     pub(super) fn reload_in_place(
         &mut self,
         key: &str,
@@ -230,9 +232,14 @@ impl AppStore {
         let new_total = rope.len_lines();
         let old_top = self.scroll.get(key).copied().unwrap_or(0);
         let new_top = reload_anchor(old_top, new_total);
+        // The rope is about to be replaced from disk: the recorded inverse
+        // ranges are dead. Drop the history + marker first (no evidence →
+        // modified), then re-prove clean from the disk read.
+        self.drop_undo_history(key);
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.rope = rope;
             buf.mtime = mtime;
+            buf.mark_fresh();
             buf.changed_on_disk = false;
         }
         self.drop_retained_tree(key);
@@ -264,9 +271,9 @@ impl AppStore {
             self.minibuffer_message(&format!("reload failed: {e}"));
             return;
         }
-        if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.locally_modified = false; // force reload supersedes local edits
-        }
+        // plan 016 issue 03: the chokepoint already dropped the history and
+        // re-proved cleanliness from the disk read (the force reload
+        // supersedes local edits — the marker is the fresh sentinel).
         self.minibuffer_message("reloaded");
     }
 
@@ -299,9 +306,18 @@ impl AppStore {
         }
     }
 
-    /// The confirm's `y`: reload from disk in place and clear the local-
-    /// edit flags. A failed re-read keeps the confirm armed (no silent
-    /// state half-change, the `toggle_ro_accept` discipline).
+    /// The confirm's `y`: reload from disk in place and re-prove the
+    /// buffer clean (the disk content supersedes the edits). A failed
+    /// re-read keeps the confirm armed (no silent state half-change, the
+    /// `toggle_ro_accept` discipline).
+    ///
+    /// plan 016 issue 03 (the `y` half of the reload contract): the
+    /// chokepoint dropped the history and reset the marker; because this
+    /// reload replaced the content with DISK TRUTH, the buffer now proves
+    /// clean — the recorded offsets referred to content that no longer
+    /// exists, so no step survives to be undone. The `n` half (cancel) is
+    /// a no-op on the marker: the history stays intact and a dirty buffer
+    /// stays dirty.
     fn reload_confirm_accept(&mut self) {
         let Some(key) = self.reload_confirm.clone() else {
             return;
@@ -313,9 +329,6 @@ impl AppStore {
         if let Err(e) = self.reload_in_place(&key, &path) {
             self.minibuffer_message(&format!("cannot reload: {e}"));
             return;
-        }
-        if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.locally_modified = false; // the disk content supersedes the edits
         }
         self.reload_confirm = None;
         self.minibuffer_message("reloaded");
@@ -330,10 +343,18 @@ impl AppStore {
 
     /// Mark a buffer as locally modified (the light-editing hook; also used
     /// by tests to exercise the conflict logic before the editing UI lands).
+    ///
+    /// plan 016 issue 03: `locally_modified` is now DERIVED from the
+    /// saved-state marker, so "mark modified" means DROP THE EVIDENCE — a
+    /// marker of `None` cannot prove the buffer matches the disk state, and
+    /// the conservative tie-break reports modified. This is strictly more
+    /// conservative than the old unconditional `true`: even a buffer
+    /// sitting exactly on its saved position now reads modified until the
+    /// next save/load re-establishes the marker.
     #[allow(dead_code)]
     pub fn mark_locally_modified(&mut self, key: &str) {
         if let Some(buf) = self.buffers.get_mut(key) {
-            buf.locally_modified = true;
+            buf.saved_marker = None;
         }
     }
 

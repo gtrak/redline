@@ -10,10 +10,14 @@
 //! cache invalidation on reopen and for live watcher invalidation (issue 04).
 //!
 //! Light-editing flag path (plan decision #6): a buffer carries an
-//! `editable` flag and a `locally_modified` flag. A buffer is *locally
-//! owned* (never auto-clobbered by a disk change) when it has no on-disk
-//! path (the scratch buffer), it has unsaved local edits
-//! (`locally_modified`), or it is a file buffer in edit mode
+//! `editable` flag and a derived `locally_modified` (plan 016 issue 03:
+//! DERIVED from the saved-state marker + the undo history, not stored —
+//! the marker is the single source of truth, and the tie-break is
+//! conservative: a buffer that cannot PROVE it matches the disk state
+//! reports modified, because a false "clean" is a data-loss path). A
+//! buffer is *locally owned* (never auto-clobbered by a disk change) when
+//! it has no on-disk path (the scratch buffer), it has unsaved local edits
+//! (`locally_modified()`), or it is a file buffer in edit mode
 //! (`editable`, plan 005 issue 01: a file the user is actively editing is
 //! guarded even before the first keystroke, so a disk change can never
 //! silently rewrite it under the cursor mid-edit-session). When a disk
@@ -85,9 +89,21 @@ pub(crate) fn is_word_char(c: char) -> bool {
 /// forward edit's inserted text); `inserted` is the text to reinsert (the
 /// forward edit's original text). Undoing applies `removed`-then-`inserted`
 /// over `range` back through the edit path (`retain_rope_edit` +
-/// `invalidate_highlight_for_key` + `locally_modified`).
+/// `invalidate_highlight_for_key`).
+///
+/// `id` (plan 016 issue 03) is the step's unique monotonically increasing
+/// identity, assigned by the buffer's counter when the step is recorded. It
+/// is the unit the saved-state marker speaks in: the marker stores the
+/// identity of the top-of-history position at the last save/load, and the
+/// buffer is clean iff the position's identity still equals it. Ids never
+/// repeat for a buffer's lifetime (the counter survives cap eviction AND
+/// history clears), so an evicted marker can never be matched again —
+/// which is exactly what makes an unreachable saved state read as modified
+/// instead of clean-by-default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UndoStep {
+    /// The step's unique monotonically increasing id (see the struct docs).
+    pub id: usize,
     pub range: Range<usize>,
     pub removed: String,
     pub inserted: String,
@@ -126,6 +142,27 @@ impl UndoStack {
         self.steps.pop()
     }
 
+    /// Whether the stack holds no steps (test-only: production drives the
+    /// stack through `push`/`pop` and reads positions via `position_id`).
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// The identity of the current top-of-history position (plan 016 issue
+    /// 03): the most recent step's id, or `0` when the history is empty. The
+    /// `0` is the "empty history / freshly loaded" sentinel the saved-state
+    /// marker uses.
+    ///
+    /// Deliberately NOT `steps.len()`: the cap drops the OLDEST step (the
+    /// length shrinks without the position moving), and issue 04's redo will
+    /// move the position FORWARD again (a re-pushed step re-enters the top
+    /// with the same id, whatever the length does). The step id is stable
+    /// under both; the length is not.
+    pub fn position_id(&self) -> usize {
+        self.steps.last().map(|s| s.id).unwrap_or(0)
+    }
+
     /// Number of recorded steps (test-only; the production code drives the
     /// stack through `push`/`pop` and the cap, so this is gated rather than
     /// carried as dead public API).
@@ -158,11 +195,24 @@ pub struct Buffer {
     /// after `switch_project_root` changes the root-relative `notes_key()`
     /// and the old notes buffer survives in the table. Set in `open_notes`.
     pub is_notes: bool,
-    /// True when the in-memory text has unsaved local edits that differ
-    /// from what is on disk (the light-editing flag, plan decision #6).
-    /// Read-only file buffers stay `false` until an edit lands; the scratch
-    /// buffer is locally-owned by virtue of having no path.
-    pub locally_modified: bool,
+    /// The saved-state marker (plan 016 issue 03): the identity of the
+    /// top-of-history position at the last save/load — the most recent
+    /// step's id, or `Some(0)` for "saved/loaded with an EMPTY history"
+    /// (the sentinel `UndoStack::position_id` uses). `None` means NO
+    /// EVIDENCE: the history was cleared without the content being
+    /// re-established from a trusted state, so the buffer must report
+    /// modified until the next save/load (see `locally_modified` for the
+    /// tie-break). Set by `mark_saved` (a save) and `mark_fresh` (a
+    /// reload / accepted discard / notes sync re-read the content from
+    /// disk truth); reset to `None` by the store's `drop_undo_history`.
+    pub saved_marker: Option<usize>,
+    /// The per-buffer undo-step id counter (plan 016 issue 03): the next
+    /// id a recorded step takes. Monotonic for the buffer's LIFETIME — it
+    /// deliberately survives cap eviction and history clears (a cleared
+    /// history must never re-issue an id, or a stale marker could match a
+    /// new step and report a false clean). Lives on the buffer, not the
+    /// stack, so a `undo = UndoStack::default()` clear cannot reset it.
+    pub undo_seq: usize,
     /// A disk change arrived for this buffer while it was locally owned:
     /// the user must reconcile manually (`g` forces a reload; the view
     /// shows a "changed on disk" marker while this is set).
@@ -185,7 +235,7 @@ impl std::fmt::Debug for Buffer {
             .field("bytes", &self.rope.len_bytes())
             .field("editable", &self.editable)
             .field("is_notes", &self.is_notes)
-            .field("locally_modified", &self.locally_modified)
+            .field("locally_modified", &self.locally_modified())
             .field("changed_on_disk", &self.changed_on_disk)
             .finish()
     }
@@ -202,7 +252,11 @@ impl Buffer {
             editable,
             mode: BufferMode::default(),
             is_notes: false,
-            locally_modified: false,
+            // Fresh: the content just came from disk (or is empty scratch),
+            // the history is empty → the marker is the empty-history
+            // sentinel, so the buffer reads clean until the first edit.
+            saved_marker: Some(0),
+            undo_seq: 0,
             changed_on_disk: false,
             mark: None,
             undo: UndoStack::default(),
@@ -215,8 +269,56 @@ impl Buffer {
     /// mode guards the reload even before the first edit lands).
     pub fn is_locally_owned(&self) -> bool {
         self.path.is_none()
-            || self.locally_modified
+            || self.locally_modified()
             || (self.editable && self.path.is_some())
+    }
+
+    /// The light-editing flag (plan decision #6), DERIVED (plan 016 issue
+    /// 03) from the saved-state marker and the undo history rather than
+    /// stored: `true` when the buffer's current position cannot be PROVEN
+    /// to be the last saved/loaded position.
+    ///
+    /// **The tie-break (the data-loss direction):** a false "modified" is
+    /// an annoyance (the quit prompt asks one extra question, a save writes
+    /// identical bytes); a false "clean" is DATA LOSS — `C-x C-c` stops
+    /// asking and the unsaved edits are gone. So whenever the marker cannot
+    /// prove the buffer matches the disk state, this reports modified:
+    /// - `None` (no evidence: the history was cleared without a re-load)
+    ///   → always modified;
+    /// - `Some(0)` (saved/loaded at an EMPTY history) → clean only while the
+    ///   history is STILL empty (any new step moved the position away);
+    /// - `Some(id)` → clean only while the top step's id is still `id`.
+    ///   When the cap evicts the saved step, no top can carry that id again
+    ///   (ids are unique and monotonic), so the saved state is unreachable
+    ///   and the buffer reads modified, never clean-by-default.
+    ///
+    /// Undoing back to the saved position restores cleanliness without any
+    /// flag bookkeeping at the edit/undo sites: every recorded edit moves
+    /// the position to a fresh id, and every pop moves it back to the
+    /// predecessor's id.
+    pub fn locally_modified(&self) -> bool {
+        match self.saved_marker {
+            None => true,
+            Some(marker) => self.undo.position_id() != marker,
+        }
+    }
+
+    /// Record the CURRENT top-of-history position as the saved state (the
+    /// store's save paths call this once the write lands): the buffer is
+    /// clean from here on iff the position stays where the save found it.
+    pub fn mark_saved(&mut self) {
+        self.saved_marker = Some(self.undo.position_id());
+    }
+
+    /// Re-establish the saved state after the buffer's content was replaced
+    /// with a TRUSTED state read from disk truth (the reload chokepoint, the
+    /// read-only accept's re-read, the notes sync's write-then-reflect): the
+    /// history is gone (or about to be dropped by the caller) and the saved
+    /// state is the freshly loaded content — the empty-history sentinel.
+    /// Distinct from the `None` evidence-free state a bare
+    /// `drop_undo_history` leaves: this one proves clean, that one does not.
+    pub fn mark_fresh(&mut self) {
+        self.saved_marker = Some(0);
     }
 
     /// The number of lines in the buffer.

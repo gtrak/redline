@@ -22,7 +22,7 @@ use super::*;
         let notes_path = dir.path().join(".redline-notes.md");
         s.key_event(key("H"));
         s.key_event(key("i"));
-        assert!(s.buffers.current_buffer().unwrap().locally_modified);
+        assert!(s.buffers.current_buffer().unwrap().locally_modified());
 
         // Interception: the prompt names the modified buffer's path.
         s.key_event(key("C-x"));
@@ -40,7 +40,7 @@ use super::*;
         let on_disk = std::fs::read_to_string(&notes_path).unwrap();
         assert!(on_disk.contains("Hi"), "y must write the edit to disk");
         assert!(
-            !s.buffers.current_buffer().unwrap().locally_modified,
+            !s.buffers.current_buffer().unwrap().locally_modified(),
             "save must clear locally_modified"
         );
     }
@@ -61,7 +61,7 @@ use super::*;
         let on_disk = std::fs::read_to_string(&notes_path).unwrap();
         assert!(!on_disk.contains("x"), "n must NOT write the edit to disk");
         assert!(
-            s.buffers.current_buffer().unwrap().locally_modified,
+            s.buffers.current_buffer().unwrap().locally_modified(),
             "the skipped buffer keeps its local text (still modified in memory)"
         );
     }
@@ -85,8 +85,8 @@ use super::*;
         assert!(extra_disk.contains("old"), "! must save the extra buffer");
         let notes_disk = std::fs::read_to_string(&notes_path).unwrap();
         assert!(notes_disk.contains("z"), "! must save the notes buffer");
-        assert!(!s.buffers.get(&extra_key).unwrap().locally_modified);
-        assert!(!s.buffers.current_buffer().unwrap().locally_modified);
+        assert!(!s.buffers.get(&extra_key).unwrap().locally_modified());
+        assert!(!s.buffers.current_buffer().unwrap().locally_modified());
     }
 
     #[test]
@@ -133,7 +133,7 @@ use super::*;
             text_before,
             "buffer content must be intact after C-g"
         );
-        assert!(s.buffers.current_buffer().unwrap().locally_modified);
+        assert!(s.buffers.current_buffer().unwrap().locally_modified());
 
         // Quitting again re-enters the prompt (the buffer is still modified);
         // a bare answer finishes it.
@@ -223,12 +223,12 @@ use super::*;
         // through the API, then answer `n` — exactly ONE prompt total.
         let notes_key = s.buffers.current().unwrap().to_string();
         assert!(s.save_buffer_key(&notes_key));
-        assert!(!s.buffers.get(&notes_key).unwrap().locally_modified);
+        assert!(!s.buffers.get(&notes_key).unwrap().locally_modified());
         s.key_event(key("n"));
         assert!(s.quit, "one snapshot entry → the next answer quits");
         assert!(!s.quit_prompt_active());
         // The post-interception buffer was never asked about.
-        assert!(s.buffers.get(&extra_key).unwrap().locally_modified);
+        assert!(s.buffers.get(&extra_key).unwrap().locally_modified());
     }
 
     #[test]
@@ -426,7 +426,7 @@ use super::*;
         // notes (a printable that binds nothing appends at the end).
         assert!(s.insert_text("X"), "edit-mode file buffer must accept typing");
         assert!(
-            s.buffers.get(&bufk).unwrap().locally_modified,
+            s.buffers.get(&bufk).unwrap().locally_modified(),
             "an edit must set locally_modified"
         );
         assert_eq!(s.buffers.get(&bufk).unwrap().text(), "fn old() {}\nX");
@@ -442,14 +442,14 @@ use super::*;
         s.key_event(key("C-x"));
         s.key_event(key("C-q"));
         s.insert_text("X");
-        assert!(s.buffers.get(&bufk).unwrap().locally_modified);
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified());
 
         s.key_event(key("C-x"));
         s.key_event(key("C-s"));
         let on_disk = std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap();
         assert_eq!(on_disk, "fn old() {}\nX", "C-x C-s must write the edit to disk");
         let buf = s.buffers.get(&bufk).unwrap();
-        assert!(!buf.locally_modified, "save must clear locally_modified");
+        assert!(!buf.locally_modified(), "save must clear locally_modified");
         assert!(!buf.changed_on_disk, "save must clear changed_on_disk");
         assert!(s.message.contains("wrote"), "msg: {}", s.message);
     }
@@ -462,7 +462,7 @@ use super::*;
         s.key_event(key("C-x"));
         s.key_event(key("C-s"));
         assert!(s.message.contains("read-only"), "msg: {}", s.message);
-        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified());
         let on_disk = std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap();
         assert_eq!(on_disk, "fn old() {}\n");
     }
@@ -524,7 +524,7 @@ use super::*;
         assert!(!s.toggle_ro_active());
         let buf = s.buffers.get(&bufk).unwrap();
         assert!(!buf.editable, "accept must make the buffer read-only");
-        assert!(!buf.locally_modified, "accept must clear locally_modified");
+        assert!(!buf.locally_modified(), "accept must clear locally_modified");
         assert!(!buf.changed_on_disk);
         assert_eq!(buf.text(), "fn old() {}\n",
             "accept must re-read the on-disk content (the edit is discarded)");
@@ -541,7 +541,7 @@ use super::*;
         s.insert_text("X");
         s.key_event(key("C-x"));
         s.key_event(key("C-s"));
-        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified());
 
         // The watcher's event for our own save must not flag the buffer.
         let path = dir.path().join("src/f.rs");
@@ -1481,7 +1481,7 @@ use super::*;
             "the char must land at the point (after 'hello'), not the buffer end"
         );
         assert_eq!(s.point_col(), 6, "the point must advance past the insert");
-        assert!(s.buffers.get(&bk).unwrap().locally_modified);
+        assert!(s.buffers.get(&bk).unwrap().locally_modified());
     }
 
     #[test]
@@ -1510,7 +1510,7 @@ use super::*;
         s.key_event(key("C-h"));
         assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello world\n");
         assert_eq!(s.point_col(), 0);
-        assert!(!s.buffers.get(&bk).unwrap().locally_modified, "a no-op must not mark the buffer");
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified(), "a no-op must not mark the buffer");
     }
 
     #[test]
@@ -2457,6 +2457,10 @@ use super::*;
         // A buggy BYTE-based recording records é's byte range [3,5) with the
         // same char text "é" — the byte/char mix-up.
         s.buffers.get_mut(&bk).unwrap().undo.push(UndoStep {
+            // plan 016 issue 03: manual seeds carry explicit ids (the
+            // counter is bypassed); non-zero keeps them clear of the
+            // fresh/empty-history sentinel.
+            id: 1,
             range: 3..5, // byte width (é spans 2 bytes), NOT the char width
             removed: "é".into(),
             inserted: String::new(),
@@ -2477,6 +2481,7 @@ use super::*;
         // Discriminating pair: the correct char-width inverse for the same
         // kill DOES apply.
         s.buffers.get_mut(&bk).unwrap().undo.push(UndoStep {
+            id: 2,
             range: 3..4,
             removed: "é".into(),
             inserted: String::new(),
@@ -2747,6 +2752,7 @@ use super::*;
         assert!(!s.buffers.get(&bk).unwrap().editable);
         // Seed a step to prove the gate holds even with history present.
         s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            id: 1,
             range: 0..1,
             removed: "h".into(),
             inserted: "H".into(),
@@ -2772,17 +2778,19 @@ use super::*;
         );
     }
 
-    /// plan 016 issue 01 + gate P1: the notes sync replaces the buffer's
-    /// rope BEHIND a live undo history. `sync_notes_from_doc` (the path the
-    /// annotation save/delete/reanchor all use) calls `replace_buffer_text`,
-    /// which rewrites `buf.rope` WITHOUT clearing `buf.undo` — that clear is
-    /// 03's job (`drop_undo_history`). Until 03 lands, the recorded ranges
-    /// are stale and `undo()` must REJECT the step (drop it, already popped,
-    /// and report) rather than panic in ropey's `remove` (`Char range out of
-    /// bounds`). This drives the real notes sync path, not a direct
-    /// `replace_buffer_text` call.
+    /// plan 016 issue 03 (WIRE SITE 3 OF 3, driven through the notes path
+    /// — `sync_notes_from_doc`, which annotation save/delete/reanchor all
+    /// reach): the notes sync replaces the buffer's rope BEHIND a live undo
+    /// history. `replace_buffer_text` must drop the history AND reset the
+    /// marker: the recorded ranges were stale (pre-03, undo here was a
+    /// reachable panic in ropey's `remove`, caught only by the guard), and
+    /// a cleared history proves nothing. This sync, however, WROTE the
+    /// serialized doc to disk first and reflects that same text into the
+    /// buffer, so it re-proves the buffer clean (the fresh sentinel) — the
+    /// notes save path of the dirty-flag contract. This drives the real
+    /// notes sync path, not a direct `replace_buffer_text` call.
     #[test]
-    fn undo_after_notes_sync_rope_replacement_is_stale_not_panic() {
+    fn notes_sync_drops_history_and_reproves_clean() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
         let mut s = store(dir.path());
@@ -2794,38 +2802,53 @@ use super::*;
         );
         // Type enough free text that the buffer clearly exceeds the short
         // empty-doc serialization (the begin/end markers, ~67 chars), so the
-        // top recorded range sits past the end of the post-sync rope. (The
-        // typed free text is not part of the structured notes doc.)
+        // sync visibly replaces the rope. (The typed free text is not part
+        // of the structured notes doc.)
         for _ in 0..80 {
             s.notes_insert_char('a');
         }
         let pre_len = s.buffers.get(&key).unwrap().rope.len_chars();
+        assert!(!s.buffers.get(&key).unwrap().undo.is_empty(),
+            "typing must build a live undo history");
         assert!(
-            s.buffers.get(&key).unwrap().undo.len() >= 1,
-            "typing must build a live undo history"
+            s.buffers.get(&key).unwrap().locally_modified(),
+            "precondition: the typed notes buffer is modified"
         );
         // The notes sync replaces the buffer's rope with the serialized doc
-        // (the free text is not in the doc) — the rope shrinks below the
-        // history's top range. This is the P1 reproduction.
+        // (the free text is not in the doc) — the rope shrinks.
         s.sync_notes_from_doc();
         let post_len = s.buffers.get(&key).unwrap().rope.len_chars();
         assert!(
             post_len < pre_len,
-            "the sync must shrink the rope below the recorded history's top range (reproduces the stale range); pre={pre_len} post={post_len}"
+            "the sync must shrink the rope (replaces the content); pre={pre_len} post={post_len}"
         );
-        // Undo now pops a stale step whose range no longer fits the rope.
-        // Before the fix this PANICKED in ropey. After it: no panic, the step
-        // is dropped (already popped) and reported, and the rope is untouched.
+        let buf = s.buffers.get(&key).unwrap();
+        assert_eq!(
+            buf.undo.len(),
+            0,
+            "the sync must drop the recorded history (site 3 of 3)"
+        );
+        assert_eq!(
+            buf.saved_marker,
+            Some(0),
+            "the sync re-proves clean: the content IS the just-written disk truth"
+        );
+        assert!(
+            !buf.locally_modified(),
+            "the notes sync is a save/load path: the buffer is clean afterwards"
+        );
+        // Undo after the clear is a no-op with a message, not a panic and
+        // not a stale apply — the history is simply gone.
         s.undo();
         assert!(
-            s.message.contains("stale"),
-            "a stale-history undo must report the staleness: {:?}",
+            s.message.contains("nothing to undo"),
+            "a cleared history has nothing to undo: {:?}",
             s.message
         );
         assert_eq!(
             s.buffers.get(&key).unwrap().rope.len_chars(),
             post_len,
-            "a rejected stale undo must not mutate the rope"
+            "the no-op undo must not mutate the rope"
         );
     }
 
@@ -2844,6 +2867,7 @@ use super::*;
         // does NOT match the rope's text there ("def") → stale on the text
         // check even though the range is in bounds.
         s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            id: 1,
             range: 0..3,
             removed: "abc".into(),
             inserted: "x".into(),
@@ -2878,6 +2902,7 @@ use super::*;
         // here is the guard, not the lint.
         let (start, end) = (3usize, 1usize);
         s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            id: 1,
             range: start..end, // start > end
             removed: "de".into(),
             inserted: "x".into(),
@@ -2896,3 +2921,404 @@ use super::*;
         assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 0, "the step is dropped");
     }
 
+
+    // ── plan 016 issue 03: the saved-state marker and the dirty flag ────
+
+    /// plan 016 issue 03 (the round-trip matrix, each step asserted on the
+    /// TEXT and the FLAG): edit → save → clean; edit → save → edit →
+    /// modified; edit → save → edit → undo → clean; then edit again →
+    /// modified (the reverse direction: a new edit after reaching the
+    /// saved state re-sets the flag).
+    #[test]
+    fn dirty_flag_round_trip_matrix_text_and_flag() {
+        let (mut s, bk, dir) = accurate_file_store("hello\n");
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "a freshly opened file proves clean (fresh marker, empty history)"
+        );
+        // edit → modified
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("1"); // "1hello\n"
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "1hello\n");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "an edit moves the position off the marker → modified"
+        );
+        // save → clean
+        assert!(s.save_buffer_key(&bk), "the save must land");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap(),
+            "1hello\n",
+            "the save wrote the edited text"
+        );
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "1hello\n");
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "edit → save → clean (the marker lands on the saved position)"
+        );
+        // edit again → modified
+        s.insert_text_at_point("2"); // "12hello\n"
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "12hello\n");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "a new edit after the save → modified"
+        );
+        // undo back to the saved state → clean
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "1hello\n", "undo restores the saved text");
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "edit → save → edit → undo → clean (the position is the saved position again)"
+        );
+        // a further edit re-sets the flag (the reverse direction)
+        s.insert_text_at_point("3"); // "13hello\n"
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "13hello\n");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "a new edit after reaching the saved state re-sets modified"
+        );
+    }
+
+
+
+    /// plan 016 issue 03 (save at an intermediate point — the case a
+    /// depth-comparison gets wrong and the marker gets right): edit → edit
+    /// → save → undo → undo → **modified**. After the second undo the buffer
+    /// sits *BEFORE* the saved state (its text is even the original
+    /// disk-at-open text, which no longer equals what the save wrote), so it
+    /// differs from disk and must read modified. A `history.len() == saved
+    /// depth`-style rule would read it clean — this test carries the
+    /// data-loss direction: it FAILS on any implementation that reports
+    /// clean while the buffer holds text that differs from disk.
+    #[test]
+    fn save_at_intermediate_point_undo_past_saved_state_reads_modified() {
+        let (mut s, bk, dir) = accurate_file_store("end\n");
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("a"); // "aend\n"
+        s.insert_text_at_point("b"); // "abend\n" (b lands at char 1)
+        assert!(s.save_buffer_key(&bk));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap(),
+            "abend\n",
+            "the save wrote the intermediate state"
+        );
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "saved: clean"
+        );
+        // Undo past the saved state: the position is now BEFORE the marker.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "aend\n", "undo 1");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "one undo leaves the buffer BEFORE the saved state → modified"
+        );
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "end\n", "undo 2");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "fully undone PAST the saved state: the buffer differs from disk (\"end\\n\" vs \"abend\\n\") → still modified, never clean"
+        );
+        assert!(
+            s.buffers.get(&bk).unwrap().undo.is_empty(),
+            "the history is empty — the marker must still say modified with nothing left to undo"
+        );
+    }
+
+    /// plan 016 issue 03 (cap eviction of the SAVED marker): the cap drops
+    /// the OLDEST steps, so a saved marker can be evicted and the saved
+    /// state becomes unreachable by undo. An unreachable marker must read
+    /// MODIFIED, never clean-by-default: the position's id can never equal
+    /// the evicted id again (ids are unique and monotonic), so the
+    /// comparison is conservative by construction.
+    #[test]
+    fn dirty_flag_cap_eviction_of_saved_marker_reads_modified() {
+        use crate::model::buffer::UndoStack;
+        let max = UndoStack::MAX_ENTRIES;
+        let (mut s, bk, dir) = accurate_file_store("end\n");
+        s.set_point(0, 0, 0);
+        // Five edits, then save: the marker lands on the 5th step's id.
+        for _ in 0..5 {
+            s.insert_text_at_point("a");
+        }
+        assert!(s.save_buffer_key(&bk));
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "saved: clean (marker on the 5th step's id)"
+        );
+        let marker = s.buffers.get(&bk).unwrap().saved_marker;
+        assert_eq!(marker, Some(5), "the marker is the top step's id at save time");
+        // Far more edits than the cap: steps 1..15 (including the marker's)
+        // get evicted, oldest-first.
+        for _ in 0..(max + 10) {
+            s.insert_text_at_point("a");
+        }
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "new edits: modified"
+        );
+        // Undo everything: the stack empties 15 edits short of the original
+        // "end\n" (the first 15 steps were evicted, marker among them).
+        for _ in 0..max {
+            s.key_event(key("C-x"));
+            s.key_event(key("u"));
+        }
+        let buf = s.buffers.get(&bk).unwrap();
+        assert_eq!(buf.undo.len(), 0, "fully undone to the evicted floor");
+        assert_eq!(
+            buf.text(),
+            format!("{}end\n", "a".repeat(15)),
+            "undo stopped at the cap's floor"
+        );
+        assert_ne!(
+            buf.text(),
+            std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap(),
+            "the floor text differs from disk (disk holds the 5-a save)"
+        );
+        assert!(
+            buf.locally_modified(),
+            "the saved marker was EVICTED: the saved state is unreachable, so the buffer reads modified, never clean"
+        );
+        assert_eq!(
+            buf.saved_marker,
+            marker,
+            "the marker itself is untouched — only its target step is gone"
+        );
+    }
+
+    /// plan 016 issue 03 (the data-loss-direction pin, explicit): a buffer
+    /// that CANNOT PROVE it matches the disk state must read modified.
+    /// Forced evidence-free marker (`None`) and an unresolvable marker (an
+    /// id no step carries) both report modified while the buffer holds
+    /// unsaved edits. A clean-by-default marker would fail this test with
+    /// unsaved text in memory — the `C-x C-c` stops-asking data-loss path.
+    #[test]
+    fn dirty_flag_tie_break_unresolvable_marker_reads_modified() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("X"); // "Xhello\n", step id 1
+        assert!(s.save_buffer_key(&bk));
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified());
+        s.insert_text_at_point("Y"); // "XYhello\n", step id 2 — UNSAVED
+        assert!(s.buffers.get(&bk).unwrap().locally_modified());
+
+        // Force the evidence-free state (what a history clear with no
+        // re-load leaves): no proof exists → modified.
+        s.buffers.get_mut(&bk).unwrap().saved_marker = None;
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "no evidence (marker None) → modified: a false clean here is the C-x C-c data-loss path"
+        );
+
+        // Force an unresolvable marker (an id no step carries — the state
+        // after the cap evicted the saved step, made direct): still
+        // modified.
+        s.buffers.get_mut(&bk).unwrap().saved_marker = Some(99_999);
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "an unresolvable marker (evicted / pointing at nothing) → modified"
+        );
+
+        // The marker is still the only source of truth: pointing it at the
+        // TRUE top step re-proves clean (the buffer IS at that position);
+        // pointing it one step earlier reads modified (before the save).
+        s.buffers.get_mut(&bk).unwrap().saved_marker = Some(2);
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified());
+        s.buffers.get_mut(&bk).unwrap().saved_marker = Some(1);
+        assert!(s.buffers.get(&bk).unwrap().locally_modified());
+    }
+
+    /// plan 016 issue 03 (WIRE SITE 1 OF 3 — the `reload_in_place`
+    /// chokepoint, driven through the `g` force-reload route): a disk
+    /// reload must clear the history AND reset the marker; the re-read
+    /// content is disk truth, so the buffer proves clean and undo is a
+    /// no-op with a message, not a stale apply.
+    #[test]
+    fn force_reload_clears_history_and_resets_marker() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q")); // Accurate + editable
+        s.insert_text("X"); // unsaved edit, live history
+        assert_eq!(s.buffers.get(&bufk).unwrap().undo.len(), 1);
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified());
+        // New disk content under the buffer.
+        std::fs::write(dir.path().join("src/f.rs"), "fn new() {}\n").unwrap();
+        s.reload_current_buffer(); // `g`
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(buf.text(), "fn new() {}\n", "the reload re-read the disk content");
+        assert_eq!(buf.undo.len(), 0, "the reload must clear the history (site 1 of 3)");
+        assert_eq!(
+            buf.saved_marker,
+            Some(0),
+            "the reload resets the marker to the fresh sentinel (disk truth)"
+        );
+        assert!(!buf.locally_modified(), "the reloaded buffer proves clean");
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to undo"),
+            "a cleared history undoes to a message, not a stale apply: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().text(),
+            "fn new() {}\n",
+            "the no-op undo leaves the reloaded text alone"
+        );
+    }
+
+    /// plan 016 issue 03 (WIRE SITE 2 OF 3 — `toggle_ro_accept`, which
+    /// assigns `buf.rope` directly): the read-only discard confirm's `y`
+    /// must clear the history AND reset the marker (the re-read file is
+    /// disk truth → fresh sentinel), making undo a no-op with a message.
+    #[test]
+    fn toggle_ro_accept_clears_history_and_resets_marker() {
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q")); // into Accurate
+        s.insert_text("X"); // unsaved edit, live history
+        assert_eq!(s.buffers.get(&bufk).unwrap().undo.len(), 1);
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q")); // leave Accurate with unsaved edits → confirm
+        assert!(s.toggle_ro_active(), "the discard confirm must arm");
+        s.key_event(key("y")); // accept: discard + re-read
+        assert!(!s.toggle_ro_active());
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert_eq!(buf.text(), "fn old() {}\n", "the edit is discarded, disk content re-read");
+        assert_eq!(buf.undo.len(), 0, "the accept must clear the history (site 2 of 3)");
+        assert_eq!(
+            buf.saved_marker,
+            Some(0),
+            "the accept resets the marker to the fresh sentinel (disk truth)"
+        );
+        assert!(!buf.locally_modified(), "the accepted buffer proves clean");
+        assert!(!buf.editable, "the buffer is read-only again");
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            s.message.contains("read-only") || s.message.contains("nothing to undo"),
+            "undo on the cleared, read-only buffer is a no-op with a message: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().text(),
+            "fn old() {}\n",
+            "the no-op undo leaves the re-read text alone"
+        );
+        let _ = &dir;
+    }
+
+    /// plan 016 issue 03 (the M-y merge trap): the coalesced step keeps the
+    /// M-y step's id (the newer/top id), never the preceding yank's. The
+    /// data-loss variant: a buffer SAVED in between the C-y and the M-y
+    /// carries a marker on the C-y step's id; after the M-y's merge replaces
+    /// that step, the marker must NOT match the merged step — the buffer
+    /// holds rotated, unsaved text and must read modified. (If the merge had
+    /// kept the older id, this buffer would read clean with unsaved edits.)
+    #[test]
+    fn m_y_merge_cannot_hijack_the_saved_marker() {
+        let (mut s, bk, dir) = accurate_file_store("base\n");
+        // Two kills for the ring: "base" (killed first, deeper in the
+        // ring) and a marker word killed second.
+        s.set_point(0, 0, 0);
+        // C-k at the start kills the whole "base" line content... the kill
+        // line at (0,0) kills to EOL ("base").
+        s.kill_line(); // ring: ["base"]
+        // Type a new line content and kill that too: "zzz"
+        s.insert_text_at_point("z");
+        s.insert_text_at_point("z");
+        s.insert_text_at_point("z"); // "zzz\n"
+        s.set_point(0, 0, 0);
+        s.kill_line(); // ring: ["base", "zzz"] (top = "zzz")
+        // C-y yanks "zzz" back at the (post-kill) point.
+        s.yank(); // "zzz\n" again
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "zzz\n");
+        // SAVE here: the marker lands on the C-y step's id.
+        assert!(s.save_buffer_key(&bk));
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified());
+        let marker_at_save = s.buffers.get(&bk).unwrap().saved_marker;
+        // M-y rotates to "base": the merge pops the M-y step AND the C-y
+        // step (the marker's target) and pushes ONE coalesced step.
+        s.yank_pop();
+        let buf = s.buffers.get(&bk).unwrap();
+        assert_eq!(buf.text(), "base\n", "the rotation swapped in the previous kill");
+        assert_ne!(
+            buf.text(),
+            std::fs::read_to_string(dir.path().join("src/f.rs")).unwrap(),
+            "the rotated text differs from disk (disk holds \"zzz\\n\")"
+        );
+        assert_eq!(
+            buf.saved_marker,
+            marker_at_save,
+            "the marker is untouched by the merge"
+        );
+        assert!(
+            buf.locally_modified(),
+            "the merged step must NOT carry the C-y step's id, or this buffer would read clean while holding unsaved rotated text — the data-loss direction"
+        );
+        // Undo the coalesced step: one undo removes the WHOLE
+        // yank-and-rotate sequence, and the buffer is at the pre-yank
+        // (empty-line) state — before the save → modified, not clean.
+        s.dispatch("undo", None).unwrap();
+        let buf = s.buffers.get(&bk).unwrap();
+        assert_eq!(
+            buf.text(),
+            "\n",
+            "one undo removes the whole yank-and-rotate sequence"
+        );
+        assert!(
+            buf.locally_modified(),
+            "pre-yank state ≠ saved state → modified"
+        );
+    }
+
+    /// plan 016 issue 03 (buffer kill / reopen): the marker lives on the
+    /// `Buffer`, so killing a dirty buffer and reopening the file must not
+    /// leak a stale clean (or dirty) state across the kill — the reopened
+    /// buffer starts with NO history and a FRESH marker.
+    #[test]
+    fn killed_buffer_marker_cannot_leak_into_the_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), "original\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs");
+        s.toggle_read_only(); // Accurate
+        let k = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("x"); // "xoriginal\n", unsaved
+        assert!(s.buffers.get(&k).unwrap().locally_modified());
+        let killed_seq = s.buffers.get(&k).unwrap().undo_seq;
+        let killed_marker = s.buffers.get(&k).unwrap().saved_marker;
+        assert_eq!(killed_marker, Some(0), "precondition: marker still fresh (never saved)");
+
+        s.kill_buffer(&k);
+        // Reopen the same file.
+        s.open_path("src/f.rs");
+        let k2 = s.buffers.current().unwrap().to_string();
+        let fresh = s.buffers.get(&k2).unwrap();
+        assert_eq!(fresh.undo.len(), 0, "the reopened file has no history");
+        assert_eq!(
+            fresh.saved_marker,
+            Some(0),
+            "the reopened file carries a FRESH marker — no stale state leaked"
+        );
+        assert_eq!(
+            fresh.undo_seq,
+            0,
+            "the id counter is per-buffer: it restarts (no id can collide with a dead marker)"
+        );
+        assert!(
+            !fresh.locally_modified(),
+            "the reopened file proves clean at its own disk content"
+        );
+        assert_eq!(fresh.text(), "original\n", "the reopen reads disk, not the killed buffer's edits");
+        assert!(
+            killed_seq >= 1,
+            "the killed buffer really had recorded steps (seq {killed_seq}) — its state existed but died with it"
+        );
+    }

@@ -27,9 +27,9 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(pos, text);
-            // A local edit: the buffer now differs from disk (the
-            // light-editing flag, plan decision #6).
-            buf.locally_modified = true;
+            // plan 016 issue 03: no stored flag to set — the recorded undo
+            // step moved the history position away from the saved-state
+            // marker, and the derived `locally_modified()` reads the rest.
             // Plan 007 issue 04: record the edit on the retained parse
             // tree so the next ensure_highlight reparses incrementally.
             if let Some(old_rope) = old_rope {
@@ -126,7 +126,6 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(point_char, text);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -176,7 +175,6 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(point_char - 1..point_char);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -224,7 +222,6 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(point_char..point_char + 1);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -317,7 +314,6 @@ impl AppStore {
         self.kill_ring.push(killed.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(point_char..end_of_kill);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -404,7 +400,6 @@ impl AppStore {
         self.kill_ring.push(killed.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(i..point_char);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -500,7 +495,6 @@ impl AppStore {
         self.kill_ring.push(killed.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(point_char..end_char);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -549,7 +543,6 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(point_char, "\n");
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -654,7 +647,6 @@ impl AppStore {
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(first_idx..second_idx + 1);
             buf.rope.insert(first_idx, &swapped);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -743,16 +735,25 @@ impl AppStore {
             // pure insertion). Clamped so an out-of-range record can never
             // panic the slice (ropey slice panics on an over-long range).
             let old_text = old_rope.slice(char_start.min(len)..char_end.min(len)).to_string();
-            let step = UndoStep {
-                // The forward edit's inserted text now lives at
-                // [char_start, char_start + len(new_text)) in the post-edit
-                // rope: undo removes `new_text` there and reinserts
-                // `old_text`.
-                range: char_start..char_start + new_text.chars().count(),
-                removed: new_text.to_string(),
-                inserted: old_text,
-            };
             if let Some(buf) = self.buffers.get_mut(key) {
+                // plan 016 issue 03: assign the step's unique monotonically
+                // increasing id from the buffer's counter BEFORE pushing —
+                // the id is the position's identity, and the saved-state
+                // marker speaks in these. The counter is monotonic for the
+                // buffer's lifetime (it survives the cap's oldest-eviction
+                // and history clears), so no id is ever re-issued: a marker
+                // can never be "accidentally matched" by a later step.
+                buf.undo_seq += 1;
+                let step = UndoStep {
+                    id: buf.undo_seq,
+                    // The forward edit's inserted text now lives at
+                    // [char_start, char_start + len(new_text)) in the post-
+                    // edit rope: undo removes `new_text` there and
+                    // reinserts `old_text`.
+                    range: char_start..char_start + new_text.chars().count(),
+                    removed: new_text.to_string(),
+                    inserted: old_text,
+                };
                 buf.undo.push(step);
             }
         }
@@ -768,9 +769,19 @@ impl AppStore {
 
     /// Undo the current buffer's most recent text edit (plan 016 issue 01):
     /// pop the top inverse edit and re-apply it through the SAME path as an
-    /// edit — `retain_rope_edit` + `invalidate_highlight_for_key` (+
-    /// `locally_modified`) — so the retained parse tree never drifts from
-    /// the rope (the exact class `retain_rope_edit` exists to prevent).
+    /// edit — `retain_rope_edit` + `invalidate_highlight_for_key` — so the
+    /// retained parse tree never drifts from the rope (the exact class
+    /// `retain_rope_edit` exists to prevent).
+    ///
+    /// plan 016 issue 03: the dirty flag needs NO bookkeeping here. The pop
+    /// moves the history position back to the predecessor step's id (or the
+    /// empty sentinel), and `Buffer::locally_modified` derives clean/
+    /// modified from that position versus the saved-state marker — undoing
+    /// back to the saved position reads clean, undoing past it (or after a
+    /// new edit) reads modified. There is no `locally_modified = true` to
+    /// maintain because no stored flag exists: the marker is the single
+    /// source of truth, and the conservative tie-break means a pop can never
+    /// accidentally prove cleanliness it does not have.
     ///
     /// Only in an EDITABLE buffer: a read-only buffer is a no-op with a
     /// message, and undo must NOT resurrect the mode or `editable` state
@@ -808,18 +819,17 @@ impl AppStore {
         };
         let (start, end) = (step.range.start, step.range.end);
         // Validate the inverse against the CURRENT rope before applying
-        // (gate P1): the rope may have been REPLACED behind this history by a
-        // content replacement that does NOT flow through the edit path — the
-        // notes sync (`replace_buffer_text`), a disk reload
-        // (`reload_in_place`), or a read-only accept (`toggle_ro_accept`). 03
-        // clears the history at those three sites (via `drop_undo_history`);
-        // until it does, a stale step's range can no longer fit the rope and
-        // an unclamped `remove` would PANIC in ropey (`Char range out of
-        // bounds`). The record is trustworthy only while the range still fits
-        // AND the text it expects to remove still sits there — the
-        // `removed`-text check also makes `UndoStep.removed` a live reader
-        // rather than dead weight (gate P2-1). Otherwise the step is already
-        // popped, so report it and leave the rope alone.
+        // (gate P1 backstop): 03 clears the history at all three
+        // rope-replacing sites via `drop_undo_history`, so a stale step
+        // should no longer occur in production — this guard remains the
+        // safety net for any replacement a caller misses (a stale step's
+        // range would otherwise make an unclamped `remove` PANIC in ropey,
+        // `Char range out of bounds`). The record is trustworthy only
+        // while the range still fits AND the text it expects to remove
+        // still sits there — the `removed`-text check also makes
+        // `UndoStep.removed` a live reader rather than dead weight
+        // (gate P2-1). Otherwise the step is already popped, so report it
+        // and leave the rope alone.
         let valid = self
             .buffers
             .get(&key)
@@ -829,6 +839,16 @@ impl AppStore {
             })
             .unwrap_or(false);
         if !valid {
+            // plan 016 issue 03 (the tie-break, applied to the backstop):
+            // a rejected step proves the content was replaced BEHIND this
+            // history, so the marker's comparison is no longer trustworthy
+            // either (the pop moved the position without moving the text).
+            // Drop the saved-state evidence — the buffer reads modified
+            // until the next save/load re-establishes the marker — and
+            // report the stale step.
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.saved_marker = None;
+            }
             self.minibuffer_message("undo history is stale — ignored");
             return;
         }
@@ -840,7 +860,8 @@ impl AppStore {
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(start..end);
             buf.rope.insert(start, &step.inserted);
-            buf.locally_modified = true;
+            // plan 016 issue 03: no flag to set — the popped position's id
+            // versus the saved-state marker IS the dirty state (see above).
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -879,9 +900,12 @@ impl AppStore {
 
     /// Save the buffer with `key` to its on-disk path (plan 004 issue 04:
     /// the quit save-prompt must save buffers that are not the current one).
-    /// Updates the buffer's mtime and clears `locally_modified`. Returns
-    /// `true` when the write landed; on any refusal/failure the minibuffer
-    /// message reports the reason and `false` is returned.
+    /// Updates the buffer's mtime and SETS the saved-state marker at the
+    /// current history position (plan 016 issue 03 — the save half of the
+    /// dirty-flag contract; the derived `locally_modified()` now proves
+    /// clean until the position moves). Returns `true` when the write
+    /// landed; on any refusal/failure the minibuffer message reports the
+    /// reason and `false` is returned.
     pub fn save_buffer_key(&mut self, key: &str) -> bool {
         let (path, text) = {
             let buf = match self.buffers.get(key) {
@@ -922,7 +946,13 @@ impl AppStore {
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 if let Some(buf) = self.buffers.get_mut(key) {
                     buf.mtime = mtime;
-                    buf.locally_modified = false;
+                    // plan 016 issue 03: the save path SETS the saved-state
+                    // marker at the current position (top step's id, or the
+                    // empty sentinel) — the single place "the disk now
+                    // matches the buffer" becomes provable. A buffer that
+                    // never had this called on it after an edit can never
+                    // read clean again (conservative, by design).
+                    buf.mark_saved();
                     buf.changed_on_disk = false;
                 }
                 // Watcher self-write suppression (plan 005 issue 01): the
@@ -958,40 +988,52 @@ impl AppStore {
     /// Replace a buffer's text (the notes-buffer sync path, from
     /// `sync_notes_from_doc`). ONE OF THREE rope-replacing sites: this
     /// assigns `buf.rope` directly, so it does NOT flow through the edit
-    /// path and the recorded inverse ranges become invalid. 03 clears the
-    /// undo history here (and at the other two) by calling
-    /// `drop_undo_history`; until then `undo()` validates each step and
-    /// rejects a stale one (so a pre-03 replacement degrades to a message,
-    /// never a panic). See that helper for the full list of the three sites.
+    /// path and the recorded inverse ranges become invalid — this is why it
+    /// calls `drop_undo_history` (plan 016 issue 03): the recorded steps
+    /// are stale, AND the cleared history proves nothing, so the buffer
+    /// reads modified until the caller re-establishes evidence. The notes
+    /// sync writes the serialized doc to disk FIRST and then reflects that
+    /// same text into the buffer, so it follows with `mark_fresh` (the
+    /// content IS the disk truth — see `sync_notes_from_doc`).
     pub(super) fn replace_buffer_text(&mut self, key: &str, text: &str) {
         let rope = Rope::from_str(text);
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.rope = rope;
         }
+        self.drop_undo_history(key);
         self.drop_retained_tree(key);
     }
 
-    /// Clear a buffer's undo history (plan 016 issue 03 seam — 03 wires this
-    /// in, not 01). Every place that REPLACES `buf.rope` outright — NOT
+    /// Clear a buffer's undo history AND its saved-state evidence (plan
+    /// 016 issue 03). Every place that REPLACES `buf.rope` outright — NOT
     /// through the edit path, so the recorded inverse char ranges become
-    /// invalid — must call this so a later undo cannot re-apply a stale range
-    /// (a stale range would otherwise make ropey's `remove` panic; see the
-    /// stale-step guard in `undo`). 03 hooks this ONE function rather than
-    /// discovering the three sites itself. The three rope-assigning sites are:
+    /// invalid — MUST call this so a later undo cannot re-apply a stale
+    /// range (a stale range would make ropey's `remove` panic; see the
+    /// stale-step guard in `undo`, which stays as the backstop for any
+    /// replacement this helper's callers cannot cover). The three
+    /// rope-assigning sites this is wired into:
     ///
-    ///   1. `reload_in_place` (`index_wiring.rs`) — a disk reload re-reads the
-    ///      file into the rope (four in-place reload routes funnel here).
+    ///   1. `reload_in_place` (`index_wiring.rs`) — a disk reload re-reads
+    ///      the file into the rope (four in-place reload routes funnel here).
     ///   2. `toggle_ro_accept` (`buffers.rs`) — the read-only accept discards
     ///      local edits and re-reads the file.
     ///   3. `replace_buffer_text` (`buffers.rs`) — the notes-buffer sync
     ///      (`sync_notes_from_doc`) rewrites the notes buffer from the doc.
     ///
-    /// Until 03 calls it from each site, `undo()`'s stale-step guard is the
-    /// safety net: a stale step is dropped and reported, never applied.
-    #[allow(dead_code)] // 03 calls this from the three sites above; 01 only adds the guard
+    /// The marker is reset to NO EVIDENCE (`None`), not to the fresh
+    /// sentinel: a cleared history proves nothing, so the buffer reads
+    /// MODIFIED until the next save/load. The sites that replaced the
+    /// content with DISK TRUTH (`reload_in_place`, `toggle_ro_accept`, and
+    /// the notes sync after its write) follow with `mark_fresh` — only they
+    /// are entitled to re-prove cleanliness.
+    ///
+    /// `undo_seq` deliberately survives the clear (it lives on the
+    /// `Buffer`, not the `UndoStack`): ids are unique for the buffer's
+    /// lifetime, and a cleared history must never re-issue an id.
     pub(super) fn drop_undo_history(&mut self, key: &str) {
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.undo = UndoStack::default();
+            buf.saved_marker = None;
         }
     }
 
@@ -1033,7 +1075,7 @@ impl AppStore {
             }
             (
                 buf.mode,
-                buf.locally_modified,
+                buf.locally_modified(),
                 self.buffer_is_project_owned(&key),
                 self.buffer_baseline_editable(&key),
             )
@@ -1128,18 +1170,19 @@ impl AppStore {
     }
 
     /// The confirm's `y`: discard the local edits (re-read the file from
-    /// disk, clearing `locally_modified`/`changed_on_disk`) and turn the
-    /// buffer read-only. A failed re-read keeps the confirm armed (no
-    /// silent state half-change).
+    /// disk, clearing `changed_on_disk` and re-proving cleanliness via the
+    /// saved-state marker) and turn the buffer read-only. A failed re-read
+    /// keeps the confirm armed (no silent state half-change).
     ///
-    /// Plan 016 (undo) seam — issue 03 owns "a disk reload clears the undo
-    /// history" (the recorded char offsets become invalid). This is ONE OF
-    /// THREE rope-replacing sites: it assigns `buf.rope` directly, so it does
-    /// NOT flow through the `reload_in_place` chokepoint (`index_wiring.rs`).
-    /// 03 clears the history at all three by calling `drop_undo_history`
-    /// (this is site 2 of 3; the others are `reload_in_place` and
-    /// `replace_buffer_text`). Until then `undo()`'s stale-step guard is the
-    /// safety net (a stale step is dropped and reported, never a panic).
+    /// Plan 016 (undo) issue 03 — WIRE SITE 2 OF 3: this assigns
+    /// `buf.rope` directly (it does NOT flow through the
+    /// `reload_in_place` chokepoint, `index_wiring.rs`), so the recorded
+    /// inverse ranges are invalid and the history is dropped here via
+    /// `drop_undo_history`. The drop resets the marker to NO EVIDENCE (the
+    /// cleared history proves nothing → modified); because this accept
+    /// replaces the content with DISK TRUTH, `mark_fresh` immediately
+    /// re-proves it: the buffer is clean, the marker is the fresh/empty
+    /// sentinel, and undo is a "nothing to undo" no-op.
     fn toggle_ro_accept(&mut self) {
         let Some(key) = self.toggle_ro_confirm.clone() else {
             return;
@@ -1155,10 +1198,14 @@ impl AppStore {
                 return;
             }
         };
+        // Drop the history (and its marker) BEFORE re-reading: the drop
+        // leaves the buffer in the evidence-free modified state, and only
+        // the successful re-read re-proves it clean.
+        self.drop_undo_history(&key);
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope = rope;
             buf.mtime = mtime;
-            buf.locally_modified = false;
+            buf.mark_fresh();
             buf.changed_on_disk = false;
             buf.editable = false;
             buf.mode = BufferMode::Annotation;
@@ -1322,7 +1369,6 @@ impl AppStore {
         if editable {
             if let Some(buf) = self.buffers.get_mut(&key) {
                 buf.rope.remove(char_start..char_end);
-                buf.locally_modified = true;
                 buf.mark = None;
             }
             self.retain_rope_edit(&key, &old_rope, char_start, char_end, "");
@@ -1419,7 +1465,6 @@ impl AppStore {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.insert(point_char, &text);
-            buf.locally_modified = true;
             // Clear the mark (the text insertion shifts byte offsets).
             buf.mark = None;
         }
@@ -1490,7 +1535,6 @@ impl AppStore {
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove(yank_pos..end);
             buf.rope.insert(yank_pos, &text);
-            buf.locally_modified = true;
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
@@ -1533,6 +1577,18 @@ impl AppStore {
     /// intervening edit lands its own step on top (with a non-empty `inserted`
     /// or a different `removed`) and prevents coalescing — exactly as emacs's
     /// sequence-bound undo would.
+    ///
+    /// plan 016 issue 03 (STATED DECISION — the merged step's id): the merged
+    /// step keeps the id of the M-y step — the NEWER (top) of the two popped
+    /// steps — and NOT the preceding yank's. The saved-state marker stores the
+    /// top-of-history position at save time, so it can only hold the id of a
+    /// step that WAS the top. If the merge instead kept the OLDER id, a buffer
+    /// saved in between the C-y and the M-y would carry a marker equal to the
+    /// merged step's id and read CLEAN while holding the rotated (unsaved)
+    /// text — a data-loss direction. Keeping the newer top's id means a merge
+    /// can never hand the marker's id to a step with different meaning: after
+    /// any merge the top id is the newest one recorded, strictly greater than
+    /// any marker set before it.
     fn coalesce_yank_pop_with_preceding_yank(&mut self, key: &str, yank_pos: usize) {
         let Some(buf) = self.buffers.get_mut(key) else {
             return;
@@ -1553,7 +1609,11 @@ impl AppStore {
             && prev.range.start == yank_pos
         {
             // Coalesce: one undo removes the rotated text and restores the
-            // pre-yank (empty) origin.
+            // pre-yank (empty) origin. The merged step keeps `step.id` —
+            // the M-y (top/newer) step's id — so a saved-state marker set
+            // between the C-y and the M-y can never match it and read a
+            // false clean (the data-loss direction; see the decision in
+            // the docs above).
             step.inserted.clear();
             buf.undo.push(step);
         } else {

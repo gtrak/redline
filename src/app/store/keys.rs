@@ -550,7 +550,7 @@ impl AppStore {
             .list()
             .into_iter()
             .rev() // MRU order reversed → oldest-first
-            .filter(|(_, b)| b.locally_modified)
+            .filter(|(_, b)| b.locally_modified())
             .map(|(k, _)| k.to_string())
             .collect();
         if modified.is_empty() {

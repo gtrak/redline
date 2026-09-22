@@ -1759,7 +1759,10 @@ use super::*;
             let buf = store.buffers.get_mut(&key).unwrap();
             buf.rope = Rope::from_str("# t\nreloaded\n");
             buf.mtime = new_mtime;
-            buf.locally_modified = false;
+            // plan 016 issue 03: a reload re-reads the content from disk
+            // truth → the fresh sentinel (history gone, saved state is the
+            // freshly loaded content).
+            buf.mark_fresh();
         }
         assert!(
             !store.highlight_cache.retain_contains(&TreeKey::new(&key, new_mtime)),

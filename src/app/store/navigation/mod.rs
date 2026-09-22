@@ -48,7 +48,7 @@ impl AppStore {
                 self.external_buffers.insert(key.clone());
             }
             Some(buf) => {
-                if buf.locally_modified {
+                if buf.locally_modified() {
                     // A dirty buffer (unsaved edits) is never replaced —
                     // the landing just makes it current (below).
                 } else if let Ok(new_mtime) = std::fs::metadata(abs).and_then(|m| m.modified())

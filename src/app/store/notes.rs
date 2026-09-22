@@ -400,12 +400,21 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         // The in-memory doc now equals the disk: loaded.
         self.notes_doc_loaded = true;
         if self.buffers.get(&key).is_some() {
+            // `replace_buffer_text` dropped the buffer's undo history AND
+            // reset its saved-state marker to no evidence (plan 016 issue
+            // 03, the third rope-assigning site). This sync just WROTE the
+            // serialized doc to disk and is now reflecting that SAME text
+            // into the buffer — the content IS the disk truth, so the
+            // fresh sentinel re-proves it clean (this is the notes
+            // save/load path of the dirty-flag contract; a bare
+            // replacement without a preceding write would leave the
+            // buffer modified instead).
             self.replace_buffer_text(&key, &text);
             if let Some(buf) = self.buffers.get_mut(&key) {
                 if let Some(m) = mtime {
                     buf.mtime = m;
                 }
-                buf.locally_modified = false;
+                buf.mark_fresh();
                 buf.changed_on_disk = false;
                 buf.mark = None;
             }
@@ -773,7 +782,9 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.rope.remove((len - 1)..len);
-            buf.locally_modified = true;
+            // plan 016 issue 03: no flag to set — the recorded undo step
+            // moved the history position; the derived `locally_modified()`
+            // reads modified from the marker comparison.
             if let Some(old_rope) = old_rope {
                 self.retain_rope_edit(&key, &old_rope, len - 1, len, "");
             }

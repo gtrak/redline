@@ -656,7 +656,7 @@ fn external_landing_on_dirty_project_buffer_keeps_edits_and_mode() {
     s.key_event(key("C-q"));
     s.insert_text("zz");
     let buf = s.buffers.get(&bufk).unwrap();
-    assert!(buf.locally_modified, "precondition: dirty");
+    assert!(buf.locally_modified(), "precondition: dirty");
     assert_eq!(buf.mode, BufferMode::Accurate, "precondition (msg: {})", s.message);
     // The external landing lands on the key the project buffer holds.
     let landed = s.open_external_path(&abs).expect("the landing returns the existing key");
@@ -667,7 +667,7 @@ fn external_landing_on_dirty_project_buffer_keeps_edits_and_mode() {
         s.buffer_text()
     );
     let buf = s.buffers.get(&bufk).unwrap();
-    assert!(buf.locally_modified, "the dirty flag survives");
+    assert!(buf.locally_modified(), "the dirty flag survives");
     assert_eq!(
         buf.mode,
         BufferMode::Accurate,
@@ -709,7 +709,7 @@ fn crate_index_landing_inside_project_root_keeps_dirty_buffer() {
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
     s.insert_text("zz");
-    assert!(s.buffers.get(&bufk).unwrap().locally_modified, "precondition: dirty");
+    assert!(s.buffers.get(&bufk).unwrap().locally_modified(), "precondition: dirty");
     // The crate root's index lands (the 006-03 start_crate_indexing event).
     s.apply_crate_index_event(&CrateIndexEvent {
         source_root: root.path().to_path_buf(),
@@ -747,7 +747,7 @@ fn crate_index_landing_inside_project_root_keeps_dirty_buffer() {
         "the unsaved edit survives the crate-index landing: {:?}",
         s.buffer_text()
     );
-    assert!(buf.locally_modified, "the dirty flag survives");
+    assert!(buf.locally_modified(), "the dirty flag survives");
     assert_eq!(buf.mode, BufferMode::Accurate, "the mode survives");
     assert!(buf.editable, "editability survives");
     assert!(
@@ -803,7 +803,7 @@ fn external_landing_on_clean_accurate_project_buffer_refreshes_in_place() {
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
     assert!(
-        !s.buffers.get(&bufk).unwrap().locally_modified,
+        !s.buffers.get(&bufk).unwrap().locally_modified(),
         "precondition: Accurate but clean (msg: {})",
         s.message
     );
@@ -820,6 +820,6 @@ fn external_landing_on_clean_accurate_project_buffer_refreshes_in_place() {
     );
     assert_eq!(s.buffer_mode_display(), "Accurate", "the mode survives the refresh");
     assert!(s.buffers.get(&bufk).unwrap().editable, "editability survives the refresh");
-    assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+    assert!(!s.buffers.get(&bufk).unwrap().locally_modified());
     assert!(!s.external_buffers.contains(&bufk), "not registered as an external entry");
 }
