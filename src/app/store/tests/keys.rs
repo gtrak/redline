@@ -262,3 +262,47 @@ use super::*;
         assert!(c_slash.ctrl);
     }
 
+    /// plan 016 issue 02: bind `C-7` for undo so that a BYTE-BASED terminal's
+    /// physical Ctrl+/ (raw control byte 0x1F, which crossterm decodes as
+    /// Char('7') + CONTROL — pinned in `input.rs::crossterm_0x1f_decodes_to_c_7`
+    ///) reaches the undo command at the APP level. The three undo bindings
+    /// split terminal coverage (stated in the binding table): `C-x u`
+    /// (everywhere), `C-/` (CSI-u / kitty terminals only), `C-7` (byte-based
+    /// terminals only). This asserts the app-level mapping for the 0x1F byte
+    /// reaches undo.
+    #[test]
+    fn c7_binding_reaches_undo_the_0x1f_app_key() {
+        let km = load_bindings(BUFFER_BINDINGS);
+        // The app key crossterm produces for raw 0x1F (byte-based Ctrl+/ /
+        // Ctrl-_) is Char('7') + CONTROL.
+        let seq = parse_sequence("C-7").unwrap();
+        let c7 = &seq[0];
+        assert_eq!(
+            c7,
+            &Key::ctrl_char('7'),
+            "C-7 must parse to Char('7') + ctrl (the app key crossterm yields for 0x1F)"
+        );
+        assert_eq!(c7.code, KeyCode::Char('7'));
+        assert!(c7.ctrl);
+        // That app key must resolve to undo in the buffer view.
+        assert_eq!(
+            km.lookup(&seq),
+            Some(Lookup::Command("undo")),
+            "C-7 (0x1F on byte-based terminals) must reach the undo command"
+        );
+        // C-7 is a single-key leaf, not a prefix (no collision with the
+        // C-x family or any longer sequence).
+        assert!(!km.is_prefix(&seq), "C-7 must be a complete binding, not a prefix");
+        // All three undo bindings now resolve (stated in the commit).
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x u").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-x u (every terminal) must bind undo"
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-/").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-/ (CSI-u / kitty terminals) must bind undo"
+        );
+    }
+

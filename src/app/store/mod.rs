@@ -364,14 +364,25 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     //
     // Terminal control-code subtlety (PINNED, not assumed — see the
     // input-layer test `crossterm_0x1f_decodes_to_c_7` and the store keymap
-    // test `undo_bindings_resolve`): `C-/` parses to Char('/') + ctrl. On a
-    // byte-based terminal Ctrl+/ and Ctrl-_ both send control byte 0x1F,
-    // which crossterm decodes as Char('7') + CONTROL ("C-7"), NOT
-    // Char('/') + ctrl — so there the physical Ctrl+/ arrives as C-7 and the
-    // `C-/` binding does not fire; on a CSI-u / kitty-protocol terminal the
-    // physical Ctrl+/ arrives as Char('/') + ctrl and DOES fire.
+    // test `undo_bindings_resolve_and_pin_the_control_code`): `C-/` parses to
+    // Char('/') + ctrl. On a byte-based terminal Ctrl+/ and Ctrl-_ both send
+    // control byte 0x1F, which crossterm decodes as Char('7') + CONTROL
+    // ("C-7"), NOT Char('/') + ctrl — so there the physical Ctrl+/ arrives as
+    // C-7 and the `C-/` binding does not fire; on a CSI-u / kitty-protocol
+    // terminal the physical Ctrl+/ arrives as Char('/') + ctrl and DOES fire.
+    //
+    // plan 016 issue 02: the three bindings therefore split terminal
+    // coverage (stated, not left to the user to discover):
+    //   - `C-x u`: every terminal (two keys, always reachable) — the
+    //     universal fallback.
+    //   - `C-/`:   CSI-u / kitty-protocol terminals only (a physical Ctrl+/ is
+    //              decoded as Char('/') + ctrl and fires this binding).
+    //   - `C-7`:   byte-based terminals only (a physical Ctrl+/ / Ctrl-_ sends
+    //              0x1F, which crossterm decodes as Char('7') + CONTROL).
+    // `C-7` was free in this table; binding it makes byte-based Ctrl+/ undo.
     ("C-x u", "undo"),
     ("C-/", "undo"),
+    ("C-7", "undo"),
     // Window-split keys (the 3 pre-existing ux_sweep findings),
     // degraded onto the single-pane view-stack model — a full
     // vertical split is a scoped follow-up (per-pane buffer /

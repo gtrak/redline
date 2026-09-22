@@ -1437,6 +1437,13 @@ impl AppStore {
 
     /// M-y: yank-pop — replace the last yanked text with the previous kill
     /// ring entry. Only valid immediately after C-y or another M-y.
+    ///
+    /// plan 016 issue 02: a M-y is a REPLACEMENT, and it COALESCES with the
+    /// preceding C-y (or an earlier M-y) into ONE undo step — one undo removes
+    /// the whole yank-and-rotate sequence, restoring the pre-yank buffer
+    /// (matching emacs). See the coalesce block below for the exact rule; the
+    /// scoped, yank-sequence-only decision means an intervening edit breaks the
+    /// run and M-y becomes its own step.
     pub fn yank_pop(&mut self) {
         let Some(idx) = self.yank_ring_index else {
             self.minibuffer_message("Yank-pop: no previous yank");
@@ -1489,10 +1496,71 @@ impl AppStore {
         if let Some(old_rope) = old_rope {
             self.retain_rope_edit(&key, &old_rope, yank_pos, end, &text);
         }
+        // plan 016 issue 02 (STATED DECISION, scoped to the yank sequence
+        // only — the general self-insert-run rule is issue 04): M-y is a
+        // REPLACEMENT, and it coalesces with the preceding C-y / M-y into one
+        // undo step (one undo removes the whole yank-and-rotate sequence,
+        // matching emacs). `retain_rope_edit` just recorded the M-y step; it
+        // recorded IFF `end != yank_pos || !text.is_empty()` (the hook's no-op
+        // guard) and `undo_in_progress` is false here, so `recorded` mirrors
+        // whether a step exists to coalesce. See the helper for the exact rule.
+        let recorded = end != yank_pos || !text.is_empty();
+        if recorded {
+            self.coalesce_yank_pop_with_preceding_yank(&key, yank_pos);
+        }
         self.invalidate_highlight_for_key(&key);
         self.yank_len = Some(text.chars().count());
         self.yank_ring_index = Some(next);
         // No scroll adjustment: the replacement is at the current top line.
+    }
+
+    /// plan 016 issue 02 (STATED DECISION, scoped to the yank sequence only —
+    /// the general self-insert-run rule is issue 04): coalesce a M-y
+    /// (yank-pop) inverse with the preceding yank (a C-y, or an earlier M-y
+    /// that already coalesced) into ONE undo step. M-y is a REPLACEMENT of the
+    /// just-yanked text, and emacs effectively removes the whole yank-and-
+    /// rotate sequence with ONE undo, so the single combined step removes the
+    /// current (rotated) text and restores the EMPTY pre-yank origin rather
+    /// than leaving a step that reinserts the previous kill.
+    ///
+    /// `retain_rope_edit` has just recorded the M-y step {range: [yank_pos,
+    /// yank_pos+|text|), removed: text, inserted: the just-replaced text}. It
+    /// is the rotation's anchor IFF the step beneath it is the pure yank
+    /// insertion this M-y replaces: empty `inserted` (a pure insertion), at
+    /// `yank_pos`, and its recorded `removed` equals the text M-y just swapped
+    /// in (`step.inserted`). Chained M-y's keep the coalesced anchor's
+    /// `inserted` empty, so the rule holds across a whole rotate run. Any
+    /// intervening edit lands its own step on top (with a non-empty `inserted`
+    /// or a different `removed`) and prevents coalescing — exactly as emacs's
+    /// sequence-bound undo would.
+    fn coalesce_yank_pop_with_preceding_yank(&mut self, key: &str, yank_pos: usize) {
+        let Some(buf) = self.buffers.get_mut(key) else {
+            return;
+        };
+        // The M-y step `retain_rope_edit` just recorded (the caller guarantees
+        // it recorded: `undo_in_progress` is false and the edit is non-empty
+        // or non-zero-width).
+        let Some(mut step) = buf.undo.pop() else {
+            return;
+        };
+        // No step beneath: the C-y was not recorded — keep the M-y as its own.
+        let Some(prev) = buf.undo.pop() else {
+            buf.undo.push(step);
+            return;
+        };
+        if step.inserted == prev.removed
+            && prev.inserted.is_empty()
+            && prev.range.start == yank_pos
+        {
+            // Coalesce: one undo removes the rotated text and restores the
+            // pre-yank (empty) origin.
+            step.inserted.clear();
+            buf.undo.push(step);
+        } else {
+            // Not a yank rotation: restore both, M-y on top.
+            buf.undo.push(prev);
+            buf.undo.push(step);
+        }
     }
 
     /// Kill the buffer with key `key`. 06a: no accidental buffer creation —

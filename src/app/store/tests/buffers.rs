@@ -2158,6 +2158,372 @@ use super::*;
         assert_eq!(s.point_col(), 4, "point must land char-accurate");
     }
 
+    /// plan 016 issue 02: RET (newline-at-point) is undoable, asserted at
+    /// every step with MULTIBYTE content before the edit point — the
+    /// restored text is byte-identical and the point is char-accurate (é is
+    /// two bytes, so a byte-based undo would land the point one char early,
+    /// mid-é). This is one of the five remaining edit paths covered by the
+    /// recording hook with no recording change (the RET site already funnels
+    /// through `retain_rope_edit`).
+    #[test]
+    fn ret_undo_restores_multibyte_text_and_char_point() {
+        // "café\n": c a f é (é = 2 bytes). 4 chars, 5 bytes.
+        let (mut s, bk, _dir) = accurate_file_store("café\n");
+        // Point at char 4 = AFTER é (byte 4 is the second byte of é), just
+        // before the trailing newline. A byte-based record would put the
+        // inverse at byte 4 (mid-é) → col 3 on undo.
+        s.set_point(0, 4, 4);
+        assert_eq!(s.point_col(), 4, "point is at char col 4 (past the multibyte char)");
+        s.key_event(key("RET")); // split before the newline → "café\n\n", point on the new line
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "café\n\n",
+            "RET must insert a newline at the point"
+        );
+        assert_eq!(s.point_line(), 1, "point lands on the new (lower) line");
+        // Undo the RET: the exact text (including the multibyte char) is
+        // restored and the point is char-accurate.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "café\n",
+            "undo RET must restore the exact text byte-identically"
+        );
+        assert_eq!(s.point_line(), 0, "point line restored");
+        assert_eq!(
+            s.point_col(),
+            4,
+            "point restored to CHAR col 4 (a byte-based undo lands at col 3, the byte mid-é)"
+        );
+    }
+
+    /// plan 016 issue 02: C-k (kill-line) is undoable. The killed text is
+    /// restored exactly and the point lands back at the kill start (char-
+    /// accurate). Covered by the recording hook with no recording change.
+    #[test]
+    fn kill_line_undo_restores_killed_text_and_point() {
+        let (mut s, bk, _dir) = accurate_file_store("hello world\nsecond\n");
+        s.set_point(0, 5, 5); // between "hello" and " world"
+        s.key_event(key("C-k")); // kill " world" (to EOL, keep the newline)
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\nsecond\n",
+            "C-k must kill to EOL, keeping the newline"
+        );
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello world\nsecond\n",
+            "undo must restore the killed text byte-identically"
+        );
+        assert_eq!(
+            s.point_col(),
+            5,
+            "point must land back at the kill start (char col 5)"
+        );
+    }
+
+    /// plan 016 issue 02: C-y (yank) is undoable. Undoing a yank removes the
+    /// just-inserted text and restores the buffer to its pre-yank state, with
+    /// the point back at the yank point (char-accurate). Covered by the
+    /// recording hook with no recording change.
+    #[test]
+    fn yank_undo_restores_pre_yank_text_and_point() {
+        let (mut s, bk, _dir) = accurate_file_store("hello world\n");
+        // Seed the kill ring with " world" (C-k), then yank it at the start.
+        s.set_point(0, 5, 5);
+        s.key_event(key("C-k"));
+        assert_eq!(s.kill_ring.top(), Some(" world"));
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-y")); // yank " world" at char 0 → " worldhello\n"
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            " worldhello\n",
+            "C-y must insert the yanked text at the point"
+        );
+        // Undo the C-y only: the yanked text is removed, pre-yank text stays.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n",
+            "undo C-y must remove the yanked text and restore the pre-yank buffer"
+        );
+        assert_eq!(
+            s.point_col(),
+            0,
+            "point must land back at the yank point (char col 0)"
+        );
+    }
+
+    /// plan 016 issue 02: the M-y (yank-pop) coalescing DECISION, pinned over
+    /// a known C-k … C-y … M-y sequence. M-y is a REPLACEMENT, and it
+    /// coalesces with the preceding C-y into ONE undo step (matching emacs):
+    /// a single undo removes the whole yank-and-rotate sequence, restoring
+    /// the pre-C-y buffer. Scoped to the yank sequence only (the general
+    /// self-insert-run rule is issue 04).
+    #[test]
+    fn yank_pop_coalesces_with_yank_into_one_undo_step() {
+        // Seed the kill ring with two entries: kill "alpha" then "beta" so
+        // ring = [beta (top), alpha]. C-y yanks the top (beta); M-y rotates
+        // to alpha.
+        let (mut s, bk, _dir) = accurate_file_store("alpha\nbeta\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-k")); // kill "alpha" → "\nbeta\n", ring=[alpha]
+        assert_eq!(s.kill_ring.top(), Some("alpha"));
+        s.set_point(1, 0, 0);
+        s.key_event(key("C-k")); // kill "beta" → "\n\n", ring=[beta, alpha]
+        assert_eq!(s.kill_ring.top(), Some("beta"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "\n\n");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "two kills recorded (one step each, no coalescing yet)"
+        );
+        // C-y yanks the top ("beta") at char 0 → "beta\n\n". One step.
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-y"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "beta\n\n",
+            "C-y yanks the top ring entry at the point"
+        );
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 3);
+        // M-y replaces "beta" with "alpha" (at(1)) → "alpha\n\n". This
+        // coalesces with the C-y step: the stack stays at 3, not 4.
+        s.key_event(key("M-y"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "alpha\n\n",
+            "M-y rotates the yanked text to the previous kill"
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            3,
+            "C-y and M-y must coalesce into ONE undo step (2 kills + 1 yank-and-rotate); no coalescing would make this 4"
+        );
+        // ONE undo removes the whole yank-and-rotate sequence → pre-C-y ("\n\n").
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "\n\n",
+            "a single undo must restore the pre-C-y buffer (the whole yank-and-rotate sequence)"
+        );
+        // The next undos walk the two kills, restoring the original buffer.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "\nbeta\n",
+            "undo 2 restores the second kill (beta)"
+        );
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "alpha\nbeta\n",
+            "undo 3 restores the first kill (alpha) — the original buffer"
+        );
+    }
+
+    /// plan 016 issue 02: C-w (kill-region) is undoable. The killed region is
+    /// restored byte-identically and the point lands back at the region start
+    /// (char-accurate). Covered by the recording hook with no recording
+    /// change.
+    #[test]
+    fn kill_region_undo_restores_region_and_point() {
+        let (mut s, bk, _dir) = accurate_file_store("hello world\n");
+        // Region [0, 5) = "hello": point at char 5, mark at byte 0.
+        s.set_point(0, 5, 5);
+        s.buffers.get_mut(&bk).unwrap().mark = Some(0);
+        s.key_event(key("C-w")); // kill-region removes "hello" → " world\n"
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            " world\n",
+            "C-w must remove the region and push it to the kill ring"
+        );
+        assert_eq!(s.kill_ring.top(), Some("hello"));
+        // Undo restores the region.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello world\n",
+            "undo C-w must restore the killed region byte-identically"
+        );
+        assert_eq!(
+            s.point_col(),
+            0,
+            "point must land back at the region start (char col 0)"
+        );
+    }
+
+    /// plan 016 issue 02 requirement 4: the kill-ring interaction. Undoing a
+    /// C-k (or C-w) restores the killed text to the buffer but does NOT pop
+    /// the kill ring (emacs's undo leaves the ring alone). A silent
+    /// divergence between the buffer and the kill ring after undo is the bug
+    /// this prevents — so the ring's contents are asserted after the undo.
+    #[test]
+    fn undo_of_kill_does_not_pop_the_kill_ring() {
+        let (mut s, bk, _dir) = accurate_file_store("hello world\n");
+        s.set_point(0, 5, 5);
+        s.key_event(key("C-k")); // kill " world" → ring top " world" (len 1)
+        assert_eq!(s.kill_ring.top(), Some(" world"));
+        assert_eq!(s.kill_ring.len(), 1);
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello world\n",
+            "undo restores the killed text to the buffer"
+        );
+        assert_eq!(
+            s.kill_ring.top(),
+            Some(" world"),
+            "undo must NOT pop the kill ring (the entry the undo just restored)"
+        );
+        assert_eq!(
+            s.kill_ring.len(),
+            1,
+            "the ring depth is unchanged by the undo (no silent buffer/ring divergence)"
+        );
+    }
+
+    /// plan 016 issue 02 requirement 5: the reparse invariant holds for a NEW
+    /// path. A C-k undo must re-apply through the SAME `retain_rope_edit`
+    /// hook as the forward edit, so the retained parse tree never drifts from
+    /// the rope — a ROPE-ONLY undo (mutating the rope without the hook) would
+    /// leave the tree at the post-kill length and fail this assert.
+    #[test]
+    fn kill_line_undo_reparses_through_the_retained_tree_hook() {
+        let (mut s, bk, _dir) = accurate_file_store("fn main() {}\n");
+        let mtime = s.buffers.get(&bk).unwrap().mtime;
+        s.ensure_highlight_for_key(&bk);
+        let tree_key = TreeKey::new(&bk, mtime);
+        assert!(
+            s.highlight_cache.retain_contains(&tree_key),
+            "a small Rust buffer keeps a retained parse tree"
+        );
+        let base_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        // C-k from char 3 (after "fn ") kills "main() {}" (to EOL, keep \n).
+        s.set_point(0, 3, 3);
+        s.key_event(key("C-k"));
+        let after_kill_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        assert_eq!(after_kill_bytes, base_bytes - 9, "C-k removed the 9-char body after 'fn '");
+        assert_eq!(
+            s.highlight_cache
+                .retain_tree(&tree_key)
+                .unwrap()
+                .tree()
+                .root_node()
+                .end_byte(),
+            after_kill_bytes,
+            "the kill edits the retained tree (incremental reparse)"
+        );
+        // The undo re-applies the inverse through the SAME hook; the tree
+        // must grow back with the rope.
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "fn main() {}\n");
+        let after_undo_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        assert_eq!(after_undo_bytes, base_bytes);
+        assert_eq!(
+            s.highlight_cache
+                .retain_tree(&tree_key)
+                .unwrap()
+                .tree()
+                .root_node()
+                .end_byte(),
+            after_undo_bytes,
+            "a C-k undo must re-apply through retain_rope_edit: the retained tree's end must grow back with the rope (a rope-only undo leaves it at the post-kill length)"
+        );
+    }
+
+    /// plan 016 issue 02 requirement 7: the staleness guard must catch a
+    /// byte/char unit mix-up in a NEW path's recording rather than silently
+    /// absorb a wrong-range inverse. Simulated by mutation on C-k: a buggy
+    /// byte-based recording of killing "é" would record é's BYTE width
+    /// (range [3,5), 2 bytes) with the same char text ("é"). The guard's
+    /// char-slice check sees range [3,5) as the two chars "é\n" — not "é" —
+    /// and REJECTS the step. The discriminating pair: the correct char-width
+    /// inverse (range [3,4)) applies.
+    #[test]
+    fn staleness_guard_catches_byte_char_mixup_in_kill_recording() {
+        use crate::model::buffer::UndoStep;
+        let (mut s, bk, _dir) = accurate_file_store("café\n");
+        // c a f é (é = 2 bytes: 0xC3 0xA9). 4 chars, 5 bytes, + newline.
+        // A correct char-based kill of "é" records range [3,4), removed "é".
+        // A buggy BYTE-based recording records é's byte range [3,5) with the
+        // same char text "é" — the byte/char mix-up.
+        s.buffers.get_mut(&bk).unwrap().undo.push(UndoStep {
+            range: 3..5, // byte width (é spans 2 bytes), NOT the char width
+            removed: "é".into(),
+            inserted: String::new(),
+        });
+        // The guard must REJECT it (the char-slice [3,5) is "é\n", not "é")
+        // instead of silently applying a wrong-range remove.
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "café\n",
+            "a wrong-unit inverse must be rejected; the buffer stays untouched"
+        );
+        assert!(
+            s.message.contains("stale"),
+            "the byte/char mix-up must surface via the guard's stale message, not vanish silently: {:?}",
+            s.message
+        );
+        // Discriminating pair: the correct char-width inverse for the same
+        // kill DOES apply.
+        s.buffers.get_mut(&bk).unwrap().undo.push(UndoStep {
+            range: 3..4,
+            removed: "é".into(),
+            inserted: String::new(),
+        });
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "caf\n",
+            "the char-width inverse applies (the byte-width one did not)"
+        );
+    }
+
+    /// plan 016 issue 02 requirement 6: the history cap still holds for a
+    /// long sequence of the NEW paths (a path that recorded more than one
+    /// step could otherwise bypass 01's cap). Repeated RET (newline-at-point,
+    /// one step each — no coalescing for RET) exceeds the cap; the oldest are
+    /// dropped and undo stops earlier.
+    #[test]
+    fn undo_cap_still_holds_for_the_new_paths() {
+        use crate::model::buffer::UndoStack;
+        let max = UndoStack::MAX_ENTRIES;
+        let (mut s, bk, _dir) = accurate_file_store("x\n");
+        s.set_point(0, 0, 0);
+        // `max + 30` RETs at the moving point: each inserts a "\n" (one undo
+        // step each). Well over the cap.
+        for _ in 0..(max + 30) {
+            s.newline_at_point();
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            max,
+            "the stack must be capped at MAX_ENTRIES even for the new paths (oldest dropped)"
+        );
+        // Undo `max` times: the first 30 newlines were dropped, so undo stops
+        // with 30 "\n"s still in front of "x".
+        for _ in 0..max {
+            s.dispatch("undo", None).unwrap();
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            format!("{}x\n", "\n".repeat(30)),
+            "undo stops earlier once the oldest new-path steps are dropped"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert!(s.message.contains("nothing to undo"));
+    }
+
     /// plan 016 issue 01: undo is per-buffer (emacs is buffer-local). Undo in
     /// buffer B must never touch buffer A's history, and a buffer with no
     /// edits echoes "nothing to undo" while leaving its text alone.
