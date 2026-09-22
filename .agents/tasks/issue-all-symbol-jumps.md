@@ -113,6 +113,7 @@ the exceptions block is a bug.
 | **Rust tables: local binding** | as a landing TARGET: **N/A — no jump path lands on a binding's `let`** (a binding resolves the receiver's written-down type; the pre-step lands on the FIELD/METHOD cell, whose pins above carry the column). The record now carries `name_byte` (`LocalBinding`, this fix) so a future landing path has the byte at the source. Pre-step landing pins: the field/method store tests (all use `p.member` receivers) | as in A | n/a | n/a | n/a | F: generic | G: generic |
 | **Other registry languages' outline** (C, Cpp, JS, TS/TSX, Python, Go, Java, C#, Ruby, Clojure, Scheme, Bash, Markdown, TOML) | A: language-agnostic — every language's extraction records `start_byte` on the name node (`queries.rs`); the landing consumes it identically. Per-language extraction pins: `queries.rs` tests (e.g. `ruby_extracts_module_class_method`, `csharp…`, `scheme_extracts_define_and_library`) | B: language-agnostic (same arm) | C: language-agnostic | n/a | E: language-agnostic refinement; provider line-pinning is per-language (`redline-resolve` corpus) | F: generic | G: generic |
 | **Annotations** | n/a | n/a | n/a | D: store `landings.rs` P2-1 pins (record's `col`, not the line start) | n/a | F: generic | G: n/a |
+| **Enclosing-symbol fallback** (`M-.` with no symbol under point, or on a bare binding name — the criterion lists this as its own PATH) | It is a by-LINE guess, so by construction it is **never a silent jump**: `from_enclosing` routes it to the picker, i.e. mechanism **B**, where the row's outline re-read carries the same name-node `start_byte` any outline symbol does. Store pointer: `xref_no_symbol_under_point_falls_back_to_enclosing` (`src/app/store/tests/navigation/definitions.rs`); the landing column is pinned by the B row's outline pins | B (as above) | n/a | n/a | n/a | F: generic | n/a |
 
 **Justified col-0 / N-A cells (the ONLY exceptions — defended in one place):**
 1. **goto-line** — line start by design (emacs 30.2 behavior; mechanism H).
@@ -125,10 +126,17 @@ the exceptions block is a bug.
 4. **Tooling landing on a fully comment/string-masked line** — the provider's
    `line_defines_item` does not mask comments, so a dead `/* fn spawn */`
    line pins; every live occurrence is masked → honest col 0 (never an
-   invented column). Frequency (executed): this is the ONLY degradation
-   shape on provider-pinned lines — every live definition shape (fn/struct/
-   trait/const, preceding comment or string mention, multibyte prefix)
-   lands on the name; see `tooling_refinement_lands_on_the_name_for_live_definition_lines`.
+   invented column). Frequency (executed): this is the ONLY degradation *to
+   col 0* on provider-pinned lines — every live definition shape
+   (fn/struct/trait/const, preceding comment or string mention, multibyte
+   prefix) lands on the name; see
+   `tooling_refinement_lands_on_the_name_for_live_definition_lines`.
+   One adjacent shape is **not** a col-0 degradation and is worth naming so a
+   reader does not expect it in this list: because `comment_or_string_mask`
+   deliberately leaves `//` unmasked (matching base), a provider-pinned
+   **line-commented** definition (`// fn spawn() {}`) lands on the name
+   *inside the comment* — a nonzero column, on dead code. It is the same
+   dead-code class, one step milder.
 5. **Stale index** (byte out of range after an external edit) — honest col 0
    (`landing_column_from_start_byte`'s `None`), pre-existing.
 
