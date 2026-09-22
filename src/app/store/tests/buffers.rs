@@ -2507,8 +2507,12 @@ use super::*;
     #[test]
     fn undo_rejects_an_inverted_range_instead_of_panicking() {
         let (mut s, bk, _dir) = accurate_file_store("defgh\n");
+        // Bound through variables: a literal `3..1` trips
+        // `clippy::reversed_empty_ranges` (deny-by-default), and the subject
+        // here is the guard, not the lint.
+        let (start, end) = (3usize, 1usize);
         s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
-            range: 3..1, // start > end
+            range: start..end, // start > end
             removed: "de".into(),
             inserted: "x".into(),
         });
