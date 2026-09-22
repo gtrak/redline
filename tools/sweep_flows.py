@@ -594,12 +594,14 @@ def flow_accurate_suite():
     operation (a wrong / unbound / mis-routed binding would leave the row
     unchanged or produce a different byte), and the final `C-x C-s` save is
     read back from disk byte-for-byte. The M-DEL step pins the kill-word
-    EXTENT at the PTY tier: the point sits at the END of the multi-char
-    word "aZ" with surviving text on the row, so a mis-routed plain
-    backspace (one char) leaves "a cd" where the kill-word leaves " cd" —
-    and the "2 chars killed" echo names the extent. C-u stays half-page
-    scroll (universal-argument is 015 item 9, out of scope): it must scroll,
-    not self-insert 'u'. Own App + a dedicated file (created before startup so
+    EXTENT at the PTY tier in three ways: the point sits at the END of the
+    multi-char word "aZ" with surviving text on the row, and (a) the row
+    must read EXACTLY " cd" — a mis-routed plain backspace (one char) leaves
+    "a cd", which the exact-row assertion rejects; (b) the "2 chars killed"
+    echo names the extent; (c) the final on-disk read-back corroborates
+    both. C-u stays half-page scroll (universal-argument is 015 item 9, out
+    of scope): it must scroll, not self-insert 'u'. Own App + a dedicated
+    file (created before startup so
     the find-file picker lists it, removed after)."""
     # 40 lines: line 0 "ab cd", line 1 "ef gh", then 38 fillers. Tall enough
     # that a half-page scroll is observable; the first two lines are the edit
@@ -643,15 +645,15 @@ def flow_accurate_suite():
                   and " cd" in text(app)
                   and "1 chars killed" in text(app))
         # (5) M-DEL: kill-word-backward at the end of the word "aZ" (point on
-        # the space after it) kills the whole word → " cd"; the "2 chars
-        # killed" echo pins the EXTENT. M-DEL = Alt+Backspace (ESC + 0x7F);
-        # encode_key has no M-DEL token, so feed the raw bytes. A mis-routed
-        # plain backspace removes only the space ("a cd") and emits no kill
-        # echo — the leg FAILS.
+        # the space after it) kills the whole word → " cd". The extent is
+        # pinned by the row reading EXACTLY " cd" (a mis-routed plain
+        # backspace — which the old substring terms both accepted — removes
+        # only 'Z' and leaves "a cd") and by the "2 chars killed" echo. M-DEL
+        # = Alt+Backspace (ESC + 0x7F); encode_key has no M-DEL token, so
+        # feed the raw bytes.
         app.feed(b"\x1b\x7f", settle=0.3)
         app.wait(0.4)
-        did_mdel = ("aZ" not in text(app)
-                    and " cd" in text(app)
+        did_mdel = (app.row_text(2).rstrip() == " cd"
                     and "2 chars killed" in text(app))
         # (6) C-d: delete-char-forward removes ' ' (the char at the point,
         # col 0 of " cd") → "cd".

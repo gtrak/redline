@@ -1892,8 +1892,9 @@ use super::*;
             );
             assert_eq!(s.point_col(), 2, "point leaves at the end of the buffer");
         }
-        // EOL with a one-char line (fewer than two chars before the point on
-        // the line): emacs signals an error; redline no-ops (as at the
+        // EOL with fewer than two chars before the point in the buffer
+        // (the guard is buffer-position based, so it is not a per-line
+        // criterion): emacs signals an error; redline no-ops (as at the
         // buffer start) rather than erroring.
         {
             let (_dir, mut s) = accurate_file_store_with("x\ncd\n");
@@ -1903,7 +1904,22 @@ use super::*;
             assert_eq!(
                 s.buffers.get(&bk).unwrap().text(),
                 "x\ncd\n",
-                "EOL with one char on the line is a no-op"
+                "EOL with one char before the point in the buffer is a no-op"
+            );
+            assert_eq!(s.point_col(), 1);
+        }
+        // Buffer end on a single-char buffer (total_chars < 2): nothing to
+        // transpose — emacs signals (beginning-of-buffer); redline no-ops
+        // (as at the buffer start) rather than erroring.
+        {
+            let (_dir, mut s) = accurate_file_store_with("a");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 1, 1); // past the single char
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "a",
+                "buffer-end C-t on a one-char buffer is a no-op"
             );
             assert_eq!(s.point_col(), 1);
         }

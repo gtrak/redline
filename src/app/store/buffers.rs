@@ -564,18 +564,20 @@ impl AppStore {
 
     /// Transpose the two chars around the point (plan 015 issue 03, `C-t`,
     /// emacs `transpose-chars`): mid-line, swap the char BEFORE the point
-    /// with the char AT the point and move the point forward one (between
-    /// the two swapped chars, on the far side). Swapping whole characters
-    /// (not bytes) makes the multibyte case correct. The line-edge cases
-    /// emacs folds in: at a line end (char at point is `\n`) the PREVIOUS
-    /// TWO chars are exchanged and the point does NOT move; at a line start
-    /// (char before is `\n`) the first char of the line moves to the end of
-    /// the previous one and the point moves forward one. At the buffer END
-    /// (point past the last char) emacs transposes the LAST TWO chars and
-    /// leaves the point at the end (one past the between-position). A no-op
-    /// at the buffer start (no char before), and when the EOL case has fewer
-    /// than two chars before the point on the line (emacs signals an error
-    /// there; redline no-ops rather than erroring, as at the buffer start).
+    /// with the char AT the point and move the point forward one, past both
+    /// swapped chars. Swapping whole characters (not bytes) makes the
+    /// multibyte case correct. The line-edge cases emacs folds in: at a line
+    /// end (char at point is `\n`) the PREVIOUS TWO chars are exchanged and
+    /// the point does NOT move; at a line start (char before is `\n`) the
+    /// first char of the line moves to the end of the previous one and the
+    /// point moves forward one. At the buffer END (point past the last char)
+    /// emacs transposes the LAST TWO chars and leaves the point at the end
+    /// (one past the between-position). A no-op at the buffer start (no char
+    /// before), when the EOL case has fewer than two chars before the point
+    /// in the buffer (emacs's guard is buffer-position based, so it crosses
+    /// line boundaries), and at a buffer end on a single-char buffer
+    /// (`total_chars < 2`): emacs signals `(beginning-of-buffer)` in all
+    /// three cases; redline no-ops rather than erroring.
     /// Requires `editable` and `Accurate` mode; sets the three edit-hygiene
     /// flags, clears the mark.
     pub fn transpose_chars(&mut self) {
@@ -614,11 +616,12 @@ impl AppStore {
         //   between-position — "moves forward one").
         // - EOL (char at point is \n): emacs exchanges the PREVIOUS TWO
         //   chars; the point does not move. Needs two chars before the
-        //   point on the line (point_char >= 2); with one, emacs signals
-        //   an error — a no-op here.
+        //   point in the buffer (buffer-position based, so the guard crosses
+        //   line boundaries; point_char >= 2); with one, emacs signals an
+        //   error — a no-op here.
         // - Mid-line (including a line start, where the char before is \n):
         //   swap the char before and at the point; the point moves forward
-        //   one, between the two swapped chars.
+        //   one, past both swapped chars.
         let (first_idx, second_idx, land_char) = if point_char >= total_chars {
             if total_chars < 2 {
                 return; // fewer than two chars: nothing to transpose
@@ -632,7 +635,7 @@ impl AppStore {
                 .and_then(|b| b.rope.slice(point_char..point_char + 1).chars().next());
             if char_at_point == Some('\n') {
                 if point_char < 2 {
-                    return; // not two chars before on the line: nothing to swap
+                    return; // not two chars before in the buffer: nothing to swap
                 }
                 (point_char - 2, point_char - 1, point_char)
             } else {
@@ -659,8 +662,8 @@ impl AppStore {
         }
         self.invalidate_highlight_for_key(&key);
         self.mark_notes_dirty_if_current(&key);
-        // Mid-line / line start: between the two swapped chars, one past the
-        // old point. EOL / buffer end: where the point already was.
+        // Mid-line / line start: past both swapped chars (one past the old
+        // point). EOL / buffer end: where the point already was.
         self.land_point_at_char(&key, land_char);
     }
 
