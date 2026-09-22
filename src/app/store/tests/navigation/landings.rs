@@ -443,3 +443,185 @@ fn annotations_picker_lands_recorded_column() {
         s.message
     );
 }
+
+// ── jump-column-landings follow-up (F1/F2) ─────────────────────────────
+// F1: the mask UNDER-masked a mention preceding the live definition (a wrong
+// column, not col 0) for raw strings, a block-comment continuation, and
+// nested comments (Rust's block comments DO nest — a `/*` deepens the run,
+// verified against rustc). F2: a bare `'` (a lifetime tick) was treated as a
+// string opener, over-masking `&'static str` and landing the live definition
+// at col 0.
+//
+// Follow-up (P2-1/P2-2): the `*/` continuation proxy is gated so it never
+// over-masks a live definition whose line also holds a `*/` inside a `//`
+// comment or a string (the A2/A3 regressions); and the block-comment loop
+// gained a `/*` depth counter so a nested comment masks to its true close.
+
+/// F1 (raw string): a leading raw string that mentions the name is masked —
+/// the landing sits on the live definition's name, not the mention. A
+/// mention-only raw-string line (no live definition) yields `None` (col 0),
+/// not a nonzero column inside the string.
+#[test]
+fn first_word_column_masks_raw_string_mention() {
+    // The raw string `r#"say \"spawn\" now"#` mentions `spawn`; the live def
+    // is later. Lands on the def (col 33), not the mention (col 16).
+    assert_eq!(
+        AppStore::first_word_column(
+            "let s = r#\"say \"spawn\" now\"#; fn spawn() {}",
+            "spawn"
+        ),
+        Some(33),
+        "the raw-string mention (col 16) is skipped; the live def is col 33"
+    );
+    // A raw string with TWO hash marks (`r##…##`).
+    assert_eq!(
+        AppStore::first_word_column(
+            "let s = r##\"spawn\"##; fn spawn() {}",
+            "spawn"
+        ),
+        Some(25),
+        "`r##…##` is a raw string; the mention is skipped"
+    );
+    // Mention-only (no live definition) → `None`, never a column inside the string.
+    assert_eq!(
+        AppStore::first_word_column("let s = r#\"spawn\"#;", "spawn"),
+        None,
+        "a name only inside a raw string is not a landing"
+    );
+}
+
+/// F1 (block-comment continuation): a line that CONTINUES a block comment
+/// opened on a prior line shows a `*/` with no `/*` before it. The leading run
+/// to that close is masked, so the landing sits on the live definition, not
+/// the mention trapped in the continuation.
+#[test]
+fn first_word_column_masks_block_comment_continuation() {
+    // The `   spawn */` prefix is a continuation of a prior-line `/* …`; the
+    // live def is later. Lands on the def (col 19), not the mention (col 3).
+    assert_eq!(
+        AppStore::first_word_column("   spawn */ pub fn spawn() {}", "spawn"),
+        Some(19),
+        "the continuation-run mention (col 3) is skipped; the live def is col 19"
+    );
+    // A genuine `/*` opener on this line still wins (not a continuation):
+    // both comments are masked, the live def (col 23) is returned.
+    assert_eq!(
+        AppStore::first_word_column("/* x */ /* spawn */ fn spawn() {}", "spawn"),
+        Some(23),
+        "a real `/*` on the line is not treated as a continuation"
+    );
+}
+
+/// P2-1 (regression pin): the `*/` continuation proxy must NOT over-mask a live
+/// definition whose line also holds a `*/` inside a `//` comment (A2) or inside
+/// a string (A3). Before the gate, the proxy masked from column 0 through that
+/// `*/`, sending the landing to col 0 — the exact symptom this lane removes.
+#[test]
+fn first_word_column_continuation_proxy_respects_strings_and_line_comments() {
+    // A2: a trailing `//` comment contains `*/`. The def at col 3 is live.
+    assert_eq!(
+        AppStore::first_word_column("fn spawn() {} // closes */ block", "spawn"),
+        Some(3),
+        "a `*/` inside a `//` comment must not mask the live def (A2)"
+    );
+    // A3: a later string contains `*/`. The def at col 7 is live.
+    assert_eq!(
+        AppStore::first_word_column("pub fn spawn() {} let s = \"*/\";", "spawn"),
+        Some(7),
+        "a `*/` inside a string must not mask the live def (A3)"
+    );
+}
+
+/// P2-2 (pin): Rust's block comments NEST — the `spawn` mention inside
+/// `/* /* x */ spawn */` sits inside the comment (rustc 1.97.1 confirms the
+/// nesting), so it is masked to the true depth-0 close and the landing sits on
+/// the live definition, not the mention. A first-`*/`-closes mask would land on
+/// the mention (col 11) — wrong.
+#[test]
+fn first_word_column_masks_nested_block_comment() {
+    assert_eq!(
+        AppStore::first_word_column("/* /* x */ spawn */ pub fn spawn() {}", "spawn"),
+        Some(27),
+        "the nested comment masks its inner mention; the live def (col 27) lands"
+    );
+}
+
+/// P3-1 (pin): a backtick string takes a backslash escape (matching the doc),
+/// so the escaped backticks do not close it early and the mention inside stays
+/// masked. (Non-Rust construct; behaviour ≈ the parent.)
+#[test]
+fn first_word_column_backtick_string_takes_backslash_escape() {
+    assert_eq!(
+        AppStore::first_word_column("let s = `a\\`spawn\\`b`; fn spawn() {}", "spawn"),
+        Some(26),
+        "the backslash-escaped backtick string masks its inner mention"
+    );
+}
+
+/// F2 (regression pin): a lifetime tick (`'static`, `'a`) is NOT a string
+/// opener. Before the fix, the bare `'` opened a string that ran to the next
+/// `'`, over-masking the live definition to col 0 (or a later mention).
+#[test]
+fn first_word_column_lifetimes_are_not_string_openers() {
+    // `&'static str` before the def: lands on the def (col 30), not col 0.
+    assert_eq!(
+        AppStore::first_word_column(
+            "let v: &'static str = \"x\"; fn spawn() {}",
+            "spawn"
+        ),
+        Some(30),
+        "the `'static` tick must not open a string that masks the def"
+    );
+    // A short lifetime `'a` before the def: lands on the def (col 25).
+    assert_eq!(
+        AppStore::first_word_column("let v: &'a str = \"x\"; fn spawn() {}", "spawn"),
+        Some(25),
+        "the `'a` tick must not open a string"
+    );
+    // A genuine char literal (`'x'`) before the def is masked and does not
+    // over-mask the definition (the fix must not treat a char literal as a
+    // lifetime tick either). Lands on the def (col 16).
+    assert_eq!(
+        AppStore::first_word_column("let c = 'x'; fn spawn() {}", "spawn"),
+        Some(16),
+        "`'x'` is a char literal (masked); the live def at col 16 is untouched"
+    );
+}
+
+/// F2 end-to-end (the user-facing regression): a tooling landing whose
+/// resolved line begins with `&'static str` must land on the live definition's
+/// name, not col 0. The base (pre-regression) landed right; HEAD regressed to
+/// col 0; this pins the correct column.
+#[tokio::test]
+async fn tooling_landing_lifetimes_do_not_over_mask() {
+    let (mut s, _dir) = store_with_index(&[("src/main.rs", "spawn(f);\n")]);
+    let ext = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        ext.path(),
+        "let v: &'static str = \"x\"; pub fn spawn() {}\n",
+    )
+    .unwrap();
+    s.open_path("src/main.rs");
+    s.set_point(0, 0, 0);
+    s.xref_find_definitions();
+    let event = ResolveEvent {
+        generation: 2,
+        symbol: "spawn".into(),
+        source: Some(ResolvedSource {
+            file: ext.path().to_path_buf(),
+            source_root: ext.path().parent().unwrap().to_path_buf(),
+            external: true,
+            line: Some(1),
+        }),
+        error: None,
+    };
+    s.apply_resolve_event(&event);
+    s.run_selected();
+    assert_eq!(s.point_line(), 0, "the resolved line (0-based)");
+    assert_eq!(
+        s.point_col(),
+        34,
+        "pub fn |spawn after a leading `&'static str` — the `'` is a lifetime, not a string (msg: {})",
+        s.message
+    );
+}

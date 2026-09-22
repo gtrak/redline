@@ -75,7 +75,8 @@ impl AppStore {
         // App-side refinement the `ResolvedSource.line` doc promises
         // (jump-column-landings): a provider pins a LINE but never a
         // column — locate the resolved item's name on that line (its first
-        // whole-word occurrence outside a comment or string, P2-3) and land
+        // whole-word occurrence outside a comment, string, or raw string,
+        // P2-3) and land
         // on its first char column (the item is the path's last segment,
         // `tokio::spawn` → `spawn`), so an M-. on a function lands on the
         // name, not the line start. A whole-word match only (never
@@ -101,19 +102,32 @@ impl AppStore {
     }
 
     /// (jump-column-landings) The 0-based CHAR column of the first whole-word
-    /// occurrence of `item` on `line_text` OUTSIDE a comment or string
-    /// literal — the app-side refinement for a tooling landing whose provider
-    /// pinned a line but no column. A word char immediately before or after
-    /// `item` disqualifies that occurrence (`spawn` never matches
-    /// `respawn`/`spawned`), so the landing sits on the definition's own name,
-    /// not a substring inside a longer identifier. A leading inline comment
-    /// or string that mentions the name (`/* spawn */ pub fn spawn()`,
-    /// `let s = "spawn"; fn spawn()`) is skipped (P2-3) so the landing sits on
-    /// the live definition's name, not the mention. `None` when `item` is
-    /// empty or every whole-word occurrence sits inside a comment/string —
-    /// the caller degrades to column 0 (never an invented column). The scan
-    /// is char-based, so a multibyte prefix yields a CHAR column, not a byte
-    /// offset (a byte scan would be off-by-N on such a line).
+    /// occurrence of `item` on `line_text` OUTSIDE a masked comment/string —
+    /// the app-side refinement for a tooling landing whose provider pinned a
+    /// line but no column. A word char immediately before or after `item`
+    /// disqualifies that occurrence (`spawn` never matches `respawn`/
+    /// `spawned`), so the landing sits on the definition's own name, not a
+    /// substring inside a longer identifier. A leading inline block comment,
+    /// string, or raw string that mentions the name (`/* spawn */ pub fn
+    /// spawn()`, `let s = "spawn"; fn spawn()`, `let s = r#"spawn"#; fn
+    /// spawn()`) is skipped so the landing sits on the live definition's name,
+    /// not the mention. `None` when `item` is empty or no whole-word
+    /// occurrence sits outside a masked region. The scan is char-based, so a
+    /// multibyte prefix yields a CHAR column, not a byte offset.
+    ///
+    /// HONEST SCOPE (single-line, best-effort): the mask covers constructs
+    /// that BEGIN on this line (a `/* … */` block comment — Rust's NESTED
+    /// form, where a `/*` inside deepens it and the matching `*/` (depth 0)
+    /// closes the run; a `"…"`/backtick string with escapes; a `r…"` raw
+    /// string; a `'…'` char literal; and a block-comment CONTINUATION, via a
+    /// leading `*/` whose prefix is plain comment text). It does NOT cover a
+    /// `//` or `#` line comment (deliberately, matching base) nor a
+    /// string/comment that BEGAN on a prior line (a multi-line string
+    /// continuation, for example). So a mention the scan UNDER-masks can still
+    /// be returned — a WRONG column, not col 0; an OVER-mask that covers the
+    /// definition (the name occurrence the landing would use) yields `None` →
+    /// col 0, whether it ends mid-line or runs to the line's end (an
+    /// unterminated construct).
     pub(in crate::app::store) fn first_word_column(line_text: &str, item: &str) -> Option<usize> {
         if item.is_empty() {
             return None;
@@ -143,28 +157,85 @@ impl AppStore {
         None
     }
 
-    /// (jump-column-landings P2-3) For each char index on `chars`, `true`
-    /// when that char lies inside an inline block comment (`/* … */`; an
-    /// unterminated one extends to end of line) or a string literal
-    /// (`'…'`, `"…``, or backtick; a backslash escapes the next char). `//`
-    /// and `#` are deliberately NOT masked: such a marker comments the
-    /// definition itself out (so the name is not a live definition on that
-    /// line), and `#` is a Rust ATTRIBUTE marker in `#[…]`/`#![…]`, not a
-    /// comment. A pure helper (no state), shared by the tooling-resolver
-    /// landing.
+    /// (jump-column-landings) For each char index on `chars`, `true` when that
+    /// char lies inside a construct this single-line, best-effort mask models:
+    ///  - an inline block comment `/* … */` — Rust's NESTED form (a `/*`
+    ///    inside deepens it; the matching `*/` at depth 0 closes the run); an
+    ///    unterminated one extends to end of line;
+    ///  - a `"…"` or backtick… string (a backslash escapes the next char);
+    ///  - a raw string `r"…"`, `r#"…"#`, `r##"…"##` (closer = the quote
+    ///    followed by the same number of `#`; raw strings take no escapes);
+    ///  - a `'…'` char literal — a lifetime tick (`'static`, `'a`) is NOT a
+    ///    string (it passes through);
+    ///  - the leading run of a block-comment CONTINUATION — a `*/` whose
+    ///    prefix on this line has no `/*`, `"`, `'`, backtick, or `//` (so it
+    ///    is plain comment text closing a prior-line comment); a `*/` inside
+    ///    a string or `//` comment is NOT a continuation and is left alone.
+    ///
+    /// Deliberately NOT modeled (a reader who trusts this doc should know): `//`
+    /// and `#` line comments, and a string or comment that BEGAN ON A PRIOR
+    /// line (a multi-line string's continuation line, for example) — those can
+    /// under-mask a leading mention, which `first_word_column` then returns as
+    /// a wrong column (its honest-scope note is the source of truth).
     fn comment_or_string_mask(chars: &[char]) -> Vec<bool> {
         let n = chars.len();
         let mut mask = vec![false; n];
         let mut i = 0;
+        // A line that CONTINUES a block comment opened on a prior line shows a
+        // `*/` whose prefix is plain comment text (no `/*`, `"`, `'`, backtick,
+        // or `//` before it): mask the leading run through the close, then scan
+        // normally from after it. A `*/` inside a string or `//` comment is NOT
+        // a continuation and is left to the main scan. (A leading string
+        // continuation has no such marker and is not detectable here — see the
+        // doc above.)
+        {
+            let mut k = 0;
+            let mut lead_close: Option<usize> = None;
+            while k + 1 < n {
+                if chars[k] == '*' && chars[k + 1] == '/' {
+                    lead_close = Some(k);
+                    break;
+                }
+                // A `/*` opener or a `//` line comment before the `*/` means it
+                // is not a plain-continuation `*/` → do not mask the prefix.
+                if chars[k] == '/' && (chars[k + 1] == '*' || chars[k + 1] == '/') {
+                    break;
+                }
+                // A string opener before the `*/` means the `*/` sits inside
+                // that string (e.g. `let s = "*/";`) → not a continuation.
+                if chars[k] == '"' || chars[k] == '\'' || chars[k] == '`' {
+                    break;
+                }
+                k += 1;
+            }
+            if let Some(c) = lead_close {
+                mask[0..c + 2].fill(true);
+                i = c + 2;
+            }
+        }
         while i < n {
-            // Inline block comment: `/* … */` (unterminated → to end of line).
+            // Inline block comment: `/* … */`. Rust's block comments NEST — a
+            // `/*` inside deepens the run and only the matching `*/` (depth 0)
+            // closes it; an unterminated one extends to end of line.
             if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
                 let start = i;
                 i += 2;
+                let mut depth = 1;
                 let closed = loop {
-                    if i + 1 < n && chars[i] == '*' && chars[i + 1] == '/' {
-                        i += 2;
-                        break true;
+                    if i + 1 < n {
+                        if chars[i] == '/' && chars[i + 1] == '*' {
+                            depth += 1; // a nested `/*` — the comment continues
+                            i += 2;
+                            continue;
+                        }
+                        if chars[i] == '*' && chars[i + 1] == '/' {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break true; // the matching `*/` closed the run
+                            }
+                            continue;
+                        }
                     }
                     if i >= n {
                         break false;
@@ -178,9 +249,27 @@ impl AppStore {
                 }
                 continue;
             }
-            // String literal: `'…'`, `"…``, or backtick… (backslash escapes).
-            if matches!(chars[i], '\'' | '"' | '`') {
+            // String literal: `"…"`, backtick…, or a RAW string (the `#`s
+            // directly before the quote, with an `r` before them, mark the raw
+            // form; its closer is the quote + the same `#`s, and it takes no
+            // escapes). Plain `"…"`/backtick strings take a backslash escape.
+            if chars[i] == '"' || chars[i] == '`' {
                 let quote = chars[i];
+                let hashes = Self::leading_hashes(chars, i);
+                let is_raw = quote == '"' && i > hashes && chars[i - 1 - hashes] == 'r';
+                if is_raw {
+                    let start = i - 1 - hashes;
+                    let mut j = i + 1;
+                    while j + 1 + hashes <= n
+                        && !(chars[j] == '"'
+                            && (0..hashes).all(|d| chars[j + 1 + d] == '#'))
+                    {
+                        j += 1;
+                    }
+                    i = if j + 1 + hashes <= n { j + 1 + hashes } else { n };
+                    mask[start..i.min(n)].fill(true);
+                    continue;
+                }
                 let start = i;
                 i += 1; // past the opening quote
                 loop {
@@ -190,7 +279,7 @@ impl AppStore {
                         break;
                     }
                     if chars[i] == '\\' {
-                        i += 2; // backslash + the escaped char are string
+                        i += 2; // backslash escapes the next char (`"` and backtick)
                         continue;
                     }
                     if chars[i] == quote {
@@ -202,9 +291,45 @@ impl AppStore {
                 mask[start..i].fill(true);
                 continue;
             }
+            // Char literal `'…'` — but a LIFETIME tick (`'static`, `'a`) is NOT
+            // a string: only mask when the `'` clearly opens a char literal
+            // (`'X'` or `\'…'`), else pass it through (the `'static`/`'a`
+            // regression: a bare `'` used to open a string that ran to the
+            // next `'`, over-masking the live definition to col 0).
+            if chars[i] == '\'' {
+                let is_char_lit = if i + 2 < n {
+                    if chars[i + 1] == '\\' {
+                        i + 3 < n && chars[i + 3] == '\'' // '\x' / '\''
+                    } else {
+                        chars[i + 1] != '\'' && chars[i + 2] == '\'' // 'X'
+                    }
+                } else {
+                    false
+                };
+                if is_char_lit {
+                    let start = i;
+                    i += if chars[i + 1] == '\\' { 4 } else { 3 };
+                    mask[start..i].fill(true);
+                    continue;
+                }
+                // lifetime tick / stray ' — not a string; fall through to i += 1
+            }
             i += 1;
         }
         mask
+    }
+
+    /// (jump-column-landings) The number of `#` chars immediately BEFORE
+    /// position `i` (scanning backwards). A raw-string opener (`r#*"`) has one
+    /// or more `#` directly before the quote.
+    fn leading_hashes(chars: &[char], i: usize) -> usize {
+        let mut k = 0;
+        let mut p = i;
+        while p > 0 && chars[p - 1] == '#' {
+            p -= 1;
+            k += 1;
+        }
+        k
     }
 
     /// (jump-column-landings) The index-recorded `start_byte` (an absolute
@@ -214,7 +339,12 @@ impl AppStore {
     /// (a stale index after an external edit) — the caller degrades to
     /// column 0. Matching the NAME as well as the line (P2-2) is what keeps
     /// a line that hosts two symbols (`fn a() {} fn b() {}`) from always
-    /// returning the first; the imenu path already matches name AND line.
+    /// `Symbol.start_byte` via `try_byte_to_line_col` (see the picker arms);
+    /// the imenu path already matches name AND line.
+    /// Inherent limit: a line that hosts the SAME name twice (`fn b() {} fn
+    /// b() {}`) still lands on the FIRST — the picker row carries only
+    /// `file:line` + the name, so two identical names on one line cannot be
+    /// disambiguated here (a re-read of the same index cannot break the tie).
     /// Re-reading the index uses the SAME byte the candidate row was built
     /// from (no re-derivation of a position, no file re-parse) — the picker
     /// candidate carries only the line ("file:line"), so the byte is
