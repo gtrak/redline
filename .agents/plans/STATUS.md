@@ -39,7 +39,7 @@ every remaining row's evidence was re-checked against the code at
 | Spec | State | Why it is open |
 |---|---|---|
 | `015-04` yank semantics | OPEN | 015-02 has landed; `yank` (`src/app/store/buffers.rs:1223`) still inserts at the honest point in BOTH modes — the spec wants Annotation = append at the end, Accurate = insert at the point, with `M-y` pop replacing at the yank's start under each |
-| `016-undo` (plan, design only) | OPEN | no undo anywhere in the codebase |
+| `016-undo` (plan, active; 01 landed) | PARTIAL | 01 landed `ff84669`; zero hits for `fn undo` is no longer true | 02–04 open; design settled (inverse-edit stack; BOTH `C-x u` and `C-/` per user directive) |
 | `013-01` iocraft upstream PR | OPEN | user decision on plan 013 not made |
 | `013-02` vendored patch | OPEN | contingent on that decision |
 | `013-03` pre-frame harness | OPEN | neither deliverable is present — see the 013 section |
@@ -93,11 +93,13 @@ every remaining row's evidence was re-checked against the code at
 | 015-03 accurate editing (`issue-015-03-accurate-editing`) | LANDED | the accurate-mode commands (insert/backspace/RET/C-k/C-d/M-d/M-DEL/C-o/C-t); **seven** carry `P2-b` mode gates in `src/app/store/buffers.rs` (C-d `:195`, RET `:244`, C-k `:260`, M-DEL `:351`, M-d `:439`, C-o `:525`, C-t `:584`), while insert/backspace are routed by the **mode dispatch in `src/app/store/keys.rs`** (`:390-452`) rather than a `P2-b` gate in the store; commit `4ad40a1` + the emacs-fidelity follow-up `d5fa3a5` (kill-word extent, C-t landing, a PTY extent pin that discriminates) + the P2s `d551ba6` | store tests in `src/app/store/tests/buffers.rs` (the lane added 509 + 151 + 22 lines across the three commits) |
 | 015-04 yank semantics (`issue-015-04-yank-semantics`) | OPEN | `yank` (`src/app/store/buffers.rs:1223`) inserts at the honest point in every mode — no `BufferMode` dispatch: the spec wants Annotation = append at the end (routed through `insert_text`), Accurate = insert at the point, and `M-y` pop replacing at the yank's start under each | the 02 dependency is gone; what remains is the routing + the spec's tests (a)–(e) |
 
-## Plan 016 — undo (active; design only)
+## Plan 016 — undo (active; 01 landed)
 
 | Spec | State | Evidence | Notes |
 |---|---|---|---|
-| `016-01` undo-stack · `016-02` edit-coverage · `016-03` dirty-flag-and-reload · `016-04` redo-and-coalescing (the plan's task-order rows; not yet specced as files) | OPEN | no undo: zero hits for `fn undo` in `src/` + `crates/`; no `C-x u`/`C-/` binding in the keymap tables (`src/app/store/mod.rs`) | design settled (inverse-edit stack; BOTH `C-x u` and `C-/` per user directive); pick-up = spec the four issues |
+| `016-01` undo-stack (`issue-016-01-undo-stack`) | LANDED | `ff84669` (squash of the lane's `44fb04a` + the gate's P1 repair, lane commit `f8bca68`); clippy fix `0bf82ce`; `undo()` in `src/app/store/buffers.rs`; both bindings live at `src/app/store/mod.rs:373–374` (`C-x u`, `C-/`); bin **849** passed, syntax 159 | the single hook beside `retain_rope_edit` is sound (the gate enumerated all 14 text-mutating paths and all reach it); per-buffer, cap 100. **The gate found a reachable PANIC**: `replace_buffer_text` is a **third** rope-assigning site, reachable from annotation save/delete/reanchor via `sync_notes_from_doc` on the *editable* notes buffer, so `C-x u` there panicked in ropey (`char range 87..88, Rope/RopeSlice char length 68`). Fixed by validating the inverse (`start <= end && end <= len && slice == removed`) → drop the step + "stale" message, and verified in BOTH directions (no legitimate undo is over-clamped; the gate wrote 7 spread tests of its own). `drop_undo_history(key)` built and deliberately **UNWIRED** for 03. Coalescing absent (04) — expected, not a bug |
+| `016-02` edit-coverage (`issue-016-02-edit-coverage`) | IN FLIGHT | lane slot 1, branch `edit-coverage`, base `e01c92e` | headline deliverable is an honest **per-path verdict** (`RET`/`C-k`/`C-y`/`M-y`/`C-w`): did 01's single hook cover them with **no recording change**? Plus the **`C-7` binding** (byte-based terminals send `0x1F`, which crossterm decodes as `C-7`, so `C-/` never fires there — it works only on CSI-u/kitty terminals), the `M-y` coalescing decision, the kill-ring statement, and the staleness-guard trap (a wrong-unit inverse would be *silently* refused) |
+| `016-03` dirty-flag-and-reload · `016-04` redo-and-coalescing | OPEN | not yet specced as files | 03 inherits the saved-state marker + `locally_modified` correctness + history clearing at all **three** rope-replacing sites (`reload_in_place`, `toggle_ro_accept`, `replace_buffer_text`); 04 inherits redo + the self-insert-run coalescing rule |
 
 ## Standalone task specs (not owned by a numbered plan issue)
 
