@@ -499,6 +499,15 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    batteries in the SAME worktree are worse than two in different ones.** They share
    the fixture root, the `target/debug/redline` binary and the PTY serialization
    lock, so a contended result belongs to neither lane.
+   **Wait only for a BATTERY, not for another lane or gate to exist.** The rule is
+   about two `gate.sh full` runs at once. A `cargo test`, a `clippy`, or a drive
+   script in another worktree is *not* a reason to block. Observed: one gate sat in a
+   bounded poll waiting for "slot 1's gate to finish" while slot 1 was running
+   `cargo test --workspace` in a loop hunting a flake — a condition that would never
+   present as a battery, so the gate burned minutes waiting for nothing. Worse, if
+   both sides wait on each other the pair livelocks. The check is a single
+   `pgrep -af 'tools/gate.sh'`; if it shows no **full battery**, proceed (and if one
+   appears mid-run, note the contention in the report rather than restarting).
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
