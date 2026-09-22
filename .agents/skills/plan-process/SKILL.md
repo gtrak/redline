@@ -537,8 +537,15 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    exited. **Bracketing the pattern is NOT sufficient:** a lane using `pgrep -af
    '[t]ools/gate.sh'` still self-matched, because the *unbracketed* path appeared later in
    the same `bash -c` command line. Match something your own command cannot contain at all
-   — check a specific PID (`ps -o etime= -p <pid>`), use `ps -eo args | grep -c '^timeout
-   900 tools/gate.sh'`, or subtract your own `$$`. Corollary: a wait whose condition can
+   — check a specific PID (`ps -o etime= -p <pid>`), **`pgrep -x -c timeout`** (matches the
+   process NAME, so a shell that merely *mentions* the string cannot match — the cleanest
+   form), or `ps -eo args | grep -c '^timeout 900 tools/gate.sh'` (no PID column, so the
+   line really does start with `timeout`).
+   **Two forms measured to be WRONG with a live process:** `ps -eo pid,args | grep '^[t]imeout
+   …'` returns **0** while a battery is running — the PID column is padded, so `^t` cannot
+   match (this exact broken form went out in a gate brief); and any `pgrep -f 'timeout 900
+   …'` **over-counts** (3 for a single process), because `-f` matches every shell command
+   line that mentions it. Corollary: a wait whose condition can
    never hold is worse than no wait, because it silently costs the budget instead of
    failing.
    **And be careful who you blame for a stray process.** A gate whose log contained
