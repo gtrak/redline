@@ -534,10 +534,13 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    polling `pgrep -f 'tools/gate.sh'` inside its own shell matches *its own process*, so
    it can never observe a clear window and burns the whole bounded loop — observed three
    times in one session, once for ~20 minutes after the battery it awaited had already
-   exited. Match something your own command cannot contain (`pgrep -af 'timeout 900
-   tools/gate.sh'`), check the specific PID you already know, or simply look at `ps`.
-   Corollary: a wait whose condition can never hold is worse than no wait, because it
-   silently costs the budget instead of failing.
+   exited. **Bracketing the pattern is NOT sufficient:** a lane using `pgrep -af
+   '[t]ools/gate.sh'` still self-matched, because the *unbracketed* path appeared later in
+   the same `bash -c` command line. Match something your own command cannot contain at all
+   — check a specific PID (`ps -o etime= -p <pid>`), use `ps -eo args | grep -c '^timeout
+   900 tools/gate.sh'`, or subtract your own `$$`. Corollary: a wait whose condition can
+   never hold is worse than no wait, because it silently costs the budget instead of
+   failing.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
