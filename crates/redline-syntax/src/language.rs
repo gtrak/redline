@@ -152,14 +152,18 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         name: "typescript",
         extensions: &["ts"],
         grammar: Some(|| Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT)),
-        highlight_query: Some(tree_sitter_typescript::HIGHLIGHTS_QUERY),
+        // redline's own superset query (upstream TS highlights + the
+        // locals/properties/calls/literals the grammar supports but the
+        // pinned crate's 35-line query omits — issue-lang-highlight-parity).
+        highlight_query: Some(TYPESCRIPT_HIGHLIGHTS),
         injections_query: "",
         // Local-variable tracking lives in the tree-sitter Highlighter,
         // so the reuse pipeline (single-layer) does NOT cover TS.
         locals_query: tree_sitter_typescript::LOCALS_QUERY,
-        // The pinned TS highlight query captures no comment/string
-        // faces — the dedicated query targets them directly
-        // (`string_fragment` covers template-string content).
+        // The token-class filter targets `string_fragment` (the
+        // template-string CONTENT, quote-free) directly — a finer
+        // target than the highlight query's whole-node string capture,
+        // so it stays a dedicated query.
         token_class: TokenClass::Dedicated("(comment) @comment\n(string_fragment) @string"),
         // Shared with TSX: one definition query, two grammars.
         definition_query: Some(TYPESCRIPT_QUERY),
@@ -181,7 +185,10 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         name: "tsx",
         extensions: &["tsx"],
         grammar: Some(|| Language::from(tree_sitter_typescript::LANGUAGE_TSX)),
-        highlight_query: Some(tree_sitter_typescript::HIGHLIGHTS_QUERY),
+        // Shared with TypeScript: the same superset query is valid
+        // against the TSX grammar (every node kind it uses exists in
+        // both grammars' node-types; the load smoke test pins this).
+        highlight_query: Some(TYPESCRIPT_HIGHLIGHTS),
         injections_query: "",
         locals_query: tree_sitter_typescript::LOCALS_QUERY,
         token_class: TokenClass::Dedicated("(comment) @comment\n(string_fragment) @string"),
@@ -286,7 +293,10 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         name: "cpp",
         extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
         grammar: Some(|| Language::from(tree_sitter_cpp::LANGUAGE)),
-        highlight_query: Some(tree_sitter_cpp::HIGHLIGHT_QUERY),
+        // redline's own superset query (upstream C++ highlights + the
+        // variables/members/literals/operators the grammar supports but
+        // the pinned crate's 70-line query omits — issue-lang-highlight-parity).
+        highlight_query: Some(CPP_HIGHLIGHTS),
         injections_query: "",
         locals_query: "",
         // The pinned C++ highlight query captures no comment/string
@@ -609,6 +619,21 @@ pub fn parseable(lang: LanguageId) -> bool {
     spec(lang).grammar.is_some()
 }
 
+/// The TypeScript/TSX highlight query — redline's own SUPERSET of the
+/// pinned tree-sitter-typescript 0.23.2 `queries/highlights.scm` (the
+/// upstream patterns are kept verbatim inside the file, extended with
+/// the locals/properties/calls/literals/tokens patterns the grammar
+/// supports — see the file's header for the node-name provenance). It
+/// is used by BOTH the TS and TSX rows; only node kinds present in both
+/// grammars may appear in it.
+pub const TYPESCRIPT_HIGHLIGHTS: &str =
+    include_str!("../queries/typescript/highlights.scm");
+
+/// The C++ highlight query — redline's own SUPERSET of the pinned
+/// tree-sitter-cpp 0.23.4 `queries/highlights.scm` (same shape as the
+/// TypeScript superset — see the file's header).
+pub const CPP_HIGHLIGHTS: &str = include_str!("../queries/cpp/highlights.scm");
+
 /// The C# highlight query — vendored VERBATIM from `tree-sitter-c-sharp`
 /// 0.23.5's `queries/highlights.scm` (the crate ships the file but does
 /// not export a `HIGHLIGHTS_QUERY` constant — its binding is commented
@@ -749,6 +774,27 @@ mod tests {
                 "{:?}: supports_reuse disagrees with the stated policy \
                  (locals_query empty and not a Highlighter-path language)",
                 row.id
+            );
+        }
+    }
+
+    // ── highlight query load smoke (issue-lang-highlight-parity) ────────
+    /// Every language's highlight query must COMPILE against its grammar:
+    /// a tree-sitter query that names a node/field the grammar does not
+    /// have is a load-time error, and a load failure silently degrades the
+    /// language to plain text at render time. This covers both redline's
+    /// own superset queries (TS shared by TSX, C++) and every upstream /
+    /// vendored query, so a superset edit that names a node absent from
+    /// ONE of the two TS grammars fails here, not in a user's terminal.
+    #[test]
+    fn every_language_highlight_query_loads() {
+        for spec in &LANGUAGES {
+            let Some(grammar) = spec.grammar else { continue };
+            let Some(query) = spec.highlight_query else { continue };
+            assert!(
+                tree_sitter::Query::new(&grammar(), query).is_ok(),
+                "{name}: highlight query does not compile against the pinned grammar",
+                name = spec.name
             );
         }
     }

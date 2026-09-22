@@ -49,6 +49,20 @@ pub const HIGHLIGHT_FACES: &[&str] = &[
     "special",
     "embedded",
     "error",
+    // The capture names the pinned grammars emit beyond the original 28
+    // (measured against every language's highlight query): `escape`
+    // (rust/python/go/ruby/json/scheme), `delimiter` (c), `module`
+    // (c-sharp), `boolean` (yaml/toml), and the markdown `text.*` faces
+    // (the md block query's `@none` is deliberately left UNMAPPED — it
+    // is the tree-sitter convention for "render with no face").
+    "escape",
+    "delimiter",
+    "module",
+    "boolean",
+    "text.title",
+    "text.literal",
+    "text.uri",
+    "text.reference",
 ];
 
 /// A highlighted span within a single line.
@@ -348,16 +362,20 @@ fn spans_from_tree(tree: &Tree, bytes: &[u8], engine: &ReuseEngine) -> Vec<FullS
     let mut caps = cursor.captures(&engine.query, root, bytes);
     // Pre-collect (node, capture index, pattern index). The reuse query
     // has no injection/locals patterns, so nothing is removed from the
-    // stream mid-iteration and pre-collection ordered by document order
-    // (start byte, end byte, pattern index) is equivalent to the lazy
-    // `QueryCaptures` stream the `Highlighter` walks.
+    // stream mid-iteration, and pre-collection in the raw `QueryCaptures`
+    // iteration order is exactly the order the `Highlighter` walks. That
+    // order is NOT re-sortable by (start, end) bytes: captures that start
+    // at the same byte are ordered by PATTERN INDEX, not by nesting
+    // (verified against the Highlighter's event stream — the markdown
+    // fence's outer/inner captures and TOML's key/pair captures both
+    // start at one byte with the inner or outer node coming first
+    // depending on which pattern appears earlier in the query).
     let mut pending: Vec<(Node, u32, u32)> = Vec::new();
     while let Some((m, _)) = caps.next() {
         for c in m.captures {
             pending.push((c.node, c.index, m.pattern_index as u32));
         }
     }
-    pending.sort_by_key(|(n, _ci, pi)| (n.start_byte(), n.end_byte(), *pi));
 
     let mut segments: Vec<FullSpan> = Vec::new();
     let mut face_stack: Vec<usize> = Vec::new(); // active faces; innermost last
@@ -743,6 +761,235 @@ mod tests {
                 "{id:?}: supports_reuse but the registry passes a non-empty locals query — the incremental path would desync from the full path"
             );
         }
+    }
+
+    // ── face mapping (issue-lang-highlight-parity) ─────────────────
+
+    /// The span within `line` whose byte range covers `[start, end)`.
+    fn span_at(line: &HighlightedLine, start: usize, end: usize) -> Option<&LineSpan> {
+        line.spans.iter().find(|s| s.start <= start && s.end >= end)
+    }
+
+    /// The capture names that were silently dropped (no face → default
+    /// colour) in every language before the parity fix, now resolved:
+    /// `escape` (rust/python/go/ruby/json/scheme), `delimiter` (c),
+    /// `module` (c-sharp), `boolean` (yaml/toml), and the markdown
+    /// `text.*` faces.
+    #[test]
+    fn previously_unmapped_captures_now_have_faces() {
+        for name in [
+            "escape",
+            "delimiter",
+            "module",
+            "boolean",
+            "text.title",
+            "text.literal",
+            "text.uri",
+            "text.reference",
+        ] {
+            assert!(
+                face_for_capture_name(name).is_some(),
+                "`{name}` must resolve to a face (it was rendered in the default colour)"
+            );
+        }
+        // The markdown block query's `@none` is the tree-sitter
+        // convention for "render with NO face" — it stays deliberately
+        // unmapped (mapping it would colour spans the grammar asks to
+        // leave plain).
+        assert!(face_for_capture_name("none").is_none());
+    }
+
+    /// Extract the `@capture` names a query string references (the same
+    /// loose token scan the measurement tooling used — enough for the
+    /// invariant below, which only needs the NAME set). Quoted strings
+    /// are stripped first: the grammars' anonymous token lists contain
+    /// quoted strings like `"@="` (Python's augmented assignment) that
+    /// are not captures.
+    fn capture_names_in(query: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for line in query.lines() {
+            // Drop `"..."` string literals (token literals / #match
+            // regexes) so their contents can't be mistaken for captures.
+            let mut cleaned = String::with_capacity(line.len());
+            let mut in_str = false;
+            for ch in line.chars() {
+                if ch == '"' && !in_str {
+                    in_str = true;
+                } else if ch == '"' && in_str {
+                    in_str = false;
+                } else if in_str {
+                    cleaned.push(' ');
+                } else {
+                    cleaned.push(ch);
+                }
+            }
+            let line = cleaned.trim();
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            for tok in line.split(|c: char| c.is_whitespace() || "()[],*#'".contains(c)) {
+                if let Some(name) = tok.strip_prefix('@')
+                    && !name.is_empty()
+                {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// The invariant behind the parity fix: no capture any language's
+    /// highlight query emits is silently dropped to the default colour.
+    /// `injection.*` and `local.*` are consumed by the highlighter
+    /// machinery (injected languages / local-variable tracking), and
+    /// markdown's `@none` is an explicit "no face" — every other capture
+    /// name must resolve to a `HIGHLIGHT_FACES` entry through the same
+    /// name matching the `Highlighter` uses.
+    #[test]
+    fn no_highlight_capture_is_silently_dropped() {
+        for spec in &crate::language::LANGUAGES {
+            let Some(query) = spec.highlight_query else { continue };
+            for name in capture_names_in(query) {
+                let consumed = name.starts_with("injection.") || name.starts_with("local.");
+                let intentional_none =
+                    spec.id == crate::registry::LanguageId::Markdown && name == "none";
+                assert!(
+                    consumed
+                        || intentional_none
+                        || face_for_capture_name(&name).is_some(),
+                    "{}: capture `@{name}` has no face — it renders in the default colour",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    /// The reported case, pinned end-to-end through the TUI's
+    /// `highlight_source`/`highlight` path: a TypeScript function body
+    /// whose parameters, local, and statements all get faces (before the
+    /// fix the body was one single unfaced span).
+    #[test]
+    fn ts_function_body_parameters_and_locals_are_faced() {
+        let src = "function add(x: number, y?: number): number {\n  const sum = x + y;\n  return sum;\n}\n";
+        let result = highlight_source(src, LanguageId::TypeScript)
+            .expect("typescript highlight");
+
+        // Line 0: `function add(x: number, ...` — the name is a
+        // function, the parameters carry the variable face
+        // (`@variable.parameter` maps onto `variable`).
+        let line0 = &result.lines[0];
+        assert_eq!(
+            span_at(line0, 9, 12).expect("'add' span").face,
+            face_index("function"),
+            "fn name 'add' should be the function face: {line0:?}"
+        );
+        assert_eq!(
+            span_at(line0, 13, 14).expect("param 'x' span").face,
+            face_index("variable"),
+            "parameter 'x' should carry a face: {line0:?}"
+        );
+        assert_eq!(
+            span_at(line0, 24, 25).expect("param 'y' span").face,
+            face_index("variable"),
+            "parameter 'y' should carry a face: {line0:?}"
+        );
+
+        // Line 1: `const sum = x + y;` — keyword, local, and both
+        // references are faced (before the fix this whole line was
+        // unfaced).
+        let line1 = &result.lines[1];
+        assert_eq!(
+            span_at(line1, 2, 7).expect("'const' span").face,
+            face_index("keyword"),
+            "'const' should be a keyword: {line1:?}"
+        );
+        assert_eq!(
+            span_at(line1, 8, 11).expect("'sum' span").face,
+            face_index("variable"),
+            "local 'sum' should be a variable: {line1:?}"
+        );
+        assert_eq!(
+            span_at(line1, 14, 15).expect("ref 'x' span").face,
+            face_index("variable"),
+            "reference 'x' should be a variable: {line1:?}"
+        );
+
+        // Line 2: `return sum;` — the returned local is faced.
+        let line2 = &result.lines[2];
+        assert_eq!(
+            span_at(line2, 9, 12).expect("'sum' span").face,
+            face_index("variable"),
+            "returned local 'sum' should be a variable: {line2:?}"
+        );
+    }
+
+    /// The C++ twin of the reported case: method names, parameters,
+    /// literals, escapes, namespaces, and the preprocessor line all get
+    /// faces through the same `highlight` path.
+    #[test]
+    fn cpp_method_parameters_and_literals_are_faced() {
+        let src = "#include <vector>\nclass Foo {\npublic:\n  int run(int x) { return x + 1; }\n};\n";
+        let result = highlight_source(src, LanguageId::Cpp).expect("cpp highlight");
+
+        // Line 0: `#include <vector>` — directive + system-lib string.
+        let line0 = &result.lines[0];
+        assert_eq!(
+            span_at(line0, 0, 8).expect("'#include' span").face,
+            face_index("keyword"),
+            "'#include' should be a keyword: {line0:?}"
+        );
+        assert_eq!(
+            span_at(line0, 9, 17).expect("'<vector>' span").face,
+            face_index("string"),
+            "'<vector>' should be a string: {line0:?}"
+        );
+
+        // Line 2: `public:` access specifier is a keyword.
+        let line2 = &result.lines[2];
+        assert_eq!(
+            span_at(line2, 0, 6).expect("'public' span").face,
+            face_index("keyword"),
+            "'public' should be a keyword: {line2:?}"
+        );
+
+        // Line 3: `  int run(int x) { return x + 1; }` — method name,
+        // parameter, and the numeric literal.
+        let line3 = &result.lines[3];
+        assert_eq!(
+            span_at(line3, 6, 9).expect("'run' span").face,
+            face_index("function"),
+            "method name 'run' should be a function: {line3:?}"
+        );
+        assert_eq!(
+            span_at(line3, 14, 15).expect("param 'x' span").face,
+            face_index("variable"),
+            "parameter 'x' should carry a face: {line3:?}"
+        );
+        assert_eq!(
+            span_at(line3, 30, 31).expect("'1' span").face,
+            face_index("number"),
+            "literal '1' should be a number: {line3:?}"
+        );
+    }
+
+    /// The previously-unmapped `@escape` span now carries the escape face
+    /// end-to-end (Rust's `\n` escape sequence, which used to render in
+    /// the default colour in EVERY language that ships `@escape`).
+    #[test]
+    fn escape_sequences_carry_the_escape_face() {
+        let src = "fn main() { let s = \"a\\\\nb\"; }\n";
+        let result = highlight_source(src, LanguageId::Rust).expect("rust highlight");
+        let line0 = &result.lines[0];
+        let escape = line0
+            .spans
+            .iter()
+            .find(|s| s.face == face_index("escape"))
+            .expect("the \\\\n escape should carry the escape face: {line0:?}");
+        assert_eq!(
+            escape.end - escape.start,
+            2,
+            "the escape span should cover the backslash-n pair: {line0:?}"
+        );
     }
 
     // ── incremental reparse (plan 007 issue 04) ────────────────────

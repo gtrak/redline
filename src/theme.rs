@@ -209,6 +209,14 @@ fn dark_syntax_faces() -> Vec<Face> {
             "regex" => Face::new(Color::Yellow, bg, false),
             "special" | "embedded" => Face::new(Color::Cyan, bg, true),
             "error" => Face::new(Color::Red, bg, true),
+            "escape" => Face::new(Color::Yellow, bg, true),
+            "delimiter" => Face::new(Color::Grey, bg, false),
+            "module" => Face::new(Color::Magenta, bg, false),
+            "boolean" => Face::new(Color::Yellow, bg, false),
+            "text.title" => Face::new(Color::Cyan, bg, true),
+            "text.literal" => Face::new(Color::Yellow, bg, false),
+            "text.uri" => Face::new(Color::Cyan, bg, false),
+            "text.reference" => Face::new(Color::Grey, bg, false),
             _ => Face::new(Color::White, bg, false),
         })
         .collect()
@@ -244,6 +252,14 @@ fn light_syntax_faces() -> Vec<Face> {
             "regex" => Face::new(Color::Magenta, bg, false),
             "special" | "embedded" => Face::new(Color::Blue, bg, true),
             "error" => Face::new(Color::Red, bg, true),
+            "escape" => Face::new(Color::Magenta, bg, true),
+            "delimiter" => Face::new(Color::DarkGrey, bg, false),
+            "module" => Face::new(Color::Magenta, bg, false),
+            "boolean" => Face::new(Color::Magenta, bg, false),
+            "text.title" => Face::new(Color::Blue, bg, true),
+            "text.literal" => Face::new(Color::Magenta, bg, false),
+            "text.uri" => Face::new(Color::Blue, bg, false),
+            "text.reference" => Face::new(Color::DarkGrey, bg, false),
             _ => Face::new(Color::Black, bg, false),
         })
         .collect()
