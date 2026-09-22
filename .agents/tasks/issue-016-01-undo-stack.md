@@ -37,9 +37,13 @@ commit whether that held.
    `retain_rope_edit` exists to prevent. Pin it.
 4. **Bindings — SETTLED by the user, do not re-litigate: undo is bound to BOTH `C-x u` and
    `C-/`.** Both are currently free; `C-x u` fits the existing `C-x` prefix family with no
-   collision. Note the terminal subtlety and **assert what crossterm actually reports**:
-   `C-/` and `C-_` are the same control code (0x1F) on most terminals, so binding `C-/`
-   picks up `C-_` for free — do not assume it, pin it.
+   collision. **CORRECTED (this issue's original premise was FALSE):** `C-/` does **not**
+   pick up `C-_` for free. crossterm 0.29.0 decodes control byte `0x1F` to
+   `Char('7') + CONTROL` (= `C-7`), so on a byte-based terminal the physical Ctrl+/ arrives
+   as **`C-7`** and the `C-/` binding never fires; `C-/` fires only on CSI-u / kitty
+   terminals. `C-x u` works everywhere. The general rule this typo teaches: *assert what
+   crossterm reports, do not reason about what it should report.* Binding `C-7` is
+   **issue 02's**, since it is the same physical key on byte-based terminals.
 5. **Only in editable buffers, and only where an edit is possible.** Undo must be a no-op
    (with a message) in a read-only buffer, and must not resurrect the mode or `editable`
    state. `Accurate ⟹ editable` stays untouched.

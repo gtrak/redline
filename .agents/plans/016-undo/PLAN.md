@@ -40,8 +40,15 @@ each edit, and the hook belongs beside `retain_rope_edit`.
    free in the keymap tables, and `C-x u` fits the existing `C-x` prefix family with no
    collision (`C-x C-x`, `C-x 0`, `C-x b`, …). Note a terminal subtlety worth pinning
    rather than being surprised by: **`C-/` and `C-_` are the same control code (0x1F)** on
-   most terminals, so they are indistinguishable and binding `C-/` picks up `C-_` for
-   free; assert what crossterm actually reports rather than assuming. Redo has no emacs
+   most terminals, so they are indistinguishable. **CORRECTED after verification (the
+   original claim here — "binding `C-/` picks up `C-_` for free" — is FALSE):** crossterm
+   0.29.0 decodes byte `0x1F` to `Char('7') + CONTROL`, i.e. **`C-7`**, so a byte-based
+   terminal never produces `Char('/') + ctrl` and the `C-/` binding does **not** fire
+   there; it fires only on CSI-u / kitty-protocol terminals. `C-x u` works everywhere.
+   **Therefore `C-7` must be bound too** (it is the same physical key on byte-based
+   terminals, and it is free in the table) — see issue 02. The general rule the original
+   mistake teaches: *assert what crossterm reports; do not reason about what it should
+   report.* Redo has no emacs
    default — state your choice and justify it.
 5. **The dirty flag — the requirement that is easy to get wrong.** Undoing back to the
    content that was last saved/loaded must clear `locally_modified`, or the buffer keeps
