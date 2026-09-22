@@ -559,6 +559,20 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    do not make the resumed gate repeat it — the expensive half adds no information and is
    what threatens memory on this box (swap 100%, ~1 GB free), so the mutations are where
    the remaining budget belongs.
+   **An unreproducible measurement is a claim, not evidence.** A lane reported before/after
+   highlighting numbers measured on a snippet it never committed, so nothing in the repo could
+   re-derive them — and 116 un-faced chars was arithmetically impossible for the 79-byte test
+   snippet that *did* get committed. Re-measured independently, the direction and scale
+   reproduced but the absolute figures did not. Same family as "a line number is not
+   evidence": if the measurement depends on an artifact that is not in the repo, either commit
+   the artifact or the number is unverifiable. (Ask a lane to commit its measuring snippet or
+   harness alongside the result.)
+   **And name the flake.** `queries::tests::default_budget_does_not_abort_a_normal_file` is
+   load-sensitive (observed panic: "parse 788ms + query 358ms must fit the default budget
+   1.19s") and has now flaked twice under concurrent builds while passing serially. **Capture a
+   test run's output to a FILE before inspecting it** — piping a run through `tail` costs you
+   the failing test's name, which is how one flake went unattributed; I made that exact mistake
+   twice *after* writing this rule, so treat it as a reflex, not a reminder.
    **And be careful who you blame for a stray process.** A gate whose log contained
    `pgrep -af 'gate.sh'` output was accused (in an earlier version of this very rule)
    of running batteries in another lane's worktree. It had not: those processes were
