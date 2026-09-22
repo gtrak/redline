@@ -126,6 +126,7 @@ impl CommandRegistry {
         reg.register_search();
         reg.register_tree();
         reg.register_buffer_editing();
+        reg.register_accurate_editing();
         reg.register_annotations();
         reg.register_region();
         reg
@@ -821,6 +822,62 @@ impl CommandRegistry {
         ));
     }
 
+    /// plan 015 issue 03: the accurate-mode editing commands. These are
+    /// routed by the notes-edit guard ONLY in `Accurate` mode (the guard
+    /// keeps today's coarse behaviour in `Annotation` mode); the registry
+    /// entries give them a name for the `?` menu / `M-x` palette and the
+    /// command-name tests. Each handler also GATES on the current buffer's
+    /// mode (P2-b): a direct `M-x` on an `Annotation`-mode buffer is a no-op,
+    /// so these accurate-mode commands never run where the coarse model
+    /// applies — the gate only bites for the registry path, since the key
+    /// guard already routes them to Accurate mode only. `C-d` was freed from
+    /// half-page scroll for `delete-char-forward`; `C-u` stays scroll
+    /// (universal argument is 015 item 9, out of scope).
+    fn register_accurate_editing(&mut self) {
+        self.register(Command::new(
+            "newline-at-point",
+            "Insert a newline at the point, splitting the line (RET in accurate mode)",
+            "editing",
+            |store, _arg| store.newline_at_point(),
+        ));
+        self.register(Command::new(
+            "kill-line",
+            "Kill from the point to end of line and push it to the kill ring (C-k in accurate mode); at EOL kills the newline itself, joining the lines",
+            "editing",
+            |store, _arg| store.kill_line(),
+        ));
+        self.register(Command::new(
+            "delete-char-forward",
+            "Delete the char at the point (C-d in accurate mode, freed from half-page scroll); a no-op at the buffer end",
+            "editing",
+            |store, _arg| store.delete_char_forward(),
+        ));
+        self.register(Command::new(
+            "kill-word-backward",
+            "Kill from the point backward to the previous word boundary and push it to the kill ring (M-DEL in accurate mode)",
+            "editing",
+            |store, _arg| store.kill_word_backward(),
+        ));
+        self.register(Command::new(
+            "kill-word-forward",
+            "Kill from the point forward to the next word boundary and push it to the kill ring (M-d in accurate mode, emacs kill-word)",
+            "editing",
+            |store, _arg| store.kill_word_forward(),
+        ));
+        self.register(Command::new(
+            "open-line",
+            "Open a new line before the point, dropping the text from the point on to it (C-o in accurate mode)",
+            "editing",
+            |store, _arg| store.open_line(),
+        ));
+        self.register(Command::new(
+            "transpose-chars",
+            "Swap the char before the point with the char at the point (C-t in accurate mode, emacs transpose-chars)",
+            "editing",
+            |store, _arg| store.transpose_chars(),
+        ));
+    }
+
     fn register_annotations(&mut self) {
         self.register(Command::new(
             "annotate",
@@ -904,7 +961,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 110, "expected 110 seed commands: {names:?}");
+        assert_eq!(names.len(), 117, "expected 117 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -1014,6 +1071,13 @@ mod tests {
             "yank",
             "yank-pop",
             "exchange-point-and-mark",
+            "newline-at-point",
+            "kill-line",
+            "delete-char-forward",
+            "kill-word-backward",
+            "kill-word-forward",
+            "open-line",
+            "transpose-chars",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

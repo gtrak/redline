@@ -274,7 +274,7 @@ pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("M-s o", "occur"),
 ];
 
-/// Buffer view bindings: 47 entries.
+/// Buffer view bindings: 46 entries.
 pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // Bare `q` closes the view (issue 05, finding 5): consistent
     // with the list views. When the main buffer view is the only
@@ -311,7 +311,13 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     ("M-v", "scroll-page-up"),
     ("PGDN", "scroll-page-down"),
     ("PGUP", "scroll-page-up"),
-    ("C-d", "scroll-half-page-down"),
+    // plan 015 issue 03: `C-d` is FREED from half-page scroll (it is not
+    // emacs — emacs `C-d` is delete-char, accurate-mode item 5). It now
+    // routes to delete-char-forward in `Accurate` mode (via the notes-edit
+    // guard) and is unbound in `Annotation` mode; page scrolling keeps
+    // `C-v`/`M-v`/PGDN/PGUP. `C-u` STAYS half-page scroll: universal
+    // argument (item 9) is out of scope, and un-binding `C-u` without
+    // implementing it would remove a working key for nothing.
     ("C-u", "scroll-half-page-up"),
     // `g` = force-reload the current file buffer (issue 04's
     // refresh role; M-< / M-END / G move the point to start/end).

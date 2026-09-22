@@ -756,7 +756,10 @@ fn tall_sweep_repo(lines: usize, name: &str) -> tempfile::TempDir {
     dir
 }
 
-/// U-C1 Motion: C-d scrolls (the window moves, point's screen row held).
+/// U-C1 Motion: a page key scrolls (the window moves, point's screen row
+/// held). 015-03 re-pin (was `C-d`): `C-d` was freed from half-page scroll
+/// for delete-char-forward in accurate mode, so the motion flow drives the
+/// still-bound `C-v` (scroll-page-down) instead.
 #[test]
 fn unit_flow_c1() {
     let repo = tall_sweep_repo(60, "tall_sweep.rs");
@@ -766,12 +769,12 @@ fn unit_flow_c1() {
     let (top_before, _, viewport) = s.file_view_scroll_info();
     let point_before = s.file_view_point().0;
     assert_eq!(top_before, 0);
-    s.key_event(key("C-d"));
+    s.key_event(key("C-v"));
     let (top_after, _, _) = s.file_view_scroll_info();
     let point_after = s.file_view_point().0;
     // (a) Real scroll: the top visible line changed (non-vacuous).
-    assert_ne!(top_before, top_after, "C-d must scroll the window");
-    assert!(top_after <= viewport, "half-page scroll: {top_after}");
+    assert_ne!(top_before, top_after, "C-v must scroll the window");
+    assert!(top_after <= viewport, "page scroll: {top_after}");
     // (b) Point's screen row preserved: same relative row in the window.
     assert_eq!(
         point_before.saturating_sub(top_before),
@@ -1690,6 +1693,10 @@ fn unit_flow_edit_save() {
     open_edit_file(&mut s);
     s.key_event(key("C-x"));
     s.key_event(key("C-q")); // into edit mode
+    // 015-03: Accurate mode inserts at the point; park the point at the end
+    // of the buffer so the typed edit lands there (the flow asserts the disk
+    // ends with it).
+    s.key_event(key("M-END"));
     s.key_event(key("z"));
     s.key_event(key("z"));
     let typed = s.buffer_text().contains("zz");
@@ -1767,6 +1774,10 @@ fn unit_flow_edit_conflict() {
     // Edit mode, type, then an external append must CONFLICT, not clobber.
     s.key_event(key("C-x"));
     s.key_event(key("C-q"));
+    // 015-03: Accurate mode inserts at the point; park it at the end so the
+    // typed edit lands after the externally-appended "EXT1" (the flow asserts
+    // the buffer holds "EXT1qq").
+    s.key_event(key("M-END"));
     s.key_event(key("q"));
     s.key_event(key("q"));
     append(&path, "EXT2");
@@ -3308,11 +3319,13 @@ fn unit_flow_ux_keymap_coverage() {
             // (jump-ambiguity: point-buffer-end moved M-> -> M-END; M->
             // now forces the Xref candidate list — the C-g after it
             // closes the picker before the remaining buffer-view keys
-            // sweep as before.)
+            // sweep as before.) 015-03: `C-d` is freed from half-page
+            // scroll (delete-char in accurate mode), so in this read-only
+            // buffer view it now echoes unbound — moved to known_unbound.
             &["C-n", "C-p", "C-f", "C-b", "C-a", "C-e", "M-f", "M-b", "M-<",
-              "M-END", "M->", "C-g", "C-v", "M-v", "C-d", "C-u", "C-l",
+              "M-END", "M->", "C-g", "C-v", "M-v", "C-u", "C-l",
               "j", "k"],
-            &[],
+            &["C-d"],
         ),
         ("magit", &["C-x", "g"], &["n", "p", "n", "n", "TAB", "TAB", "s", "u", "g", "q"], &[]),
         ("log", &["C-x", "g", "l"], &["n", "p", "RET", "q"], &[]),

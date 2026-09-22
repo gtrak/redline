@@ -141,3 +141,78 @@ use super::*;
         );
     }
 
+    /// (015-03) The notes-edit guard routes the accurate-mode keys to the
+    /// point-accurate commands. In particular `C-d` routes to delete-char
+    /// (NOT the half-page scroll it used to drive), and `M-d` to kill-word
+    /// backward. These go through `key_event` so the mode routing itself is
+    /// what is pinned, not just the store methods.
+    #[test]
+    fn accurate_mode_keys_route_to_point_commands_via_guard() {
+        // C-d: delete-char at the point (freed from half-page scroll).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::write(dir.path().join("src/f.rs"), "ab cd\n").unwrap();
+            let mut s = store(dir.path());
+            s.open_path("src/f.rs");
+            s.toggle_read_only(); // Accurate
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 1, 1); // on 'b'
+            s.key_event(key("C-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "a cd\n",
+                "C-d must delete the char at the point, not scroll"
+            );
+            assert!(!s.message.contains("unbound"), "C-d must be handled: {}", s.message);
+        }
+        // M-d: kill-word FORWARD (Alt+char 'd'); M-DEL is the backward kill.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::write(dir.path().join("src/f.rs"), "hello world\n").unwrap();
+            let mut s = store(dir.path());
+            s.open_path("src/f.rs");
+            s.toggle_read_only();
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 0, 0); // on "hello"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "world\n",
+                "M-d must kill the word forward"
+            );
+            // M-DEL: kill-word backward.
+            let mut s = store(dir.path());
+            s.open_path("src/f.rs");
+            s.toggle_read_only();
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 11, 11); // end of line, after "world"
+            s.key_event(key("M-DEL"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "hello \n",
+                "M-DEL must kill the previous word"
+            );
+        }
+    }
+
+    /// (015-03) `C-d` was freed from half-page scroll. In `Annotation` mode
+    /// the guard does not handle it, so it reaches the engine and now echoes
+    /// unbound — the accepted loss of C-d half-page scrolling (page scrolling
+    /// keeps `C-v`/`M-v`/PGDN/PGUP; `C-u` stays half-page scroll). Pinned so
+    /// the loss is documented, not silent.
+    #[test]
+    fn annotation_mode_c_d_falls_through_unbound() {
+        let (_dir, mut s) = notes_store(); // notes buffer: editable + Annotation
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-d"));
+        assert!(
+            s.message.contains("unbound key"),
+            "C-d is no longer half-page scroll in Annotation mode: {}",
+            s.message
+        );
+    }
+

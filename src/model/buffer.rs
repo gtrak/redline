@@ -89,6 +89,12 @@ pub struct Buffer {
     /// The per-buffer edit mode (plan 015 issue 02): `Annotation` default,
     /// `Accurate` opt-in via `C-x C-q`. See `BufferMode` for the invariant.
     pub mode: BufferMode,
+    /// Whether this buffer IS the per-project notes document (plan 015
+    /// issue 03, folded-in baseline fix): the notes buffer's baseline
+    /// editability is BUFFER-relative — it stays inherently editable even
+    /// after `switch_project_root` changes the root-relative `notes_key()`
+    /// and the old notes buffer survives in the table. Set in `open_notes`.
+    pub is_notes: bool,
     /// True when the in-memory text has unsaved local edits that differ
     /// from what is on disk (the light-editing flag, plan decision #6).
     /// Read-only file buffers stay `false` until an edit lands; the scratch
@@ -110,6 +116,7 @@ impl std::fmt::Debug for Buffer {
             .field("lines", &self.rope.len_lines())
             .field("bytes", &self.rope.len_bytes())
             .field("editable", &self.editable)
+            .field("is_notes", &self.is_notes)
             .field("locally_modified", &self.locally_modified)
             .field("changed_on_disk", &self.changed_on_disk)
             .finish()
@@ -126,6 +133,7 @@ impl Buffer {
             mtime,
             editable,
             mode: BufferMode::default(),
+            is_notes: false,
             locally_modified: false,
             changed_on_disk: false,
             mark: None,

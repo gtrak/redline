@@ -95,6 +95,39 @@ use super::*;
         assert!(!buf.text().ends_with("ab"), "backspace must remove 'b'");
     }
 
+    /// (f) The annotation-mode regression guard for the whole issue (015-03):
+    /// in `Annotation` mode the coarse behaviour stays byte-for-byte —
+    /// self-insert appends at the END of the buffer and Backspace deletes the
+    /// LAST char, EVEN WHEN THE POINT IS AT THE START. A col-0 point that
+    /// still lands the edit at the buffer end is exactly the coarse shape, so
+    /// this discriminates from the accurate point-accurate commands (which
+    /// would land at the point). Routed through `key_event` (the notes-edit
+    /// guard) so the mode routing itself is what is pinned.
+    #[test]
+    fn annotation_mode_keeps_coarse_append_and_backspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes(); // notes buffer: editable + Annotation mode
+        let bk = s.buffers.current().unwrap().to_string();
+        let before = s.buffers.get(&bk).unwrap().text().len();
+        // Park the point at the very start of the buffer.
+        s.set_point(0, 0, 0);
+        assert_eq!(s.point_col(), 0);
+        // Type a char: Annotation mode appends it at the END (not at col 0).
+        s.key_event(key("Z"));
+        let text = s.buffers.get(&bk).unwrap().text();
+        assert!(text.ends_with('Z'), "annotation mode must append at the end");
+        assert!(
+            text.len() == before + 1 && !text.starts_with('Z'),
+            "the char must not land at the point (col 0) — it is appended at the end"
+        );
+        // Backspace: removes the LAST char (the Z), wherever the point is.
+        s.key_event(key("C-h"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text().len(), before);
+        assert!(!s.buffers.get(&bk).unwrap().text().ends_with('Z'));
+    }
+
     /// Editable buffers (issue 003-02): typing in the notes buffer near the
     /// bottom keeps the insertion row inside the visible file-view window.
     #[test]

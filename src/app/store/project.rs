@@ -55,6 +55,18 @@ impl AppStore {
             }
         }
         self.buffers.set_current(&key);
+        // plan 015 issue 03 (P2-a): a notes document opened via find-file
+        // (open_path) must carry the same buffer-relative baseline as
+        // open_notes — the is_notes flag rides on the buffer, so it is set on
+        // EVERY route that opens the notes file (compare against notes_key()
+        // at open time), not only open_notes. Without this, C-x C-f
+        // .redline-notes.md → C-x C-q → C-x C-q ends read-only (the old notes
+        // buffer survives the table but the baseline is not marked).
+        if self.notes_key().as_deref() == Some(key.as_str())
+            && let Some(buf) = self.buffers.get_mut(&key)
+        {
+            buf.is_notes = true;
+        }
         self.record_recent(rel);
         // Buffer-follow (issue 09, off by default): sync the tree cursor.
         self.tree_follow_opened(rel);

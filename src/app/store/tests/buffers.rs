@@ -1451,3 +1451,512 @@ use super::*;
 
     // ── plan 005 issue 02: inline annotations ─────────────────────────
 
+    // ── plan 015 issue 03: accurate-mode editing ─────────────────────
+    // A file buffer opened read-only, then toggled into `Accurate` mode
+    // (editable). The content is the test fixture.
+    fn accurate_file_store_with(content: &str) -> (tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), content).unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs");
+        s.toggle_read_only(); // C-x C-q → Accurate + editable
+        (dir, s)
+    }
+
+    #[test]
+    fn accurate_insert_lands_at_point_and_advances() {
+        // (a): a mid-line self-insert lands AT the point (not the end of
+        // the buffer) and the point advances past the inserted char. The
+        // col-0/end-of-buffer fixture is deliberately avoided — the point is
+        // mid-line, so this discriminates from the append-at-end coarse path.
+        let (_dir, mut s) = accurate_file_store_with("hello world\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 5, 5); // between "hello" and " world"
+        s.key_event(key("x"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hellox world\n",
+            "the char must land at the point (after 'hello'), not the buffer end"
+        );
+        assert_eq!(s.point_col(), 6, "the point must advance past the insert");
+        assert!(s.buffers.get(&bk).unwrap().locally_modified);
+    }
+
+    #[test]
+    fn accurate_backspace_removes_preceding_char() {
+        // (b): Backspace mid-line removes the char BEFORE the point and the
+        // point moves back over it (not the last char of the buffer).
+        let (_dir, mut s) = accurate_file_store_with("hello world\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 5, 5); // between "hello" and " world"
+        s.key_event(key("C-h"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hell world\n",
+            "the char before the point ('o' of hello) must be removed"
+        );
+        assert_eq!(s.point_col(), 4, "the point must move back one char");
+    }
+
+    #[test]
+    fn accurate_backspace_at_buffer_start_is_noop() {
+        // (c): at the buffer start there is no char before the point
+        // (emacs behaviour): the buffer and the point are untouched.
+        let (_dir, mut s) = accurate_file_store_with("hello world\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-h"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello world\n");
+        assert_eq!(s.point_col(), 0);
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified, "a no-op must not mark the buffer");
+    }
+
+    #[test]
+    fn accurate_ret_splits_line_at_point() {
+        // (d): RET inserts a newline at the point, splitting the line; the
+        // point lands on the new (lower) line. Today RET is unhandled in the
+        // Buffer view, so this test fails on the pre-change code.
+        let (_dir, mut s) = accurate_file_store_with("hello world\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 5, 5);
+        s.key_event(key("RET"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n world\n",
+            "RET must split the line at the point"
+        );
+        assert_eq!(s.point_line(), 1, "the point must land on the new line");
+        assert_eq!(s.point_col(), 0);
+    }
+
+    #[test]
+    fn accurate_kill_line_to_eol_and_yank_back() {
+        // (e): C-k kills from the point to EOL (keeping the newline) and
+        // pushes it to the kill ring; C-y then re-inserts it. Also pins the
+        // yank-pop reset (the kill is not a yank).
+        let (_dir, mut s) = accurate_file_store_with("hello world\nsecond\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 5, 5);
+        s.key_event(key("C-k"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\nsecond\n",
+            "C-k must kill to EOL, keeping the newline"
+        );
+        assert_eq!(s.kill_ring.top(), Some(" world"), "the killed text must hit the kill ring");
+        assert_eq!(s.yank_pos, None, "a kill must reset the yank-pop state");
+        // Yank it back at the same point.
+        s.key_event(key("C-y"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello world\nsecond\n",
+            "C-y must re-insert the killed text at the point"
+        );
+    }
+
+    #[test]
+    fn accurate_kill_line_at_eol_joins_lines() {
+        // C-k at EOL kills the newline itself (join), per the stated
+        // end-of-line decision. At the buffer end (no trailing newline) it
+        // is a no-op.
+        let (_dir, mut s) = accurate_file_store_with("hello world\nsecond\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        // Point at the end of line 0 (after "hello world", before the \n).
+        s.set_point(0, 11, 11);
+        s.key_event(key("C-k"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello worldsecond\n",
+            "C-k at EOL must kill the newline and join the lines"
+        );
+        assert_eq!(s.kill_ring.top(), Some("\n"));
+        // Now one line with a trailing \n; C-k at its EOL kills that final
+        // newline (a kill, not a no-op — the join is what C-k does at EOL).
+        s.set_point(0, 17, 17); // EOL of the joined line, before the final \n
+        s.key_event(key("C-k"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello worldsecond",
+            "C-k at EOL kills the trailing newline"
+        );
+        // Now the point is at the buffer end (no trailing newline): a no-op.
+        s.set_point(0, 17, 17);
+        s.key_event(key("C-k"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello worldsecond",
+            "C-k at the buffer end (no trailing newline) must be a no-op"
+        );
+    }
+
+    #[test]
+    fn accurate_delete_char_forward() {
+        // (item 5): C-d deletes the char AT the point (freed from half-page
+        // scroll); the point stays put. At the buffer end it is a no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("hello world\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 5, 5); // on the space
+            s.key_event(key("C-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "helloworld\n",
+                "C-d must delete the char at the point (the space)"
+            );
+            assert_eq!(s.point_col(), 5, "the point must not move");
+            // On the trailing \n (the last char): C-d removes it.
+            s.set_point(0, 10, 10);
+            s.key_event(key("C-d"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "helloworld");
+        }
+        // Past the end (EOL of a no-trailing-newline buffer) is a no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 2, 2); // past the last char
+            s.key_event(key("C-d"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "ab");
+        }
+    }
+
+    #[test]
+    fn accurate_kill_word_backward() {
+        // (item 6): M-DEL kills from the point backward to the previous word
+        // boundary (emacs `backward-kill-word`) and pushes it to the kill
+        // ring. The point moves to the START of the killed text. A run of
+        // whitespace IMMEDIATELY before the point is killed with the word;
+        // interior whitespace (a gap between two words) is NOT crossed. At the
+        // buffer start it is a no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("hello world\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 11, 11); // end of line 0, after "world"
+            s.key_event(key("M-DEL"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "hello \n",
+                "M-DEL must kill the previous word (the preceding space is kept)"
+            );
+            assert_eq!(s.kill_ring.top(), Some("world"));
+        }
+        // Discriminating multibyte mid-line case (plan 015-03 P1): the point
+        // lands at the KILL START, not at the stale pre-kill point char. On the
+        // old code (landing at the pre-kill point_char) the point would sit at
+        // col 4 of " omega" (on 'g'); the fix puts it at col 0.
+        {
+            let (_dir, mut s) = accurate_file_store_with("café omega\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 4, 4); // mid-line, on the space after "café"
+            s.key_event(key("M-DEL"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                " omega\n",
+                "M-DEL must kill the word 'café' (the space before the point is kept)"
+            );
+            assert_eq!(s.kill_ring.top(), Some("café"));
+            assert_eq!(s.point_col(), 0, "point must land at the kill start, not the stale pre-kill point char");
+        }
+        // Whitespace immediately before the point is killed with the word.
+        {
+            let (_dir, mut s) = accurate_file_store_with("word  \n"); // "word" + 2 spaces
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 6, 6); // end, after the two spaces
+            s.key_event(key("M-DEL"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "\n",
+                "M-DEL must kill the word and the whitespace before it"
+            );
+            assert_eq!(s.kill_ring.top(), Some("word  "));
+        }
+        // Buffer start: no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("word\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 0, 0);
+            s.key_event(key("M-DEL"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "word\n");
+        }
+    }
+
+    #[test]
+    fn accurate_kill_word_forward() {
+        // (item 6, P2-c): M-d kills from the point FORWARD to the next word
+        // boundary (emacs `kill-word`) and pushes it to the kill ring; the
+        // point stays at the kill start (the text after the killed word moves
+        // up to it). A run of whitespace immediately AFTER the point is killed
+        // with the word. At the buffer end it is a no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("hello world\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 0, 0); // start of line 0, on "hello"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "world\n",
+                "M-d must kill the word at the point and the following space"
+            );
+            assert_eq!(s.kill_ring.top(), Some("hello "));
+            assert_eq!(s.point_col(), 0, "point stays at the kill start");
+        }
+        // Mid-line: kills the word under the point plus the trailing gap; the
+        // following word moves up to the point, which stays put.
+        {
+            let (_dir, mut s) = accurate_file_store_with("aa bb cc\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 3, 3); // mid-line, on the 'b' of "bb"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "aa cc\n",
+                "M-d must kill the word at the point and the trailing gap"
+            );
+            assert_eq!(s.kill_ring.top(), Some("bb "));
+            assert_eq!(s.point_col(), 3, "point stays at the kill start (col 3)");
+        }
+        // Buffer end: no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("word");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 4, 4); // past the last char
+            s.key_event(key("M-d"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "word");
+        }
+    }
+
+    #[test]
+    fn accurate_open_line() {
+        // (item 8): C-o opens a line before the point; the text from the
+        // point on drops to the new line, the point stays at the end of the
+        // upper line.
+        let (_dir, mut s) = accurate_file_store_with("abcdef\n");
+        let bk = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 3, 3); // between "abc" and "def"
+        s.key_event(key("C-o"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "abc\ndef\n",
+            "C-o must open a line before the point"
+        );
+        assert_eq!(s.point_line(), 0, "the point stays on the upper line");
+        assert_eq!(s.point_col(), 3);
+    }
+
+    #[test]
+    fn accurate_transpose_chars() {
+        // (item 8): C-t swaps the char before and at the point; the point
+        // stays at the boundary. Line-edge cases (a newline on either side)
+        // fall out of the same two-char swap.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 1, 1); // between a and b
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "ba\n",
+                "C-t must swap the two chars"
+            );
+            assert_eq!(s.point_col(), 1, "the point stays at the boundary");
+        }
+        // At EOL (char at point is \n): last char of the line moves to the
+        // start of the next line.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab\ncd\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 2, 2); // end of line 0, on the \n
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "a\nbcd\n",
+                "EOL transpose must move the last char down"
+            );
+        }
+        // At the buffer start (no char before): no-op.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 0, 0);
+            s.key_event(key("C-t"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "ab\n");
+        }
+        // At the buffer END (point past the last char): emacs transposes the
+        // LAST TWO chars and leaves the point at the end (one past the
+        // between-position) — not a no-op (plan 015-03 P2-c). The buffer-end
+        // case is what the old no-op guard got wrong.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 2, 2); // past the last char
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "ba",
+                "buffer-end C-t must transpose the last two chars"
+            );
+            assert_eq!(s.point_col(), 2, "point leaves at the end of the buffer");
+        }
+    }
+
+    #[test]
+    fn accurate_multibyte_point_arithmetic() {
+        // (g): the multibyte byte/char trap. `point_col` is a CHAR index; a
+        // byte-arithmetic implementation would land at the wrong spot. The
+        // two-é fixture has char index 1 at byte index 2, so a byte-as-char
+        // bug is visible.
+        {
+            let (_dir, mut s) = accurate_file_store_with("\u{e9}\u{e9}\n"); // "éé\n"
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 1, 1); // between the two é (char 1, byte 2)
+            s.key_event(key("x"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "\u{e9}x\u{e9}\n",
+                "the insert must land between the two é, not after both"
+            );
+        }
+        // Backspace over a multibyte char at the boundary.
+        {
+            let (_dir, mut s) = accurate_file_store_with("h\u{e9}llo\n"); // "héllo"
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 2, 2); // after the é (char 2, byte 3)
+            s.key_event(key("C-h"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "hllo\n",
+                "backspace must remove the whole é, not a stray byte"
+            );
+        }
+        // Transpose across a multibyte char keeps the bytes whole.
+        {
+            let (_dir, mut s) = accurate_file_store_with("a\u{e9}b\n"); // "aéb"
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 2, 2); // between é and b
+            s.key_event(key("C-t"));
+            assert_eq!(s.buffers.get(&bk).unwrap().text(), "ab\u{e9}\n");
+        }
+    }
+
+    #[test]
+    fn baseline_editable_survives_project_root_switch() {
+        // The 015-02 gate drift, pinned: the baseline predicate must be
+        // BUFFER-relative (is_notes), not root-relative (notes_key()). Open
+        // the notes buffer, enter Accurate, then switch_project_root: the old
+        // notes buffer survives the table and its baseline stays editable.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let notes_key = s.buffers.current().unwrap().to_string();
+        assert!(s.buffer_baseline_editable(&notes_key), "the notes buffer is baseline-editable");
+        s.toggle_read_only();
+        assert_eq!(
+            s.buffers.get(&notes_key).unwrap().mode,
+            BufferMode::Accurate
+        );
+        // A second, distinct project root.
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir2.path().join("Cargo.toml"), "[package]\n").unwrap();
+        s.switch_project_root(dir2.path().to_str().unwrap());
+        // The old notes buffer survives the root switch (the table is not
+        // cleared)...
+        assert!(
+            s.buffers.get(&notes_key).is_some(),
+            "the old notes buffer must survive switch_project_root"
+        );
+        // ...and the root-relative notes_key() now points at the NEW project,
+        // so a root-relative predicate would read the OLD notes buffer as
+        // non-notes (read-only baseline).
+        let new_notes = dir2
+            .path()
+            .join(".redline-notes.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            s.notes_key().as_deref(),
+            Some(new_notes.as_str()),
+            "sanity: notes_key() is now root-relative to the new project"
+        );
+        // The FIX: the baseline is buffer-relative (is_notes) and does not
+        // drift.
+        assert!(
+            s.buffer_baseline_editable(&notes_key),
+            "the baseline must stay editable across a project-root switch"
+        );
+    }
+
+    #[test]
+    fn notes_opened_via_find_file_is_baseline_editable() {
+        // (P2-a): the is_notes flag must be set on EVERY route that opens the
+        // notes file, not only open_notes. Opening .redline-notes.md through
+        // find-file (open_path) must leave the buffer with the same
+        // buffer-relative baseline as open_notes; the old code left it
+        // is_notes=false, so C-x C-q → C-x C-q on a find-file-opened notes
+        // buffer ended read-only.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join(".redline-notes.md"), "# Notes\n").unwrap();
+        let mut s = store(dir.path());
+        // Find-file route (open_path), not open_notes.
+        s.open_path(".redline-notes.md");
+        let notes_key = s.buffers.current().unwrap().to_string();
+        assert!(
+            s.notes_key().as_deref() == Some(notes_key.as_str()),
+            "sanity: the opened buffer is the notes file"
+        );
+        assert!(
+            s.buffer_baseline_editable(&notes_key),
+            "the notes buffer opened via find-file must be baseline-editable"
+        );
+        // The full drift repro: find-file open, enter Accurate, exit — the
+        // baseline must not flip it read-only.
+        s.toggle_read_only();
+        assert_eq!(
+            s.buffers.get(&notes_key).unwrap().mode,
+            BufferMode::Accurate
+        );
+        s.toggle_read_only();
+        assert!(
+            s.buffers.get(&notes_key).unwrap().editable,
+            "the find-file-opened notes buffer must stay editable after leaving Accurate"
+        );
+    }
+
+    #[test]
+    fn accurate_commands_are_no_op_in_annotation_mode_via_dispatch() {
+        // (P2-b): the point-accurate commands are gated on Accurate mode, so a
+        // direct M-x (dispatch) on an Annotation-mode buffer is a no-op —
+        // Annotation stays coarse. Without the gate, M-x delete-char-forward
+        // would delete at the point on the notes buffer (contradicting
+        // PLAN §4). The contrast (Accurate) proves the gate does not block
+        // the key-routed path.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let bk = s.buffers.current().unwrap().to_string();
+        // The notes buffer is Annotation by default; its seed content is
+        // "# Notes\n".
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "# Notes\n");
+        assert_eq!(s.buffers.get(&bk).unwrap().mode, BufferMode::Annotation);
+        s.set_point(0, 0, 0); // on '#'
+        // M-x delete-char-forward in Annotation mode: no-op (gate). Without
+        // the gate this would turn "# Notes" into " Notes".
+        s.dispatch("delete-char-forward", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "# Notes\n",
+            "M-x delete-char-forward must be a no-op in Annotation mode"
+        );
+        // Contrast: the same command in Accurate mode does the point edit.
+        s.toggle_read_only();
+        s.dispatch("delete-char-forward", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            " Notes\n",
+            "M-x delete-char-forward must act in Accurate mode"
+        );
+    }
+

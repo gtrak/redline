@@ -384,13 +384,74 @@ impl AppStore {
             self.dispatch_key(key);
             return true;
         }
+        // The current buffer's edit mode selects the editing SHAPE (plan 015
+        // issue 03): in `Accurate` mode the coarse-model keys (self-insert,
+        // Backspace, RET, C-k, C-d, M-d/M-DEL, C-o, C-t) route to the
+        // point-accurate commands; in `Annotation` mode every one of them
+        // keeps today's behaviour EXACTLY (append / backspace-at-end, the
+        // rest fall through to the engine). `Accurate` ⟹ `editable`, and the
+        // guard only runs for editable buffers, so this is well-defined.
+        // emacs split: `M-d` = kill-word FORWARD, `M-DEL` = backward-kill-word.
+        let accurate = self
+            .buffers
+            .current()
+            .and_then(|k| self.buffers.get(k).map(|b| b.mode == BufferMode::Accurate))
+            .unwrap_or(false);
         if let Some(c) = key.char_value() {
-            self.notes_insert_char(c);
+            if accurate {
+                self.insert_text_at_point(&c.to_string());
+            } else {
+                self.notes_insert_char(c);
+            }
             return true;
         }
         if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
-            self.notes_backspace();
+            // M-DEL (Alt+Backspace) is kill-word-backward in `Accurate` mode;
+            // a plain Backspace / C-h is the one-char delete.
+            if accurate && key.code == KeyCode::Backspace && key.alt && !key.ctrl {
+                self.kill_word_backward();
+            } else if accurate {
+                self.delete_char_before_point();
+            } else {
+                self.notes_backspace();
+            }
             return true;
+        }
+        // Accurate-mode control keys (plan 015 issue 03). All are freed from
+        // their previous Buffer-view roles: `C-d` was half-page scroll (now
+        // delete-char-forward, the emacs binding); `RET`/`C-k`/`C-o`/`C-t`/
+        // `M-d`/`M-DEL` were unbound. `C-u` STAYS half-page scroll (universal
+        // argument is 015 item 9, out of scope). Annotation mode falls through
+        // every one of these to the engine (unchanged behaviour).
+        if accurate {
+            if key.code == KeyCode::Enter {
+                self.newline_at_point();
+                return true;
+            }
+            if key == Key::ctrl_char('k') {
+                self.kill_line();
+                return true;
+            }
+            if key == Key::ctrl_char('d') {
+                self.delete_char_forward();
+                return true;
+            }
+            if key == Key::ctrl_char('o') {
+                self.open_line();
+                return true;
+            }
+            if key == Key::ctrl_char('t') {
+                self.transpose_chars();
+                return true;
+            }
+            // M-d (Alt+char 'd'): kill-word FORWARD (emacs `kill-word`). M-DEL
+            // (Alt+Backspace) is `kill_word_backward`, handled in the Backspace
+            // branch above (Alt+Backspace is a Backspace code, so it never
+            // reaches here).
+            if key.code == KeyCode::Char('d') && key.alt && !key.ctrl {
+                self.kill_word_forward();
+                return true;
+            }
         }
         // Other keys fall through to the keymap engine (motion, view
         // commands, C-x C-s save, etc.).

@@ -21,6 +21,11 @@ proves:
   - annotation suite     ann-delete's transient-echo / repaint race + the
                          raw space-byte encoding (state halves are the
                          unit_flow_ann_* twins)
+  - accurate-mode        the point-accurate edit bindings (insert / C-t / M-DEL
+                         / C-d / C-o / C-k / C-u) driven through the real
+                         encoder + guard, each proven by byte + a save read
+                         back from disk (the state halves are the
+                         accurate_* store-level twins)
   - U-G6                 watcher SUSPENDED: a disk edit produces no reload
                          (the gate is at the watcher source, which the
                          store-level apply path deliberately bypasses)
@@ -54,6 +59,9 @@ ROWS, COLS = 24, 80
 ANN_PATH = os.path.join(REPO, "src", "notes_ann.rs")
 ANN2_PATH = os.path.join(REPO, "src", "notes_ann2.rs")
 NOTES_PATH = os.path.join(REPO, ".redline-notes.md")
+# plan-015 issue 03: accurate-mode point-accurate editing (the thin-tier
+# leg's dedicated file). Tall enough that a half-page scroll is observable.
+ACC_PATH = os.path.join(REPO, "src", "acc_edit.rs")
 # The save/quit-confirm prompt markers (asserted on by quit-prompt-y —
 # the on-terminal width-80 wrap check lives with this leg).
 PROMPT_HEAD = "Save this buffer:"
@@ -574,6 +582,112 @@ def flow_annotation_cu_still_scrolls(app):
            f"at-bottom-first={at_bottom} top-row {top_before!r} → {top_after!r} "
            f"c-u-moved-window-up={moved_up}")
 
+
+def flow_accurate_suite():
+    """plan-015 issue 03: the accurate-mode point-accurate editing legs.
+
+    One leg that drives EVERY point-accurate binding through the real terminal
+    encoder + the notes-edit guard (the thing only a live app proves), and
+    proves each fires by byte: after each binding the on-screen buffer row
+    reflects exactly that operation (a wrong / unbound / mis-routed binding
+    would leave the row unchanged or produce a different byte), and the final
+    `C-x C-s` save is read back from disk byte-for-byte. C-u stays half-page
+    scroll (universal-argument is 015 item 9, out of scope): it must scroll,
+    not self-insert 'u'. Own App + a dedicated file (created before startup so
+    the find-file picker lists it, removed after)."""
+    # 40 lines: line 0 "ab cd", line 1 "ef gh", then 38 fillers. Tall enough
+    # that a half-page scroll is observable; the first two lines are the edit
+    # targets.
+    with open(ACC_PATH, "w") as f:
+        f.write("ab cd\n")
+        f.write("ef gh\n")
+        f.write("".join(f"filler {i:02d}\n" for i in range(1, 39)))
+    try:
+        app = App(REPO, rows=ROWS, cols=COLS)
+        _open_ann_file(app, "acc_edit.rs")
+        opened = "ab cd" in text(app) and "ef gh" in text(app)
+        # Enter Accurate mode (C-x C-q toggle-read-only).
+        app.key("C-x C-q")
+        app.wait(0.4)
+        accurate = "accurate mode" in app.row_text(app.rows - 1) or \
+                   "accurate mode" in app.row_text(app.rows - 2)
+        # (1) insert: type 'Z' at the start (point (0,0)) → "Zab cd".
+        app.key("Z", settle=0.2)
+        app.wait(0.3)
+        did_insert = "Zab cd" in text(app)
+        # (2) C-t: transpose 'Z'/'a' → "aZb cd"; the pre-swap bytes gone.
+        app.key("C-t")
+        app.wait(0.4)
+        did_ct = "aZb cd" in text(app) and "Zab cd" not in text(app)
+        # (3) M-DEL: kill-word-backward kills 'a' (the word before the point) →
+        # "Zb cd". M-DEL = Alt+Backspace (ESC + 0x7F); encode_key has no M-DEL
+        # token, so feed the raw bytes.
+        app.feed(b"\x1b\x7f", settle=0.3)
+        app.wait(0.4)
+        did_mdel = "Zb cd" in text(app) and "aZb cd" not in text(app)
+        # (4) C-d: delete-char-forward removes 'Z' (the char at the point) →
+        # "b cd".
+        app.key("C-d")
+        app.wait(0.4)
+        did_cd = "b cd" in text(app) and "Zb cd" not in text(app)
+        # (5) C-o: open-line. C-f to the space (col 1), then C-o splits the
+        # line: "b" on one row, " cd" on the next. The single "b cd" row is
+        # gone (split); the " cd" remainder is on its own row.
+        app.key("C-f", settle=0.2)
+        app.wait(0.2)
+        app.key("C-o")
+        app.wait(0.4)
+        did_co = " cd" in text(app) and "b cd" not in text(app)
+        # (6) C-k: kill-line. C-n C-n lands on the "ef gh" line (now line 2
+        # after C-o pushed it down); C-a to line start (C-n carries goal_col,
+        # so without it the point lands mid-line and C-k kills only part);
+        # C-k clears the whole line's content.
+        app.key("C-n", settle=0.2)
+        app.wait(0.2)
+        app.key("C-n", settle=0.2)
+        app.wait(0.2)
+        app.key("C-a", settle=0.2)
+        app.wait(0.2)
+        app.key("C-k")
+        app.wait(0.4)
+        did_ck = "ef gh" not in text(app)
+        # (7) C-u: half-page scroll UP. Scroll down first (C-v page-down; a
+        # window scroll, not an accurate-mode edit) so there is room to scroll
+        # up; then C-u moves the window up a half-page (the top content row
+        # changes). A no-op or a self-inserted 'u' would not change the TOP row.
+        app.key("C-v")
+        app.wait(0.4)
+        top_before = app.row_text(1)
+        app.key("C-u")
+        app.wait(0.4)
+        top_after = app.row_text(1)
+        did_cu = (top_before != top_after
+                  and "filler" in top_before and "filler" in top_after)
+        # Save and read the disk bytes back (the definitive by-byte artifact).
+        app.key("C-x C-s")
+        saved = wait_for(app, lambda: "wrote" in flat_text(app), 4.0)
+        app.wait(0.3)
+        with open(ACC_PATH, "r") as f:
+            lines = f.read().split("\n")
+        disk_ok = (len(lines) >= 4 and lines[0] == "b" and lines[1] == " cd"
+                   and lines[2] == "" and lines[3] == "filler 01")
+        ok = (opened and accurate and did_insert and did_ct and did_mdel
+              and did_cd and did_co and did_ck and did_cu and disk_ok)
+        record("accurate-mode", "Z,C-t,M-DEL,C-d,C-o,C-k,C-u,C-x C-s",
+               ok,
+               f"opened={opened} accurate={accurate} insert={did_insert} "
+               f"C-t={did_ct} M-DEL={did_mdel} C-d={did_cd} C-o={did_co} "
+               f"C-k={did_ck} C-u-scroll={did_cu} saved={saved} "
+               f"disk-bytes={disk_ok} top {top_before!r}->{top_after!r} "
+               f"disk[:4]={lines[:4]}")
+        app.kill()
+    finally:
+        try:
+            os.remove(ACC_PATH)
+        except FileNotFoundError:
+            pass
+
+
 def flow_g1(app, path):
     """U-G1 live-edit scroll preservation: an external append at the bottom of a
     viewed file repaints the view (watcher) and preserves the scroll anchor
@@ -732,6 +846,10 @@ def main():
     # repaint race + the raw space-byte encoding); the state halves are
     # the unit_flow_ann_* twins.
     flow_annotation_suite()
+    # plan-015 issue 03: the accurate-mode point-accurate editing leg (own
+    # App + a dedicated file; drives insert/C-t/M-DEL/C-d/C-o/C-k/C-u and
+    # reads the save back from disk by byte).
+    flow_accurate_suite()
 
     print("\n=== SUMMARY ===")
     for flow, keys, ok, _ in RESULTS:

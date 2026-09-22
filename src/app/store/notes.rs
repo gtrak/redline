@@ -45,6 +45,13 @@ impl AppStore {
                 }
             }
         }
+        // Buffer-relative baseline (plan 015 issue 03, folded in from the
+        // 02 gate): this buffer IS the notes document, so its baseline
+        // editability rides on `is_notes` and cannot drift when
+        // `switch_project_root` changes the root-relative `notes_key()`.
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.is_notes = true;
+        }
         self.buffers.set_current(&key);
         // plan 005 issue 02: on (re)open the notes buffer's text is the
         // source of truth — re-parse the notes document from it.
