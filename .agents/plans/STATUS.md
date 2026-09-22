@@ -317,3 +317,19 @@ headers) must be listed and defended in that issue; everything else is a bug.
 
 State: the `issue-all-symbol-jumps` row in the standalone table above (LANDED,
 with the residual recorded in the matrix).
+
+## Plan 016 (undo) — issues specced 2026-09-21
+
+The plan was design-only; its task-order rows now have specs. `016-01` (the stack) is
+specced at `.agents/tasks/issue-016-01-undo-stack.md` and dispatched; 02 (retrofit width:
+RET/C-k/C-y/M-y/C-w), 03 (the saved-state marker + `locally_modified` + history-clearing on
+reload) and 04 (redo + coalescing) remain to be specced from `PLAN.md`'s task order.
+
+**Settled by the user and carried in 016-01: undo is bound to BOTH `C-x u` and `C-/`**
+(the user reaches for `C-x u`), with the control-code note that `C-/` and `C-_` are the same
+0x1F on most terminals — assert what crossterm reports rather than assuming.
+
+**016 inherits two seams from landed work** rather than inventing them: the
+`reload_in_place` chokepoint (`index_wiring.rs`) is the single in-place reload path, and
+`toggle_ro_accept` (`buffers.rs`) is the FIFTH rope-replacing route that bypasses it — both
+must clear the undo history, per `issue-external-change-reload.md` F3/F4.
