@@ -144,8 +144,9 @@ use super::*;
     /// (015-03) The notes-edit guard routes the accurate-mode keys to the
     /// point-accurate commands. In particular `C-d` routes to delete-char
     /// (NOT the half-page scroll it used to drive), and `M-d` to kill-word
-    /// backward. These go through `key_event` so the mode routing itself is
-    /// what is pinned, not just the store methods.
+    /// forward (M-DEL is the backward kill). These go through `key_event` so
+    /// the mode routing itself is what is pinned, not just the store
+    /// methods.
     #[test]
     fn accurate_mode_keys_route_to_point_commands_via_guard() {
         // C-d: delete-char at the point (freed from half-page scroll).
@@ -168,6 +169,9 @@ use super::*;
             assert!(!s.message.contains("unbound"), "C-d must be handled: {}", s.message);
         }
         // M-d: kill-word FORWARD (Alt+char 'd'); M-DEL is the backward kill.
+        // Forward `kill-word` kills the word at the point only (the space
+        // after it survives — emacs `forward-word` does not consume the
+        // trailing non-word).
         {
             let dir = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -181,8 +185,8 @@ use super::*;
             s.key_event(key("M-d"));
             assert_eq!(
                 s.buffers.get(&bk).unwrap().text(),
-                "world\n",
-                "M-d must kill the word forward"
+                " world\n",
+                "M-d must kill the word forward (the following space survives)"
             );
             // M-DEL: kill-word backward.
             let mut s = store(dir.path());

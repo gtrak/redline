@@ -860,7 +860,7 @@ impl CommandRegistry {
         ));
         self.register(Command::new(
             "kill-word-forward",
-            "Kill from the point forward to the next word boundary and push it to the kill ring (M-d in accurate mode, emacs kill-word)",
+            "Kill the word forward and push it to the kill ring (emacs kill-word, M-d in accurate mode): a word char at the point kills that word only; the point on whitespace kills it plus the next word",
             "editing",
             |store, _arg| store.kill_word_forward(),
         ));

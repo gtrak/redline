@@ -422,15 +422,19 @@ impl AppStore {
     }
 
     /// Kill the word forward (plan 015 issue 03, `M-d`): kill from the point
-    /// forward to the next word boundary and push it to the kill ring. The kill
-    /// matches emacs `kill-word` (forward): skip the word at the point, then the
-    /// whitespace after it (a newline is non-word, so a run of blank lines after
-    /// a word is killed too). The point stays put (the kill is forward). A no-op
-    /// (no kill, no ring push) when the point is at the buffer end or there is no
-    /// word/whitespace after it. Requires `editable` and `Accurate` mode; sets
-    /// the three edit-hygiene flags, clears the mark, and RESETS the yank-pop
-    /// state (as `kill_word_backward` does). Emacs `M-d` is the FORWARD kill;
-    /// `M-DEL` stays `kill_word_backward`.
+    /// forward and push it to the kill ring. The kill extent matches emacs
+    /// `kill-word` (`M-d` = `kill-word 1`), which kills the region the point
+    /// moves over with `forward-word`: if the char AT the point is a word
+    /// char, only that word is killed (the trailing non-word is NOT consumed);
+    /// if the point is on a non-word char, the non-word run and then the next
+    /// word are killed (a newline is non-word, so a run of blank lines between
+    /// the point and the next word is killed too). The point stays at the kill
+    /// start (the text after the killed region moves up to it). A no-op (no
+    /// kill, no ring push) when the point is at the buffer end. Requires
+    /// `editable` and `Accurate` mode; sets the three edit-hygiene flags,
+    /// clears the mark, and RESETS the yank-pop state (as
+    /// `kill_word_backward` does). Emacs `M-d` is the FORWARD kill; `M-DEL`
+    /// stays `kill_word_backward`.
     pub fn kill_word_forward(&mut self) {
         // P2-b: accurate-mode command; a no-op on an Annotation-mode buffer.
         if !self.current_buffer_accurate() {
@@ -461,25 +465,31 @@ impl AppStore {
             // Buffer end: nothing to kill forward.
             return;
         }
-        // Char-level walk (is_word_char is the crate-wide word rule). First the
-        // word at the point, then the whitespace after it (forward `kill-word`).
+        // Char-level walk (is_word_char is the crate-wide word rule),
+        // matching emacs `forward-word` as used by `kill-word 1`: word char
+        // at the point → skip that word only (the trailing non-word is NOT
+        // consumed); non-word at the point → skip the non-word run, then the
+        // next word. `j` is always >= 1 here (point_char < total_chars, so
+        // the remainder is non-empty and either opens a word run or a
+        // non-word run). The buffer-end no-op is handled by the
+        // `point_char >= total_chars` guard above.
         let chars: Vec<char> = {
             let buf = self.buffers.get(&key).unwrap();
             buf.rope.slice(point_char..total_chars).chars().collect()
         };
         let mut j = 0;
-        // Skip the word forward.
-        while j < chars.len() && is_word_char(chars[j]) {
-            j += 1;
+        if is_word_char(chars[0]) {
+            while j < chars.len() && is_word_char(chars[j]) {
+                j += 1;
+            }
+        } else {
+            while j < chars.len() && !is_word_char(chars[j]) {
+                j += 1;
+            }
+            while j < chars.len() && is_word_char(chars[j]) {
+                j += 1;
+            }
         }
-        // Skip the non-word (whitespace) after it.
-        while j < chars.len() && !is_word_char(chars[j]) {
-            j += 1;
-        }
-        // `j` is always >= 1 here (point_char < total_chars, so the remainder
-        // is non-empty and either opens a word run or a whitespace run). The
-        // buffer-end no-op is handled by the `point_char >= total_chars`
-        // guard above.
         let end_char = point_char + j;
         let killed = self
             .buffers
@@ -553,17 +563,21 @@ impl AppStore {
     }
 
     /// Transpose the two chars around the point (plan 015 issue 03, `C-t`,
-    /// emacs `transpose-chars`): swap the char BEFORE the point with the char
-    /// AT the point; the point stays at the boundary between the two swapped
-    /// chars. Swapping whole characters (not bytes) makes the multibyte case
-    /// correct, and the same swap handles the line-edge cases emacs folds in:
-    /// at a line end (char at point is `\n`) the last char of the line moves to
-    /// the start of the next, and at a line start (char before is `\n`) the
-    /// first char of the line moves to the end of the previous. At the buffer
-    /// END (point past the last char) emacs transposes the LAST TWO chars and
-    /// leaves the point at the end (one past the between-position). A no-op at
-    /// the buffer start (no char before). Requires `editable` and `Accurate`
-    /// mode; sets the three edit-hygiene flags, clears the mark.
+    /// emacs `transpose-chars`): mid-line, swap the char BEFORE the point
+    /// with the char AT the point and move the point forward one (between
+    /// the two swapped chars, on the far side). Swapping whole characters
+    /// (not bytes) makes the multibyte case correct. The line-edge cases
+    /// emacs folds in: at a line end (char at point is `\n`) the PREVIOUS
+    /// TWO chars are exchanged and the point does NOT move; at a line start
+    /// (char before is `\n`) the first char of the line moves to the end of
+    /// the previous one and the point moves forward one. At the buffer END
+    /// (point past the last char) emacs transposes the LAST TWO chars and
+    /// leaves the point at the end (one past the between-position). A no-op
+    /// at the buffer start (no char before), and when the EOL case has fewer
+    /// than two chars before the point on the line (emacs signals an error
+    /// there; redline no-ops rather than erroring, as at the buffer start).
+    /// Requires `editable` and `Accurate` mode; sets the three edit-hygiene
+    /// flags, clears the mark.
     pub fn transpose_chars(&mut self) {
         // P2-b: accurate-mode command; a no-op on an Annotation-mode buffer.
         if !self.current_buffer_accurate() {
@@ -594,18 +608,36 @@ impl AppStore {
             // Buffer start: no char before — a no-op.
             return;
         }
-        // Which two chars to swap, and where the point lands. Normally the
-        // char before and at the point (point stays at the between-boundary).
-        // At the buffer END (point past the last char) emacs transposes the
-        // LAST TWO chars and leaves the point at the end (one past the
-        // between-position — "moves forward one").
+        // Which two chars to swap, and where the point lands.
+        // - Buffer END (point past the last char): emacs transposes the LAST
+        //   TWO chars and leaves the point at the end (one past the
+        //   between-position — "moves forward one").
+        // - EOL (char at point is \n): emacs exchanges the PREVIOUS TWO
+        //   chars; the point does not move. Needs two chars before the
+        //   point on the line (point_char >= 2); with one, emacs signals
+        //   an error — a no-op here.
+        // - Mid-line (including a line start, where the char before is \n):
+        //   swap the char before and at the point; the point moves forward
+        //   one, between the two swapped chars.
         let (first_idx, second_idx, land_char) = if point_char >= total_chars {
             if total_chars < 2 {
                 return; // fewer than two chars: nothing to transpose
             }
             (total_chars - 2, total_chars - 1, total_chars)
         } else {
-            (point_char - 1, point_char, point_char)
+            // The char at the point (point_char < total_chars, so in range).
+            let char_at_point: Option<char> = self
+                .buffers
+                .get(&key)
+                .and_then(|b| b.rope.slice(point_char..point_char + 1).chars().next());
+            if char_at_point == Some('\n') {
+                if point_char < 2 {
+                    return; // not two chars before on the line: nothing to swap
+                }
+                (point_char - 2, point_char - 1, point_char)
+            } else {
+                (point_char - 1, point_char, point_char + 1)
+            }
         };
         let (c1, c2) = {
             let buf = self.buffers.get(&key).unwrap();
@@ -627,8 +659,8 @@ impl AppStore {
         }
         self.invalidate_highlight_for_key(&key);
         self.mark_notes_dirty_if_current(&key);
-        // Between the two swapped chars (the end of the buffer in the
-        // buffer-end case).
+        // Mid-line / line start: between the two swapped chars, one past the
+        // old point. EOL / buffer end: where the point already was.
         self.land_point_at_char(&key, land_char);
     }
 

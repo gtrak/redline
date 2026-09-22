@@ -1683,11 +1683,13 @@ use super::*;
 
     #[test]
     fn accurate_kill_word_forward() {
-        // (item 6, P2-c): M-d kills from the point FORWARD to the next word
-        // boundary (emacs `kill-word`) and pushes it to the kill ring; the
-        // point stays at the kill start (the text after the killed word moves
-        // up to it). A run of whitespace immediately AFTER the point is killed
-        // with the word. At the buffer end it is a no-op.
+        // (item 6, P2-c): M-d kills from the point FORWARD with the emacs
+        // `kill-word 1` extent and pushes it to the kill ring; the point
+        // stays at the kill start (the text after the killed region moves up
+        // to it). Emacs `forward-word` extent: a word char at the point kills
+        // that word ONLY (the trailing space is NOT consumed); a non-word at
+        // the point kills the non-word run plus the next word. At the buffer
+        // end it is a no-op.
         {
             let (_dir, mut s) = accurate_file_store_with("hello world\n");
             let bk = s.buffers.current().unwrap().to_string();
@@ -1695,14 +1697,15 @@ use super::*;
             s.key_event(key("M-d"));
             assert_eq!(
                 s.buffers.get(&bk).unwrap().text(),
-                "world\n",
-                "M-d must kill the word at the point and the following space"
+                " world\n",
+                "M-d must kill the word at the point only, NOT the following space"
             );
-            assert_eq!(s.kill_ring.top(), Some("hello "));
+            assert_eq!(s.kill_ring.top(), Some("hello"));
             assert_eq!(s.point_col(), 0, "point stays at the kill start");
         }
-        // Mid-line: kills the word under the point plus the trailing gap; the
-        // following word moves up to the point, which stays put.
+        // Mid-line: the word under the point is killed; the two spaces left
+        // behind (the trailing gap is NOT consumed) — the following word
+        // moves up to the point, which stays put.
         {
             let (_dir, mut s) = accurate_file_store_with("aa bb cc\n");
             let bk = s.buffers.current().unwrap().to_string();
@@ -1710,11 +1713,73 @@ use super::*;
             s.key_event(key("M-d"));
             assert_eq!(
                 s.buffers.get(&bk).unwrap().text(),
-                "aa cc\n",
-                "M-d must kill the word at the point and the trailing gap"
+                "aa  cc\n",
+                "M-d must kill the word at the point only (two spaces survive)"
             );
-            assert_eq!(s.kill_ring.top(), Some("bb "));
+            assert_eq!(s.kill_ring.top(), Some("bb"));
             assert_eq!(s.point_col(), 3, "point stays at the kill start (col 3)");
+        }
+        // Multibyte + three-word line (the gate's `café omega zeta` case):
+        // char 5 is the 'o' of "omega"; the kill is "omega" only, leaving the
+        // double space, and the point stays on the first of the two spaces.
+        {
+            let (_dir, mut s) = accurate_file_store_with("café omega zeta\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 5, 5); // the 'o' of "omega"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "café  zeta\n",
+                "M-d must not eat the space after the word"
+            );
+            assert_eq!(s.kill_ring.top(), Some("omega"));
+            assert_eq!(s.point_col(), 5, "point stays at the kill start");
+        }
+        // The newline is non-word but is NOT consumed when the kill is the
+        // word at the point (the gate's `café omega\n` @5 case).
+        {
+            let (_dir, mut s) = accurate_file_store_with("café omega\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 5, 5); // the 'o' of "omega"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "café \n",
+                "M-d must not join the lines (the newline survives)"
+            );
+            assert_eq!(s.kill_ring.top(), Some("omega"));
+            assert_eq!(s.point_col(), 5);
+        }
+        // Point at line start on a word char: only the word is killed (the
+        // gate's `café omega\n` @0 case).
+        {
+            let (_dir, mut s) = accurate_file_store_with("café omega\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 0, 0); // on the 'c' of "café"
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                " omega\n",
+                "M-d must kill the word only (the following space survives)"
+            );
+            assert_eq!(s.kill_ring.top(), Some("café"));
+            assert_eq!(s.point_col(), 0);
+        }
+        // Point INSIDE whitespace: the non-word run and the next word are
+        // killed (the gate's `café  zeta` @5 case) — the old code killed the
+        // single space only.
+        {
+            let (_dir, mut s) = accurate_file_store_with("café  zeta\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 5, 5); // the second space
+            s.key_event(key("M-d"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "café \n",
+                "M-d on whitespace must kill the run plus the next word"
+            );
+            assert_eq!(s.kill_ring.top(), Some(" zeta"));
+            assert_eq!(s.point_col(), 5);
         }
         // Buffer end: no-op.
         {
@@ -1746,9 +1811,13 @@ use super::*;
 
     #[test]
     fn accurate_transpose_chars() {
-        // (item 8): C-t swaps the char before and at the point; the point
-        // stays at the boundary. Line-edge cases (a newline on either side)
-        // fall out of the same two-char swap.
+        // (item 8): C-t is emacs `transpose-chars`: mid-line it swaps the
+        // char before and at the point and moves the point forward one
+        // (between the swapped chars, on the far side). The line-edge cases
+        // emacs folds in: at a line end (char at point is \n) the PREVIOUS
+        // TWO chars are exchanged and the point does not move; at a line
+        // start (char before is \n) the first char of the line moves to the
+        // end of the previous and the point moves forward one.
         {
             let (_dir, mut s) = accurate_file_store_with("ab\n");
             let bk = s.buffers.current().unwrap().to_string();
@@ -1759,10 +1828,16 @@ use super::*;
                 "ba\n",
                 "C-t must swap the two chars"
             );
-            assert_eq!(s.point_col(), 1, "the point stays at the boundary");
+            assert_eq!(
+                s.point_col(),
+                2,
+                "the point moves forward one, between the swapped chars"
+            );
         }
-        // At EOL (char at point is \n): last char of the line moves to the
-        // start of the next line.
+        // At EOL (char at point is \n): emacs exchanges the PREVIOUS TWO
+        // chars of the line (the old pin, "last char moves to the start of
+        // the next line", is what emacs does NOT do); the point does not
+        // move.
         {
             let (_dir, mut s) = accurate_file_store_with("ab\ncd\n");
             let bk = s.buffers.current().unwrap().to_string();
@@ -1770,8 +1845,27 @@ use super::*;
             s.key_event(key("C-t"));
             assert_eq!(
                 s.buffers.get(&bk).unwrap().text(),
-                "a\nbcd\n",
-                "EOL transpose must move the last char down"
+                "ba\ncd\n",
+                "EOL transpose must exchange the previous two chars"
+            );
+            assert_eq!(s.point_col(), 2, "the point does not move at EOL");
+        }
+        // At a line start (char before is \n): the first char of the line
+        // moves to the end of the previous; the point moves forward one.
+        {
+            let (_dir, mut s) = accurate_file_store_with("ab\ncd\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(1, 0, 0); // start of line 1, on the 'c'
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "abc\nd\n",
+                "line-start transpose must drag the newline past the char"
+            );
+            assert_eq!(
+                s.point_col(),
+                0,
+                "the point moves one char forward and stays at the line start (now on 'd')"
             );
         }
         // At the buffer start (no char before): no-op.
@@ -1797,6 +1891,21 @@ use super::*;
                 "buffer-end C-t must transpose the last two chars"
             );
             assert_eq!(s.point_col(), 2, "point leaves at the end of the buffer");
+        }
+        // EOL with a one-char line (fewer than two chars before the point on
+        // the line): emacs signals an error; redline no-ops (as at the
+        // buffer start) rather than erroring.
+        {
+            let (_dir, mut s) = accurate_file_store_with("x\ncd\n");
+            let bk = s.buffers.current().unwrap().to_string();
+            s.set_point(0, 1, 1); // end of the one-char line 0, on the \n
+            s.key_event(key("C-t"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().text(),
+                "x\ncd\n",
+                "EOL with one char on the line is a no-op"
+            );
+            assert_eq!(s.point_col(), 1);
         }
     }
 
