@@ -10,7 +10,7 @@ bright blue: as 256-color `48;5;12` -> pyte `5c5cff`, or (plan-004 issue 05,
 when `COLORTERM=truecolor`) as truecolor `48;2;0;0;255` -> pyte `0000ff`.
 So the discriminating signature of the cursor row is a bg in `BAR_BGS`.
 """
-import os, pty, fcntl, termios, struct, time, select, signal, sys
+import os, pty, fcntl, termios, struct, time, select, signal, sys, re
 
 import pyte
 
@@ -197,6 +197,12 @@ class App:
         self.master = master
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
+        # Raw-stream tail for CUP capture (jump-column-pty): the pyte screen
+        # does not retain cursor placement, so the drives that assert a
+        # landing COLUMN parse the raw bytes the same way
+        # check_cursor_stream.py does. Capped (a frame is small; only the
+        # last synchronized frame's CUP is ever read).
+        self.raw_tail = b""
         # Terminal-query state (DA1 — see _answer_terminal_queries).
         self._queries_answered = False
         # Wait for the app to fully start (config + index + watcher) and the
@@ -235,6 +241,7 @@ class App:
                     break
                 self._answer_terminal_queries(data)
                 self.stream.feed(data)
+                self.raw_tail = (self.raw_tail + data)[-1_500_000:]
                 last = time.time()
             if quiet > 0 and (time.time() - last) >= quiet:
                 break
@@ -296,6 +303,53 @@ class App:
         # out to t. Fast mode is validated by a full-battery equivalence
         # run, not assumed (see tools/gate.sh).
         self._read(t, quiet=PTY_QUIET if quiet is None else quiet)
+
+    # ── Raw-stream CUP capture (jump-column-pty) ─────────────────────────
+    # The surviving CUP (the last `ESC[row;col H` after the final
+    # `?2026l` of the current frame) is where the user actually sees the
+    # cursor — a row-only assertion (buffer line) cannot catch a col-0
+    # landing. The same parsing as check_cursor_stream.py's Session:
+    # only the CUP AFTER the final synchronized-frame close counts, so a
+    # mid-frame CUP from an earlier frame is never mistaken for the
+    # survivor. `cup_settle` keeps the read window OPEN until such a CUP
+    # is observed (the CUP race: under load the deferred CUP can arrive
+    # after the frame's sync-close, and a quiet-only close reads it as
+    # `None`); the hard-deadline backstop makes a missing CUP a real
+    # protocol failure. Use it only on reads whose assertion IS the CUP
+    # on a cursor-bearing view (Buffer frames) — picker/Home frames carry
+    # no post-sync CUP, and gating those reads would wait the full cap.
+    _SYNC_END_RE = re.compile(rb"\x1b\[\?2026l")
+    _CUP_RE = re.compile(rb"\x1b\[(\d+);(\d+)[Hf]")
+
+    def cup_after_sync(self, buf=None):
+        """(row, col) — 1-based terminal coordinates — of the last CUP
+        issued after the final `?2026l` of the raw tail, or (None, None).
+        """
+        buf = self.raw_tail if buf is None else buf
+        ends = [m.end() for m in self._SYNC_END_RE.finditer(buf)]
+        if not ends:
+            return (None, None)
+        cups = self._CUP_RE.findall(buf[ends[-1]:])
+        if not cups:
+            return (None, None)
+        return (int(cups[-1][0]), int(cups[-1][1]))
+
+    def _cup_settled(self, buf):
+        ends = [m.end() for m in self._SYNC_END_RE.finditer(buf)]
+        if not ends:
+            return True
+        return bool(self._CUP_RE.search(buf[ends[-1]:]))
+
+    def cup_settle(self, cap=5.0):
+        """Keep reading until a CUP after the final `?2026l` is observed
+        (hard-deadline backstop), then return `cup_after_sync()`."""
+        deadline = time.time() + cap
+        while not self._cup_settled(self.raw_tail):
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
+            self._read(min(0.5, remain), quiet=0.05)
+        return self.cup_after_sync()
 
     def wait_done(self, timeout=15.0):
         """Wait until a streamed search has finished: the title stops showing

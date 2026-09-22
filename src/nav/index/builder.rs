@@ -206,7 +206,7 @@ impl SymbolIndex {
                     .or_default()
                     .entry(path.to_string())
                     .or_default()
-                    .push(f.line);
+                    .push((f.line, f.start_byte));
             }
         }
         // 010-04: the trait-keyed map — one entry per (impl block, self

@@ -1792,3 +1792,256 @@ use super::*;
         assert_eq!((s.point_line(), s.point_col()), (1, 13), "M-, back after RET");
     }
 
+
+// ── jump-column-pty / issue-all-symbol-jumps: the Rust TABLE landings
+// (struct field, impl method, local-binding pre-step) carry the name's
+// column. The user's second report: "when I jump to a field name, it goes
+// to beginning of line." The data source had no column: `StructField` /
+// `ImplMethod` recorded a line only, so `type_member_candidates` built a
+// `Location` with `start_byte: 0` — the silent jump landed at column 0 by
+// construction, and the picker's RET (outline re-read, which has no field
+// rows) degraded to col 0 the same way. The outline-symbol paths already
+// carried `start_byte`; these are the table paths.
+//
+// Every pin below asserts a NONZERO landing column on the NAME, so a
+// col-0 regression fails the battery (pre-fix all of them failed):
+//   * field silent  — `y` at char col 32 of the declaration line;
+//   * method silent — `add` at char col 7 of its `fn` line;
+//   * field picker  — cross-file field row's RET on the field's col 32;
+//   * self-field    — the 010-01 self-receiver pre-step, field col 20;
+//   * multibyte     — `/* 中文 */` before `y`: CHAR col 29 (a byte-column
+//     regression would land at 33, off by the CJK pair's 4 extra bytes;
+//     col-0 at 0).
+
+    /// The user's repro, store-level: `M-.` on a field access (`p.y`)
+    /// through the 010-03 local-binding pre-step, same-file unique → the
+    /// SILENT jump lands on the field NAME's column, not the line start.
+    /// Pre-fix: `point_col()` was 0 (the table carried no byte).
+    #[test]
+    fn xref_field_silent_jump_lands_on_the_field_name_column() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32, pub y: i32 }\n\
+             fn main() {\n\
+             \x20   let p = Pt { x: 1, y: 2 };\n\
+             \x20   let v = p.y;\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    let v = p.y;" — cursor inside the member run `y`
+        // (char col 14). `p` is written down as `Pt` (struct-literal RHS),
+        // so the local-binding pre-step resolves `y` to the struct field.
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file unique field: silent jump");
+        assert_eq!(s.point_line(), 0, "landed on the field's declaration line");
+        assert_eq!(
+            s.point_col(),
+            32,
+            "landed on the field name `y` (char col 32) — a col-0 regression is the user's 'beginning of the line' report"
+        );
+    }
+
+    /// `M-.` on a method call (`p.add`) through the same pre-step: the impl
+    /// method's name column. Pre-fix: col 0 (the table's method entry had
+    /// no byte). The outline also records `add` (a `function_item`), but
+    /// the pre-step short-circuits the bare-name lookup, so this pin goes
+    /// through the TABLE's byte, not the outline's.
+    #[test]
+    fn xref_method_silent_jump_lands_on_the_method_name_column() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\n\
+             fn main() {\n\
+             \x20   let p = Pt { x: 1 };\n\
+             \x20   let v = p.add(2);\n\
+             }\n\
+             impl Pt {\n\
+             \x20   fn add(&self, n: i32) -> i32 { self.x + n }\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "    let v = p.add(2);" — cursor inside `add` (char col 14).
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file unique method: silent jump");
+        assert_eq!(s.point_line(), 6, "landed on the impl method's `fn` line");
+        assert_eq!(
+            s.point_col(),
+            7,
+            "landed on the method name `add` (char col 7) — col 0 pre-fix"
+        );
+    }
+
+    /// The picker path for a field (cross-file unique → Xref picker): RET
+    /// must land on the field name's column in the struct's file. Pre-fix
+    /// the picker's RET re-read the OUTLINE (no field rows) → col 0; now
+    /// `definition_start_byte` falls back to the field table.
+    #[test]
+    fn xref_field_picker_landing_lands_on_the_field_name_column() {
+        let (mut s, _dir) = store_with_index(&[
+            ("src/pt.rs", "pub struct Pt { pub x: i32, pub y: i32 }\n"),
+            (
+                "src/main.rs",
+                "use crate::pt::Pt;\nfn main() {\n    let p = Pt { x: 1, y: 2 };\n    let v = p.y;\n}\n",
+            ),
+        ]);
+        s.open_path("src/main.rs");
+        // Line 3: "    let v = p.y;" — the field lives in src/pt.rs →
+        // cross-file unique → the picker (best row preselected).
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file field: picker");
+        assert_eq!(
+            s.picker_filtered()[0].0.name, "src/pt.rs:1",
+            "the cross-file field row is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/pt.rs");
+        assert_eq!(s.point_line(), 0);
+        assert_eq!(
+            s.point_col(),
+            32,
+            "RET landed on the field name `y` (char col 32), not the line start (col 0 pre-fix)"
+        );
+    }
+
+    /// The 010-01 SELF-receiver pre-step (the other of the two table
+    /// pre-steps): `self.y` inside `impl Pt` resolves via the lexically
+    /// enclosing impl's self type → the field's name column.
+    #[test]
+    fn xref_self_receiver_field_lands_on_the_field_name_column() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub y: i32 }\n\
+             impl Pt {\n\
+             \x20   fn use_it(&self) -> i32 {\n\
+             \x20       self.y\n\
+             \x20   }\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        // Line 3: "        self.y" — cursor inside `y` (char col 13).
+        s.set_point(3, 13, 13);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file unique self-field: silent jump");
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (0, 20),
+            "landed on the field name `y` (line 0, char col 20) — col 0 pre-fix"
+        );
+    }
+
+    /// Multibyte: a CJK comment before the field name on its declaration
+    /// line. The landing must be the CHAR column (29), which
+    /// `try_byte_to_line_col` derives from the name's start byte — a
+    /// byte-column regression lands at 33 (the `中文` pair adds 4 bytes),
+    /// a col-0 regression at 0.
+    #[test]
+    fn xref_field_multibyte_prefix_lands_on_the_char_column_not_the_byte() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { /* 中文 */ pub y: i32 }\n\
+             fn main() {\n\
+             \x20   let p = Pt { y: 1 };\n\
+             \x20   let v = p.y;\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open());
+        assert_eq!(
+            s.point_col(),
+            29,
+            "CHAR col 29 (name start byte 33 converted); a byte-column regression lands at 33, col-0 at 0"
+        );
+    }
+
+    /// The multibyte method twin: the method name after an inline CJK
+    /// comment — char col 16 (start byte 20; a byte-column regression
+    /// lands at 20).
+    #[test]
+    fn xref_method_multibyte_prefix_lands_on_the_char_column_not_the_byte() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/lib.rs",
+            "pub struct Pt { pub x: i32 }\n\
+             fn main() {\n\
+             \x20   let p = Pt { x: 1 };\n\
+             \x20   let v = p.add(2);\n\
+             }\n\
+             impl Pt {\n\
+             \x20   fn /* 中文 */ add(&self) -> i32 { 0 }\n\
+             }\n",
+        )]);
+        s.open_path("src/lib.rs");
+        s.set_point(3, 14, 14);
+        s.xref_find_definitions();
+        assert!(!s.picker_open());
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (6, 16),
+            "CHAR col 16 (name start byte 20 converted); a byte-column regression lands at 20, col-0 at 0"
+        );
+    }
+
+// ── jump-column-pty: the tooling/resolver landing's app-side refinement
+// (`first_word_column`). The cargo provider pins a LINE (never a column)
+// with `line_defines_item` (a definition-shaped match: the item whole-word
+// after an item keyword). This probe settles, by execution, how often the
+// refinement degrades to col 0 on realistic pinned lines:
+//
+//   * every LIVE definition shape (fn / struct / …, comment or string
+//     mentions preceding the name, a multibyte prefix) lands on the NAME's
+//     CHAR column;
+//   * the only degradation is a line where EVERY whole-word occurrence of
+//     the item is inside a comment or string (e.g. a fully commented-out
+//     `/* fn spawn */` — the provider's keyword rule does not mask
+//     comments, so it pins that line too). That is dead code: landing at
+//     the line start there is the honest col-0, never an invented column.
+//   * a bare substring (`respawn`) never matches (never a wrong symbol).
+#[test]
+fn tooling_refinement_lands_on_the_name_for_live_definition_lines() {
+    // Live definition lines: the name's CHAR column (multibyte-aware).
+    assert_eq!(
+        AppStore::first_word_column("pub fn spawn<F>(f: F) {};", "spawn"),
+        Some(7),
+        "plain fn line: the name at char col 7"
+    );
+    assert_eq!(
+        AppStore::first_word_column("pub struct Error { msg: String }", "Error"),
+        Some(11)
+    );
+    // A comment mention BEFORE the live name is skipped (P2-3): the
+    // landing sits on the live definition's name, not the mention.
+    assert_eq!(
+        AppStore::first_word_column("/* spawn */ pub fn spawn() {}", "spawn"),
+        Some(19),
+        "the comment occurrence (col 3) is masked; the live name is col 19"
+    );
+    assert_eq!(
+        AppStore::first_word_column("const N: &str = \"spawn\"; fn spawn() {}", "spawn"),
+        Some(28),
+        "the string occurrence (col 17) is masked; the live name is col 28"
+    );
+    // Multibyte prefix: a CHAR column, not a byte offset (a byte reading
+    // of the same line puts `greet` at 20; the char column is 16).
+    assert_eq!(
+        AppStore::first_word_column("pub /* 中文 */ fn greet() {}", "greet"),
+        Some(16),
+        "char col 16; a byte-column reading would give 20"
+    );
+    // The honest degradations (col 0 at the call site — never an invented
+    // column, never a wrong symbol):
+    assert_eq!(
+        AppStore::first_word_column("/* fn spawn */", "spawn"),
+        None,
+        "every occurrence comment-masked -> None -> col 0 (dead code)"
+    );
+    assert_eq!(
+        AppStore::first_word_column("pub fn respawn() {}", "spawn"),
+        None,
+        "a substring inside a longer identifier never matches"
+    );
+}

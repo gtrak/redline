@@ -55,6 +55,9 @@ def reset():
                   # finally, and untracked leftovers perturb every later
                   # suite's tree/status/file-listing renders (backlog-#12).
                   "src/call.rs", "src/long.rs",
+                  # drive_xref's L7 jump-column pins (jump-column-pty):
+                  "src/col_a.rs", "src/col_b.rs", "src/col_b_use.rs",
+                  "src/col_c.rs", "src/col_d.rs",
                   # drive_xref's external-landing leg (L5) adds a path-dep
                   # Cargo.toml/Cargo.lock to the SHARED fixture; if that run is
                   # killed by the mandated `timeout` (SIGTERM/SIGKILL skips its

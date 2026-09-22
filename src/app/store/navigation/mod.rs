@@ -352,7 +352,11 @@ impl AppStore {
     /// Re-reading the index uses the SAME byte the candidate row was built
     /// from (no re-derivation of a position, no file re-parse) — the picker
     /// candidate carries only the line ("file:line"), so the byte is
-    /// fetched, not re-derived.
+    /// fetched, not re-derived. Struct fields are NOT outline symbols (the
+    /// outline re-read has no byte for them), so a miss falls back to the
+    /// FIELD TABLE — the same name-keyed source the M-. field candidates
+    /// came from, matched by (file, line) (jump-column-pty: pre-fix this
+    /// fallback did not exist and a field row's RET landed at col 0).
     pub(in crate::app::store) fn definition_start_byte(
         &mut self,
         crate_root: Option<&Path>,
@@ -364,20 +368,37 @@ impl AppStore {
             Some(root) => self
                 .crate_index_arc(root)
                 .and_then(|arc| {
-                    arc.lock()
-                        .unwrap()
-                        .outline(file)
-                        .iter()
-                        .find(|s| s.line == line && s.name == symbol_name)
-                        .map(|s| s.start_byte)
+                    Self::definition_start_byte_in(
+                        &arc.lock().unwrap(),
+                        file,
+                        line,
+                        symbol_name,
+                    )
                 }),
-            None => self
-                .index
-                .outline(file)
-                .iter()
-                .find(|s| s.line == line && s.name == symbol_name)
-                .map(|s| s.start_byte),
+            None => Self::definition_start_byte_in(&self.index, file, line, symbol_name),
         }
+    }
+
+    /// The pure lookup both [`definition_start_byte`](Self::definition_start_byte)
+    /// arms share: the outline first (name + line — the imenu P2-2 rule),
+    /// then the field table (a struct field is not an outline symbol; its
+    /// name byte lives in the Rust tables, matched by (file, line)).
+    /// `None` when neither records the (name, line) pair — the caller
+    /// degrades to column 0 (never an invented column).
+    fn definition_start_byte_in(
+        index: &crate::nav::index::SymbolIndex,
+        file: &str,
+        line: usize,
+        symbol_name: &str,
+    ) -> Option<usize> {
+        if let Some(sym) = index
+            .outline(file)
+            .iter()
+            .find(|s| s.line == line && s.name == symbol_name)
+        {
+            return Some(sym.start_byte);
+        }
+        index.field_start_byte(file, line, symbol_name)
     }
 
     /// (jump-column-landings) Translate an index-recorded `start_byte` into

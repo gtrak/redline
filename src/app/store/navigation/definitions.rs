@@ -703,13 +703,23 @@ impl AppStore {
     /// same file's impl tables (an impl's methods are lexically one
     /// file); both are gathered when a name is both (the picker lets the
     /// user choose — never guessed away), deduped, same-file-first.
+    /// Each candidate carries the member name's start byte (jump-column-
+    /// pty: the tables used to carry a line only, so these landings were
+    /// column 0 by construction — the user's "field jumps land at the
+    /// beginning of the line" report); the silent jump and the picker's
+    /// outline re-read both consume it via the byte→(line,col) conversion.
     fn type_member_candidates(
         index: &SymbolIndex,
         rel: &str,
         type_name: &str,
         member: &str,
     ) -> Vec<crate::nav::index::Location> {
-        let mk = |file: String, kind: redline_syntax::queries::SymbolKind, line: usize| {
+        let mk = |
+            file: String,
+            kind: redline_syntax::queries::SymbolKind,
+            line: usize,
+            start_byte: usize,
+        | {
             crate::nav::index::Location {
                 file,
                 symbol: crate::nav::index::Symbol {
@@ -717,23 +727,27 @@ impl AppStore {
                     kind,
                     line,
                     end_line: line,
-                    start_byte: 0,
-                    end_byte: 0,
+                    start_byte,
+                    end_byte: start_byte,
                 },
             }
         };
         let mut out: Vec<crate::nav::index::Location> = Vec::new();
         // Fields: the struct's `field_declaration` lines, all files (the
-        // same file orders first below).
-        for (file, line) in index.field_locations(type_name, member) {
+        // same file orders first below); the entry's start byte is the
+        // field name node's byte (the landing's char-column source).
+        for loc in index.field_locations(type_name, member) {
             out.push(mk(
-                file,
+                loc.file,
                 redline_syntax::queries::SymbolKind::Constant,
-                line,
+                loc.line,
+                loc.start_byte,
             ));
         }
         // Methods: the same file's impl tables only (lexical — an impl's
-        // methods all live in its own file).
+        // methods all live in its own file); the method's start byte is
+        // the name node's byte, the same way the outline symbols carry
+        // theirs.
         if let Some(tables) = index.tables(rel)
             && let Some(methods) = tables.impls.get(type_name)
         {
@@ -742,6 +756,7 @@ impl AppStore {
                     rel.to_string(),
                     redline_syntax::queries::SymbolKind::Function,
                     m.line,
+                    m.start_byte,
                 ));
             }
         }

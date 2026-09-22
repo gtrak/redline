@@ -89,12 +89,21 @@ pub struct Symbol {
 // synchronously. A struct field's location and an impl method's location
 // (with the impl's kind: inherent or the implemented trait's path).
 
-/// One struct field: its name and the line the `field_declaration` starts on.
+/// One struct field: its name, the line the `field_declaration` starts on,
+/// and the field name node's start byte (jump-column-pty / issue-
+/// all-symbol-jumps: the landing's char column comes from this byte via the
+/// byte→(line,col) conversion. The table used to carry a line only, so a
+/// field jump landed at column 0 *by construction* — the user's "jumping to
+/// a field name goes to the beginning of the line" report).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructField {
     pub field: String,
     /// 0-based line of the field declaration.
     pub line: usize,
+    /// Byte offset of the field name's start (tree-sitter's
+    /// `field_identifier` node — the same node the query captures as
+    /// `@struct_field`), for the landing's char-column conversion.
+    pub start_byte: usize,
 }
 
 /// How an impl block associates a method with its type.
@@ -131,6 +140,11 @@ pub struct LocalBinding {
     /// The `let`'s start byte (shadowing: within one scope, the last
     /// `let` before the use site wins).
     pub let_byte: usize,
+    /// Byte offset of the binding's name node (the query's `@bnd_name`
+    /// identifier — the table's data source for a landing on the binding
+    /// itself: a line-only record degrades to a col-0 landing, the same
+    /// shape as the pre-fix `StructField`/`ImplMethod`).
+    pub name_byte: usize,
 }
 
 /// One method of an impl block.
@@ -143,6 +157,10 @@ pub struct ImplMethod {
     /// table key — Rung 4's read-only view).
     pub impl_line: usize,
     pub kind: ImplKind,
+    /// Byte offset of the method name's start (the query's `@impl_method`
+    /// identifier node — the landing's char column comes from this byte,
+    /// the same way the outline symbols carry theirs).
+    pub start_byte: usize,
 }
 
 /// The per-file Rust tables: `fields` is struct name → its fields, `impls`
@@ -161,13 +179,14 @@ pub struct RustTables {
 /// 010-01 accumulator for one `impl_item` while the table query runs (keyed
 /// by the impl node's start byte, which dedupes the double pattern match of
 /// a trait impl): its self-type base name, the trait path (if any), the
-/// impl's start line, and the methods seen so far as `(name, line)`.
+/// impl's start line, and the methods seen so as `(name, line, name start
+/// byte)` (the byte is the landing's char-column source, jump-column-pty).
 #[derive(Default)]
 struct ImplAcc {
     base: String,
     trait_name: Option<String>,
     impl_line: usize,
-    methods: Vec<(String, usize)>,
+    methods: Vec<(String, usize, usize)>,
 }
 
 // ── per-language definition queries ─────────────────────────────────────
@@ -909,6 +928,7 @@ fn extract_rust_tables(
                 type_name: type_name.to_string(),
                 line: let_node.start_position().row,
                 let_byte: let_node.start_byte(),
+                name_byte: name_node.start_byte(),
             });
             continue;
         }
@@ -951,8 +971,8 @@ fn extract_rust_tables(
                     methods: Vec::new(),
                 }
             });
-            if !entry.methods.iter().any(|(n, _)| n == &method) {
-                entry.methods.push((method, method_line));
+            if !entry.methods.iter().any(|(n, _, _)| n == &method) {
+                entry.methods.push((method, method_line, method_node.start_byte()));
             }
             continue;
         }
@@ -964,6 +984,7 @@ fn extract_rust_tables(
         fields.entry(s.to_string()).or_default().push(StructField {
             field: f.to_string(),
             line: field_node.start_position().row,
+            start_byte: field_node.start_byte(),
         });
     }
     let mut impls_out: HashMap<String, Vec<ImplMethod>> = HashMap::new();
@@ -975,10 +996,11 @@ fn extract_rust_tables(
         impls_out
             .entry(acc.base)
             .or_default()
-            .extend(acc.methods.into_iter().map(|(method, line)| ImplMethod {
+            .extend(acc.methods.into_iter().map(|(method, line, start_byte)| ImplMethod {
                 method,
                 line,
                 impl_line: acc.impl_line,
+                start_byte,
                 kind: kind.clone(),
             }));
     }
@@ -1227,19 +1249,21 @@ mod tests {
                    }\n";
         let (_syms, tables) = extract_all(LanguageId::Rust, src);
         // Fields: the visibility modifier is ignored, lines are the
-        // field_declaration's own line.
+        // field_declaration's own line, and the start_byte is the field
+        // name node's byte (jump-column-pty: the landing's char column
+        // comes from this byte — a line-only table lands at col 0).
         assert_eq!(
             tables.fields.get("Foo"),
             Some(&vec![
-                StructField { field: "a".into(), line: 0 },
-                StructField { field: "b".into(), line: 0 },
+                StructField { field: "a".into(), line: 0, start_byte: 13 },
+                StructField { field: "b".into(), line: 0, start_byte: 25 },
             ]),
             "Foo's fields: {:?}",
             tables.fields
         );
         assert_eq!(
             tables.fields.get("Generic"),
-            Some(&vec![StructField { field: "x".into(), line: 1 }]),
+            Some(&vec![StructField { field: "x".into(), line: 1, start_byte: 57 }]),
         );
         assert_eq!(tables.fields.len(), 2, "exactly the two structs");
         // Impl methods: inherent + trait (the trait's FULL path) + the
@@ -1247,25 +1271,38 @@ mod tests {
         // match, sorted by line.
         let foo = tables.impls.get("Foo").expect("impls[Foo]");
         assert_eq!(foo.len(), 3, "three Foo methods, no duplicates: {foo:?}");
-        assert_eq!(foo[0], ImplMethod { method: "m".into(), line: 3, impl_line: 2, kind: ImplKind::Inherent });
+        assert_eq!(foo[0], ImplMethod { method: "m".into(), line: 3, impl_line: 2, start_byte: 82, kind: ImplKind::Inherent });
         assert_eq!(
             foo[1],
             ImplMethod {
                 method: "fmt".into(),
                 line: 7,
                 impl_line: 6,
+                start_byte: 175,
                 kind: ImplKind::Trait("std::fmt::Display".into()),
             }
         );
         assert_eq!(
             foo[2],
-            ImplMethod { method: "extra".into(), line: 14, impl_line: 13, kind: ImplKind::Inherent }
+            ImplMethod {
+                method: "extra".into(),
+                line: 14,
+                impl_line: 13,
+                start_byte: 350,
+                kind: ImplKind::Inherent,
+            }
         );
         // The generic self type `Generic<T>` keys by its base name.
         let generic = tables.impls.get("Generic").expect("impls[Generic]");
         assert_eq!(
             generic,
-            &[ImplMethod { method: "g".into(), line: 10, impl_line: 9, kind: ImplKind::Inherent }]
+            &[ImplMethod {
+                method: "g".into(),
+                line: 10,
+                impl_line: 9,
+                start_byte: 280,
+                kind: ImplKind::Inherent,
+            }]
         );
         assert_eq!(tables.impls.len(), 2);
         // The symbol pass is byte-for-byte the pre-010-01 outline (the

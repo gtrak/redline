@@ -35,7 +35,7 @@ pub use builder::extract_file;
 #[allow(unused_imports)]
 pub use progress::PROGRESS_STEP;
 #[allow(unused_imports)]
-pub use symbol_index::TraitImpl;
+pub use symbol_index::{FieldLocation, TraitImpl};
 
 // Re-exported so the public index/xref API can name the symbol type.
 pub use redline_syntax::queries::Symbol;
@@ -223,7 +223,8 @@ mod tests {
         let index = build_index(root, &files, None);
 
         // Same-file seam: ops.rs's impl table (inherent, method line 2,
-        // impl line 1).
+        // impl line 1, method name's start byte 49 — jump-column-pty: the
+        // landing's char column comes from this byte).
         let ops = index.tables("src/ops.rs").expect("ops.rs has tables");
         assert_eq!(
             ops.impls.get("Point"),
@@ -231,6 +232,7 @@ mod tests {
                 method: "x".into(),
                 line: 2,
                 impl_line: 1,
+                start_byte: 49,
                 kind: redline_syntax::queries::ImplKind::Inherent,
             }]),
             "ops.rs impl table: {ops:?}"
@@ -241,15 +243,20 @@ mod tests {
         assert_eq!(
             point.fields.get("Point"),
             Some(&vec![
-                redline_syntax::queries::StructField { field: "x".into(), line: 0 },
-                redline_syntax::queries::StructField { field: "y".into(), line: 0 },
+                redline_syntax::queries::StructField { field: "x".into(), line: 0, start_byte: 23 },
+                redline_syntax::queries::StructField { field: "y".into(), line: 0, start_byte: 35 },
             ])
         );
         // Cross-file seam: the field `x` of struct `Point` lives in point.rs
-        // even though the lookup would be issued from ops.rs's impl.
+        // even though the lookup would be issued from ops.rs's impl — and
+        // the entry carries the name's start byte (23), not just the line.
         assert_eq!(
             index.field_locations("Point", "x"),
-            vec![("src/point.rs".into(), 0usize)],
+            vec![FieldLocation {
+                file: "src/point.rs".into(),
+                line: 0,
+                start_byte: 23,
+            }],
             "cross-file field location"
         );
         assert!(index.field_locations("Point", "missing").is_empty());
@@ -268,14 +275,17 @@ mod tests {
         std::fs::write(root.join("src/point.rs"), "pub struct Point { pub x: i32 }\n").unwrap();
         let files = rel_files(root);
         let mut index = build_index(root, &files, None);
-        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
+        assert_eq!(
+            index.field_locations("Point", "x"),
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 23 }]
+        );
 
         // Reparse the UNCHANGED file through the refresh path.
         let path = root.join("src/point.rs");
         refresh_in_place(root, std::slice::from_ref(&path), &mut index);
         assert_eq!(
             index.field_locations("Point", "x"),
-            vec![("src/point.rs".into(), 0)],
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 23 }],
             "a same-content refresh must not strip the field map"
         );
         // And the tables entry survives for method resolution.
@@ -284,8 +294,14 @@ mod tests {
         // double-removed or corrupted by the shortcut).
         std::fs::write(&path, "pub struct Point { pub x: i32, pub y: i32 }\n").unwrap();
         refresh_in_place(root, std::slice::from_ref(&path), &mut index);
-        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
-        assert_eq!(index.field_locations("Point", "y"), vec![("src/point.rs".into(), 0)]);
+        assert_eq!(
+            index.field_locations("Point", "x"),
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 23 }]
+        );
+        assert_eq!(
+            index.field_locations("Point", "y"),
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 35 }]
+        );
     }
 
     /// 010-03 (010-01 review P1 mirror pin): a file whose ONLY table
@@ -349,7 +365,10 @@ mod tests {
         std::fs::write(root.join("src/point.rs"), "pub struct Point { pub x: i32 }\n").unwrap();
         let files = rel_files(root);
         let mut index = build_index(root, &files, None);
-        assert_eq!(index.field_locations("Point", "x"), vec![("src/point.rs".into(), 0)]);
+        assert_eq!(
+            index.field_locations("Point", "x"),
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 23 }]
+        );
 
         // Change the struct: `x` becomes `xx` — the stale location must
         // disappear, the new one appear (the field map stays consistent).
@@ -357,7 +376,10 @@ mod tests {
         let path = root.join("src/point.rs");
         refresh_in_place(root, std::slice::from_ref(&path), &mut index);
         assert!(index.field_locations("Point", "x").is_empty(), "stale field dropped");
-        assert_eq!(index.field_locations("Point", "xx"), vec![("src/point.rs".into(), 0)]);
+        assert_eq!(
+            index.field_locations("Point", "xx"),
+            vec![FieldLocation { file: "src/point.rs".into(), line: 0, start_byte: 23 }]
+        );
 
         // Delete the file: its tables leave the index with the outline.
         std::fs::remove_file(&path).unwrap();

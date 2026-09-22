@@ -6,6 +6,10 @@ use std::collections::HashMap;
 
 use redline_syntax::queries::{ImplKind, RustTables, Symbol};
 
+/// The field-map shape (clippy's type_complexity factored out): struct
+/// name → field name → (file → [(line, name start byte)]).
+type FieldMap = HashMap<String, HashMap<String, HashMap<String, Vec<(usize, usize)>>>>;
+
 /// A definition's location in the project: the (project-relative) file and
 /// the symbol itself. The tree-sitter backend's `definitions_of` returns
 /// these.
@@ -37,10 +41,12 @@ pub struct SymbolIndex {
     /// block (`set_file_tables`) can maintain the maps alongside.
     pub(super) rust_tables: HashMap<String, RustTables>,
     /// 010-01: name-keyed struct fields for the CROSS-file self-receiver
-    /// field lookup: struct name → field name → (file → [lines]).
+    /// field lookup: struct name → field name → (file → [(line, name start
+    /// byte)]). The byte (jump-column-pty) is what the landing converts to
+    /// a char column — the pre-fix line-only shape landed at col 0.
     /// `pub(super)` so the builder's second `impl SymbolIndex`
     /// block (`set_file_tables`) can maintain the maps alongside.
-    pub(super) rust_fields: HashMap<String, HashMap<String, HashMap<String, Vec<usize>>>>,
+    pub(super) rust_fields: FieldMap,
     /// 010-04 (plan 010 Shape A, rung 4): the name-keyed TRAIT map for
     /// find-implementations: trait name (the impl's captured `trait:` field
     /// text) → (file → that file's `impl Trait for Type` blocks) — built
@@ -72,6 +78,18 @@ pub struct TraitImplLocation {
     pub self_type: String,
 }
 
+/// (010-01 / jump-column-pty) One struct field's location in the index:
+/// the (project-relative) file, the field declaration's 0-based line, and
+/// the field name node's start byte (the landing's char-column source —
+/// the pre-fix `Vec<(String, usize)>` shape had no byte to carry, so a
+/// field jump landed at column 0 by construction).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldLocation {
+    pub file: String,
+    pub line: usize,
+    pub start_byte: usize,
+}
+
 impl SymbolIndex {
     pub fn new() -> Self {
         Self::default()
@@ -98,18 +116,40 @@ impl SymbolIndex {
     /// (010-01) Every location of struct `struct_name`'s field `field`
     /// (all files, same file included), in deterministic (file, line) order
     /// — the cross-file self-receiver field lookup; the caller orders the
-    /// same-file hit first.
-    pub fn field_locations(&self, struct_name: &str, field: &str) -> Vec<(String, usize)> {
+    /// same-file hit first. Each entry carries the field name's start byte
+    /// (jump-column-pty): the landing converts it to the char column via
+    /// the byte→(line,col) conversion, the way the outline symbols do.
+    pub fn field_locations(&self, struct_name: &str, field: &str) -> Vec<FieldLocation> {
         let Some(per_file) = self.rust_fields.get(struct_name).and_then(|m| m.get(field)) else {
             return Vec::new();
         };
-        let mut out: Vec<(String, usize)> = per_file
+        let mut out: Vec<FieldLocation> = per_file
             .iter()
-            .flat_map(|(file, lines)| lines.iter().map(move |&l| (file.clone(), l)))
+            .flat_map(|(file, locs)| {
+                locs.iter().map(move |&(line, start_byte)| FieldLocation {
+                    file: file.clone(),
+                    line,
+                    start_byte,
+                })
+            })
             .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
         out.dedup();
         out
+    }
+
+    /// (jump-column-pty) The name-node start byte of the struct field
+    /// `field` (of ANY struct — the field-table map is keyed struct-first,
+    /// and the picker's RET row carries only the field name + (file, line))
+    /// declared at `(file, line)` — the picker-landing fallback for a field
+    /// row (fields are not outline symbols). `None` when no field of that
+    /// name is recorded at that (file, line) — the caller degrades to col 0.
+    pub fn field_start_byte(&self, file: &str, line: usize, field: &str) -> Option<usize> {
+        self.rust_fields
+            .values()
+            .filter_map(|by_field| by_field.get(field))
+            .filter_map(|by_file| by_file.get(file))
+            .find_map(|locs| locs.iter().find(|&&(l, _)| l == line).map(|&(_, b)| b))
     }
 
     /// (010-04) Every `impl <trait_name> for <Type>` location in the
