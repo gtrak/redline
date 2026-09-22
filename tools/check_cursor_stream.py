@@ -1109,7 +1109,9 @@ def jump_highlight_checks():
     """jump-highlight: the animated landing highlight, with an animated
     jump exercised (the spec's CUP-race interaction check, plan 013):
     * M-i -> beta (window pinned at Bot: beta lands on terminal row 20,
-      1-based): the landing pulse is a YELLOW band (iocraft's bright
+      1-based, at the `beta` name's column (col 4) — jump-column-landings,
+      the imenu landing is on the symbol, not the line start): the
+      landing pulse is a YELLOW band (iocraft's bright
       yellow, `48;5;11`, under the 256-color path) — present in the raw
       stream right after the landing and reconstructable in pyte (a
       `ffff00` bg on the landing row) — then CLEARS (no `48;5;11` / no
@@ -1137,6 +1139,7 @@ def jump_highlight_checks():
         f.write("\n".join(lines))
 
     BETA_ROW = 20          # 1-based terminal row of `fn beta() {`
+    BETA_COL = 4           # 1-based terminal col of the `beta` NAME (jump-column-landings: the imenu landing is on the symbol, `fn |beta`, not the line start)
     REF_ROW, REF_COL = 21, 6  # 1-based row/col of the `alpha` reference
 
     def run(mode):
@@ -1191,8 +1194,12 @@ def jump_highlight_checks():
         # ?2026l is in the chunk — the landing frame's CUP or a later
         # animation frame's; the point does not move during the fade).
         r, c = last_cup_after_sync(s.cup_settle(buf))
+        # jump-column-landings: the imenu landing is on the `beta` NAME
+        # (`fn |beta` → 1-based col 4), not the line start — the CUP tracks
+        # that column both during and after the fade.
         rec(f"{'truecolor' if mode else '256'}: CUP on the animated landing",
-            (r, c) == (BETA_ROW, 1), f"cup=({r},{c}) want ({BETA_ROW},1)")
+            (r, c) == (BETA_ROW, BETA_COL),
+            f"cup=({r},{c}) want ({BETA_ROW},{BETA_COL})")
         if mode is None:
             # The band CLEARS after the ~200 ms fade: the settled frame
             # (pyte's final state AND the raw stream) carries no yellow.

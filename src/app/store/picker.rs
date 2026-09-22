@@ -879,13 +879,22 @@ impl AppStore {
                     } else {
                         self.current_jump_entry()
                     };
-                    if let Some(root) = self.xref_crate_root.clone() {
+                    // (jump-column-landings) re-read the definition's
+                    // recorded name byte (the candidate row carries only
+                    // "file:line") so the landing sits on the name's
+                    // column, not the line start. `None` (a stale index)
+                    // degrades honestly to col 0.
+                    let crate_root = self.xref_crate_root.clone();
+                    let start_byte =
+                        self.definition_start_byte(crate_root.as_deref(), file, line - 1);
+                    if let Some(root) = crate_root {
                         // 006-03: the candidate is CRATE-relative — open
                         // READ-ONLY via the external path (the landing
                         // stays inside the same source_root, so the crate
                         // cache stays valid and 008-01 semantics hold).
                         if self.open_external_path(&root.join(file)).is_some() {
-                            self.set_point_line(line - 1);
+                            let col = self.landing_column_from_start_byte(start_byte);
+                            self.set_point(line - 1, col, col);
                             self.recenter_landing();
                             self.ensure_highlight();
                             self.record_jump(origin, "M-.");
@@ -895,7 +904,8 @@ impl AppStore {
                         }
                     } else {
                         self.open_path(file);
-                        self.set_point_line(line - 1);
+                        let col = self.landing_column_from_start_byte(start_byte);
+                        self.set_point(line - 1, col, col);
                         self.recenter_landing();
                         self.ensure_highlight();
                         self.record_jump(origin, "M-.");
@@ -906,11 +916,24 @@ impl AppStore {
             PickerKind::Imenu => {
                 // name is "symbol:line" (1-based line number); the file is
                 // the current buffer, so just scroll to the line.
-                if let Some(line_str) = name.rsplit_once(':').map(|(_, l)| l)
+                if let Some((sym, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();
-                    self.set_point_line(line - 1);
+                    // (jump-column-landings) land on the symbol's name
+                    // column, not the line start: the imenu candidate
+                    // encodes "symbol:line" (the line only); re-read the
+                    // current buffer's outline for that (name, line)
+                    // symbol's recorded start_byte so the landing sits on
+                    // the name. `None` (a stale index) degrades honestly to
+                    // col 0.
+                    let outline = self.current_buffer_outline();
+                    let start_byte = outline
+                        .iter()
+                        .find(|s| s.name == sym && s.line == line - 1)
+                        .map(|s| s.start_byte);
+                    let col = self.landing_column_from_start_byte(start_byte);
+                    self.set_point(line - 1, col, col);
                     self.recenter_landing();
                     self.ensure_highlight();
                     self.record_jump(origin, "M-i");
@@ -930,6 +953,10 @@ impl AppStore {
             // picker (open, point to the line, recenter, record the jump).
             PickerKind::Annotations => {
                 // detail is "path:line" (1-based line number, as shown).
+                // (jump-column-landings) col 0 is CORRECT here: an
+                // annotation is anchored to a LINE (the record carries no
+                // column/symbol), so the landing sits at the line start —
+                // there is no name column to land on (never invent one).
                 if let Some((file, line_str)) = detail.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {

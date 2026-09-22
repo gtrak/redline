@@ -51,8 +51,19 @@ impl AppStore {
             ExternalXrefOutcome::Jump { file, line } => {
                 let origin = self.current_jump_entry();
                 let abs = root.join(&file);
+                // (jump-column-landings) land on the definition's name
+                // column, not the line start: the crate index recorded the
+                // name's start_byte for this (file, line); re-read it. The
+                // outcome enum carries only a line, and re-querying the
+                // index avoids a mod.rs change to the outcome type (making
+                // `ExternalXrefOutcome::Jump` carry a column is the
+                // deferred follow-up). `None` (a stale index) degrades
+                // honestly to col 0.
+                let start_byte =
+                    self.definition_start_byte(Some(root.as_path()), &file, line);
                 if self.open_external_path(&abs).is_some() {
-                    self.set_point_line(line);
+                    let col = self.landing_column_from_start_byte(start_byte);
+                    self.set_point(line, col, col);
                     self.recenter_landing();
                     self.ensure_highlight();
                     self.record_jump(origin, "M-.");

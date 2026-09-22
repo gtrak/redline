@@ -64,6 +64,10 @@ use super::*;
         let buf = s.buffers.get(&key).unwrap();
         assert!(!buf.editable, "external source is read-only");
         assert_eq!(s.point_line(), 1, "point on the resolved (1-based line 2) definition");
+        // jump-column-landings: the app-side refinement lands on the
+        // resolved item's name column (`pub fn |spawn` → col 7), not the
+        // line start (col 0) — the pre-fix col-0 landing would fail here.
+        assert_eq!(s.point_col(), 7, "the `spawn` name's column, not col 0");
         assert!(s.message.contains("jumped to"), "jump report, got: {}", s.message);
         assert_eq!(
             s.project_store.recents.list(&root).to_vec(),

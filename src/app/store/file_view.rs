@@ -605,19 +605,21 @@ impl AppStore {
     /// A col-0 landing: `set_point` with the point's column (and goal
     /// column) reset to 0. For the callers whose target carries no
     /// column — goto-line (M-g g; emacs `goto-line` lands at the line
-    /// start), imenu / the xref & symbol pickers (M-i / M-.; candidates
-    /// are "symbol:line" / "file:line"), resolver landings
-    /// (`ResolvedSource` has no column), and external xref jumps (line-only
-    /// outcome). Callers that DO know a landing column must not use
-    /// this — they land via `set_point(line, col, col)`: isearch lands
-    /// on the match's column, isearch cancel (C-g) restores the recorded
-    /// pre-search (line, col), C-x C-x lands the mark's byte offset via
-    /// `try_byte_to_line_col`, project-search RET lands the hit's byte
-    /// column (converted within the line; regex hits have none and land
-    /// col 0), the unique-definition `M-.` jump lands
-    /// `Symbol.start_byte` via `try_byte_to_line_col`, and `M-,` /
-    /// picker-selected `M-.` restore the recorded column
-    /// (`navigate_to_entry`).
+    /// start) and the Annotations picker (an annotation is anchored to a
+    /// line — the record carries no symbol/column). Callers that DO know a
+    /// landing column must not use this — they land via `set_point(line,
+    /// col, col)`: isearch lands on the match's column, isearch cancel
+    /// (C-g) restores the recorded pre-search (line, col), C-x C-x lands the
+    /// mark's byte offset via `try_byte_to_line_col`, project-search RET
+    /// lands the hit's byte column (converted within the line; regex hits
+    /// have none and land col 0), the unique-definition `M-.` jump lands
+    /// `Symbol.start_byte` via `try_byte_to_line_col`, the xref / symbols /
+    /// imenu pickers land the definition's `Symbol.start_byte` column
+    /// (jump-column-landings), resolver (tooling) landings refine to the
+    /// resolved item's name column on the line (the app-side refinement the
+    /// `ResolvedSource.line` doc describes), external xref jumps land the
+    /// crate-index `start_byte` column, and `M-,` / picker-selected `M-.`
+    /// restore the recorded column (`navigate_to_entry`).
     pub(super) fn set_point_line(&mut self, line: usize) {
         self.set_point(line, 0, 0);
     }

@@ -100,7 +100,11 @@ pub struct ResolvedSource {
     pub external: bool,
     /// Best-effort 1-based line of the item's definition inside `file`.
     /// `None` when a file was located but no definition line could be pinned
-    /// down; the app refines placement precisely later.
+    /// down. A provider emits a line, never a column — the app refines
+    /// placement precisely later (jump-column-landings): after landing on
+    /// the line it locates the resolved item's name on that line and lands
+    /// on its first char column, degrading to column 0 when the name is not
+    /// a whole word on the line (never an invented column).
     pub line: Option<u32>,
 }
 

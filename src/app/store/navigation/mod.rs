@@ -72,11 +72,121 @@ impl AppStore {
         // pin one, the top of the file — a provider emitting 0 is treated
         // as "no line", 006-02b item 6, so no underflow).
         let line = tooling_landing_line(source);
-        self.set_point_line(line);
+        // App-side refinement the `ResolvedSource.line` doc promises
+        // (jump-column-landings): a provider pins a LINE but never a
+        // column — locate the resolved item's name on that line and land
+        // on its first char column (the item is the path's last segment,
+        // `tokio::spawn` → `spawn`), so an M-. on a function lands on the
+        // name, not the line start. A whole-word match only (never
+        // `respawn`/`spawned`); the scan is char-based, so a multibyte
+        // prefix yields a CHAR column, not a byte offset. The honest col-0
+        // fallback when the name is not a whole word on the line — never
+        // an invented column.
+        let line_text = self
+            .buffers
+            .current_buffer()
+            .and_then(|b| b.line_text(line).map(|t| t.into_owned()))
+            .unwrap_or_default();
+        let item = symbol
+            .rsplit([':', '.'])
+            .find(|seg| !seg.is_empty())
+            .unwrap_or(symbol);
+        let col = AppStore::first_word_column(&line_text, item).unwrap_or(0);
+        self.set_point(line, col, col);
         self.recenter_landing();
         self.ensure_highlight();
         self.record_jump(origin, "M-.");
         self.minibuffer_message(&format!("jumped to {display}:{}", line + 1));
+    }
+
+    /// (jump-column-landings) The 0-based CHAR column of the first whole-word
+    /// occurrence of `item` on `line_text` — the app-side refinement for a
+    /// tooling landing whose provider pinned a line but no column. A word
+    /// char immediately before or after `item` disqualifies that occurrence
+    /// (`spawn` never matches `respawn`/`spawned`), so the landing sits on
+    /// the definition's own name, not a substring inside a longer
+    /// identifier. `None` when `item` is empty or absent as a whole word —
+    /// the caller degrades to column 0 (never an invented column). The scan
+    /// is char-based, so a multibyte prefix yields a CHAR column, not a byte
+    /// offset (a byte scan would be off-by-N on such a line).
+    pub(in crate::app::store) fn first_word_column(line_text: &str, item: &str) -> Option<usize> {
+        if item.is_empty() {
+            return None;
+        }
+        let chars: Vec<char> = line_text.chars().collect();
+        let target: Vec<char> = item.chars().collect();
+        let n = target.len();
+        if n > chars.len() {
+            return None;
+        }
+        for i in 0..=chars.len() - n {
+            if chars[i..i + n] != target[..] {
+                continue;
+            }
+            let before_ok = i == 0 || !is_word_char(chars[i - 1]);
+            let j = i + n;
+            let after_ok = j >= chars.len() || !is_word_char(chars[j]);
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// (jump-column-landings) The index-recorded `start_byte` (an absolute
+    /// file byte offset) of the symbol at `(file, line)` in the picker's
+    /// current index: the project index when `crate_root` is `None`, the
+    /// crate's index otherwise. `None` when no symbol on that line is in the
+    /// index (a stale index after an external edit) — the caller degrades to
+    /// column 0. Re-reading the index uses the SAME byte the candidate row
+    /// was built from (no re-derivation of a position, no file re-parse) —
+    /// the picker candidate carries only the line ("file:line"), so the byte
+    /// is fetched, not re-derived.
+    pub(in crate::app::store) fn definition_start_byte(
+        &mut self,
+        crate_root: Option<&Path>,
+        file: &str,
+        line: usize,
+    ) -> Option<usize> {
+        match crate_root {
+            Some(root) => self
+                .crate_index_arc(root)
+                .and_then(|arc| {
+                    arc.lock()
+                        .unwrap()
+                        .outline(file)
+                        .iter()
+                        .find(|s| s.line == line)
+                        .map(|s| s.start_byte)
+                }),
+            None => self
+                .index
+                .outline(file)
+                .iter()
+                .find(|s| s.line == line)
+                .map(|s| s.start_byte),
+        }
+    }
+
+    /// (jump-column-landings) Translate an index-recorded `start_byte` into
+    /// the 0-based CHAR column of the name on its own line via the current
+    /// buffer's byte→(line,char) conversion (`try_byte_to_line_col` — the
+    /// byte→char step keeps it a CHAR column, not a raw byte offset). `0`
+    /// when the byte is out of range of the current buffer (a stale index)
+    /// or no buffer is current — the honest col-0 degradation, never an
+    /// invented column.
+    pub(in crate::app::store) fn landing_column_from_start_byte(
+        &self,
+        start_byte: Option<usize>,
+    ) -> usize {
+        start_byte
+            .and_then(|byte| {
+                self.buffers
+                    .current_buffer()
+                    .and_then(|b| b.try_byte_to_line_col(byte))
+            })
+            .map(|(_, col)| col)
+            .unwrap_or(0)
     }
 
     /// (jump-ambiguity) A tooling-resolver HIT joins the Xref picker
