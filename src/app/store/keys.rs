@@ -39,6 +39,14 @@ impl AppStore {
             self.toggle_ro_key(key);
             return;
         }
+        // External-change reload confirm (issue-external-change-reload):
+        // `y` reloads from disk (discarding the unsaved edits), `n`/C-g/ESC
+        // cancel (the edits and the changed-on-disk marker stay); every
+        // other key is swallowed (no "unbound key" echo mid-prompt).
+        if self.reload_confirm_active() {
+            self.reload_confirm_key(key);
+            return;
+        }
         // Picker: printable chars extend the query, Backspace/C-h edit it,
         // RET / arrows / C-n / C-p drive it; other keys fall through.
         if self.picker.is_some() && self.picker_key_event(key) {

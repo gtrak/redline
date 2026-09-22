@@ -172,34 +172,65 @@ impl AppStore {
     }
 
     /// Re-read the file buffer at `path` from disk, preserving the scroll
-    /// anchor (same line number if it still exists, else clamp). Returns true
-    /// when the buffer existed and was reloaded.
+    /// anchor (same line number if it still exists, else clamp). Returns
+    /// true when the buffer existed and was reloaded.
     fn reload_buffer(&mut self, path: &Path) -> bool {
         let key = path.to_string_lossy().into_owned();
-        let old_top = self.scroll.get(&key).copied().unwrap_or(0);
+        self.reload_in_place(&key, path).is_ok()
+    }
+
+    /// Re-read `path` into the buffer at `key` IN PLACE: the rope and the
+    /// mtime are replaced, but the buffer's IDENTITY survives the reload —
+    /// `mode`, `editable`, `is_notes`, `mark` and `locally_modified` are
+    /// NOT reset (a disk reload changes the buffer's CONTENT, not its
+    /// identity; a replace via `insert_rope` would rebuild the buffer via
+    /// `Buffer::new` and silently drop both the mode and any unsaved
+    /// edits — the data-loss path this exists to close). Scroll anchor is
+    /// preserved (same line if it still exists, else clamp), the retained
+    /// tree is dropped, and the highlight + annotation-anchor caches are
+    /// refreshed.
+    ///
+    /// Every disk reload flows through this one chokepoint: the watcher's
+    /// auto-reload (`reload_buffer`), the reopen re-stat
+    /// (`open_project_path`), the external-change confirm's `y`
+    /// (`reload_confirm_accept`), and the `g` force-reload
+    /// (`reload_current_buffer`).
+    ///
+    /// Plan 016 (undo) seam — STATED ORDER: this issue lands FIRST, so
+    /// 016 inherits these reload semantics and must honour its own rule
+    /// that a file reloaded from disk clears the undo history (the
+    /// recorded offsets become invalid) by hooking that clear into this
+    /// chokepoint — one place covers all four reload routes.
+    pub(super) fn reload_in_place(
+        &mut self,
+        key: &str,
+        path: &Path,
+    ) -> std::result::Result<(), String> {
         let (rope, mtime) = match load_file(path) {
             Ok(x) => x,
-            // File vanished / unreadable: keep the old content; no error
-            // spam on every change event.
-            Err(_) => return false,
+            // File vanished / unreadable: keep the old content; report the
+            // failure so the caller can decide (no error spam on every
+            // change event is the watcher's policy, stated there).
+            Err(e) => return Err(e.to_string()),
         };
         let new_total = rope.len_lines();
+        let old_top = self.scroll.get(key).copied().unwrap_or(0);
         let new_top = reload_anchor(old_top, new_total);
-        if let Some(buf) = self.buffers.get_mut(&key) {
+        if let Some(buf) = self.buffers.get_mut(key) {
             buf.rope = rope;
             buf.mtime = mtime;
             buf.changed_on_disk = false;
         }
-        self.drop_retained_tree(&key);
-        self.scroll.insert(key.clone(), new_top);
-        self.ensure_highlight_for_key(&key);
-        // plan 005 issue 02: auto-reload is a content change — the
+        self.drop_retained_tree(key);
+        self.scroll.insert(key.to_string(), new_top);
+        self.ensure_highlight_for_key(key);
+        // plan 005 issue 02: a disk reload is a content change — the
         // annotation anchors for this file maintain themselves.
-        self.reanchor_for_key(&key);
-        if self.notes_key().as_deref() == Some(key.as_str()) {
+        self.reanchor_for_key(key);
+        if self.notes_key().as_deref() == Some(key) {
             self.notes_buffer_dirty = true;
         }
-        true
+        Ok(())
     }
 
     /// `g`: force-reload the current file buffer from disk, superseding any
@@ -215,33 +246,72 @@ impl AppStore {
             self.minibuffer_message("no file to reload (scratch buffer)");
             return;
         };
-        let old_top = self.scroll.get(&key).copied().unwrap_or(0);
-        let (rope, mtime) = match load_file(&path) {
-            Ok(x) => x,
-            Err(e) => {
-                self.minibuffer_message(&format!("reload failed: {e}"));
-                return;
-            }
-        };
-        let new_total = rope.len_lines();
-        let new_top = reload_anchor(old_top, new_total);
+        if let Err(e) = self.reload_in_place(&key, &path) {
+            self.minibuffer_message(&format!("reload failed: {e}"));
+            return;
+        }
         if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.rope = rope;
-            buf.mtime = mtime;
-            buf.changed_on_disk = false;
             buf.locally_modified = false; // force reload supersedes local edits
         }
-        self.drop_retained_tree(&key);
-        self.scroll.insert(key.clone(), new_top);
-        self.ensure_highlight_for_key(&key);
-        // plan 005 issue 02: on reload, the annotation anchors for this
-        // file maintain themselves; reloading the notes file itself
-        // re-parses its structured section.
-        self.reanchor_for_key(&key);
-        if self.notes_key().as_deref() == Some(key.as_str()) {
-            self.notes_buffer_dirty = true;
-        }
         self.minibuffer_message("reloaded");
+    }
+
+    /// Whether an external-change reload confirm is armed.
+    pub fn reload_confirm_active(&self) -> bool {
+        self.reload_confirm.is_some()
+    }
+
+    /// The external-change confirm's state machine (issue-
+    /// external-change-reload; same shape as the quit / toggle-read-only
+    /// confirms): `y` reloads the file from disk — discarding the unsaved
+    /// edits but KEEPING the buffer's identity (the mode is not reset by a
+    /// reload) — `n`, C-g and ESC cancel (the edits and the
+    /// `changed_on_disk` marker stay). Every other key is swallowed (no
+    /// "unbound key" echo mid-prompt).
+    pub fn reload_confirm_key(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+            self.reload_confirm_cancel();
+            return;
+        }
+        let Some(c) = key.char_value() else { return };
+        match c {
+            'y' => {
+                self.reload_confirm_accept();
+            }
+            'n' => {
+                self.reload_confirm_cancel();
+            }
+            _ => {}
+        }
+    }
+
+    /// The confirm's `y`: reload from disk in place and clear the local-
+    /// edit flags. A failed re-read keeps the confirm armed (no silent
+    /// state half-change, the `toggle_ro_accept` discipline).
+    fn reload_confirm_accept(&mut self) {
+        let Some(key) = self.reload_confirm.clone() else {
+            return;
+        };
+        let Some(path) = self.buffers.get(&key).and_then(|b| b.path.clone()) else {
+            self.reload_confirm = None;
+            return;
+        };
+        if let Err(e) = self.reload_in_place(&key, &path) {
+            self.minibuffer_message(&format!("cannot reload: {e}"));
+            return;
+        }
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.locally_modified = false; // the disk content supersedes the edits
+        }
+        self.reload_confirm = None;
+        self.minibuffer_message("reloaded");
+    }
+
+    /// The confirm's `n` / C-g / ESC: cancel; the unsaved edits and the
+    /// changed-on-disk marker stay.
+    fn reload_confirm_cancel(&mut self) {
+        self.reload_confirm = None;
+        self.minibuffer_message("cancel (unsaved edits kept)");
     }
 
     /// Mark a buffer as locally modified (the light-editing hook; also used

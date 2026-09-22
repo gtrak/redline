@@ -1725,6 +1725,13 @@ pub struct AppStore {
     /// `y`/`n`/C-g decision (every key routes to `toggle_ro_key`). Holds
     /// the buffer key to confirm.
     toggle_ro_confirm: Option<String>,
+    /// An external-change reload confirm is armed (issue-
+    /// external-change-reload): re-opening a file whose on-disk mtime
+    /// changed while the buffer carried unsaved edits awaits a `y`/`n`/
+    /// C-g decision — `y` reloads from disk (discarding the edits),
+    /// `n`/C-g/ESC keep them and the changed-on-disk marker. Holds the
+    /// buffer key to confirm.
+    reload_confirm: Option<String>,
     // ── plan 005 issue 02: inline annotations ──────────────────────────
     /// The parsed `.redline-notes.md` document (plan 005 issue 02): free
     /// text outside the structured annotation section is preserved
@@ -1883,6 +1890,7 @@ impl AppStore {
             created_paths: HashSet::new(),
             saved_paths: HashMap::new(),
             toggle_ro_confirm: None,
+            reload_confirm: None,
             notes_doc: NotesDoc::default(),
             notes_doc_loaded: false,
             notes_doc_mtime: None,

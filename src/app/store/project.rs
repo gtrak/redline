@@ -32,24 +32,46 @@ impl AppStore {
         } else {
             // Re-stat on reopen: reload when mtime changed (spec: "highlight
             // cache invalidates when a file changes on disk (pre-watcher: on
-            // reopen)"). Issue-03 buffers are read-only, so this is safe.
-            if let Ok(new_mtime) = std::fs::metadata(abs).and_then(|m| m.modified()) {
-                let old_mtime = self
-                    .buffers
-                    .get(&key)
-                    .map(|b| b.mtime)
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                if new_mtime != old_mtime {
-                    match load_file(abs) {
-                        Ok((rope, mtime)) => {
-                            self.buffers
-                                .insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
-                        }
-                        // Reload failure is non-fatal (the buffer stays current
-                        // on its stale content); keep `open_path`'s report.
-                        Err(e) => {
-                            self.minibuffer_message(&format!("cannot reload {rel}: {e}"));
-                        }
+            // reopen)"). The update is always IN PLACE: the buffer's identity
+            // (mode, editable, is_notes, mark) belongs to the session, not
+            // the file, so a reopen changes the CONTENT, never the identity.
+            // This branch used to `insert_rope` the buffer wholesale,
+            // justified by "Issue-03 buffers are read-only, so this is
+            // safe" — that justification was false the moment Accurate-mode
+            // editing landed: `insert_rope` rebuilds the buffer via
+            // `Buffer::new` (mode resets to `Annotation`) and replaces the
+            // rope, so an externally-changed file dropped BOTH the edit mode
+            // and any unsaved edits with no prompt and no record — a
+            // data-loss path. The dirty case now asks instead.
+            if let Ok(new_mtime) = std::fs::metadata(abs).and_then(|m| m.modified())
+                && let Some(buf) = self.buffers.get(&key)
+                && new_mtime != buf.mtime
+            {
+                if buf.locally_modified {
+                    // Unsaved edits are never discarded silently (the
+                    // emacs `revert-buffer` policy: a modified buffer is
+                    // not reverted without asking). Keep the text and
+                    // the mode, arm the discard/reload confirm (`y`
+                    // reloads from disk, `n`/C-g/ESC keep the edits),
+                    // and surface the conflict so the buffer's marker
+                    // shows either way.
+                    if let Some(b) = self.buffers.get_mut(&key) {
+                        b.changed_on_disk = true;
+                    }
+                    self.reload_confirm = Some(key.clone());
+                    self.minibuffer_message(&format!(
+                        "File changed on disk; discard unsaved edits in {} and reload? (y or n)",
+                        self.buffer_display(&key)
+                    ));
+                } else {
+                    // Clean buffer: the disk content wins, applied in
+                    // place (mode and every other identity field
+                    // survive the reopen).
+                    if let Err(e) = self.reload_in_place(&key, abs) {
+                        // Reload failure is non-fatal (the buffer stays
+                        // current on its stale content); keep
+                        // `open_path`'s report.
+                        self.minibuffer_message(&format!("cannot reload {rel}: {e}"));
                     }
                 }
             }

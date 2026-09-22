@@ -383,5 +383,226 @@ use super::*;
         assert!(!s.current_buffer_changed_on_disk());
     }
 
+    // ── issue-external-change-reload: the reopen re-stat path ───────────
+
+    /// Force the buffer's recorded mtime to differ from the on-disk mtime so
+    /// the reopen's re-stat branch ("mtime changed") fires on any filesystem
+    /// granularity. A real external write has already happened (the on-disk
+    /// content is genuinely new); this only pins the comparison's
+    /// precondition (second-granularity filesystems can stamp two writes
+    /// with the same mtime).
+    fn force_mtime_divergence(s: &mut AppStore, bufk: &str, abs: &std::path::Path) {
+        let disk = std::fs::metadata(abs).unwrap().modified().unwrap();
+        if s.buffers.get(bufk).unwrap().mtime == disk {
+            s.buffers.get_mut(bufk).unwrap().mtime = std::time::SystemTime::UNIX_EPOCH;
+        }
+    }
+
+    /// Open a one-file project and a store on it (the reopen tests' setup).
+    fn reopen_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        let path = dir.join("src/t.rs");
+        std::fs::write(&path, "fn old() {}\n").unwrap();
+        path
+    }
+
+    /// Requirement 1: edit → external change (content + mtime) → reopen.
+    /// The unsaved edit must NOT be silently discarded: the confirm arms,
+    /// the text and the mode survive, and a cancel keeps the edits with a
+    /// visible conflict marker.
+    #[test]
+    fn dirty_reopen_arms_reload_confirm_and_keeps_unsaved_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        // Into Accurate mode with unsaved edits (the data-loss setup: the
+        // in-memory text differs from disk).
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert!(
+            s.buffers.get(&bufk).unwrap().editable,
+            "into edit mode (msg: {})",
+            s.message
+        );
+        s.insert_text("zz");
+        assert!(s.buffers.get(&bufk).unwrap().locally_modified);
+        // The external change (a build / formatter / background agent):
+        // the file's content AND mtime move on under the buffer.
+        std::fs::write(&path, "fn externally() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        // The reopen fires the re-stat branch.
+        s.open_path("src/t.rs");
+        assert!(
+            s.reload_confirm_active(),
+            "dirty reopen must arm the confirm, not reload silently (msg: {})",
+            s.message
+        );
+        assert!(
+            s.message.contains("discard unsaved edits"),
+            "the confirm must be explicit: {:?}",
+            s.message
+        );
+        assert!(
+            s.buffer_text().contains("zz"),
+            "the unsaved edit must survive the reopen: {:?}",
+            s.buffer_text()
+        );
+        assert!(
+            s.buffers.get(&bufk).unwrap().locally_modified,
+            "no decision made yet: the local flag stays set"
+        );
+        assert_eq!(
+            s.buffer_mode_display(),
+            "Accurate",
+            "the mode survives the armed reopen"
+        );
+        // Cancel: the edits stay and the conflict is surfaced.
+        s.key_event(key("C-g"));
+        assert!(!s.reload_confirm_active());
+        assert!(
+            s.buffer_text().contains("zz"),
+            "cancel keeps the unsaved edit"
+        );
+        assert!(
+            s.current_buffer_changed_on_disk(),
+            "cancel must leave the visible conflict marker"
+        );
+        assert_eq!(
+            s.buffer_mode_display(),
+            "Accurate",
+            "the mode survives the cancel"
+        );
+        // A second reopen re-arms; `n` cancels the same way.
+        s.open_path("src/t.rs");
+        assert!(s.reload_confirm_active(), "second reopen re-arms the confirm");
+        s.key_event(key("n"));
+        assert!(!s.reload_confirm_active());
+        assert!(s.buffer_text().contains("zz"), "n keeps the unsaved edit");
+    }
+
+    /// Requirement 1 (the explicit-yes half) + requirement 3: `y` on the
+    /// confirm discards the unsaved edits — but ONLY because the user said
+    /// so — reloads from disk in place, clears the flags, and KEEPS the
+    /// buffer's mode (a reload changes content, not identity).
+    #[test]
+    fn reload_confirm_accept_reloads_from_disk_and_keeps_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("zz");
+        std::fs::write(&path, "fn externally() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        s.open_path("src/t.rs");
+        assert!(s.reload_confirm_active());
+        // `y`: the explicit discard + reload.
+        s.key_event(key("y"));
+        assert!(!s.reload_confirm_active());
+        assert_eq!(
+            s.buffer_text(),
+            "fn externally() {}\n",
+            "y re-reads the disk content"
+        );
+        let buf = s.buffers.get(&bufk).unwrap();
+        assert!(!buf.locally_modified, "y clears the local flag");
+        assert!(!buf.changed_on_disk, "y clears the conflict marker");
+        assert!(buf.editable, "the edit-mode state survives the reload");
+        assert_eq!(
+            s.buffer_mode_display(),
+            "Accurate",
+            "the mode survives the reload (a reload is content, not identity)"
+        );
+        // The confirm never writes the disk.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn externally() {}\n"
+        );
+    }
+
+    /// Requirement 2: a CLEAN buffer (no unsaved edits) still picks up the
+    /// new on-disk content on reopen — the behaviour that must keep
+    /// working — with no confirm and no marker.
+    #[test]
+    fn clean_reopen_picks_up_new_disk_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        assert!(
+            !s.buffers.get(&bufk).unwrap().is_locally_owned(),
+            "a plain read-only file buffer is not locally owned"
+        );
+        std::fs::write(&path, "fn fresh() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        s.open_path("src/t.rs");
+        assert!(
+            !s.reload_confirm_active(),
+            "a clean reopen must not arm a confirm"
+        );
+        assert!(
+            s.buffer_text().contains("fn fresh()"),
+            "the clean buffer must pick up the new content: {:?}",
+            s.buffer_text()
+        );
+        let disk = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().mtime,
+            disk,
+            "the recorded mtime advances to the disk value"
+        );
+        assert!(!s.current_buffer_changed_on_disk());
+    }
+
+    /// Requirement 3: the mode survives the reopen on the CLEAN path too —
+    /// a buffer in `Accurate` with no unsaved edits re-reads the new
+    /// content in place and is still `Accurate` afterwards (the old
+    /// `insert_rope` replace reset it to `Annotation`).
+    #[test]
+    fn clean_reopen_in_edit_mode_keeps_mode_and_updates_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = reopen_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.open_path("src/t.rs");
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        assert_eq!(
+            s.buffer_mode_display(),
+            "Accurate",
+            "precondition (msg: {})",
+            s.message
+        );
+        assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+        std::fs::write(&path, "fn fresh() {}\n").unwrap();
+        force_mtime_divergence(&mut s, &bufk, &path);
+        s.open_path("src/t.rs");
+        assert!(
+            !s.reload_confirm_active(),
+            "no unsaved edits: no confirm"
+        );
+        assert!(
+            s.buffer_text().contains("fn fresh()"),
+            "content updated in place: {:?}",
+            s.buffer_text()
+        );
+        assert_eq!(
+            s.buffer_mode_display(),
+            "Accurate",
+            "the mode survives the clean reopen"
+        );
+        assert!(
+            s.buffers.get(&bufk).unwrap().editable,
+            "editability survives the clean reopen"
+        );
+    }
+
+
     // ── plan 004 issue 03: mark / region / kill ring / yank tests ──────
 
