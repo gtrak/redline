@@ -139,6 +139,17 @@ the exceptions block is a bug.
    dead-code class, one step milder.
 5. **Stale index** (byte out of range after an external edit) — honest col 0
    (`landing_column_from_start_byte`'s `None`), pre-existing.
+6. **Same-line tie — deterministic but not EXACT** (a known limit, not a col-0
+   exception). The picker's RET row carries only `file:line` + the field name
+   (`picker.rs` parses `name.rsplit_once(':')`), so when two same-named fields are
+   declared on one line the landing takes the **minimum** byte — the earliest
+   declaration — mirroring the outline arm's "earliest occurrence" convention. That
+   is deliberate and deterministic (it replaced a `HashMap`-order lookup whose answer
+   varied **per process**; see the `table-determinism` commit). Note the remaining
+   imprecision: `SymbolIndex::rust_fields` is keyed by **bare struct name**, so two
+   same-named structs in different modules also collapse into one entry and the
+   minimum can be the other module's column. Pre-existing keying, out of the
+   field-jump lane's scope; module-qualifying the key would make it exact.
 
 **Residual (honest gaps):** no PTY column pin per NON-RUST outline language
 (one per language would be 14 near-duplicate legs of the same mechanism; the
