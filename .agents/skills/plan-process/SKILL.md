@@ -561,6 +561,18 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    or recreate the branch from main before continuing. **Always confirm the landing
    happened** — read the new `git log` line and check the test count moved, rather
    than trusting the command chain's exit status.
+9. **A lane's deliverable is the COMMIT, not the working tree — and verify that
+   before gating.** Three consecutive lanes reported complete work with **zero
+   commits**: `git log <base>..<branch>` was empty and the whole deliverable sat
+   uncommitted in the worktree. That makes the gate's own `git merge-tree main
+   <branch>` check **vacuous** — it compares a commit containing none of the work —
+   so a real conflict could have been missed while the gate reported "merge clean".
+   The gates caught it each time, which is why it never landed as a bug, but it cost
+   three round trips. **So: before dispatching a gate, run `git log --oneline
+   <base>..<branch>` and confirm it is non-empty** — that single check replaces
+   trusting the report. If a lane has left the tree uncommitted, the orchestrator can
+   commit the reviewed tree itself (state that in the message) or send it back; either
+   way the gate must read a commit, not a dirty tree.
 6. **The shared target dir cuts BOTH ways, and the second direction is worse.**
    A scratch copy that builds a **modified** source tree (a reverted guard, a
    neutered function) into a *lane's* target dir leaves an artefact that cargo's
