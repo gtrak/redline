@@ -75,20 +75,46 @@ rule. Say which you assumed.
 
 **F1 — `open_external_path` calls `insert_rope` UNCONDITIONALLY (a guard is wanted).**
 Unlike `open_notes`, which is `is_none`-guarded so an already-open buffer is never
-replaced, `open_external_path` (`src/app/store/navigation/mod.rs:23-29`) replaces
+replaced, `open_external_path` (`src/app/store/navigation/mod.rs:39`) replaces
 whatever buffer holds that key. The gate probed it directly: calling it on a key that is
 an open, **dirty**, `Accurate` project buffer lost the unsaved text and reset the mode to
 `Annotation` — the exact pre-fix failure mode, now guarded everywhere *except* here.
 
-**User-path reachability is UNVERIFIED.** The gate tried to construct a landing whose
-file lies inside the project root and could not get a picker to open at all
-(`picker_open=false`) — inconclusive, not a disproof. Note the sibling tooling route
-*does* handle in-project resolved sources explicitly
-(`navigation/mod.rs:55-62`: `strip_prefix(project.root)` → `open_project_path`), which
-shows the shape is anticipated. **Fix:** `is_none`-guard it, or use `reload_in_place` for
-an existing key. Prove reachability or prove it unreachable — do not leave "probably
-unreachable" as the justification, since that is the same reasoning that made this bug
-latent until Accurate-mode editing existed.
+**User-path reachability — PROVEN REACHABLE** (was UNVERIFIED; the gate's own
+attempt — a landing whose file lies inside the project root — could not get a
+picker open, `picker_open=false`, which was inconclusive). The route that
+reaches it: a **project root nested inside an indexed external crate root**
+(a project opened inside a crate source tree the tooling resolver has
+indexed — exactly the in-project shape the sibling tooling route anticipates
+with its `strip_prefix(project.root)` → `open_project_path` branch at
+`navigation/mod.rs:86-92`, which is why that route is safe: it routes
+in-project files to the guarded project open). The picker's crate-relative
+index rows do **not** have that route: RET on an Xref index row of a
+crate-rooted picker takes the `Some(crate_root)` arm
+(`picker.rs`: `open_external_path(&root.join(file))`, `navigation/xref.rs`
+silent-jump arm the same) with NO in-project check. Sequence:
+(1) crate root R indexed (006-03 `start_crate_indexing` event);
+(2) project P rooted at `R/sub`; `R/sub/src/app.rs` open, Accurate, dirty;
+(3) land in external `R/src/lib.rs` (M-. into a registry/tooling source,
+or any external open);
+(4) M-. on a symbol defined in `R/sub/src/app.rs` → cross-file → crate-
+rooted Xref picker;
+(5) RET → `open_external_path(R.join("sub/src/app.rs"))` → the held key of
+the open, dirty project buffer → pre-fix: edits and mode both lost. Pinning
+tests (all in `src/app/store/tests/navigation/landings.rs`):
+`crate_index_landing_inside_project_root_keeps_dirty_buffer` (this exact
+sequence — RED pre-fix, GREEN post-fix) and
+`external_landing_on_dirty_project_buffer_keeps_edits_and_mode` (the gate's
+direct probe — RED pre-fix, GREEN post-fix). The fix: `open_external_path`
+no longer calls `insert_rope` unconditionally — on a HELD key, a DIRTY
+buffer is left content-wise alone (just made current; its conflict belongs
+to the watcher / `open_project_path` machinery) and a CLEAN one is refreshed
+IN PLACE via the `reload_in_place` chokepoint only when the on-disk mtime
+moved (`external_reland_refreshes_clean_cache_in_place` pins the preserved
+cache-refresh behaviour; `external_landing_on_clean_accurate_project_
+buffer_refreshes_in_place` pins identity survival on the clean path).
+`external_buffers` registration now happens only on CREATION, so a project
+buffer can no longer be mis-classified as an external cache entry.
 
 **F2 — one thin PTY leg for the new confirm.** No PTY flow exercises it, so its on-screen
 rendering is uncovered. The store tests drive the same entry point the PTY path uses

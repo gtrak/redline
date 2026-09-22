@@ -19,14 +19,48 @@ impl AppStore {
     /// file in the project's recents, never touches the tree/file-walk
     /// state, and inserts with `editable = false` so an external source
     /// can never enter edit mode (per-session, like other external jumps).
-    /// Returns the buffer key, or `None` when the file cannot be read.
+    /// Returns the buffer key, or `None` when the file cannot be read AND
+    /// no buffer already holds the key.
+    ///
+    /// The key may already be HELD — a re-landing onto the external cache,
+    /// or a crate-index landing whose `crate_root.join(file)` falls
+    /// INSIDE the project root (proven user-reachable, issue-
+    /// external-change-reload F1, see the `crate_index_landing_…` tests):
+    /// then a PROJECT buffer owns the key, and the landing must not
+    /// replace it. The pre-guard `insert_rope` rebuilt the buffer here via
+    /// `Buffer::new` — mode reset to `Annotation`, unsaved edits dropped
+    /// with no prompt — the last unguarded site of that data-loss class.
+    /// Now: a DIRTY buffer (unsaved edits) is left content-wise alone and
+    /// just made current (its conflict, if any, is surfaced by the
+    /// watcher / `open_project_path` machinery — a re-landing is not the
+    /// place to discard work); a CLEAN one is refreshed IN PLACE only when
+    /// the on-disk mtime moved (the `reload_in_place` chokepoint: content
+    /// changes, identity — mode, editable, flags — survives).
     pub(super) fn open_external_path(&mut self, abs: &Path) -> Option<String> {
-        let (rope, mtime) = load_file(abs).ok()?;
-        let key = self.buffers.insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
-        // 006-02b item 1: remember that this key is an external (registry /
-        // tooling) source — the ownership guard refuses edit mode + save
-        // for exactly these buffers.
-        self.external_buffers.insert(key.clone());
+        let key = abs.to_string_lossy().into_owned();
+        match self.buffers.get(&key) {
+            None => {
+                let (rope, mtime) = load_file(abs).ok()?;
+                let key = self.buffers.insert_rope(Some(abs.to_path_buf()), rope, mtime, false);
+                // 006-02b item 1: remember that this key is an external
+                // (registry / tooling) source — the ownership guard refuses
+                // edit mode + save for exactly these buffers.
+                self.external_buffers.insert(key.clone());
+            }
+            Some(buf) => {
+                if buf.locally_modified {
+                    // A dirty buffer (unsaved edits) is never replaced —
+                    // the landing just makes it current (below).
+                } else if let Ok(new_mtime) = std::fs::metadata(abs).and_then(|m| m.modified())
+                    && new_mtime != buf.mtime
+                    && let Err(e) = self.reload_in_place(&key, abs)
+                {
+                    // Reload failure is non-fatal (the buffer keeps its
+                    // current content); the landing still proceeds.
+                    self.minibuffer_message(&format!("cannot reload {key}: {e}"));
+                }
+            }
+        }
         self.buffers.set_current(&key);
         // 006-03b item 1: the landed crate is now the crate we are IN —
         // keep it MRU so it can never be the LRU eviction victim.

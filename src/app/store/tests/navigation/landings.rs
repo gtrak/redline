@@ -625,3 +625,201 @@ async fn tooling_landing_lifetimes_do_not_over_mask() {
         s.message
     );
 }
+
+// ── issue-external-change-reload F1: open_external_path on a HELD key ─────
+// The pre-fix `open_external_path` called `insert_rope` UNCONDITIONALLY:
+// a re-landing rebuilt the buffer via `Buffer::new` (mode → Annotation,
+// unsaved edits dropped, editable flipped off) — the last unguarded site
+// of the unsaved-edits data-loss class. These tests pin the failure mode
+// (a dirty Accurate buffer at the key survives the landing) and PROVE
+// user-path reachability (a crate-index landing whose
+// `crate_root.join(file)` falls inside the project root).
+
+/// The gate's direct probe: a dirty `Accurate` project buffer holds the key,
+/// the external landing lands on it — the edits, the mode, the editability
+/// and the project ownership survive; the landing still makes the buffer
+/// current. Content-wise it is a NO-OP (the dirty buffer is never replaced;
+/// its conflict, if any, belongs to the watcher / `open_project_path`
+/// machinery, not to a re-landing).
+#[test]
+fn external_landing_on_dirty_project_buffer_keeps_edits_and_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let abs = dir.path().join("src/t.rs");
+    std::fs::write(&abs, "fn old() {}\n").unwrap();
+    let mut s = store(dir.path());
+    s.open_path("src/t.rs");
+    let bufk = s.buffers.current().unwrap().to_string();
+    // Into Accurate mode with unsaved edits (the data-loss setup).
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    s.insert_text("zz");
+    let buf = s.buffers.get(&bufk).unwrap();
+    assert!(buf.locally_modified, "precondition: dirty");
+    assert_eq!(buf.mode, BufferMode::Accurate, "precondition (msg: {})", s.message);
+    // The external landing lands on the key the project buffer holds.
+    let landed = s.open_external_path(&abs).expect("the landing returns the existing key");
+    assert_eq!(landed, bufk, "the same key (the absolute path)");
+    assert!(
+        s.buffer_text().contains("zz"),
+        "the unsaved edit survives the landing: {:?}",
+        s.buffer_text()
+    );
+    let buf = s.buffers.get(&bufk).unwrap();
+    assert!(buf.locally_modified, "the dirty flag survives");
+    assert_eq!(
+        buf.mode,
+        BufferMode::Accurate,
+        "the mode survives (pre-fix: the rebuild reset it to Annotation)"
+    );
+    assert!(buf.editable, "editability survives (pre-fix: flipped read-only)");
+    assert!(
+        !s.external_buffers.contains(&bufk),
+        "a project buffer must not be registered as an external cache entry"
+    );
+    assert_eq!(s.buffers.current().unwrap(), bufk.as_str(), "the landing still makes the buffer current");
+    assert!(!s.reload_confirm_active(), "no confirm: a re-landing does not discard");
+}
+
+/// REACHABILITY, proven: a project root NESTED INSIDE an indexed external
+/// crate root (a project opened inside a crate source tree the tooling
+/// resolver has indexed — the registry checkout / vendored-source shape the
+/// sibling tooling route anticipates with its in-project `strip_prefix`
+/// branch). A cross-file M-. inside the EXTERNAL buffer opens the
+/// crate-rooted Xref picker; RET on the index row takes the
+/// `Some(crate_root)` arm — `open_external_path(crate_root.join(file))`,
+/// where the join lands INSIDE the project root, on the open, DIRTY
+/// project buffer's key. Pre-fix, that RET replaced the buffer wholesale.
+#[test]
+fn crate_index_landing_inside_project_root_keeps_dirty_buffer() {
+    let root = tempfile::tempdir().unwrap(); // the crate root R
+    let sub = root.path().join("sub"); // the project root, INSIDE R
+    std::fs::create_dir_all(sub.join("src")).unwrap();
+    std::fs::write(sub.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(sub.join("src/app.rs"), "pub fn target() {}\n").unwrap();
+    // A crate file OUTSIDE the project (the M-. origin buffer).
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    let lib = root.path().join("src/lib.rs");
+    std::fs::write(&lib, "pub fn caller() {\n    target();\n}\n").unwrap();
+    let mut s = store(&sub);
+    // The project file is open, Accurate, and dirty.
+    s.open_path("src/app.rs");
+    let bufk = s.buffers.current().unwrap().to_string();
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    s.insert_text("zz");
+    assert!(s.buffers.get(&bufk).unwrap().locally_modified, "precondition: dirty");
+    // The crate root's index lands (the 006-03 start_crate_indexing event).
+    s.apply_crate_index_event(&CrateIndexEvent {
+        source_root: root.path().to_path_buf(),
+        index: build_index(
+            root.path(),
+            &AppStore::crate_source_files(root.path(), &["rs"]),
+            None,
+        ),
+    });
+    // Land in the EXTERNAL (crate) file, then M-. on the cross-file symbol.
+    s.open_external_path(&lib).unwrap();
+    s.set_point(1, 4, 4); // line 1: `    target();`
+    s.xref_find_definitions();
+    assert!(
+        s.picker_open(),
+        "a cross-file unique candidate goes to the picker (msg: {})",
+        s.message
+    );
+    assert!(
+        s.picker_filtered()[0].0.name.starts_with("sub/src/app.rs:"),
+        "the candidate is crate-relative and joins INSIDE the project root: {:?}",
+        s.picker_filtered()[0].0.name
+    );
+    // RET: the `Some(crate_root)` arm — `open_external_path(R.join("sub/src/app.rs"))`.
+    s.run_selected();
+    assert_eq!(
+        s.buffers.current().unwrap(),
+        bufk.as_str(),
+        "the landing returns to the project buffer (msg: {})",
+        s.message
+    );
+    let buf = s.buffers.get(&bufk).unwrap();
+    assert!(
+        s.buffer_text().contains("zz"),
+        "the unsaved edit survives the crate-index landing: {:?}",
+        s.buffer_text()
+    );
+    assert!(buf.locally_modified, "the dirty flag survives");
+    assert_eq!(buf.mode, BufferMode::Accurate, "the mode survives");
+    assert!(buf.editable, "editability survives");
+    assert!(
+        !s.external_buffers.contains(&bufk),
+        "the project buffer is not an external cache entry"
+    );
+}
+
+/// The pre-fix replace had one legitimate job: refreshing a READ-ONLY
+/// external cache whose file changed on disk. The guard keeps it — via
+/// `reload_in_place` (content only; identity and the external registration
+/// survive).
+#[test]
+fn external_reland_refreshes_clean_cache_in_place() {
+    let (_dir, ext, mut s) = store_with_external_buffer();
+    let abs = ext.path().join("registry_src.rs");
+    let bufk = s.buffers.current().unwrap().to_string();
+    assert!(s.external_buffers.contains(&bufk), "precondition");
+    // The file changes on disk (content AND mtime — a second-granularity
+    // filesystem can stamp both writes with the same mtime, so force the
+    // divergence the re-stat branch compares).
+    std::fs::write(&abs, "pub fn spawn2<F>(f: F) {}\n").unwrap();
+    let disk = std::fs::metadata(&abs).unwrap().modified().unwrap();
+    if s.buffers.get(&bufk).unwrap().mtime == disk {
+        s.buffers.get_mut(&bufk).unwrap().mtime = std::time::SystemTime::UNIX_EPOCH;
+    }
+    s.open_external_path(&abs).unwrap();
+    assert!(
+        s.buffer_text().contains("spawn2"),
+        "the clean cache refreshes from disk: {:?}",
+        s.buffer_text()
+    );
+    assert_eq!(s.buffers.get(&bufk).unwrap().mtime, disk, "the recorded mtime advances");
+    assert!(s.external_buffers.contains(&bufk), "still the external cache entry");
+    assert!(!s.buffers.get(&bufk).unwrap().editable, "still read-only");
+    assert_eq!(s.buffers.len(), 1, "no second buffer was created");
+}
+
+/// A CLEAN project buffer in `Accurate` (editability is part of the buffer's
+/// identity): the landing refreshes the content IN PLACE when the on-disk
+/// mtime moved — the mode and the editability survive (pre-fix the rebuild
+/// reset the mode to `Annotation` and flipped it read-only).
+#[test]
+fn external_landing_on_clean_accurate_project_buffer_refreshes_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let abs = dir.path().join("src/t.rs");
+    std::fs::write(&abs, "fn old() {}\n").unwrap();
+    let mut s = store(dir.path());
+    s.open_path("src/t.rs");
+    let bufk = s.buffers.current().unwrap().to_string();
+    s.key_event(key("C-x"));
+    s.key_event(key("C-q"));
+    assert!(
+        !s.buffers.get(&bufk).unwrap().locally_modified,
+        "precondition: Accurate but clean (msg: {})",
+        s.message
+    );
+    std::fs::write(&abs, "fn fresh() {}\n").unwrap();
+    let disk = std::fs::metadata(&abs).unwrap().modified().unwrap();
+    if s.buffers.get(&bufk).unwrap().mtime == disk {
+        s.buffers.get_mut(&bufk).unwrap().mtime = std::time::SystemTime::UNIX_EPOCH;
+    }
+    s.open_external_path(&abs).unwrap();
+    assert!(
+        s.buffer_text().contains("fn fresh()"),
+        "the clean buffer picks up the new content in place: {:?}",
+        s.buffer_text()
+    );
+    assert_eq!(s.buffer_mode_display(), "Accurate", "the mode survives the refresh");
+    assert!(s.buffers.get(&bufk).unwrap().editable, "editability survives the refresh");
+    assert!(!s.buffers.get(&bufk).unwrap().locally_modified);
+    assert!(!s.external_buffers.contains(&bufk), "not registered as an external entry");
+}
