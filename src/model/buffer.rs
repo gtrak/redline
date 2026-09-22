@@ -23,6 +23,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -72,6 +73,68 @@ pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// One recorded text edit, kept as the INVERSE needed to undo it
+/// (plan 016 issue 01). It is NOT a document snapshot: the history grows
+/// with the *edit*, not with the document (a per-step `Rope` clone would
+/// grow with the file). Char indices throughout — the same units
+/// `retain_rope_edit` takes (a byte/char mix-up here is this project's
+/// most recurring defect class, so the ranges are never bytes).
+///
+/// `range` is the char range the forward edit's inserted text now OCCUPIES
+/// in the post-edit rope; `removed` is the text to delete to undo (the
+/// forward edit's inserted text); `inserted` is the text to reinsert (the
+/// forward edit's original text). Undoing applies `removed`-then-`inserted`
+/// over `range` back through the edit path (`retain_rope_edit` +
+/// `invalidate_highlight_for_key` + `locally_modified`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoStep {
+    pub range: Range<usize>,
+    pub removed: String,
+    pub inserted: String,
+}
+
+/// The per-buffer undo stack (plan 016 issue 01): a bounded LIFO of
+/// inverse edits, most recent LAST (`pop()` yields the next thing to
+/// undo). One per buffer — emacs is buffer-local, so undo in buffer A
+/// never touches buffer B, and killing a buffer drops its history with
+/// the `Buffer` (a reopened file must not inherit stale offsets). Capped
+/// at `MAX_ENTRIES`; when the cap is hit the OLDEST step is dropped, so
+/// undo simply stops earlier (the newest steps always win).
+#[derive(Clone, Debug, Default)]
+pub struct UndoStack {
+    steps: Vec<UndoStep>,
+}
+
+impl UndoStack {
+    /// The undo-history cap (entries). A long session cannot grow the
+    /// history without limit; the byte footprint of one step is bounded
+    /// by the size of the single edit it records.
+    pub const MAX_ENTRIES: usize = 100;
+
+    /// Record an inverse edit (most recent). Over the cap, the oldest is
+    /// dropped (undo stops earlier).
+    pub fn push(&mut self, step: UndoStep) {
+        self.steps.push(step);
+        if self.steps.len() > Self::MAX_ENTRIES {
+            self.steps.remove(0); // drop the oldest → undo stops earlier
+        }
+    }
+
+    /// The most recent inverse edit (the next thing to undo), or `None`
+    /// when the stack is empty.
+    pub fn pop(&mut self) -> Option<UndoStep> {
+        self.steps.pop()
+    }
+
+    /// Number of recorded steps (test-only; the production code drives the
+    /// stack through `push`/`pop` and the cap, so this is gated rather than
+    /// carried as dead public API).
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+}
+
 /// One open buffer. `path` is `None` for the scratch buffer; the text
 /// is ropey-backed (O(1) clone, O(log N) line access).
 #[derive(Clone)]
@@ -107,6 +170,11 @@ pub struct Buffer {
     /// The mark position (byte offset in the rope). `None` when no mark is
     /// set (plan 004 issue 03: set by C-SPC, cleared by C-g / C-w / C-y / M-y).
     pub mark: Option<usize>,
+    /// The per-buffer undo stack (plan 016 issue 01): inverse edits of the
+    /// text made here, most recent last. Dropped with the buffer on kill;
+    /// cleared on a disk reload (issue 03 owns that hook — see the
+    /// `reload_in_place` / `toggle_ro_accept` rope-assign sites).
+    pub undo: UndoStack,
 }
 
 impl std::fmt::Debug for Buffer {
@@ -137,6 +205,7 @@ impl Buffer {
             locally_modified: false,
             changed_on_disk: false,
             mark: None,
+            undo: UndoStack::default(),
         }
     }
 

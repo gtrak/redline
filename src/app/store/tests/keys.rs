@@ -220,3 +220,45 @@ use super::*;
         );
     }
 
+    /// plan 016 issue 01: undo is bound to BOTH `C-x u` and `C-/` (SETTLED by
+    /// the user). Both must resolve to `undo` in the buffer view; `C-x` stays
+    /// a pending prefix (no collision with the `C-x` family). The app-level
+    /// Key for `C-/` is pinned here (Char('/') + ctrl); the TERMINAL-side
+    /// control-code subtlety (what byte a physical Ctrl+/ sends and how
+    /// crossterm decodes it) is pinned in the input-layer test
+    /// `crossterm_0x1f_decodes_to_c_7`.
+    #[test]
+    fn undo_bindings_resolve_and_pin_the_control_code() {
+        let km = load_bindings(BUFFER_BINDINGS);
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x u").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-x u must bind undo (fits the C-x family)"
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-/").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-/ must bind undo (the settled emacs undo mnemonic)"
+        );
+        // C-x stays a pending prefix — no collision with the C-x family.
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x").unwrap()),
+            Some(Lookup::Pending),
+            "C-x must stay a prefix (C-x u reachable, no C-x collision)"
+        );
+        // C-/ is a single-key leaf, not a prefix.
+        assert!(
+            !km.is_prefix(&parse_sequence("C-/").unwrap()),
+            "C-/ must be a complete binding, not a prefix"
+        );
+        // Pin the app-level Key for the C-/ binding rather than assume it.
+        let c_slash = parse_sequence("C-/").unwrap()[0];
+        assert_eq!(
+            c_slash,
+            Key::ctrl_char('/'),
+            "C-/ must parse to Char('/') + ctrl"
+        );
+        assert_eq!(c_slash.code, KeyCode::Char('/'));
+        assert!(c_slash.ctrl);
+    }
+

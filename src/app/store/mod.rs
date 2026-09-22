@@ -32,7 +32,9 @@ use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use crate::git::diff::{DiffSide, FileDiff};
 use crate::git::status::{RepoStatus, Side};
 use crate::git::{GitError, GitRepo};
-use crate::model::buffer::{is_word_char, load_file, BufferMode, BufferTable, SCRATCH_NAME};
+use crate::model::buffer::{
+    is_word_char, load_file, BufferMode, BufferTable, SCRATCH_NAME, UndoStack, UndoStep,
+};
 use crate::model::files::FileList;
 use crate::model::project::{detect_root, Project, ProjectStore};
 use crate::model::sections::{MagitRow, RowRole, SectionKind, StatusTree};
@@ -353,6 +355,23 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     ("M-y", "yank-pop"),
     // C-x C-x: exchange point and mark.
     ("C-x C-x", "exchange-point-and-mark"),
+    // plan 016 issue 01: undo (undo only; redo + the self-insert-run
+    // coalescing rule are issue 04 — without it every keystroke is one undo
+    // step, expected at this stage, not a bug). SETTLED by the user on BOTH
+    // `C-x u` and `C-/`: `C-x u` fits the `C-x` prefix family (no collision
+    // with `C-x 0`/`C-x 1`/`C-x 2`/`C-x C-x`/`C-x o`) and `C-/` is emacs's
+    // traditional undo mnemonic. Both are free in this table.
+    //
+    // Terminal control-code subtlety (PINNED, not assumed — see the
+    // input-layer test `crossterm_0x1f_decodes_to_c_7` and the store keymap
+    // test `undo_bindings_resolve`): `C-/` parses to Char('/') + ctrl. On a
+    // byte-based terminal Ctrl+/ and Ctrl-_ both send control byte 0x1F,
+    // which crossterm decodes as Char('7') + CONTROL ("C-7"), NOT
+    // Char('/') + ctrl — so there the physical Ctrl+/ arrives as C-7 and the
+    // `C-/` binding does not fire; on a CSI-u / kitty-protocol terminal the
+    // physical Ctrl+/ arrives as Char('/') + ctrl and DOES fire.
+    ("C-x u", "undo"),
+    ("C-/", "undo"),
     // Window-split keys (the 3 pre-existing ux_sweep findings),
     // degraded onto the single-pane view-stack model — a full
     // vertical split is a scoped follow-up (per-pane buffer /
@@ -1765,6 +1784,13 @@ pub struct AppStore {
     /// Kill ring depth for yank-pop (M-y cycles backward from 0).
     /// `None` when no yank is in progress.
     yank_ring_index: Option<usize>,
+    // ── plan 016 issue 01: undo ─────────────────────────────────────────
+    /// Re-entrancy guard for the undo re-apply path: while `undo` is
+    /// re-applying an inverse edit through `retain_rope_edit`, the inverse
+    /// itself is NOT recorded as a new undo step (recording it would make
+    /// undo flip-flop between two states). Issue 04 routes the undo's
+    /// inverse to a redo stack; this guard is that seam.
+    undo_in_progress: bool,
 }
 
 impl AppStore {
@@ -1903,6 +1929,7 @@ impl AppStore {
             yank_pos: None,
             yank_len: None,
             yank_ring_index: None,
+            undo_in_progress: false,
         }
     }
 

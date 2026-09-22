@@ -121,4 +121,52 @@ mod tests {
         let app_key2 = to_app_key(&key2).unwrap();
         assert!(app_key2.shift, "shift must be set for non-Char codes");
     }
+
+    /// plan 016 issue 01: pin the terminal control-code fact for the `C-/`
+    /// undo binding, then pin the APP BOUNDARY that follows from it.
+    ///
+    /// What this test does NOT do: feed 0x1F to crossterm. crossterm's unix
+    /// `parse_event` reads from a file descriptor (not a byte buffer a test
+    /// can hand it), so the crossterm half of the mapping is a CITED fact,
+    /// not one this test asserts: crossterm 0.29.0 decodes control byte 0x1F
+    /// (what byte-based terminals send for BOTH `Ctrl+/` and `Ctrl-_`) as
+    /// `Char('7') + CONTROL` — cited source, crossterm 0.29.0 unix parse:
+    /// `c @ b'\x1C'..=b'\x1F' => Char(c - 0x1C + b'4') + CONTROL` (i.e.
+    /// 0x1C/1D/1E/1F → C-4/5/6/7).
+    ///
+    /// What this test DOES pin — the app boundary: given the KeyEvent
+    /// crossterm produces for 0x1F (`Char('7') + CONTROL`), `to_app_key`
+    /// yields the app key `C-7` (NOT `C-/`); and given a CSI-u /
+    /// kitty-protocol terminal's physical `Ctrl+/` (codepoint 0x2F '/' +
+    /// ctrl → `Char('/') + CONTROL`), `to_app_key` yields exactly the key the
+    /// `C-/` binding stores. Consequence (documented at the binding): the
+    /// `C-/` mnemonic fires on modern CSI-u terminals, but on byte-based
+    /// terminals the same physical key arrives as `C-7`, so `C-x u` is the
+    /// universal fallback.
+    #[test]
+    fn crossterm_0x1f_decodes_to_c_7() {
+        // The iocraft/crossterm event for raw control byte 0x1F (Ctrl+/ and
+        // Ctrl-_ on byte-based terminals) is Char('7') + CONTROL → C-7.
+        let mut ev = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('7'));
+        ev.modifiers = KeyModifiers::CONTROL;
+        let app_key = to_app_key(&ev).unwrap();
+        assert_eq!(
+            app_key,
+            crate::app::keymap::Key::ctrl_char('7'),
+            "crossterm 0x1F (Ctrl+/ / Ctrl-_) must arrive as C-7, not C-/"
+        );
+        assert_eq!(app_key.code, crate::app::keymap::KeyCode::Char('7'));
+        assert!(app_key.ctrl);
+
+        // A CSI-u / modern-terminal Ctrl+/ (codepoint '/' + ctrl) is the app
+        // key the `C-/` binding stores.
+        let mut ev_slash = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('/'));
+        ev_slash.modifiers = KeyModifiers::CONTROL;
+        let app_slash = to_app_key(&ev_slash).unwrap();
+        assert_eq!(
+            app_slash,
+            crate::app::keymap::parse_sequence("C-/").unwrap()[0],
+            "a CSI-u Ctrl+/ (Char('/') + ctrl) matches the C-/ binding"
+        );
+    }
 }

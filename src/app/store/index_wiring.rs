@@ -196,19 +196,25 @@ impl AppStore {
     /// (`reload_confirm_accept`), and the `g` force-reload
     /// (`reload_current_buffer`).
     ///
-    /// NOT exhaustive — one route replaces the rope directly and therefore
-    /// does NOT come through here: `toggle_ro_accept` (`buffers.rs`, the
-    /// toggle-read-only discard/reload confirm, which also flips `mode` and
-    /// `editable` by design) assigns `buf.rope` itself. It is an explicit user
-    /// command, so the requirement (no *silent* loss) still holds, but it
-    /// invalidates rope-relative state the same way — **016 (undo) must hook
-    /// that site too**, not this one alone.
+    /// NOT exhaustive — TWO other routes replace the rope directly and
+    /// therefore do NOT come through here: `toggle_ro_accept` (`buffers.rs`,
+    /// the toggle-read-only discard/reload confirm, which also flips `mode`
+    /// and `editable` by design) and `replace_buffer_text` (`buffers.rs`, the
+    /// notes-buffer sync). Both assign `buf.rope` themselves. Together with
+    /// this chokepoint they are the THREE rope-assigning sites in the store
+    /// (all of which invalidate rope-relative state, so none silently loses
+    /// undo).
     ///
     /// Plan 016 (undo) seam — STATED ORDER: this issue lands FIRST, so
     /// 016 inherits these reload semantics and must honour its own rule
-    /// that a file reloaded from disk clears the undo history (the
-    /// recorded offsets become invalid) by hooking that clear into this
-    /// chokepoint — one place covers all four reload routes.
+    /// that a reloaded/replaced rope clears the undo history (the recorded
+    /// offsets become invalid). 03 does that by calling the single
+    /// `drop_undo_history` helper from each of the three sites (this one —
+    /// one place covers all four in-place reload routes — plus
+    /// `toggle_ro_accept` and `replace_buffer_text`), so 03 hooks ONE
+    /// function, not three sites to discover. Until then `undo()`'s
+    /// stale-step guard is the safety net (a stale step is dropped and
+    /// reported, never a panic).
     pub(super) fn reload_in_place(
         &mut self,
         key: &str,

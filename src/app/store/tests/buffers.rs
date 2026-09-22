@@ -2085,3 +2085,444 @@ use super::*;
         );
     }
 
+    // ── plan 016 issue 01: the undo stack (self-insert + backspace) ──────
+
+    /// A small file buffer in `Accurate` mode (the point-accurate editing
+    /// shape), rooted in a throwaway project. Returns the store and the
+    /// buffer key.
+    fn accurate_file_store(content: &str) -> (AppStore, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), content).unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs");
+        s.toggle_read_only(); // Accurate + editable
+        let bk = s.buffers.current().unwrap().to_string();
+        (s, bk, dir)
+    }
+
+    /// plan 016 issue 01: a self-insert edit sequence can be FULLY undone,
+    /// with the buffer text byte-identical to the expected intermediate state
+    /// after EVERY undo step (asserted at each step, not just the end). One
+    /// keystroke is one undo step (issue 04 adds the self-insert-run
+    /// coalescing rule; until then this is expected, not a bug).
+    #[test]
+    fn full_undo_roundtrip_self_insert_asserts_every_step() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        // Type "abc" at the start via the real key path (C-x u for undo ties
+        // the binding to the behaviour).
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "ahello\n");
+        s.key_event(key("b"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abhello\n");
+        s.key_event(key("c"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n");
+        // Undo each self-insert, asserting the text at every step.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abhello\n", "undo 1");
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "ahello\n", "undo 2");
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "undo 3");
+        // A fourth undo: the stack is empty → a no-op with a message.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "past the start: no change");
+        assert!(
+            s.message.contains("nothing to undo"),
+            "empty history must echo a message: {:?}",
+            s.message
+        );
+    }
+
+    /// plan 016 issue 01: backspace (delete-char-before-point) is undoable —
+    /// the deleted char is restored exactly.
+    #[test]
+    fn backspace_undo_restores_deleted_char() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 5, 5); // end of "hello" (char col 5)
+        s.delete_char_before_point(); // backspace: remove 'o' (accurate mode)
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hell\n");
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n",
+            "undo must restore the backspaced char"
+        );
+        // The point lands back on the restored char's position (char col 4).
+        assert_eq!(s.point_col(), 4, "point must land char-accurate");
+    }
+
+    /// plan 016 issue 01: undo is per-buffer (emacs is buffer-local). Undo in
+    /// buffer B must never touch buffer A's history, and a buffer with no
+    /// edits echoes "nothing to undo" while leaving its text alone.
+    #[test]
+    fn undo_is_per_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "alpha\n").unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "beta\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/a.rs");
+        s.toggle_read_only(); // a: Accurate
+        let akey = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("X"); // a: "Xalpha\n"
+        assert_eq!(s.buffers.get(&akey).unwrap().text(), "Xalpha\n");
+        assert_eq!(s.buffers.get(&akey).unwrap().undo.len(), 1, "a has one recorded edit");
+
+        // Switch to b (Accurate) — b has no edits of its own.
+        s.open_path("src/b.rs");
+        s.toggle_read_only(); // b: Accurate
+        let bkey = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 0, 0);
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bkey).unwrap().text(),
+            "beta\n",
+            "undo on b must not touch b's text (it has no history)"
+        );
+        assert!(
+            s.message.contains("nothing to undo"),
+            "b has no history: {:?}",
+            s.message
+        );
+        // a's history is intact (one step still).
+        assert_eq!(s.buffers.get(&akey).unwrap().undo.len(), 1);
+
+        // Undo on a (switch back) removes a's own 'X'.
+        s.buffers.set_current(&akey);
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&akey).unwrap().text(),
+            "alpha\n",
+            "undo on a must restore a's own edit"
+        );
+    }
+
+    /// plan 016 issue 01: killing a buffer drops its undo history — a
+    /// reopened file must not inherit stale offsets from the killed buffer.
+    #[test]
+    fn killing_a_buffer_drops_its_undo_history() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), "original\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs");
+        s.toggle_read_only();
+        let k = s.buffers.current().unwrap().to_string();
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("x"); // "xoriginal\n" (unsaved)
+        assert_eq!(s.buffers.get(&k).unwrap().undo.len(), 1);
+
+        // Kill the buffer: its history goes with it.
+        s.kill_buffer(&k);
+        assert!(s.buffers.get(&k).is_none(), "the killed buffer is gone");
+
+        // Reopen the same file: a FRESH buffer with an empty undo history.
+        s.open_path("src/f.rs");
+        let k2 = s.buffers.current().unwrap().to_string();
+        assert_eq!(
+            s.buffers.get(&k2).unwrap().undo.len(),
+            0,
+            "a reopened file must start with an empty undo history (no stale offsets)"
+        );
+        // Make it editable to prove undo has nothing (not merely read-only)
+        // to undo.
+        s.toggle_read_only(); // Accurate
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to undo"),
+            "the reopened buffer has no history to undo: {:?}",
+            s.message
+        );
+        assert_eq!(s.buffers.get(&k2).unwrap().text(), "original\n");
+    }
+
+    /// plan 016 issue 01: the multibyte case. An edit and its undo on a line
+    /// with non-ASCII BEFORE the edit point must restore the EXACT text and
+    /// the EXACT point (char indices, not bytes — é is two bytes, so a
+    /// byte-based undo would land the point off-by-one).
+    #[test]
+    fn undo_multibyte_restores_exact_text_and_point() {
+        // "café\n": c a f é (é = 2 bytes). 4 chars, 5 bytes.
+        let (mut s, bk, _dir) = accurate_file_store("café\n");
+        s.set_point(0, 4, 4); // char col 4 = after é (end of "café")
+        s.key_event(key("x")); // self-insert 'x' → "caféx\n", point char 5
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "caféx\n",
+            "insert past the multibyte char"
+        );
+        assert_eq!(s.point_col(), 5, "point advanced past the inserted char");
+
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "café\n",
+            "the exact text (including the multibyte char) is restored"
+        );
+        assert_eq!(
+            s.point_line(),
+            0,
+            "point line restored"
+        );
+        assert_eq!(
+            s.point_col(),
+            4,
+            "point restored to CHAR col 4 (a byte-based undo would land at 3, the byte mid-é)"
+        );
+    }
+
+    /// plan 016 issue 01: undo re-applies through the SAME path as an edit —
+    /// `retain_rope_edit` — so the retained parse tree never drifts from the
+    /// rope. After an edit and an undo, the retained tree's covered byte
+    /// length must match the rope's: a ROPE-ONLY undo (mutating the rope
+    /// without the reparse hook) leaves the tree at the post-edit length and
+    /// fails this assert.
+    #[test]
+    fn undo_reparses_through_the_retained_tree_hook() {
+        let (mut s, bk, _dir) = accurate_file_store("fn main() {}\n");
+        let mtime = s.buffers.get(&bk).unwrap().mtime;
+        // Populate the retained tree (Rust is a reuse language → a full
+        // parse is retained as the incremental baseline).
+        s.ensure_highlight_for_key(&bk);
+        let tree_key = TreeKey::new(&bk, mtime);
+        assert!(
+            s.highlight_cache.retain_contains(&tree_key),
+            "a small Rust buffer keeps a retained parse tree"
+        );
+        let base_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        assert_eq!(
+            s.highlight_cache.retain_tree(&tree_key).unwrap().tree().root_node().end_byte(),
+            base_bytes,
+            "baseline tree covers the whole rope"
+        );
+
+        // Self-insert 'x' at the start. The edit goes through
+        // retain_rope_edit (records undo + edits the retained tree).
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("x");
+        let after_edit_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        assert_eq!(after_edit_bytes, base_bytes + 1);
+        assert_eq!(
+            s.highlight_cache.retain_tree(&tree_key).unwrap().tree().root_node().end_byte(),
+            after_edit_bytes,
+            "the edit edits the retained tree (incremental reparse)"
+        );
+
+        // Undo re-applies the inverse through the SAME hook. The retained
+        // tree must shrink with the rope.
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "fn main() {}\n");
+        let after_undo_bytes = s.buffers.get(&bk).unwrap().rope.len_bytes();
+        assert_eq!(after_undo_bytes, base_bytes);
+        assert_eq!(
+            s.highlight_cache.retain_tree(&tree_key).unwrap().tree().root_node().end_byte(),
+            after_undo_bytes,
+            "undo must re-apply through retain_rope_edit: the retained tree's end must shrink with the rope (a rope-only undo leaves it at the post-edit length)"
+        );
+    }
+
+    /// plan 016 issue 01: the history is capped. Exceeding the cap drops the
+    /// OLDEST steps, so undo simply stops earlier — the newest edits always
+    /// win.
+    #[test]
+    fn undo_history_is_capped() {
+        use crate::model::buffer::UndoStack;
+        let max = UndoStack::MAX_ENTRIES;
+        let (mut s, bk, _dir) = accurate_file_store("end\n");
+        s.set_point(0, 0, 0);
+        // Type `max + 30` self-inserts at the start (well over the cap).
+        for _ in 0..(max + 30) {
+            s.insert_text_at_point("a");
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            max,
+            "the stack must be capped at MAX_ENTRIES (oldest dropped)"
+        );
+        // Undo `max` times: each removes one 'a'. The first 30 inserts were
+        // dropped, so undo stops with 30 'a's still in front of "end".
+        for _ in 0..max {
+            s.dispatch("undo", None).unwrap();
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            format!("{}end\n", "a".repeat(30)),
+            "undo stops earlier once the oldest steps are dropped"
+        );
+        // One more undo: nothing left.
+        s.dispatch("undo", None).unwrap();
+        assert!(s.message.contains("nothing to undo"));
+    }
+
+    /// plan 016 issue 01: in a read-only buffer undo is a no-op with a
+    /// message, and must NOT resurrect the mode or `editable` state (the
+    /// `Accurate` ⟹ `editable` invariant stays untouched). The gate holds
+    /// even when a history somehow exists (proven by seeding a step directly).
+    #[test]
+    fn undo_is_a_noop_in_read_only_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/f.rs"), "hello\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_path("src/f.rs"); // read-only (Annotation, editable = false)
+        let bk = s.buffers.current().unwrap().to_string();
+        assert!(!s.buffers.get(&bk).unwrap().editable);
+        // Seed a step to prove the gate holds even with history present.
+        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            range: 0..1,
+            removed: "h".into(),
+            inserted: "H".into(),
+        });
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n",
+            "read-only: undo must not change the text"
+        );
+        assert!(
+            s.message.contains("read-only"),
+            "read-only undo must echo a message: {:?}",
+            s.message
+        );
+        // The history is untouched (not consumed) and mode/editable intact.
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 1, "read-only undo leaves the history");
+        assert!(!s.buffers.get(&bk).unwrap().editable, "editable must stay false");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().mode,
+            BufferMode::Annotation,
+            "mode must stay Annotation"
+        );
+    }
+
+    /// plan 016 issue 01 + gate P1: the notes sync replaces the buffer's
+    /// rope BEHIND a live undo history. `sync_notes_from_doc` (the path the
+    /// annotation save/delete/reanchor all use) calls `replace_buffer_text`,
+    /// which rewrites `buf.rope` WITHOUT clearing `buf.undo` — that clear is
+    /// 03's job (`drop_undo_history`). Until 03 lands, the recorded ranges
+    /// are stale and `undo()` must REJECT the step (drop it, already popped,
+    /// and report) rather than panic in ropey's `remove` (`Char range out of
+    /// bounds`). This drives the real notes sync path, not a direct
+    /// `replace_buffer_text` call.
+    #[test]
+    fn undo_after_notes_sync_rope_replacement_is_stale_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let mut s = store(dir.path());
+        s.open_notes();
+        let key = s.buffers.current().unwrap().to_string();
+        assert!(
+            s.buffers.get(&key).unwrap().editable,
+            "the notes buffer is editable — undo is enabled here"
+        );
+        // Type enough free text that the buffer clearly exceeds the short
+        // empty-doc serialization (the begin/end markers, ~67 chars), so the
+        // top recorded range sits past the end of the post-sync rope. (The
+        // typed free text is not part of the structured notes doc.)
+        for _ in 0..80 {
+            s.notes_insert_char('a');
+        }
+        let pre_len = s.buffers.get(&key).unwrap().rope.len_chars();
+        assert!(
+            s.buffers.get(&key).unwrap().undo.len() >= 1,
+            "typing must build a live undo history"
+        );
+        // The notes sync replaces the buffer's rope with the serialized doc
+        // (the free text is not in the doc) — the rope shrinks below the
+        // history's top range. This is the P1 reproduction.
+        s.sync_notes_from_doc();
+        let post_len = s.buffers.get(&key).unwrap().rope.len_chars();
+        assert!(
+            post_len < pre_len,
+            "the sync must shrink the rope below the recorded history's top range (reproduces the stale range); pre={pre_len} post={post_len}"
+        );
+        // Undo now pops a stale step whose range no longer fits the rope.
+        // Before the fix this PANICKED in ropey. After it: no panic, the step
+        // is dropped (already popped) and reported, and the rope is untouched.
+        s.undo();
+        assert!(
+            s.message.contains("stale"),
+            "a stale-history undo must report the staleness: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&key).unwrap().rope.len_chars(),
+            post_len,
+            "a rejected stale undo must not mutate the rope"
+        );
+    }
+
+    /// plan 016 issue 01 + gate P2-1: the `removed`-text check is load-bearing,
+    /// not just the bounds check. A step whose range still FITS the rope but
+    /// whose `removed` text no longer matches the rope's text at that range is
+    /// stale and must be rejected (dropped + reported) — this is the second
+    /// half of the `undo()` validation that the out-of-bounds case
+    /// short-circuits past. Seeded directly (the notes path produces the
+    /// out-of-bounds half; a fit-but-wrong-text step is the cleanest way to
+    /// isolate the text check).
+    #[test]
+    fn undo_rejects_stale_step_when_removed_text_no_longer_matches() {
+        let (mut s, bk, _dir) = accurate_file_store("defgh\n");
+        // A step whose range (0..3) fits "defgh\n" but whose `removed` ("abc")
+        // does NOT match the rope's text there ("def") → stale on the text
+        // check even though the range is in bounds.
+        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            range: 0..3,
+            removed: "abc".into(),
+            inserted: "x".into(),
+        });
+        s.undo();
+        assert!(
+            s.message.contains("stale"),
+            "an in-bounds but text-mismatched step must be reported stale: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "defgh\n",
+            "the text check must reject the step: the rope is untouched"
+        );
+        // The stale step was dropped (popped), leaving an empty history.
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 0, "the stale step is dropped");
+    }
+
+    /// The undo guard must be a **panic backstop**, not merely a staleness
+    /// check: a step whose range is INVERTED (`start > end`) must be rejected
+    /// like any other invalid step rather than reaching ropey's `slice`.
+    ///
+    /// Not reachable today — the recorder builds `char_start..char_start +
+    /// len`, so `start <= end` by construction — which is precisely why the
+    /// guard must not *depend* on that invariant holding.
+    #[test]
+    fn undo_rejects_an_inverted_range_instead_of_panicking() {
+        let (mut s, bk, _dir) = accurate_file_store("defgh\n");
+        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+            range: 3..1, // start > end
+            removed: "de".into(),
+            inserted: "x".into(),
+        });
+        s.undo();
+        assert!(
+            s.message.contains("stale"),
+            "an inverted range must be reported stale, not panic: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "defgh\n",
+            "the rope is untouched"
+        );
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 0, "the step is dropped");
+    }
+

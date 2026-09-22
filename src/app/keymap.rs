@@ -684,8 +684,10 @@ mod tests {
             );
         }
 
-        // Per-view maps: 120 total bindings across 9 views (121 minus the
-        // 015-03 `C-d` freeing from the Buffer view).
+        // Per-view maps: 122 total bindings across 9 views (121 minus the
+        // 015-03 `C-d` freeing from the Buffer view → 120, then plan 016
+        // issue 01 added `C-x u` and `C-/` → undo to the Buffer view, a net
+        // +2 → 122).
         let views: &[(&str, &[(&str, &str)])] = &[
             ("Buffer", BUFFER_BINDINGS),
             ("BufferList", BUFFER_LIST_BINDINGS),
@@ -698,7 +700,7 @@ mod tests {
             ("Search", SEARCH_BINDINGS),
         ];
         let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
-        assert_eq!(total_per_view, 120, "total per-view bindings must be 120");
+        assert_eq!(total_per_view, 122, "total per-view bindings must be 122");
         for (name, table) in views {
             let km = load_bindings(table);
             assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");

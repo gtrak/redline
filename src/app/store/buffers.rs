@@ -714,6 +714,18 @@ impl AppStore {
     /// No-op when the buffer has no retained tree (plain text, big file,
     /// non-reuse language, or never highlighted yet) — those keep the
     /// full-parse path.
+    ///
+    /// Plan 016 issue 01: this is also the ONE place the INVERSE of each
+    /// text edit is recorded on the buffer's undo stack. Every text edit
+    /// (self-insert, backspace, RET, C-k, C-y/M-y, C-w, …) already flows
+    /// through here, so recording beside it covers them all with no
+    /// per-command bookkeeping — and 02's "retrofit" of the wider edit
+    /// commands needs no change to this recording logic, because the
+    /// inverse is derived purely from `(old_rope, char_start, char_end,
+    /// new_text)`. The inverse is NOT recorded while an undo itself is
+    /// re-applying its inverse (`undo_in_progress`): that would make undo
+    /// flip-flop. Issue 04 routes the undo's inverse to a redo stack; this
+    /// guard is that seam.
     pub(super) fn retain_rope_edit(
         &mut self,
         key: &str,
@@ -722,6 +734,28 @@ impl AppStore {
         char_end: usize,
         new_text: &str,
     ) {
+        // Record the inverse on the buffer's undo stack — beside the
+        // incremental-reparse record, in this single hook. Char indices
+        // throughout (matching the ropey edit units; never bytes).
+        if !self.undo_in_progress && (char_start != char_end || !new_text.is_empty()) {
+            let len = old_rope.len_chars();
+            // The original text the forward edit replaced (empty for a
+            // pure insertion). Clamped so an out-of-range record can never
+            // panic the slice (ropey slice panics on an over-long range).
+            let old_text = old_rope.slice(char_start.min(len)..char_end.min(len)).to_string();
+            let step = UndoStep {
+                // The forward edit's inserted text now lives at
+                // [char_start, char_start + len(new_text)) in the post-edit
+                // rope: undo removes `new_text` there and reinserts
+                // `old_text`.
+                range: char_start..char_start + new_text.chars().count(),
+                removed: new_text.to_string(),
+                inserted: old_text,
+            };
+            if let Some(buf) = self.buffers.get_mut(key) {
+                buf.undo.push(step);
+            }
+        }
         let Some(buf) = self.buffers.get(key) else { return };
         if buf.is_big() || buf.path.is_none() {
             return;
@@ -730,6 +764,93 @@ impl AppStore {
             highlight::rope_edit_to_input_edit(old_rope, char_start, char_end, new_text);
         self.highlight_cache
             .retain_apply_edit(&TreeKey::new(key, buf.mtime), &edit);
+    }
+
+    /// Undo the current buffer's most recent text edit (plan 016 issue 01):
+    /// pop the top inverse edit and re-apply it through the SAME path as an
+    /// edit — `retain_rope_edit` + `invalidate_highlight_for_key` (+
+    /// `locally_modified`) — so the retained parse tree never drifts from
+    /// the rope (the exact class `retain_rope_edit` exists to prevent).
+    ///
+    /// Only in an EDITABLE buffer: a read-only buffer is a no-op with a
+    /// message, and undo must NOT resurrect the mode or `editable` state
+    /// (the `Accurate` ⟹ `editable` invariant stays untouched). The commit
+    /// editor has its own text model and is out of scope. Without the
+    /// 04 coalescing rule every keystroke is one undo step — expected at
+    /// this stage, NOT a bug. Point lands on the undone edit.
+    ///
+    /// Stale-step guard (gate P1): before applying, the inverse is validated
+    /// against the CURRENT rope. A step is stale when the buffer's rope was
+    /// replaced behind the history by a content replacement that does not
+    /// flow through the edit path (the notes sync `replace_buffer_text`, a
+    /// disk reload `reload_in_place`, or a read-only accept
+    /// `toggle_ro_accept`) — 03 clears the history at those three sites via
+    /// `drop_undo_history`, but until it does, a stale range would make
+    /// ropey's `remove` panic. A stale step is dropped (it is already popped)
+    /// and reported, never applied.
+    pub fn undo(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("nothing to undo");
+            return;
+        };
+        let editable = self
+            .buffers
+            .get(&key)
+            .map(|b| b.editable)
+            .unwrap_or(false);
+        if !editable {
+            self.minibuffer_message("Buffer is read-only");
+            return;
+        }
+        let Some(step) = self.buffers.get_mut(&key).and_then(|b| b.undo.pop()) else {
+            self.minibuffer_message("nothing to undo");
+            return;
+        };
+        let (start, end) = (step.range.start, step.range.end);
+        // Validate the inverse against the CURRENT rope before applying
+        // (gate P1): the rope may have been REPLACED behind this history by a
+        // content replacement that does NOT flow through the edit path — the
+        // notes sync (`replace_buffer_text`), a disk reload
+        // (`reload_in_place`), or a read-only accept (`toggle_ro_accept`). 03
+        // clears the history at those three sites (via `drop_undo_history`);
+        // until it does, a stale step's range can no longer fit the rope and
+        // an unclamped `remove` would PANIC in ropey (`Char range out of
+        // bounds`). The record is trustworthy only while the range still fits
+        // AND the text it expects to remove still sits there — the
+        // `removed`-text check also makes `UndoStep.removed` a live reader
+        // rather than dead weight (gate P2-1). Otherwise the step is already
+        // popped, so report it and leave the rope alone.
+        let valid = self
+            .buffers
+            .get(&key)
+            .map(|b| {
+                let len = b.rope.len_chars();
+                start <= end && end <= len && b.rope.slice(start..end).chars().eq(step.removed.chars())
+            })
+            .unwrap_or(false);
+        if !valid {
+            self.minibuffer_message("undo history is stale — ignored");
+            return;
+        }
+        // Re-apply the inverse through the edit path. The guard suppresses
+        // recording this re-application as a NEW undo step (the undo's
+        // inverse belongs to a redo stack, issue 04).
+        self.undo_in_progress = true;
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope.remove(start..end);
+            buf.rope.insert(start, &step.inserted);
+            buf.locally_modified = true;
+            buf.mark = None;
+        }
+        if let Some(old_rope) = old_rope {
+            self.retain_rope_edit(&key, &old_rope, start, end, &step.inserted);
+        }
+        self.undo_in_progress = false;
+        self.invalidate_highlight_for_key(&key);
+        self.mark_notes_dirty_if_current(&key);
+        // The point lands on the undone edit (char-accurate).
+        self.land_point_at_char(&key, start);
     }
 
     /// Switch to (creating if needed) the `*scratch*` buffer.
@@ -834,13 +955,44 @@ impl AppStore {
         }
     }
 
-    /// Replace a buffer's text (the notes-buffer sync path).
+    /// Replace a buffer's text (the notes-buffer sync path, from
+    /// `sync_notes_from_doc`). ONE OF THREE rope-replacing sites: this
+    /// assigns `buf.rope` directly, so it does NOT flow through the edit
+    /// path and the recorded inverse ranges become invalid. 03 clears the
+    /// undo history here (and at the other two) by calling
+    /// `drop_undo_history`; until then `undo()` validates each step and
+    /// rejects a stale one (so a pre-03 replacement degrades to a message,
+    /// never a panic). See that helper for the full list of the three sites.
     pub(super) fn replace_buffer_text(&mut self, key: &str, text: &str) {
         let rope = Rope::from_str(text);
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.rope = rope;
         }
         self.drop_retained_tree(key);
+    }
+
+    /// Clear a buffer's undo history (plan 016 issue 03 seam — 03 wires this
+    /// in, not 01). Every place that REPLACES `buf.rope` outright — NOT
+    /// through the edit path, so the recorded inverse char ranges become
+    /// invalid — must call this so a later undo cannot re-apply a stale range
+    /// (a stale range would otherwise make ropey's `remove` panic; see the
+    /// stale-step guard in `undo`). 03 hooks this ONE function rather than
+    /// discovering the three sites itself. The three rope-assigning sites are:
+    ///
+    ///   1. `reload_in_place` (`index_wiring.rs`) — a disk reload re-reads the
+    ///      file into the rope (four in-place reload routes funnel here).
+    ///   2. `toggle_ro_accept` (`buffers.rs`) — the read-only accept discards
+    ///      local edits and re-reads the file.
+    ///   3. `replace_buffer_text` (`buffers.rs`) — the notes-buffer sync
+    ///      (`sync_notes_from_doc`) rewrites the notes buffer from the doc.
+    ///
+    /// Until 03 calls it from each site, `undo()`'s stale-step guard is the
+    /// safety net: a stale step is dropped and reported, never applied.
+    #[allow(dead_code)] // 03 calls this from the three sites above; 01 only adds the guard
+    pub(super) fn drop_undo_history(&mut self, key: &str) {
+        if let Some(buf) = self.buffers.get_mut(key) {
+            buf.undo = UndoStack::default();
+        }
     }
 
     /// `C-x C-q` (plan 015 issue 02: the per-buffer edit-MODE toggle;
@@ -979,6 +1131,15 @@ impl AppStore {
     /// disk, clearing `locally_modified`/`changed_on_disk`) and turn the
     /// buffer read-only. A failed re-read keeps the confirm armed (no
     /// silent state half-change).
+    ///
+    /// Plan 016 (undo) seam — issue 03 owns "a disk reload clears the undo
+    /// history" (the recorded char offsets become invalid). This is ONE OF
+    /// THREE rope-replacing sites: it assigns `buf.rope` directly, so it does
+    /// NOT flow through the `reload_in_place` chokepoint (`index_wiring.rs`).
+    /// 03 clears the history at all three by calling `drop_undo_history`
+    /// (this is site 2 of 3; the others are `reload_in_place` and
+    /// `replace_buffer_text`). Until then `undo()`'s stale-step guard is the
+    /// safety net (a stale step is dropped and reported, never a panic).
     fn toggle_ro_accept(&mut self) {
         let Some(key) = self.toggle_ro_confirm.clone() else {
             return;

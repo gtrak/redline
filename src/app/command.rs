@@ -129,6 +129,7 @@ impl CommandRegistry {
         reg.register_accurate_editing();
         reg.register_annotations();
         reg.register_region();
+        reg.register_undo();
         reg
     }
     fn register_navigation(&mut self) {
@@ -943,6 +944,19 @@ impl CommandRegistry {
             |store, _arg| store.exchange_point_and_mark(),
         ));
     }
+
+    /// plan 016 issue 01: the undo command (undo only; redo + the
+    /// self-insert-run coalescing rule are issue 04). Bound to BOTH `C-x u`
+    /// and `C-/` (SETTLED). Only in editable buffers; a read-only buffer is
+    /// a no-op with a message.
+    fn register_undo(&mut self) {
+        self.register(Command::new(
+            "undo",
+            "Undo the last edit in the current buffer (C-x u or C-/); only in editable buffers",
+            "editing",
+            |store, _arg| store.undo(),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -961,7 +975,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 117, "expected 117 seed commands: {names:?}");
+        assert_eq!(names.len(), 118, "expected 118 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -1078,6 +1092,7 @@ mod tests {
             "kill-word-forward",
             "open-line",
             "transpose-chars",
+            "undo",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }
