@@ -106,6 +106,12 @@ SHARED_SUITES=(
   ux_sweep.py
   probe_notes_dump.py
   drive_syntax_notes.py
+  drive_symbol_precise.py # symbol-precise annotation anchoring: the indicator
+                        # sits before the annotated SYMBOL (the record's
+                        # column, char->display converted), incl. wide-char
+                        # and tab fixtures and the no-whitespace fallback.
+                        # Registered by the gate (P2-3): the 27 legs were
+                        # reproducible only by a manual run before this.
   drive_xref.py
   drive_external_notes.py
   drive_external_crate.py

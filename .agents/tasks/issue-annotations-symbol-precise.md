@@ -13,11 +13,23 @@ Let `char_col` be the annotation record's stored column and `display_col` its **
 
 1. **`display_col > 0` and the cell at `display_col - 1` is whitespace** → the anchor is
    `display_col - 1`. The indicator overwrites a whitespace cell, so **the code does not move**.
-2. **`display_col == 0`** → the anchor is `0` and that line shifts right by **exactly 1** cell
-   (option (a), as landed and as the user chose).
-3. **The cell before the symbol is NOT whitespace** (e.g. `x+y` annotated at `y`) → **fall back**
-   to the line's indent anchor (`indent_width - 1`, itself falling back to rule 2 when the indent
-   is 0). This is the case that makes "the code never moves" absolute.
+2. **The cell before the symbol is NOT whitespace** (e.g. `x+y` annotated at `y`), **or the
+   record is at display column 0** (no cell before the symbol exists) → **fall back** to the
+   line's indent anchor, `indent_width - 1`. This is the case that makes "the code never moves"
+   absolute.
+3. **The fallback lands on column 0 only when the line has NO leading indentation** — then the
+   line shifts right by **exactly 1** cell (the landed option (a), and the only case where the
+   code moves).
+
+   **⚠ AMENDED 2026-09-22 after the gate.** As originally written, rule 2 said a record at
+   display column 0 → anchor 0 **and a shift**, unconditionally. That is wrong, and the code
+   does not implement it: a record at column 0 on an *indented* line would move the whole line
+   — code included — one cell right, in order to annotate a character that is whitespace rather
+   than a symbol. That is precisely the "the code moved" defect this issue exists to fix. The
+   as-built behaviour (fall back to the indent cell, no shift) is the correct one, and it is
+   pinned by `line_anchors_indented_first_token_coincides_with_landed_rule` and the indented
+   click pin. A reader implementing the literal old rule 2 would write a branch the code does
+   not have.
 
 ## ⚠ The units trap — read this before writing code
 

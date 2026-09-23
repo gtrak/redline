@@ -209,26 +209,36 @@ use super::*;
 
     #[test]
     fn mouse_click_indented_annotated_line_pins_indented_branch() {
-        // issue-annotations-anchor-at-symbol P2-1: pin the INDENTED branch of
+        // issue-annotations-anchor-at-symbol P2-1 (re-expressed for
+        // issue-annotations-symbol-precise): pin the INDENTED branch of
         // mouse_click_position (the `tail = &t[indent..]` / `indent +
-        // display_col_to_char_index(tail, col - code_start)` path). The column-
-        // 0 pin above (mouse_click_annotated_line_pins_gutter_column_mapping)
-        // never enters that branch — for a column-0 line `indent` is 0 and the
+        // display_col_to_char_index(tail, col - code_start)` path). The
+        // column-0 pin above
+        // (mouse_click_annotated_line_pins_gutter_column_mapping) never
+        // enters that branch — for a column-0 line `indent` is 0 and the
         // tail is the whole line, so an indent-BUG there is invisible. This
-        // fixture is `    c1` (4-space indent): the indicator borrows the last
-        // indentation cell (anchor col 3), the code tail `c1` starts at display
-        // col 4, and the mapping must add the indent back on for the code
-        // region. The gate's own scratch test fixes the expected mapping:
-        // display cells 0 / 3 / 4 / 5 / 9 -> chars 4 / 4 / 4 / 5 / 6.
+        // fixture is `    c1` (4-space indent) with a record AT CHAR 0 (the
+        // record's symbol is the line's start; it falls back to the indent
+        // anchor, display col 3 — the same cell the landed rule used), the
+        // code tail `c1` starts at display col 4, and the mapping must add
+        // the indent back on for the code region. Expected mapping:
+        // display cells 0 / 3 / 4 / 5 / 9 -> chars 4 / 0 / 4 / 5 / 6.
         //
-        // MUTATION the pin exists to catch: replacing the indented path with
-        // the indent-blind `display_col_to_char_index(&t, col - code_start)`
-        // (no `indent +`, no tail) makes THIS test RED — a click on the code's
-        // own cell (display col 4) lands at char 0 instead of char 4 (the
-        // leading spaces get mapped) — while the whole rest of the suite stays
-        // GREEN (the column-0 pin still passes, because there `indent` is 0
-        // and the two forms coincide). That contrast is exactly why the pin
-        // uses an indented line.
+        // issue-annotations-symbol-precise re-verification: the INDICATOR
+        // cell (display 3) now maps to the record's OWN column (char 0 —
+        // where the annotation was made), not to the line's first token:
+        // the indicator guards the record's symbol, and the record's
+        // symbol here is the line's start. A blank cell left of the
+        // indicator (cell 0) keeps the landed first-token mapping (char 4).
+        //
+        // MUTATION the pin exists to catch: replacing the indented path
+        // with the indent-blind `display_col_to_char_index(&t, col -
+        // code_start)` (no `indent +`, no tail) makes THIS test RED — a
+        // click on the code's own cell (display col 4) lands at char 0
+        // instead of char 4 (the leading spaces get mapped) — while the
+        // whole rest of the suite stays GREEN (the column-0 pin still
+        // passes, because there `indent` is 0 and the two forms coincide).
+        // That contrast is exactly why the pin uses an indented line.
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/annpinind.rs", "c0\n    c1\nc2\n");
         s.notes_doc.entries.push(NotesEntry::Record(Annotation {
@@ -245,14 +255,18 @@ use super::*;
         s.set_scroll_top(0);
         // Rendered rows: 0=c0, 1=note (above c1), 2=c1 (annotated code row,
         // code tail `c1` starts at display col 4, indicator at col 3), 3=c2,
-        // 4=trailing empty line. Full line is `    c1` (6 chars, symbol at
-        // char 4).
-        // Cells LEFT of the code (the blank cells 0..3 and the indicator
-        // cell 3) all map to the symbol's char (char 4).
+        // 4=trailing empty line. Full line is `    c1` (6 chars, first token
+        // at char 4; the record's symbol is char 0).
+        // A blank cell LEFT of the indicator (cell 0) keeps the landed
+        // first-token mapping: the line's own indentation maps to the first
+        // non-whitespace char (char 4).
         s.mouse_click_position(2, 0);
-        assert_eq!((s.point_line(), s.point_col()), (1, 4), "indented cell 0 (left of code) -> the symbol's char 4");
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "indented cell 0 (left of every indicator) -> the first token char 4");
+        // The INDICATOR cell (cell 3) maps to the record's OWN column (char
+        // 0 — the annotation's column, re-verified for the moved anchor):
+        // clicking the indicator lands where the annotation was made.
         s.mouse_click_position(2, 3);
-        assert_eq!((s.point_line(), s.point_col()), (1, 4), "indented cell 3 (the indicator cell) -> the symbol's char 4");
+        assert_eq!((s.point_line(), s.point_col()), (1, 0), "indented cell 3 (the indicator cell) -> the annotation's column (char 0)");
         // The code's OWN cell (display col 4, the `c`) maps to char 4 — this
         // is the cell the indent-blind mutation mis-maps to char 0.
         s.mouse_click_position(2, 4);
@@ -267,17 +281,21 @@ use super::*;
 
     #[test]
     fn file_view_rows_multi_record_same_line_share_one_anchor() {
-        // issue-annotations-anchor-at-symbol P2-2 (spec requirement 8): when
-        // SEVERAL annotation records sit on ONE line, they share that line's
-        // single anchor column — the note rows stack above the (single)
-        // code-row indicator in record order, and folding hides them all
-        // while leaving exactly one annotated code row (the renderer's one ▸
-        // lives on it). The `A` key path dedupes/edits to one record per line,
-        // so this fixture is built BY HAND (two NotesEntry::Record pushes on
-        // the same line), not by what the UI happens to allow.
+        // issue-annotations-symbol-precise (re-expressed from P2-2's
+        // "several records on one line share the line's single anchor": that
+        // rule is GONE — one indicator per record, at its own anchor). The
+        // surviving shared-anchor case: two records on one line that BOTH
+        // fall back to the SAME indent anchor (both at char 0 on an
+        // indented line) share that ONE indicator — the code row's anchor
+        // set is deduplicated, so the renderer draws a single ▴/▸ and
+        // folding leaves exactly one ▸. The `A` key path dedupes/edits to
+        // one record per line, so this fixture is built BY HAND (two
+        // NotesEntry::Record pushes on the same line), not by what the UI
+        // happens to allow.
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/annmulti.rs", "c0\n    c1\nc2\n");
-        // TWO records on line 1 (the indented `    c1`, anchor col 3).
+        // TWO records on line 1 (the indented `    c1`, both at char 0 —
+        // both fall back to the indent anchor, display col 3).
         for text in ["first note", "second note"] {
             s.notes_doc.entries.push(NotesEntry::Record(Annotation {
                 syntax: None,
@@ -294,39 +312,314 @@ use super::*;
         s.set_scroll_top(0);
 
         let rows = s.file_view_rows();
-        // EXACTLY ONE annotated code row for the line (the renderer draws a
-        // single ▴/▸ on it, no matter how many records anchor there).
+        // EXACTLY ONE annotated code row for the line (the renderer draws
+        // one indicator per DISTINCT anchor; both records fall back to the
+        // same indent anchor, so there is exactly one).
         let code_rows: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 1).collect();
         assert_eq!(code_rows.len(), 1, "one line -> one annotated code row: {rows:?}");
         assert!(code_rows[0].annotated, "the code row is annotated: {rows:?}");
-        let anchor = code_rows[0].anchor_col;
-        // `    c1` is 4-space indented: the shared anchor is the last indent
-        // cell (display col 3).
-        assert_eq!(anchor, 3, "the shared anchor is the line's last indent cell (col 3): {rows:?}");
+        // `    c1` is 4-space indented: both records fall back to the
+        // indent anchor (display col 3) and SHARE it — the code row's
+        // anchor set dedups to the single entry.
+        assert_eq!(code_rows[0].anchors, vec![3], "both fallback records share the indent anchor (col 3): {rows:?}");
+        assert_eq!(code_rows[0].code_start, 4, "the code keeps its source column (4): {rows:?}");
 
-        // TWO note rows, both for line 1, BOTH carrying the SAME anchor_col
-        // as the code row (they stack at the line's single anchor).
+        // TWO note rows, both for line 1, EACH carrying its own record's
+        // anchor — here both records resolved to the same fallback anchor,
+        // so both ╭ corners sit at col 3 (they stack at the shared
+        // indicator).
         let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
         assert_eq!(note_rows.len(), 2, "two records on one line -> two note rows: {rows:?}");
         for n in &note_rows {
-            assert_eq!(n.anchor_col, anchor, "each note row shares the line's single anchor: {rows:?}");
+            assert_eq!(n.anchors, vec![3], "each note row carries its record's (shared) anchor col 3: {rows:?}");
         }
-        // Both note rows sit DIRECTLY ABOVE the (single) code row.
+        // Both note rows sit DIRECTLY ABOVE the code row (record order).
         let code_idx = rows.iter().position(|r| !r.is_note && r.line == 1).unwrap();
         assert!(code_idx >= 2, "both note rows must precede the code row: {rows:?}");
         assert!(rows[code_idx - 2].is_note && rows[code_idx - 2].line == 1, "first-above row is a note for line 1: {rows:?}");
         assert!(rows[code_idx - 1].is_note && rows[code_idx - 1].line == 1, "second-above row is a note for line 1: {rows:?}");
 
         // Fold: BOTH note rows vanish, but the single annotated code row
-        // remains (it is what the renderer's single ▸ is drawn on).
+        // remains with its single (shared) ▸.
         s.annotate_toggle();
         assert!(s.note_rows_folded(), "toggled to folded");
         let folded = s.file_view_rows();
         let folded_notes: Vec<_> = folded.iter().filter(|r| r.is_note && r.line == 1).collect();
         assert!(folded_notes.is_empty(), "folded: both note rows gone: {folded:?}");
         let folded_code: Vec<_> = folded.iter().filter(|r| !r.is_note && r.line == 1).collect();
-        assert_eq!(folded_code.len(), 1, "folded: still exactly one annotated code row (the single ▸): {folded:?}");
+        assert_eq!(folded_code.len(), 1, "folded: still exactly one annotated code row: {folded:?}");
         assert!(folded_code[0].annotated, "folded code row stays annotated: {folded:?}");
+        assert_eq!(folded_code[0].anchors, vec![3], "folded: the shared anchor (one ▸) survives: {folded:?}");
+    }
+
+    #[test]
+    fn file_view_rows_mid_line_record_anchors_at_the_symbol() {
+        // issue-annotations-symbol-precise: the indicator sits before the
+        // SYMBOL the annotation was made on, at its own display column —
+        // NOT before the line's first token. A record on a MID-LINE symbol
+        // (char 8 of `    let x = 1;` — the `x`) anchors at display col 7
+        // (the space before `x`), not at the indent anchor col 3. The code
+        // row carries the anchor SET (here the single entry 7), the code
+        // keeps its source column (code_start 4), and the note row's ╭
+        // carries the same anchor.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annmid.rs", "c0\n    let x = 1;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annmid.rs".to_string(),
+            line: 1,
+            col: 8, // char offset of `x` (issue: a CHAR offset, not a display col)
+            anchor: "    let x = 1;".to_string(),
+            text: "mid note".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let code_rows: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(code_rows.len(), 1, "one annotated code row: {rows:?}");
+        assert_eq!(code_rows[0].anchors, vec![7], "the mid-line anchor is display col 7 (the cell before `x`), not the indent anchor 3: {rows:?}");
+        assert_eq!(code_rows[0].code_start, 4, "the code keeps its source column (4): {rows:?}");
+        assert_eq!(code_rows[0].indent_chars, 4, "the leading run is stripped: {rows:?}");
+        // The note row carries the SAME anchor (the ╭ sits at col 7, the
+        // same cell as the ▴ below it).
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 1, "one note row: {rows:?}");
+        assert_eq!(note_rows[0].anchors, vec![7], "the note row's ╭ anchors at the record's own col 7: {rows:?}");
+        // The note row sits directly above the code row.
+        let code_idx = rows.iter().position(|r| !r.is_note && r.line == 1).unwrap();
+        assert_eq!(rows[code_idx - 1].line, 1, "the note row is directly above the code row: {rows:?}");
+
+        // Fold: the note row vanishes; the code row keeps its mid-line
+        // anchor (one ▸ at col 7).
+        s.annotate_toggle();
+        let folded = s.file_view_rows();
+        assert!(folded.iter().all(|r| !r.is_note), "folded: note rows gone: {folded:?}");
+        let folded_code: Vec<_> = folded.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(folded_code[0].anchors, vec![7], "folded: the mid-line ▸ survives at col 7: {folded:?}");
+    }
+
+    #[test]
+    fn file_view_rows_two_records_two_distinct_anchors_two_indicators() {
+        // issue-annotations-symbol-precise: one indicator PER ANNOTATION.
+        // Two records on one line at TWO DIFFERENT symbols get two
+        // indicators at two columns and two note rows, each ╭ at its own
+        // anchor — replacing the landed "several records on one line share
+        // one anchor" rule. `    a b`: record 1 on `a` (char 4 — first
+        // token, anchor 3), record 2 on `b` (char 6 — mid-line, anchor 5).
+        // The `A` key path dedupes per line, so the fixture is a hand-built
+        // pair of records (not something the UI can produce).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/ann2.rs", "c0\n    a b\nc2\n");
+        for (col, text) in [(4usize, "note a"), (6usize, "note b")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/ann2.rs".to_string(),
+                line: 1,
+                col,
+                anchor: "    a b".to_string(),
+                text: text.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let code_rows: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(code_rows.len(), 1, "one annotated code row: {rows:?}");
+        assert_eq!(code_rows[0].anchors, vec![3, 5], "TWO indicators at TWO columns (the anchor SET): {rows:?}");
+        assert_eq!(code_rows[0].code_start, 4, "the code keeps its source column: {rows:?}");
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 2, "two note rows: {rows:?}");
+        assert_eq!(note_rows[0].anchors, vec![3], "the first note's ╭ at its record's anchor (3): {rows:?}");
+        assert_eq!(note_rows[1].anchors, vec![5], "the second note's ╭ at its record's anchor (5): {rows:?}");
+        let code_idx = rows.iter().position(|r| !r.is_note && r.line == 1).unwrap();
+        assert!(rows[code_idx - 2].is_note && rows[code_idx - 1].is_note, "both note rows directly above the code row: {rows:?}");
+
+        // Fold: both note rows vanish; the code row keeps BOTH ▸ (one per
+        // annotation, at its own anchor).
+        s.annotate_toggle();
+        let folded = s.file_view_rows();
+        let folded_code: Vec<_> = folded.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(folded_code[0].anchors, vec![3, 5], "folded: one ▸ PER ANNOTATION (two, at 3 and 5): {folded:?}");
+    }
+
+    #[test]
+    fn file_view_rows_wide_and_tab_records_use_display_columns() {
+        // issue-annotations-symbol-precise, the UNITS TRAP pinned at the
+        // store level: the record's `col` is a CHAR offset, and the anchor
+        // is a DISPLAY column. A symbol after two CJK chars is 2 display
+        // columns further right than its char offset; after a tab, up to 7.
+        // A char-vs-display error is invisible on ASCII lines and lands the
+        // indicator one cell off the symbol only here.
+        let mut s = store_with_project();
+        // Line 1: `  中中 x = 1;` — `x` at char 5, display col 7 (two CJK =
+        // 4 cells). Line 2: `\tz = 3;` — `z` at char 1, display
+        // col 8 (the tab advances to the 8-column stop). Line 3: `x\ty = 1;`
+        // — `y` at char 2, display col 8 (the MID-LINE tab: x = 1 cell, tab
+        // to col 8).
+        open_ann_file(&mut s, "src/annwide.rs", "c0\n  中中 x = 1;\n\tz = 3;\nx\ty = 1;\nc4\n");
+        for (line, col) in [(1usize, 5usize), (2usize, 1usize), (3usize, 2usize)] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/annwide.rs".to_string(),
+                line,
+                col,
+                anchor: "pin".to_string(),
+                text: format!("w{line}").to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        // Line 1: `x` at display col 7 (char 5) → anchor 6 (the space
+        // before it). A char-offset implementation would anchor at 4 — the
+        // SECOND CJK char's first cell, one the CJK glyph itself occupies
+        // (the units trap, invisible on ASCII lines).
+        let l1: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(l1[0].anchors, vec![6], "CJK-preceded symbol: anchor at DISPLAY col 6 (char-offset 4 would overwrite the second 中 — the units trap): {rows:?}");
+        assert_eq!(l1[0].code_start, 2, "the leading run (2 spaces) is the only indent — the CJK chars are code: {rows:?}");
+        // Line 2: `z` at display col 8 (the tab stop; char 1) → anchor 7 —
+        // the same cell the landed indent-anchor rule would pick, but here
+        // it is a rule-1 anchor (the tab IS the whitespace before the
+        // symbol).
+        let l2: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 2).collect();
+        assert_eq!(l2[0].anchors, vec![7], "tab-indented symbol: anchor at display col 7 (the last tab cell): {rows:?}");
+        assert_eq!(l2[0].code_start, 8, "the code sits at the 8-column tab stop: {rows:?}");
+        // Line 3: `y` at display col 8 (x = 1 cell, the mid-line tab to 8;
+        // char 2) → anchor 7, and NO shift (the line is unindented but the
+        // indicator overwrites a blank cell — the tab's trailing cells).
+        let l3: Vec<_> = rows.iter().filter(|r| !r.is_note && r.line == 3).collect();
+        assert_eq!(l3[0].anchors, vec![7], "mid-line tab: anchor at display col 7 (char-offset 1 would be inside the tab's blank region — the units trap): {rows:?}");
+        assert_eq!(l3[0].code_start, 0, "mid-line tab: NO shift (a blank cell was overwritten, not column 0 taken): {rows:?}");
+    }
+
+    #[test]
+    fn mouse_click_mid_line_indicator_maps_to_the_symbol() {
+        // issue-annotations-symbol-precise: re-verify the click/cursor
+        // mapping at the moved indicator — clicking an indicator cell maps
+        // to the SYMBOL's char (the record's column, the landed semantics),
+        // which the indicator now guards MID-LINE, where the plain
+        // code-tail mapping would land on its preceding space. Fixture:
+        // `    let x = 1;` with a record on `x` (char 8, mid-line anchor 7;
+        // code at display col 4, no shift).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annclick.rs", "c0\n    let x = 1;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annclick.rs".to_string(),
+            line: 1,
+            col: 8,
+            anchor: "    let x = 1;".to_string(),
+            text: "click me".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // Rendered rows: 0=c0, 1=note row, 2=code row (the annotated line).
+        // The indicator cell (display col 7) maps to the symbol's char 8
+        // (NOT char 7, the space — the tail mapping's answer; this is the
+        // cell the moved indicator newly guards, mid-code).
+        s.mouse_click_position(2, 7);
+        assert_eq!((s.point_line(), s.point_col()), (1, 8), "mid-line indicator cell 7 -> the symbol's char 8");
+        // A blank cell left of EVERY indicator (col 3) keeps the landed
+        // first-token semantics: the line's own indentation maps to the
+        // first non-whitespace char (char 4, the `l`), not to the record's
+        // symbol.
+        s.mouse_click_position(2, 3);
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "blank cell 3 (left of every indicator) -> the line's first token char 4");
+        // The code's own cell (display col 8, the `x`) maps to char 8 via
+        // the code-tail path (col - code_start 4 -> char 4 + 4).
+        s.mouse_click_position(2, 8);
+        assert_eq!((s.point_line(), s.point_col()), (1, 8), "code cell 8 -> char 8");
+        // One cell past it (display col 9, the space) maps to char 9.
+        s.mouse_click_position(2, 9);
+        assert_eq!((s.point_line(), s.point_col()), (1, 9), "code cell 9 -> char 9 (the space after x)");
+        // The code's start cell (display col 4, the `l`) maps to char 4.
+        s.mouse_click_position(2, 4);
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "code cell 4 -> char 4");
+        // Past the code's EOL (display col 15) clamps to the line end (char 14).
+        s.mouse_click_position(2, 15);
+        assert_eq!((s.point_line(), s.point_col()), (1, 14), "past EOL -> char 14");
+    }
+
+    #[test]
+    fn mouse_click_first_token_record_indicator_maps_to_its_column() {
+        // issue-annotations-symbol-precise: a record on the line's FIRST
+        // TOKEN (char 4 of `    let x = 1;` — the anchor is display col 3,
+        // coinciding with the landed indent anchor: the two rules agree on
+        // first-token records). Its indicator cell maps to the record's
+        // column (char 4), and cells left of it keep the landed mapping
+        // (the first non-whitespace char — the same char 4 here).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annclickft.rs", "c0\n    let x = 1;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annclickft.rs".to_string(),
+            line: 1,
+            col: 4,
+            anchor: "    let x = 1;".to_string(),
+            text: "first token".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // Rendered rows: 0=c0, 1=note row, 2=code row.
+        s.mouse_click_position(2, 3);
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "first-token indicator cell 3 -> the record's column (char 4)");
+        s.mouse_click_position(2, 2);
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "blank cell 2 (left of the indicator) -> the first token char 4");
+        s.mouse_click_position(2, 4);
+        assert_eq!((s.point_line(), s.point_col()), (1, 4), "code cell 4 -> char 4");
+    }
+
+    #[test]
+    fn mouse_click_column_zero_mid_line_indicator_no_shift() {
+        // issue-annotations-symbol-precise: a COLUMN-0 line whose record is
+        // MID-LINE does NOT shift (the indicator overwrites a blank cell),
+        // and the click mapping must honor that: the line's own cells keep
+        // their source columns (col 0 -> char 0, unchanged by any shift),
+        // while the indicator cell still maps to the symbol's char.
+        // Fixture: `let x = 1;`, record on `x` (char 4, anchor 3, no
+        // shift — no column-0 indicator present).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annclick0.rs", "let x = 1;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annclick0.rs".to_string(),
+            line: 0,
+            col: 4,
+            anchor: "let x = 1;".to_string(),
+            text: "no shift".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // The row model: anchor 3, code_start 0 (NO shift).
+        let rows = s.file_view_rows();
+        let code_row = rows.iter().find(|r| !r.is_note && r.line == 0).unwrap();
+        assert_eq!(code_row.anchors, vec![3], "mid-line record on a column-0 line: anchor 3");
+        assert_eq!(code_row.code_start, 0, "NO shift (the blank cell is overwritten, not column 0 taken)");
+        // Rendered rows: 0=note row (above), 1=code row.
+        // The indicator cell (3) maps to the symbol's char 4 (the tail
+        // mapping would give char 3, the space — the discriminator).
+        s.mouse_click_position(1, 3);
+        assert_eq!((s.point_line(), s.point_col()), (0, 4), "indicator cell 3 -> the symbol's char 4");
+        // Cell 0 is the line's own (unmoved) `l` → char 0 (a shifted line
+        // would have the code at 1 and cell 0 as the indicator — the
+        // no-shift case keeps source columns).
+        s.mouse_click_position(1, 0);
+        assert_eq!((s.point_line(), s.point_col()), (0, 0), "cell 0 -> char 0 (the line did not move)");
     }
 
     #[test]

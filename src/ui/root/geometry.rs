@@ -80,21 +80,21 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 // The terminal cursor is positioned in CELLS, not char
                 // indexes: the display column is the width of the point
                 // line's prefix [0, point_col) (plan 004 issue 05d).
-                // issue-annotations-anchor-at-symbol: the 2-cell gutter is
-                // GONE. An annotated line's code sits at display column
-                // `anchor_col + 1` (the indicator borrows the last
-                // indentation cell, or takes column 0 for a column-0 line);
-                // the row's `text` has that leading run stripped, so the
-                // point column (a full-line char offset) is translated onto
-                // the stripped text by `indent_chars`, then offset by the
-                // code's start column. A non-annotated line keeps its full
+                // issue-annotations-symbol-precise: an annotated line's
+                // code sits at display column `code_start` (the leading
+                // run's display width, or column 1 for the column-0
+                // exact-1 shift); the row's `text` has that leading run
+                // stripped, so the point column (a full-line char offset)
+                // is translated onto the stripped text by `indent_chars`,
+                // then offset by the code's start column. A non-annotated
+                // line keeps its full
                 // text at column 0. The fallback is the char index when the
                 // point line is outside the pre-computed visible slice.
                 FileViewRow::row_for_line(rows, target_line)
                     .and_then(|i| rows.get(i))
                     .map(|r| {
                         if r.annotated {
-                            let code_start = r.anchor_col + 1;
+                            let code_start = r.code_start;
                             let code_col =
                                 snap.file_view_point_col.saturating_sub(r.indent_chars);
                             code_start
@@ -158,7 +158,8 @@ mod tests {
                 line: i,
                 is_note: false,
                 annotated: false,
-                anchor_col: 0,
+                anchors: Vec::new(),
+                code_start: 0,
                 indent_chars: 0,
                 text: (*t).to_string(),
                 spans: Vec::new(),
@@ -296,7 +297,8 @@ mod tests {
                         line: l,
                         is_note: true,
                         annotated: false,
-                        anchor_col: 0,
+                        anchors: vec![0],
+                        code_start: 0,
                         indent_chars: 0,
                         text: format!("note {l}"),
                         spans: Vec::new(),
@@ -308,7 +310,11 @@ mod tests {
                     line: i,
                     is_note: false,
                     annotated: *annotated,
-                    anchor_col: 0,
+                    // The column-0 shift shape (issue-annotations-symbol-
+                    // precise): full text intact, the column-0 indicator
+                    // takes cell 0, the code starts at cell 1.
+                    anchors: vec![0],
+                    code_start: 1,
                     indent_chars: 0,
                     text: (*text).to_string(),
                     spans: Vec::new(),
@@ -391,12 +397,12 @@ mod tests {
 
     /// issue-annotations-anchor-at-symbol: the 2-cell gutter is GONE — the
     /// cursor column on an annotated line is the code's own start column
-    /// (`anchor_col + 1`) plus the point's display offset within the code,
+    /// (`code_start`) plus the point's display offset within the code,
     /// NOT a fixed 2-cell add. The fixtures here are COLUMN-0 lines (no
     /// indentation to borrow): the anchor is column 0, the code shifts right
     /// by exactly one cell, so the cursor sits at column 1 + the point's
     /// display col. (The store builds these rows with the full text intact,
-    /// `anchor_col = 0`, `indent_chars = 0` — the column-0 shape.)
+    /// `code_start = 1`, `indent_chars = 0` — the column-0 shape.)
     /// (annotations-render-fold: the note row emits BEFORE
     /// the code row, so an annotated point's code row sits at slice row 1
     /// — terminal row 2.)
@@ -427,22 +433,30 @@ mod tests {
     }
 
     /// issue-annotations-anchor-at-symbol: an INDENTED annotated line's code
-    /// does NOT move — the anchor borrows the last indentation cell, so the
-    /// cursor's code-start column is the line's own indentation width (here
-    /// 4 spaces → the code at display col 4), not a fixed gutter. This is the
-    /// mirror of the column-0 test above and is what catches a refactor that
-    /// re-introduces a constant leading width.
+    /// does NOT move — the anchor borrows a cell of the line's own
+    /// indentation, so the cursor's code-start column is the line's own
+    /// indentation width (here 4 spaces → the code at display col 4), not a
+    /// fixed gutter. This is the mirror of the column-0 test above and is
+    /// what catches a refactor that re-introduces a constant leading width.
+    /// issue-annotations-symbol-precise: the fixture now carries the
+    /// MID-LINE anchor shape (the record's symbol is mid-line: anchors [7],
+    /// the cell before the symbol — code_start stays 4, the cursor math
+    /// reads only `code_start`, never the anchor set).
     #[test]
     fn cursor_cell_annotated_indented_line_code_does_not_move() {
         // `    fn deep() {}` (4 leading spaces): the store strips the run,
-        // sets anchor_col = 3, indent_chars = 4, and the cursor is
+        // sets code_start = 4, indent_chars = 4, and the cursor is
         // code_start (4) + the point's display offset within the code.
+        // The record's indicator sits at the MID-LINE anchor 7 (one cell
+        // left of its symbol at display 8) — a fact the cursor math must
+        // ignore (it is the renderer's business, not the cursor's).
         let rows = vec![
             FileViewRow {
                 line: 0,
                 is_note: true,
                 annotated: false,
-                anchor_col: 3,
+                anchors: vec![7],
+                code_start: 0,
                 indent_chars: 0,
                 text: "a note".to_string(),
                 spans: Vec::new(),
@@ -453,7 +467,8 @@ mod tests {
                 line: 0,
                 is_note: false,
                 annotated: true,
-                anchor_col: 3,
+                anchors: vec![7],
+                code_start: 4,
                 indent_chars: 4,
                 text: "fn deep() {}".to_string(), // stripped of the 4 spaces
                 spans: Vec::new(),
@@ -490,7 +505,8 @@ mod tests {
                 line,
                 is_note: false,
                 annotated: false,
-                anchor_col: 0,
+                anchors: Vec::new(),
+                code_start: 0,
                 indent_chars: 0,
                 text: format!("line {}", line),
                 spans: Vec::new(),

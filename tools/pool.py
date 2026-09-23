@@ -65,7 +65,8 @@ DEFAULT_LANES = 4
 BATTERY = [
     "sweep.py", "drive_all.py", "drive_windowing.py",
     "drive_windowing_panes.py", "check_cursor_stream.py", "ux_sweep.py",
-    "probe_notes_dump.py", "drive_syntax_notes.py", "drive_xref.py",
+    "probe_notes_dump.py", "drive_syntax_notes.py", "drive_symbol_precise.py",
+    "drive_xref.py",
     "drive_external_notes.py", "drive_external_crate.py", "sweep_flows.py",
 ]
 

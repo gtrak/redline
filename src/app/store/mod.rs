@@ -929,36 +929,53 @@ pub struct FileViewRow {
     /// Code rows only: the line carries at least one annotation (the
     /// margin fold arrow — independent of note-row visibility, `C-c a h`).
     pub annotated: bool,
-    /// The annotation indicator's display column (the `\u{25b4}`/`\u{25b8}`
-    /// arrow on a code row, the `\u{256d}` corner on a note row) — the ANCHOR
-    /// column. The indicator borrows the LAST cell of the line's own
-    /// indentation (issue-annotations-anchor-at-symbol), so an indented
-    /// symbol's code does not move; a column-0 symbol has no indentation to
-    /// borrow and its line shifts right by exactly one cell (the indicator
-    /// takes column 0). `0` for non-annotated code rows and for every note
-    /// row's ANCHOR (a note row mirrors its anchored code row's anchor —
-    /// the corner sits in the same column as the arrow directly below).
-    /// Carried by the STORE (which builds the row and knows the line's
-    /// indentation) rather than recomputed in the renderer from the code
-    /// text: the anchor is a display-column fact about the line, not
-    /// re-derivable from the (already leading-whitespace-stripped) row
-    /// text alone.
-    pub anchor_col: usize,
+    /// The indicator column(s) (the `\u{25b4}`/`\u{25b8}` arrow on a code
+    /// row, the `\u{256d}` corner on a note row) — the ANCHOR column.
+    /// issue-annotations-symbol-precise: the anchor is per-RECORD, not
+    /// per-line. A code row carries the SET of its line's indicator columns
+    /// (deduplicated, ascending — one `\u{25b4}`/`\u{25b8}` per entry; the
+    /// renderer draws them all). Records that resolve to the same column —
+    /// e.g. two records on one line both falling back to the same indent
+    /// anchor — share that ONE indicator (the dedup is what keeps a code
+    /// cell from ever hosting two glyphs). Empty when the line has no
+    /// annotations. A note row carries its own record's anchor (a single
+    /// entry) — the corner sits in the same column as that record's arrow
+    /// on the code row directly below.
+    /// Each entry is the display column of the cell directly BEFORE the
+    /// record's symbol when that cell is whitespace (the indicator
+    /// overwrites a blank cell — the code does not move); otherwise the
+    /// line's indent anchor (`indent_width - 1`, itself column 0 when the
+    /// indent is 0, shifting the line right by exactly one cell). Carried
+    /// by the STORE (which builds the row and knows the line's full text)
+    /// rather than recomputed in the renderer from the (stripped) row text:
+    /// the record's stored `col` is a CHAR offset — not a display column —
+    /// so the anchor's column is only re-derivable from the un-stripped
+    /// line, which the renderer does not hold.
+    pub anchors: Vec<usize>,
+    /// Code rows only: the display column where `text` is drawn
+    /// (issue-annotations-symbol-precise): the line's leading indentation
+    /// run's display width when the line has one (the code keeps its source
+    /// column; every indicator sits in a blank cell), else column 1 when a
+    /// column-0 line is shifted right by exactly one cell for a column-0
+    /// indicator, else column 0 (unannotated code rows — and 0 for note
+    /// rows, which do not use it).
+    pub code_start: usize,
     /// Code rows only: the char (and, for spaces/tabs, byte) count of the
-    /// leading indentation run that the indicator borrowed — 0 when the
-    /// line has no leading whitespace (the column-0 shift case) and 0 for
-    /// non-annotated rows. The renderer strips this run from `text` so the
-    /// code sits at `anchor_col + 1`; the hardware cursor and the click
+    /// leading indentation run — 0 when the line has no leading
+    /// whitespace (the column-0 cases) and 0 for non-annotated rows. The
+    /// store strips this run from `text` so the code sits at `code_start`
+    /// (the run's display width); the hardware cursor and the click
     /// mapping use it to translate a full-line point column back onto the
     /// stripped row text.
     pub indent_chars: usize,
     /// The row's text (without trailing newline; an orphaned note row
     /// carries an `(orphaned)` tag in its text). For an ANNOTATED code row
     /// the leading indentation run (`indent_chars` chars of spaces/tabs) is
-    /// stripped so the code begins at cell `anchor_col + 1` and no code
-    /// character moves (a column-0 line keeps its full text — its indicator
-    /// shifts the whole line right by one instead); `spans`/`matches` are
-    /// re-based by that run's byte length accordingly. Non-annotated and
+    /// stripped so the code begins at cell `code_start` and no code
+    /// character moves (a column-0 line keeps its full text — its
+    /// indicators shift the whole line right by one instead when a
+    /// column-0 anchor is present, else it stays put); `spans`/`matches`
+    /// are re-based by that run's byte length accordingly. Non-annotated and
     /// note rows keep their full text.
     pub text: String,
     /// Highlight spans (code rows only; byte offsets relative to the line
