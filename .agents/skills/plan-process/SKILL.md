@@ -582,6 +582,22 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    aimed at the property that actually **changed**, and its stated reason is part of the claim — a
    false rationale in prose cannot be caught by any assertion, only by measuring the class it
    names.
+   **A mutation that survives the WHOLE suite means the suite is not testing the feature.** A
+   click pin was added for annotated lines and it discriminated — but its fixture was a
+   **column-0** line, so the *indented* branch of the same function was never exercised: replacing
+   that branch with an indent-blind implementation left **all 511 store tests green** while every
+   click on an indented annotated line would land at char 0 instead of the symbol. The code was
+   correct; nothing proved it. So when a function branches on a *shape* (column-0 vs indented,
+   empty vs non-empty, present vs absent), the pin must cover **each shape**, and the cheap test
+   for that is to mutate the branch your fixture does NOT cover and check the suite stays green —
+   a green suite under a breaking mutation is the finding.
+   **When a change moves text, verify what is anchored to BYTE OFFSETS, not just what is anchored
+   to layout.** Stripping a line's leading whitespace to hand those cells to the renderer also
+   moved every highlight span and search-match range, and a one-byte error there is **silently
+   mis-coloured text on exactly the lines that have annotations** — invisible to any layout test.
+   The check that settles it: render an annotated line and its plain twin, and confirm the spans
+   light the same *characters at the same display columns*. Watch the units: a tab is **1 byte but
+   8 columns**, so a re-base must shift by bytes/chars, never by displayed width.
    **And name the flake.** `queries::tests::default_budget_does_not_abort_a_normal_file` is
    load-sensitive (observed panic: "parse 788ms + query 358ms must fit the default budget
    1.19s") and has now flaked twice under concurrent builds while passing serially. **Capture a
