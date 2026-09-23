@@ -899,24 +899,25 @@ def list_view_cup_checks():
 
 
 def annotation_gutter_checks():
-    """plan 005 issue 02b + annotations-fold-visual: the annotated line has a
-    2-cell gutter (the fold arrow at cell 0, the tree-line branch/blank at
-    cell 1, code at cell 2 — the SAME column folded and shown), the note row
-    carries the 2-branch tree-line's curved corner (╭ at cell 0, ─ bend at
-    cell 1, note text at cell 2) ABOVE the anchored code row, the cursor
-    column adds the gutter on
-    annotated lines, and note rows do not push the point's line off-canvas.
+    """plan 005 issue 02b + annotations-fold-visual + issue-annotations-
+    anchor-at-symbol: the 2-cell gutter is GONE. Line 0 (`fn target_one() {}
+    `) is a COLUMN-0 symbol, so the indicator borrows no indentation, takes
+    cell 0 (▴ shown / ▸ folded), and shifts the code right by exactly one
+    (code at cell 1). The note row carries the curved corner (╭ at the anchor
+    cell 0, ─ bend at cell 1, note text at cell 2) ABOVE the anchored code
+    row, the cursor column sits on the code (cell 1 + display col) on the
+    annotated line, and note rows do not push the point's line off-canvas.
 
     Legs:
       * Open a >viewport file, `A` on line 0, C-n to the window bottom:
         assert the position's line IS drawn and the cursor row equals it.
-      * Assert the annotated line renders its source text VERBATIM after
-        the gutter (full-string assertion, not prefix).
-      * Cursor-column leg: the hardware cursor on an annotated line sits ON
-        the character (gutter + display col), not one cell left — and the
-        note row ABOVE the code row moved the cursor's CUP row down by 1
-        when it committed (the CUP stream is consistent with the note
-        above).
+      * Assert the annotated line renders its source text VERBATIM after the
+        1-cell anchor shift (full-string assertion, not prefix).
+      * Cursor-column leg: the hardware cursor on an annotated column-0 line
+        sits ON the code (cell 1 + display col), not one cell left in the
+        anchor — and the note row ABOVE the code row moved the cursor's CUP
+        row down by 1 when it committed (the CUP stream is consistent with
+        the note above).
       * All-annotated canvas FILL (02c): a 25-line file with every line
         annotated in the 21-row viewport emits ~20 of 21 rows (10 code +
         10 note — the LARGEST fitting span), not a handful of non-blank
@@ -946,61 +947,61 @@ def annotation_gutter_checks():
         s.key(ch, 0.25)
     s.key("RET", 1.2)
 
-    # ── Leg 1: annotated line renders source text VERBATIM after gutter ──
-    # After `A` on line 0 (note SHOWN by default), the code row is
-    # "\u25be\u2500fn target_one() {}" — the ▾ fold arrow at cell 0, the ─
-    # tree-line branch at cell 1, code at cell 2 (the full string, not a
-    # prefix; the 2-cell gutter is the no-jitter leading width).
+    # ── Leg 1: annotated line renders source text VERBATIM after the anchor ─
+    # issue-annotations-anchor-at-symbol: line 0 (`fn target_one() {}`) is a
+    # COLUMN-0 symbol, so the indicator borrows nothing, takes cell 0, and
+    # shifts the code right by exactly one — the code row is
+    # "\u25b4fn target_one() {}" (▴ at cell 0, code at cell 1). The note row
+    # carries the ╭ corner at the SAME anchor cell (0) with its ─ bend at
+    # cell 1 and the note text at cell 2.
     s.key("A", 0.5)
     # Type the note text and commit with RET.
     os.write(s.master, b"regression check\r")
     s.cup_settle(s._read(0.8, quiet=0.15))
-    # Find the row with the SHOWN arrow (▾) and verify the full text after the
-    # gutter.
+    # Find the row with the SHOWN arrow (▴) and verify the full text after it.
     row_text = None
     for r in range(1, s.rows - 2):
         t = s.row_text(r)
-        if "\u25be" in t:
+        if "\u25b4" in t:
             row_text = t
             break
     verbatim = row_text is not None and "fn target_one() {}" in row_text
-    # The arrow is at cell 0, the branch at cell 1, the code at cell 2:
-    # the row starts with "\u25be\u2500" followed by "fn target_one() {}".
-    gutter_correct = row_text is not None and row_text.startswith("\u25be\u2500fn target_one() {}")
-    rec("annotated line: source text VERBATIM after the 2-cell gutter", verbatim,
+    # The indicator is at cell 0 and the code at cell 1 (the exact-1 shift):
+    # the row starts with "\u25b4" followed by "fn target_one() {}".
+    anchor_correct = row_text is not None and row_text.startswith("\u25b4fn target_one() {}")
+    rec("annotated column-0 line: source text VERBATIM after the 1-cell anchor shift", verbatim,
         f"row={row_text[:40]!r}" if row_text else "arrow row not found")
-    rec("annotated line: ▾ at cell 0, ─ at cell 1, code at cell 2 (full-string)",
-        gutter_correct,
-        f"row starts with arrow+branch+code: {gutter_correct}")
+    rec("annotated column-0 line: ▴ at cell 0, code at cell 1 (full-string)",
+        anchor_correct,
+        f"row starts with arrow+code: {anchor_correct}")
     # annotations-curve-glyphs (design A): the note row is directly ABOVE
-    # the arrow row, carrying the tree-line's curved corner (╭ at cell 0 —
-    # the SAME cell as the ▾ on the code row below — with its ─ bend at
+    # the arrow row, carrying the curved corner (╭ at the anchor cell 0 —
+    # the SAME cell as the ▴ on the code row below — with its ─ bend at
     # cell 1) and the note text at cell 2 (the note is the code row's
     # header, not its trailer). The per-cell "\u256d\u2500regression
     # check" string is the ANCHOR assertion: it is false if the corner
     # moves one cell or if the cell-1 bend is dropped.
     marker_row_idx = next((r for r in range(1, s.rows - 2)
-                           if "\u25be" in s.row_text(r)), None)
+                           if "\u25b4" in s.row_text(r)), None)
     note_above = marker_row_idx is not None and marker_row_idx > 1 and (
         "\u256d\u2500regression check" in s.row_text(marker_row_idx - 1)
     )
-    rec("note row (╭ corner at cell 0, ─ at cell 1) sits directly ABOVE the code row",
+    rec("note row (╭ corner at the anchor cell 0, ─ at cell 1) sits directly ABOVE the code row",
         note_above, f"arrow_row={marker_row_idx}")
 
-    # ── Leg 2: cursor column on an annotated line adds the gutter ──────
+    # ── Leg 2: cursor column on an annotated line sits on the code, not the anchor ─
     # Point is at line 0, col 0 (after the annotation commit, the point
-    # stays on the anchored line). Before the commit the CUP was at (2, 2)
-    # (1-based); the note row ABOVE the code row pushed the code row down
-    # by 1, so the CUP row is now 3 — the CUP stream is consistent with
-    # the note above. Terminal col: gutter(2) + display_col(0) = 2
-    # (0-based) = 3 (1-based).
+    # stays on the anchored line). Line 0 is a column-0 symbol: the code
+    # sits at cell 1 (the exact-1 shift), so char 0 is at 0-based terminal
+    # col 1 (1-based col 2). The note row ABOVE the code row pushed the
+    # code row down by 1, so the CUP row is now 3 (1-based).
     r, c = do("C-a", 0.6)
-    rec("cursor on annotated line: CUP row moved +1 (note above), col = gutter + 0",
-        (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
-    # C-f x3: display col 3, terminal col = 2 + 3 = 5 (0-based) = 6 (1-based).
+    rec("cursor on annotated column-0 line: CUP row moved +1 (note above), col = code cell 1",
+        (r, c) == (3, 2), f"cup=({r},{c}) want (3,2)")
+    # C-f x3: char 3 of the code → 0-based terminal col 1 + 3 = 4 (1-based 5).
     r, c = do("C-f C-f C-f")
-    rec("cursor on annotated line: C-f x3 → CUP col = gutter + 3 (1-based col 6)",
-        (r, c) == (3, 6), f"cup=({r},{c}) want (3,6)")
+    rec("cursor on annotated column-0 line: C-f x3 → CUP col = code cell 1 + 3 (1-based col 5)",
+        (r, c) == (3, 5), f"cup=({r},{c}) want (3,5)")
 
     # ── Leg 3: note rows do not push the point off-canvas ─────────────
     # 30-line file, viewport 21. Note on line 0 (already created). C-n x20
@@ -1050,7 +1051,7 @@ def annotation_gutter_checks():
         idx = row_text.find("fn target_one() {}")
         if idx < 0:
             return None
-        # every char before the code is single-cell here (▾/▸/─/space)
+        # every char before the code is single-cell here (▴/▸/─/space)
         return sum(1 for _ in row_text[:idx])
 
     s.key("C-c a h", 0.6)
@@ -1072,7 +1073,7 @@ def annotation_gutter_checks():
     note_row_back = False
     for r2 in range(1, s.rows - 2):
         t = s.row_text(r2)
-        if "\u25be" in t and "fn target_one() {}" in t:
+        if "\u25b4" in t and "fn target_one() {}" in t:
             shown_row = t
         if "\u256d\u2500regression check" in t:
             note_row_back = True
@@ -1120,7 +1121,7 @@ def annotation_gutter_checks():
     canvas_rows = [s.row_text(r) for r in range(1, s.rows - 2)]
     title = s.row_text(0).strip()
     filled = [t for t in canvas_rows if t.strip()]
-    marker_rows = [t for t in canvas_rows if "\u25be" in t]
+    marker_rows = [t for t in canvas_rows if "\u25b4" in t]
     note_rows = [t for t in canvas_rows if "\u256d" in t]
     # FILL, not merely non-blank: >= 18 of 21 content rows, specifically
     # the 10 code + 10 note shape.
@@ -1132,7 +1133,7 @@ def annotation_gutter_checks():
         f"filled={len(filled)}")
     # The point's line (line 0, "dense line 0") is drawn with its marker
     # and its note row directly above it.
-    point_drawn = any("dense line 0" in t and "\u25be" in t for t in canvas_rows)
+    point_drawn = any("dense line 0" in t and "\u25b4" in t for t in canvas_rows)
     rec("all-annotated fill: point's line (line 0) drawn with marker",
         point_drawn,
         f"row0={[t for t in canvas_rows if 'dense line 0' in t][:1]}")

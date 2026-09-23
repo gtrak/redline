@@ -142,25 +142,57 @@ impl AppStore {
         else {
             return;
         };
-        // plan 005 issue 02b + annotations-fold-visual: annotated lines
-        // render their code at cell 2 (the 2-cell gutter for the fold arrow
-        // at cell 0 and the tree-line branch/blank at cell 1). A click in
-        // the gutter (col 0 or 1) maps to char 0; a click at code cell k
-        // maps to char display_col_to_char_index(text, k - 2). The leading
-        // width is the same folded and shown, so no fold-state branch here.
-        let annotated = rows
-            .iter()
-            .any(|r| !r.is_note && r.line == target_line && r.annotated);
-        let code_col = if annotated { col.saturating_sub(2) } else { col };
+        // issue-annotations-anchor-at-symbol: the 2-cell gutter is GONE. An
+        // annotated line's code sits at display column `anchor_col + 1`
+        // (the indicator borrows the last indentation cell, or takes column
+        // 0 for a column-0 line). A click LEFT of the code's own column
+        // (the blank cells plus the indicator cell) maps to the line's
+        // symbol — the first non-whitespace char, at full-line char index
+        // `indent_chars` (a column-0 line's symbol is char 0). A click on
+        // the code's own column or beyond maps within the code: the code
+        // tail (the full line minus its leading whitespace) starts at
+        // display column `anchor_col + 1`, so the char index is
+        // `indent_chars + display_col_to_char_index(code_tail, col -
+        // (anchor_col + 1))`. A non-annotated line maps the display column
+        // straight onto its full line (the old, unchanged behavior).
+        let target_row = rows.iter().find(|r| !r.is_note && r.line == target_line);
         let line_len = self.line_char_len(target_line);
         // Display column -> char index (plan 004 issue 05d).
-        let char_col = self
-            .buffers
-            .current_buffer()
-            .and_then(|b| b.line_text(target_line))
-            .map(|t| crate::model::text_width::display_col_to_char_index(&t, code_col))
-            .unwrap_or(0)
-            .min(line_len);
+        let char_col = match target_row.filter(|r| r.annotated) {
+            Some(r) => {
+                let code_start = r.anchor_col + 1;
+                let indent = r.indent_chars;
+                let symbol_col = indent.min(line_len);
+                let mapped = self
+                    .buffers
+                    .current_buffer()
+                    .and_then(|b| b.line_text(target_line))
+                    .map(|t| {
+                        if col < code_start {
+                            symbol_col
+                        } else {
+                            // `indent` is the leading run's byte length
+                            // (spaces/tabs are single-byte), a valid char
+                            // boundary; the code tail starts there.
+                            let tail = &t[indent.min(t.len())..];
+                            indent
+                                + crate::model::text_width::display_col_to_char_index(
+                                    tail,
+                                    col - code_start,
+                                )
+                        }
+                    })
+                    .unwrap_or(symbol_col);
+                mapped.min(line_len)
+            }
+            None => self
+                .buffers
+                .current_buffer()
+                .and_then(|b| b.line_text(target_line))
+                .map(|t| crate::model::text_width::display_col_to_char_index(&t, col))
+                .unwrap_or(0)
+                .min(line_len),
+        };
         let p = self.file_point();
         self.set_point(target_line, char_col, p.goal_col);
     }
@@ -369,11 +401,31 @@ impl AppStore {
 
         let mut out = Vec::with_capacity(end.saturating_sub(start) + notes_left);
         for line in start..end {
+            let full_text = buf.line_text(line).unwrap_or_default();
+            let annotated = records.iter().any(|a| a.line == line);
+            // issue-annotations-anchor-at-symbol: the indicator borrows the
+            // LAST cell of the line's own indentation, so an indented
+            // symbol's code does not move (the anchor sits at display
+            // column `indent_width - 1`); a column-0 symbol has no
+            // indentation to borrow, so its anchor is column 0 and the line
+            // shifts right by exactly one cell. This is a display-column
+            // fact about the line, computed HERE (the store builds the row
+            // and knows the full line) and carried on the row — the
+            // renderer / cursor / click mapping read `anchor_col` rather
+            // than re-deriving it from the (stripped) row text.
+            let (indent_chars, indent_width) =
+                if annotated { Self::leading_indent(&full_text) } else { (0, 0) };
+            let anchor_col = if annotated { indent_width.saturating_sub(1) } else { 0 };
             // annotations-render-fold: the note rows emit BEFORE the code
             // row — the note reads as a header for the code it annotates,
             // not a trailer under it. The budget bookkeeping is unchanged
             // (the code rows are never reduced; the note-row budget is
-            // final).
+            // final). Multiple annotations on one line share the line's
+            // single anchor column (the anchor is a property of the line's
+            // indentation, not of any one record): their note rows stack
+            // above the code row in record order, all carrying the same
+            // `anchor_col`, and folding hides them all while the single
+            // code-row indicator (▸) survives.
             if self.show_note_rows {
                 for a in records.iter().filter(|a| a.line == line) {
                     if notes_left == 0 {
@@ -382,8 +434,8 @@ impl AppStore {
                     notes_left -= 1;
                     // annotations-fold-visual: the note row's text is now the
                     // BARE note content — the old `  ▸ ` text prefix is gone
-                    // (the tree-line's diagonal, drawn by the canvas at cell
-                    // 0, carries the "this is a note" meaning now).
+                    // (the canvas's curved corner ╭ at the anchor cell carries
+                    // the "this is a note" meaning now).
                     let mut note = a.text.clone();
                     if a.orphaned {
                         note.push_str(" (orphaned)");
@@ -392,6 +444,8 @@ impl AppStore {
                         line,
                         is_note: true,
                         annotated: false,
+                        anchor_col,
+                        indent_chars: 0,
                         matches: Vec::new(),
                         highlight: None,
                         text: note,
@@ -399,25 +453,61 @@ impl AppStore {
                     });
                 }
             }
-            let text = buf.line_text(line).unwrap_or_default().to_string();
-            let spans = highlight
-                .and_then(|h| h.lines.get(line))
-                .map(|hl| hl.spans.clone())
-                .unwrap_or_default();
-            let annotated = records.iter().any(|a| a.line == line);
             // Issue match-highlight: this line's match ranges, clipped to
             // the line (VISIBLE lines only — the context is pre-computed,
-            // so nothing here scans the whole buffer per frame).
-            let matches = match_ranges_for_line(
+            // so nothing here scans the whole buffer per frame). Byte
+            // offsets are relative to the FULL line start.
+            let matches_full = match_ranges_for_line(
                 &self.match_context,
                 &key,
                 buf.try_line_to_byte(line),
-                text.len(),
+                full_text.len(),
             );
+            let spans_full = highlight
+                .and_then(|h| h.lines.get(line))
+                .map(|hl| hl.spans.clone())
+                .unwrap_or_default();
+            // issue-annotations-anchor-at-symbol: for an annotated line the
+            // leading indentation run is stripped from the row text (the
+            // canvas would render a tab as ~1 cell, not the next 8-column
+            // tab stop, so controlling placement means owning the leading
+            // cells) and `spans`/`matches` are re-based by that run's byte
+            // length (spaces/tabs are single-byte, so the char count IS the
+            // byte length; spans never start inside the leading run, so the
+            // re-base is exact). A column-0 line keeps its full text — the
+            // indicator shifts the whole line right by one instead.
+            let (text, spans, matches) = if annotated {
+                let stripped = full_text[indent_chars..].to_string();
+                let rebase_spans = spans_full
+                    .into_iter()
+                    .map(|s| {
+                        let start = s.start.saturating_sub(indent_chars);
+                        let end = s.end.saturating_sub(indent_chars);
+                        redline_syntax::highlight::LineSpan {
+                            start,
+                            end,
+                            face: s.face,
+                        }
+                    })
+                    .collect();
+                let rebase_matches = matches_full
+                    .into_iter()
+                    .map(|m| LineMatch {
+                        start: m.start.saturating_sub(indent_chars),
+                        end: m.end.saturating_sub(indent_chars),
+                        selected: m.selected,
+                    })
+                    .collect();
+                (stripped, rebase_spans, rebase_matches)
+            } else {
+                (full_text.to_string(), spans_full, matches_full)
+            };
             out.push(FileViewRow {
                 line,
                 is_note: false,
                 annotated,
+                anchor_col,
+                indent_chars,
                 matches,
                 // jump-highlight: the snapshot attaches the landing row's
                 // highlight (with the frame's fade intensity) after this.
@@ -427,6 +517,35 @@ impl AppStore {
             });
         }
         out
+    }
+
+    /// issue-annotations-anchor-at-symbol: the line's LEADING INDENTATION
+    /// run, as `(char_count, display_width)`. Spaces count one cell each;
+    /// a tab advances to the next 8-column tab stop (tab width 8, from
+    /// column 0 — the standard terminal rule the anchor's display-column
+    /// position must honour: a `\t`-indented line's code sits at display
+    /// column 8, so its anchor is column 7). The run stops at the first
+    /// non-space, non-tab char (indentation is spaces/tabs; a line of pure
+    /// whitespace yields the whole line as the run, which an annotated
+    /// blank line renders as just its indicator). Returns `(0, 0)` when the
+    /// line has no leading whitespace (the column-0 shift case).
+    fn leading_indent(line: &str) -> (usize, usize) {
+        let mut chars = 0usize;
+        let mut col = 0usize;
+        for c in line.chars() {
+            match c {
+                ' ' => {
+                    chars += 1;
+                    col += 1;
+                }
+                '\t' => {
+                    chars += 1;
+                    col += 8 - (col % 8);
+                }
+                _ => break,
+            }
+        }
+        (chars, col)
     }
 
     /// The `annotate-fold` command (annotations-render-fold / annotations-

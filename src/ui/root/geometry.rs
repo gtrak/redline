@@ -79,23 +79,34 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
             } else {
                 // The terminal cursor is positioned in CELLS, not char
                 // indexes: the display column is the width of the point
-                // line's prefix [0, point_col) (plan 004 issue 05d). For an
-                // annotated line the code starts at cell 2 (the 2-cell
-                // gutter — the fold arrow at cell 0 and the tree-line
-                // branch/blank at cell 1; plan 005 issue 02b, annotations-
-                // fold-visual), so add the gutter offset. The leading width
-                // is the same folded and shown (no fold-state branch), and
-                // the fallback is the char index when the point line is
-                // outside the pre-computed visible slice.
+                // line's prefix [0, point_col) (plan 004 issue 05d).
+                // issue-annotations-anchor-at-symbol: the 2-cell gutter is
+                // GONE. An annotated line's code sits at display column
+                // `anchor_col + 1` (the indicator borrows the last
+                // indentation cell, or takes column 0 for a column-0 line);
+                // the row's `text` has that leading run stripped, so the
+                // point column (a full-line char offset) is translated onto
+                // the stripped text by `indent_chars`, then offset by the
+                // code's start column. A non-annotated line keeps its full
+                // text at column 0. The fallback is the char index when the
+                // point line is outside the pre-computed visible slice.
                 FileViewRow::row_for_line(rows, target_line)
                     .and_then(|i| rows.get(i))
                     .map(|r| {
-                        let gutter = if r.annotated { 2 } else { 0 };
-                        gutter
-                            + crate::model::text_width::char_index_to_display_col(
+                        if r.annotated {
+                            let code_start = r.anchor_col + 1;
+                            let code_col =
+                                snap.file_view_point_col.saturating_sub(r.indent_chars);
+                            code_start
+                                + crate::model::text_width::char_index_to_display_col(
+                                    &r.text, code_col,
+                                )
+                        } else {
+                            crate::model::text_width::char_index_to_display_col(
                                 &r.text,
                                 snap.file_view_point_col,
                             )
+                        }
                     })
                     .unwrap_or(snap.file_view_point_col)
             };
@@ -147,6 +158,8 @@ mod tests {
                 line: i,
                 is_note: false,
                 annotated: false,
+                anchor_col: 0,
+                indent_chars: 0,
                 text: (*t).to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -283,6 +296,8 @@ mod tests {
                         line: l,
                         is_note: true,
                         annotated: false,
+                        anchor_col: 0,
+                        indent_chars: 0,
                         text: format!("note {l}"),
                         spans: Vec::new(),
                         matches: Vec::new(),
@@ -293,6 +308,8 @@ mod tests {
                     line: i,
                     is_note: false,
                     annotated: *annotated,
+                    anchor_col: 0,
+                    indent_chars: 0,
                     text: (*text).to_string(),
                     spans: Vec::new(),
                     matches: Vec::new(),
@@ -372,19 +389,24 @@ mod tests {
         }
     }
 
-    /// plan 005 issue 02b + annotations-fold-visual: the cursor column on an
-    /// annotated line adds the 2-cell gutter (the fold arrow at cell 0 and the
-    /// tree-line branch/blank at cell 1 push the code to cell 2). Point at
-    /// char 0 of an annotated line → display col 2 (gutter + 0).
+    /// issue-annotations-anchor-at-symbol: the 2-cell gutter is GONE — the
+    /// cursor column on an annotated line is the code's own start column
+    /// (`anchor_col + 1`) plus the point's display offset within the code,
+    /// NOT a fixed 2-cell add. The fixtures here are COLUMN-0 lines (no
+    /// indentation to borrow): the anchor is column 0, the code shifts right
+    /// by exactly one cell, so the cursor sits at column 1 + the point's
+    /// display col. (The store builds these rows with the full text intact,
+    /// `anchor_col = 0`, `indent_chars = 0` — the column-0 shape.)
     /// (annotations-render-fold: the note row emits BEFORE
     /// the code row, so an annotated point's code row sits at slice row 1
     /// — terminal row 2.)
     #[test]
-    fn cursor_cell_annotated_line_adds_gutter_to_column() {
-        // One annotated line, point at char 3 (display col 3 in the code).
-        // With the 2-cell gutter, the terminal cursor is at col 2 + 3 = 5;
-        // the note row above occupies slice row 0, so the code row is at
-        // terminal row 1 (title) + 1 = 2.
+    fn cursor_cell_annotated_line_starts_at_anchor_not_gutter() {
+        // One annotated column-0 line, point at char 3 (display col 3 in the
+        // code). The code sits at cell 1 (the anchor shifted it right by
+        // one), so the terminal cursor is at col 1 + 3 = 4; the note row
+        // above occupies slice row 0, so the code row is at terminal row
+        // 1 (title) + 1 = 2.
         let snap = annotated_snapshot(
             &[("fn target_one() {}", true)],
             &[0],
@@ -392,15 +414,63 @@ mod tests {
         );
         assert_eq!(
             cursor_cell(&snap),
-            Some((5, 2)),
-            "annotated: gutter(2) + display_col(3) = 5; note row above → terminal row 2"
+            Some((4, 2)),
+            "annotated column-0: code start (1) + display_col(3) = 4; note row above → terminal row 2"
         );
-        // Point at char 0 → col 2 (just the 2-cell gutter).
+        // Point at char 0 → col 1 (the anchor shifted the line right by one;
+        // NOT the old 2-cell gutter).
         let snap = annotated_snapshot(&[("fn target_one() {}", true)], &[0], 0, 0, 1);
-        assert_eq!(cursor_cell(&snap), Some((2, 2)), "char 0 → col 2 (gutter only); note row above");
-        // Non-annotated line: no gutter (no note row → terminal row 1).
+        assert_eq!(cursor_cell(&snap), Some((1, 2)), "char 0 → col 1 (the 1-cell shift); note row above");
+        // Non-annotated line: code at column 0, no shift.
         let snap = annotated_snapshot(&[("plain line", false)], &[], 0, 3, 1);
-        assert_eq!(cursor_cell(&snap), Some((3, 1)), "non-annotated: no gutter");
+        assert_eq!(cursor_cell(&snap), Some((3, 1)), "non-annotated: code at column 0");
+    }
+
+    /// issue-annotations-anchor-at-symbol: an INDENTED annotated line's code
+    /// does NOT move — the anchor borrows the last indentation cell, so the
+    /// cursor's code-start column is the line's own indentation width (here
+    /// 4 spaces → the code at display col 4), not a fixed gutter. This is the
+    /// mirror of the column-0 test above and is what catches a refactor that
+    /// re-introduces a constant leading width.
+    #[test]
+    fn cursor_cell_annotated_indented_line_code_does_not_move() {
+        // `    fn deep() {}` (4 leading spaces): the store strips the run,
+        // sets anchor_col = 3, indent_chars = 4, and the cursor is
+        // code_start (4) + the point's display offset within the code.
+        let rows = vec![
+            FileViewRow {
+                line: 0,
+                is_note: true,
+                annotated: false,
+                anchor_col: 3,
+                indent_chars: 0,
+                text: "a note".to_string(),
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+            },
+            FileViewRow {
+                line: 0,
+                is_note: false,
+                annotated: true,
+                anchor_col: 3,
+                indent_chars: 4,
+                text: "fn deep() {}".to_string(), // stripped of the 4 spaces
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+            },
+        ];
+        let mut snap = buffer_snapshot(&["    fn deep() {}"], 0, 0);
+        snap.file_view_rows = rows;
+        // Point at char 4 (the `f`, display col 4 of the FULL line) → within
+        // the stripped code that's char 0 → cursor at code_start (4) + 0 = 4:
+        // the code did not move. Row 2 (note above).
+        snap.file_view_point_col = 4;
+        assert_eq!(cursor_cell(&snap), Some((4, 2)), "indented: code stays at display col 4");
+        // Point at char 5 (the `n`) → stripped char 1 → cursor at 4 + 1 = 5.
+        snap.file_view_point_col = 5;
+        assert_eq!(cursor_cell(&snap), Some((5, 2)), "indented: point one code char in → col 5");
     }
 
     /// plan 005 issue 02b regression: a note row above the point must not
@@ -420,6 +490,8 @@ mod tests {
                 line,
                 is_note: false,
                 annotated: false,
+                anchor_col: 0,
+                indent_chars: 0,
                 text: format!("line {}", line),
                 spans: Vec::new(),
                 matches: Vec::new(),

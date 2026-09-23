@@ -106,44 +106,49 @@ impl Component for FileViewCanvas {
                 // annotations-render-fold: the note renders directly ABOVE
                 // the anchored code row, dim and italic; it is only emitted
                 // when the note blocks are SHOWN — a fold emits no note rows
-                // at all). The row carries the 2-branch tree-line's UP arm —
-                // design A (annotations-curve-glyphs): the CURVED corner
-                // (\u{256d} "╭") at cell 0, the SAME cell as the code row's ▾
+                // at all). issue-annotations-anchor-at-symbol: the note's
+                // indent MIRRORS the nesting of the code it annotates — the
+                // curved corner (\u{256d} "╭") sits at the ANCHOR column
+                // (`r.anchor_col`), the SAME cell as the ▴ on the code row
                 // directly below (the anchor relationship that makes the
                 // branch read as attached), whose stroke comes up from that
                 // junction and bends right into the straight ─ (\u{2500}) at
-                // cell 1, then the note text at cell 2 — the SAME column the
-                // annotated code row's text begins at — so the note and the
-                // code read as the two aligned arms of one fork.
+                // `anchor_col + 1`, then the note text at `anchor_col + 2` —
+                // so a note for a deeper symbol starts further right.
+                let anchor = r.anchor_col;
                 canvas.set_text(
-                    0,
+                    anchor as isize,
                     row as isize,
                     "\u{256d}",
                     text_style(t.preview.foreground, false, false),
                 );
-                // The corner's rightward bend: the note row's ─ at cell 1
-                // (mirroring the code row's own cell-1 branch), so the curve
-                // connects to the note text at cell 2.
+                // The corner's rightward bend: the note row's ─ at
+                // anchor+1, so the curve connects to the note text at
+                // anchor+2.
                 canvas.set_text(
-                    1,
+                    (anchor + 1) as isize,
                     row as isize,
                     "\u{2500}",
                     text_style(t.preview.foreground, false, false),
                 );
                 let note_style = text_style_italic(t.preview.foreground);
-                let display = truncate(&r.text, w.saturating_sub(2));
+                let note_start = anchor + 2;
+                let display = truncate(&r.text, w.saturating_sub(note_start));
                 if !display.is_empty() {
-                    canvas.set_text(2, row as isize, &display, note_style);
+                    canvas.set_text(note_start as isize, row as isize, &display, note_style);
                 }
             } else {
-                // annotations-fold-visual: annotated lines get a 2-cell left
-                // gutter — the fold ARROW at cell 0 and the tree-line branch
-                // (a ─ when shown, blank when folded) at cell 1 — so the
-                // code starts at cell 2 in BOTH the folded and the shown
-                // state. That constant leading width is the no-jitter
-                // guarantee: toggling a fold must not shift the code
-                // horizontally. Non-annotated lines keep starting at cell 0.
-                let gutter = if r.annotated { 2 } else { 0 };
+                // issue-annotations-anchor-at-symbol: the 2-cell gutter is
+                // GONE. An annotated line's code sits at display column
+                // `anchor_col + 1` — the indicator borrows the LAST cell of
+                // the line's own indentation (`anchor_col`), so an indented
+                // symbol's code does not move; a column-0 symbol shifts its
+                // line right by exactly one cell (the indicator takes
+                // column 0). The row's `text` already has the leading
+                // indentation run stripped (the store owns it), so the code
+                // is drawn at `anchor_col + 1`; non-annotated lines keep
+                // their full text at column 0.
+                let gutter = if r.annotated { r.anchor_col + 1 } else { 0 };
                 draw_line(
                     &mut canvas,
                     row as isize,
@@ -153,42 +158,26 @@ impl Component for FileViewCanvas {
                     &t,
                 );
                 if r.annotated {
-                    // annotations-fold-visual: the margin glyph is now the
-                    // fold ARROW (the annotation indicator — the old bar
-                    // ▎/▏ is gone): ▾ (\u{25be}) in the view-title face when
-                    // the note is SHOWN (bright, the content is right there),
+                    // The annotation INDICATOR at the anchor cell: ▴
+                    // (\u{25b4}, up) in the view-title face when the note is
+                    // SHOWN — it points at the note, which is ABOVE — and
                     // ▸ (\u{25b8}) in the dim preview face when FOLDED (the
                     // face that already carries the note text and the scroll
-                    // indicators on this same dark background — legible
-                    // without shouting). The arrow is present in BOTH states:
-                    // folding must not erase the fact that an annotation
-                    // exists; an unannotated line draws nothing (guarded by
-                    // `r.annotated`).
+                    // indicators on this dark background). The arrow is
+                    // present in BOTH states: folding must not erase the
+                    // fact that an annotation exists; an unannotated line
+                    // draws nothing (guarded by `r.annotated`).
                     let (glyph, face) = if self.notes_folded {
                         ("\u{25b8}", &t.preview)
                     } else {
-                        ("\u{25be}", &t.view_title)
+                        ("\u{25b4}", &t.view_title)
                     };
                     canvas.set_text(
-                        0,
+                        r.anchor_col as isize,
                         row as isize,
                         glyph,
                         text_style(face.foreground, false, false),
                     );
-                    if !self.notes_folded {
-                        // The tree-line's straight OUT arm: a horizontal ─
-                        // (\u{2500}) from the ▾ junction (cell 0) into the
-                        // real text at cell 2. Together with the note row's
-                        // diagonal this is the 2-branch fork. Absent when
-                        // folded — cell 1 stays blank, so the code's start
-                        // column (cell 2) is identical in both states.
-                        canvas.set_text(
-                            1,
-                            row as isize,
-                            "\u{2500}",
-                            text_style(t.view_title.foreground, false, false),
-                        );
-                    }
                 }
             }
         }
@@ -228,10 +217,11 @@ impl Component for FileViewCanvas {
 /// ranges.
 ///
 /// `x_start` is the terminal cell where the text begins (the annotation
-/// gutter offset, plan 005 issue 02b). `width` is the available cell count
-/// from `x_start` to the right edge (the truncation budget). `matches` are
-/// this line's search-match ranges (byte offsets relative to the line
-/// start; empty when no match context applies).
+/// indicator's borrowed-indentation offset, issue-annotations-anchor-at-
+/// symbol — `anchor_col + 1` on an annotated line, 0 otherwise). `width` is
+/// the available cell count from `x_start` to the right edge (the
+/// truncation budget). `matches` are this line's search-match ranges (byte
+/// offsets relative to the line start; empty when no match context applies).
 fn draw_line(
     canvas: &mut iocraft::CanvasSubviewMut<'_>,
     row: isize,
@@ -722,6 +712,8 @@ mod tests {
         assert!(row.highlight.is_none());
         assert!(!row.is_note);
         assert!(!row.annotated);
+        assert_eq!(row.anchor_col, 0);
+        assert_eq!(row.indent_chars, 0);
     }
 
     // ── issue match-highlight: the match overlay's second pass ─────
@@ -980,6 +972,8 @@ mod tests {
             line,
             is_note: false,
             annotated: true,
+            anchor_col: 0,
+            indent_chars: 0,
             text: format!("line {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -989,6 +983,8 @@ mod tests {
             line,
             is_note: true,
             annotated: false,
+            anchor_col: 0,
+            indent_chars: 0,
             text: format!("  \u{25b8} note {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -1103,54 +1099,257 @@ mod tests {
         assert!(s.contains("src/main.rs"), "title missing:\n{s}");
     }
 
-    /// annotations-fold-visual: NO JITTER — the code text's start column is
-    /// IDENTICAL with the note SHOWN and FOLDED. Folded is the ▸ arrow, a
-    /// blank cell, then the code; shown is the ▾ arrow, the ─ tree-line
-    /// branch, then the code (the 2-branch fork). Both put the code at cell
-    /// 2, so a fold toggle must not shift the code horizontally. This pins
-    /// the exact trap a row-map test cannot catch. The row map is
-    /// order/column agnostic, so it would pass even if the leading width
-    /// drifted on a fold.
-    #[test]
-    fn fold_arrow_no_jitter_code_start_column_constant() {
+    /// issue-annotations-anchor-at-symbol: build a store with `content`,
+    /// open it, and create one note (via the public A / type / RET key path)
+    /// on each line in `notes`. Returns the store (to wrap in the Arc) and
+    /// the buffer's lines split from `content` (the GROUND-TRUTH source rows
+    /// the "cell-for-cell identical" assertions compare against — read from
+    /// the actual written file content, not a hardcoded string).
+    fn annotated_store(content: &str, notes: &[(usize, &str)]) -> (crate::app::store::AppStore, Vec<String>) {
         use crate::app::keymap::{parse_key, Key};
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the project tempdir (as the store tests do): the notes file
+        // lives under it and the rendered frame must read it after this
+        // helper returns — dropping `dir` would delete the buffer and the
+        // notes before the render.
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        std::fs::create_dir_all(dir_path.join("src")).unwrap();
+        std::fs::write(dir_path.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir_path.join("src/target.rs"), content).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(&dir_path, base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/target.rs");
+        for (line, text) in notes {
+            // Move the point from line 0 to `line`, then create the note there.
+            for _ in 0..*line {
+                store.key_event(parse_key("C-n").unwrap());
+            }
+            store.key_event(parse_key("A").unwrap());
+            for c in text.chars() {
+                store.key_event(if c == ' ' {
+                    Key::char(' ')
+                } else {
+                    parse_key(&c.to_string()).unwrap()
+                });
+            }
+            store.key_event(parse_key("RET").unwrap());
+        }
+        (store, content.lines().map(String::from).collect())
+    }
+
+    /// Build a store with `content` and a HAND-EDITED `.redline-notes.md`
+    /// carrying one `[annotation]` block per `(line, text)` in `notes` —
+    /// records the `A` key path cannot create (it dedupes/edits to ONE record
+    /// per line, so several records on a single line are only reachable by
+    /// editing the notes file). The store reads the file lazily on first
+    /// `file_view_rows()` (issue-annotations-anchor-at-symbol P2-2).
+    fn annotated_store_from_notes_file(content: &str, notes: &[(usize, &str)]) -> crate::app::store::AppStore {
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the project tempdir (as the other helpers do): the hand-edited
+        // notes file lives under it and must persist past this helper.
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        std::fs::create_dir_all(dir_path.join("src")).unwrap();
+        std::fs::write(dir_path.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir_path.join("src/target.rs"), content).unwrap();
+        // Hand-edit the notes file (NOT the `A` key path): one block per
+        // record. `anchor` is the line's content (the re-anchor key), so the
+        // record stays on its line.
+        let mut notes_file = String::from("<!-- redline-annotations:begin -->\n");
+        for (line, text) in notes {
+            let anchor = content.lines().nth(*line).unwrap_or("");
+            notes_file.push_str(&format!(
+                "[annotation]\npath: src/target.rs\nline: {line}\ncol: 0\nanchor: {anchor}\nnote: {text}\norphaned: false\n"
+            ));
+        }
+        notes_file.push_str("<!-- redline-annotations:end -->\n");
+        std::fs::write(dir_path.join(".redline-notes.md"), &notes_file).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(&dir_path, base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/target.rs");
+        // Force the lazy notes load (ensure_notes_doc reads the hand-edited
+        // file + re-anchors) so the render below sees BOTH records.
+        let _ = store.file_view_rows();
+        store
+    }
+
+    /// The display column (in cells) where `needle` begins in `line`: the
+    /// cell count of everything before it.
+    fn col_of(line: &str, needle: &str) -> Option<usize> {
+        let b = line.find(needle)?;
+        Some(crate::model::text_width::display_width(&line[..b]))
+    }
+
+    /// The rendered row's content from display column `col` onward, sliced by
+    /// DISPLAY cells (the anchor glyphs ▴/╭/─ are multi-byte in UTF-8, so a
+    /// byte slice at a display boundary would panic mid-glyph).
+    fn display_from(line: &str, col: usize) -> String {
+        let mut acc = 0usize;
+        for (i, c) in line.char_indices() {
+            if acc == col {
+                return line[i..].to_string();
+            }
+            acc += crate::model::text_width::char_display_width(c);
+            if acc > col {
+                return String::new(); // `col` falls inside a char
+            }
+        }
+        String::new()
+    }
+
+    /// The line's code region: everything from the first non-whitespace char
+    /// on (the leading indentation stripped).
+    fn code_tail(line: &str) -> &str {
+        let start = line.find(|c: char| !c.is_whitespace()).unwrap_or(line.len());
+        &line[start..]
+    }
+
+    /// The display column where `needle`'s first occurrence begins, scanning
+    /// the frame line by line (a whole-frame `col_of` would count newlines
+    /// as cells — this isolates the single line first).
+    fn code_start_col_in_frame(frame: &str, needle: &str) -> Option<usize> {
+        let line = frame.lines().find(|l| l.contains(needle))?;
+        col_of(line, needle)
+    }
+
+    /// The first rendered frame line whose display content contains `needle`
+    /// and the SHOWN anchor glyph `\u{25b4}` (the code row, not a note row).
+    fn shown_code_row(frame: &str, needle: &str) -> String {
+        frame.lines()
+            .find(|l| l.contains('\u{25b4}') && l.contains(needle))
+            .unwrap_or_else(|| panic!("shown code row not found in frame:\n{frame}"))
+            .to_string()
+    }
+
+    /// issue-annotations-anchor-at-symbol — THE strongest test: for an
+    /// INDENTED symbol the rendered code row is CELL-FOR-CELL identical to
+    /// the plain source row. The indicator borrows the last indentation cell,
+    /// so no code character moves — the code region (from the symbol on) is
+    /// byte-identical to the actual buffer line at the same display columns.
+    /// This is what "the code does not move" means, and it is what a future
+    /// refactor is most likely to break.
+    #[test]
+    fn annotation_indented_symbol_code_row_cell_for_cell_identical() {
         use crate::ui::root::Root;
         use iocraft::prelude::*;
         use std::sync::{Arc, Mutex};
 
-        /// The display column (in cells) where `needle` begins in its line of
-        /// the rendered frame: the cell count of everything before it.
-        fn code_start_col(frame: &str, needle: &str) -> Option<usize> {
-            let line = frame.lines().find(|l| l.contains(needle))?;
-            let byte = line.find(needle)?;
-            Some(crate::model::text_width::display_width(&line[..byte]))
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        std::fs::write(
-            dir.path().join("src/jit.rs"),
-            "fn foo() {\n    let x = 1;\n}\n",
-        )
-        .unwrap();
-
-        let base = tempfile::tempdir().unwrap();
-        let mut store = crate::app::store::AppStore::at(dir.path(), base.path().to_path_buf());
-        store.set_viewport_lines(24);
-        store.open_path("src/jit.rs");
-        // Annotate line 0 through the public key path (A, type, RET).
-        store.key_event(parse_key("A").unwrap());
-        for c in "my note".chars() {
-            store.key_event(if c == ' ' {
-                Key::char(' ')
-            } else {
-                parse_key(&c.to_string()).unwrap()
-            });
-        }
-        store.key_event(parse_key("RET").unwrap());
+        // Line 1 is indented four spaces: the symbol `if` sits at display
+        // column 4. Annotating it must leave `if` at column 4.
+        let content = "fn main() {\n    if x > 0 {\n}\n";
+        let (store, src_lines) = annotated_store(content, &[(1, "check the bounds")]);
         assert!(!store.note_rows_folded(), "notes shown by default");
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
 
+        let src_line = &src_lines[1]; // "    if x > 0 {"
+        let code = shown_code_row(&frame, "if x > 0 {");
+
+        // The symbol's display column in the SOURCE (the first non-ws char).
+        let src_ws_end = src_line
+            .char_indices()
+            .find(|&(_, c)| !c.is_whitespace())
+            .map(|(b, _)| crate::model::text_width::display_width(&src_line[..b]))
+            .unwrap_or(0);
+        assert_eq!(src_ws_end, 4, "fixture sanity: `if` is at display col 4");
+
+        // NO CODE CHARACTER MOVED: the code's start column in the rendered
+        // row is the SAME display column as in the source row.
+        let rendered_code_col = col_of(&code, "if x > 0 {")
+            .unwrap_or_else(|| panic!("code not found in rendered row: {code:?}"));
+        assert_eq!(
+            rendered_code_col, src_ws_end,
+            "JITTER: the indented symbol's code moved — source col {src_ws_end}, rendered col {rendered_code_col}: {code:?}"
+        );
+
+        // CELL-FOR-CELL: from the symbol on, the rendered row equals the
+        // actual buffer line cell for cell (the anchor glyph took the last
+        // indentation cell, col 3; nothing after it moved).
+        let rendered_tail = display_from(&code, src_ws_end).trim_end().to_string();
+        let source_tail = code_tail(src_line);
+        assert_eq!(
+            rendered_tail, source_tail,
+            "the code region must be cell-for-cell identical to the source line: rendered={rendered_tail:?} source={source_tail:?}"
+        );
+
+        // The indicator sits at the LAST indentation cell (col 3), and the
+        // three cells before it are still blank (the borrowed-indentation
+        // cells 0..2).
+        assert_eq!(code.chars().nth(3), Some('\u{25b4}'), "anchor ▴ must be at the last indentation cell (col 3): {code:?}");
+        for i in 0..3 {
+            assert_eq!(code.chars().nth(i), Some(' '), "indentation cell {i} must stay blank: {code:?}");
+        }
+    }
+
+    /// issue-annotations-anchor-at-symbol — the COLUMN-0 case: a symbol with
+    /// no indentation to borrow shifts its line by EXACTLY ONE cell (option
+    /// (a)). The indicator takes column 0 and the code moves from column 0
+    /// to column 1; everything after it is cell-for-cell identical to the
+    /// source. Asserted as exactly 1, not "small".
+    #[test]
+    fn annotation_column_zero_shifts_by_exactly_one() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        let content = "fn main() {\n}\n";
+        let (store, src_lines) = annotated_store(content, &[(0, "the entry point")]);
+        assert!(!store.note_rows_folded(), "notes shown by default");
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+
+        let src_line = &src_lines[0]; // "fn main() {"
+        let code = shown_code_row(&frame, "fn main() {");
+
+        // The indicator takes column 0; the code's start column shifts from
+        // 0 to EXACTLY 1.
+        assert_eq!(code.chars().next(), Some('\u{25b4}'), "column-0 anchor ▴ must be at cell 0: {code:?}");
+        let rendered_code_col = col_of(&code, "fn main() {")
+            .unwrap_or_else(|| panic!("code not found in rendered row: {code:?}"));
+        assert_eq!(
+            rendered_code_col, 1,
+            "a column-0 symbol must shift by EXACTLY one cell (0 -> 1), not more: {code:?}"
+        );
+
+        // Cell-for-cell: from the symbol on, the rendered row equals the
+        // source line (shifted right by the one indicator cell).
+        let rendered_tail = display_from(&code, 1);
+        assert_eq!(
+            rendered_tail.trim_end(), src_line,
+            "the column-0 code region must be cell-for-cell identical to the source: rendered={} source={:?}", rendered_tail.trim_end(), src_line
+        );
+    }
+
+    /// issue-annotations-anchor-at-symbol — the fold invariant, RE-EXRESSED
+    /// (the old "constant leading width 2" test is obsolete): folding must
+    /// not move the code. Assert the code's start column is IDENTICAL folded
+    /// and expanded, for BOTH a column-0 symbol and an indented symbol. The
+    /// arrow carries the state (▴ shown / ▸ folded) at the anchor; the note
+    /// row appears only when shown.
+    #[test]
+    fn fold_invariant_code_start_column_identical_folded_and_shown() {
+        use crate::app::keymap::parse_key;
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 0 is a column-0 symbol, line 1 an indented (4-space) symbol.
+        let content = "fn main() {\n    if x > 0 {\n}\n";
+        let (store, _lines) = annotated_store(content, &[(0, "note zero"), (1, "note one")]);
+        assert!(!store.note_rows_folded(), "notes shown by default");
         let shared = Arc::new(Mutex::new(store));
         let mut app = element! {
             ContextProvider(value: Context::owned(shared.clone())) {
@@ -1158,12 +1357,15 @@ mod tests {
             }
         };
         let shown = app.to_string();
-        let shown_col = code_start_col(&shown, "fn foo() {").unwrap_or_else(|| {
-            panic!("code line not found in the SHOWN frame:\n{shown}")
-        });
+        let shown_zero = code_start_col_in_frame(&shown, "fn main() {").expect("col-0 code row in SHOWN frame");
+        let shown_deep = code_start_col_in_frame(&shown, "if x > 0 {").expect("indented code row in SHOWN frame");
 
-        // Fold: the note row goes, the arrow ▾→▸, the tree-line arms vanish —
-        // but the code's start column must NOT move.
+        // The column-0 symbol sits at cell 1 (the exact-1 shift); the
+        // indented symbol keeps its source column (4).
+        assert_eq!(shown_zero, 1, "col-0 symbol at cell 1 (the shift): {shown_zero}");
+        assert_eq!(shown_deep, 4, "indented symbol keeps its source column (4): {shown_deep}");
+
+        // Fold: note rows go, the arrow ▴→▸ — but the code must NOT move.
         {
             let mut st = shared.lock().unwrap();
             st.key_event(parse_key("C-c").unwrap());
@@ -1171,75 +1373,47 @@ mod tests {
             st.key_event(parse_key("h").unwrap());
         }
         let folded = app.to_string();
-        let folded_col = code_start_col(&folded, "fn foo() {").unwrap_or_else(|| {
-            panic!("code line not found in the FOLDED frame:\n{folded}")
-        });
+        let folded_zero = code_start_col_in_frame(&folded, "fn main() {").expect("col-0 code row in FOLDED frame");
+        let folded_deep = code_start_col_in_frame(&folded, "if x > 0 {").expect("indented code row in FOLDED frame");
 
-        // The no-jitter invariant: same code start column, both states.
+        // NO JITTER, both symbols, both states:
         assert_eq!(
-            shown_col, folded_col,
-            "JITTER: the code's start column moved on a fold toggle — shown={shown_col} folded={folded_col}\nSHOWN line:\n{shown}\nFOLDED line:\n{folded}"
+            shown_zero, folded_zero,
+            "JITTER (col-0): the code moved on a fold — shown={shown_zero} folded={folded_zero}\nSHOWN:\n{shown}\nFOLDED:\n{folded}"
         );
-        // And it is the 2-cell gutter (arrow + branch/blank), cell 2.
-        assert_eq!(shown_col, 2, "code must start at cell 2 (the 2-cell gutter): {shown_col}");
-        // The fold actually changed something (the note row / tree-line arms
-        // are gone) — otherwise this test would be vacuous (it would pass
-        // with the two frames identical).
-        let note_present_shown = shown.lines().any(|l| l.contains("my note"));
-        let note_present_folded = folded.lines().any(|l| l.contains("my note"));
-        assert!(
-            note_present_shown && !note_present_folded,
-            "the note row must be present SHOWN and absent FOLDED (otherwise the two frames are identical and this test is vacuous): shown={note_present_shown} folded={note_present_folded}"
+        assert_eq!(
+            shown_deep, folded_deep,
+            "JITTER (indented): the code moved on a fold — shown={shown_deep} folded={folded_deep}\nSHOWN:\n{shown}\nFOLDED:\n{folded}"
         );
+
+        // The fold actually changed something (notes gone, arrow ▴→▸) —
+        // otherwise the two frames are identical and this test is vacuous.
+        assert!(!folded.lines().any(|l| l.contains("note zero") || l.contains("note one")),
+            "folded frame must have no note rows");
+        assert!(folded.lines().any(|l| l.contains('\u{25b8}') && l.contains("fn main() {")),
+            "folded col-0 symbol must carry the ▸ arrow");
+        assert!(folded.lines().any(|l| l.contains('\u{25b8}') && l.contains("if x > 0 {")),
+            "folded indented symbol must carry the ▸ arrow");
     }
 
-    /// annotations-curve-glyphs (design A): the ANCHOR RELATIONSHIP, asserted
-    /// per cell. The note row's curved corner ╭ (\u{256d}) must sit at the
-    /// SAME cell as the ▾ on the code row DIRECTLY BELOW it — that adjacency
-    /// is what makes the branch read as attached. A presence assertion (does
-    /// the note row contain a glyph?) cannot catch a misplacement: the old
-    /// ╱ passed a gate while attached to nothing. This test instead pins,
-    /// per cell: the code row ▾@0 / ─@1 / source@2, the note row directly
-    /// above it ╭@0 / ─@1 / note text@2, and ╭'s column == ▾'s column. It is
-    /// RED if the corner moves one cell either way (or if the cell-1 ─
-    /// bend is dropped).
+    /// issue-annotations-anchor-at-symbol (design A carried): the ANCHOR
+    /// RELATIONSHIP, asserted per cell. The note row's curved corner ╭
+    /// (\u{256d}) must sit at the SAME cell as the ▴ on the code row DIRECTLY
+    /// BELOW it (both at the anchor column), with the ─ bend one cell right
+    /// and the note text at anchor+2 — so a note's indent mirrors the
+    /// nesting of the code it annotates. *Presence is not placement*: a
+    /// mere "the note row has a ╭" assertion cannot catch a misplacement,
+    /// so this pins the column per cell.
     #[test]
     fn note_corner_anchored_to_code_row_same_cell() {
-        use crate::app::keymap::{parse_key, Key};
         use crate::ui::root::Root;
         use iocraft::prelude::*;
         use std::sync::{Arc, Mutex};
 
-        /// The display column (in cells) where `needle` begins in `line`.
-        fn col_of(line: &str, needle: &str) -> Option<usize> {
-            let b = line.find(needle)?;
-            Some(crate::model::text_width::display_width(&line[..b]))
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        std::fs::write(
-            dir.path().join("src/jit.rs"),
-            "fn foo() {\n    let x = 1;\n}\n",
-        )
-        .unwrap();
-
-        let base = tempfile::tempdir().unwrap();
-        let mut store = crate::app::store::AppStore::at(dir.path(), base.path().to_path_buf());
-        store.set_viewport_lines(24);
-        store.open_path("src/jit.rs");
-        // Annotate line 0 through the public key path (A, type, RET).
-        store.key_event(parse_key("A").unwrap());
-        for c in "my note".chars() {
-            store.key_event(if c == ' ' {
-                Key::char(' ')
-            } else {
-                parse_key(&c.to_string()).unwrap()
-            });
-        }
-        store.key_event(parse_key("RET").unwrap());
-
+        // Line 0 is a column-0 symbol (anchor at cell 0) so the note row is
+        // ╭@0 / ─@1 / text@2 — the shallowest nesting.
+        let content = "fn main() {\n}\n";
+        let (store, _lines) = annotated_store(content, &[(0, "my note")]);
         let shared = Arc::new(Mutex::new(store));
         let mut app = element! {
             ContextProvider(value: Context::owned(shared.clone())) {
@@ -1249,55 +1423,187 @@ mod tests {
         let frame = app.to_string();
         let lines: Vec<&str> = frame.lines().collect();
 
-        // The EXPANDED code row: ▾ (cell 0) + ─ (cell 1) + source (cell 2).
+        // The SHOWN code row: ▴ (anchor cell 0) + source (cell 1).
         let code_idx = lines
             .iter()
-            .position(|l| l.contains('\u{25be}') && l.contains("fn foo() {"))
-            .unwrap_or_else(|| panic!("expanded code row not found:\n{frame}"));
+            .position(|l| l.contains('\u{25b4}') && l.contains("fn main() {"))
+            .unwrap_or_else(|| panic!("shown code row not found:\n{frame}"));
         let code = lines[code_idx];
-        let arrow_col = col_of(code, "\u{25be}").unwrap();
-        assert_eq!(arrow_col, 0, "▾ must be at cell 0 (the anchor column): {code:?}");
-        assert!(
-            code.chars().nth(1) == Some('\u{2500}'),
-            "code row cell 1 must be ─: {code:?}"
-        );
-        assert_eq!(
-            col_of(code, "fn foo() {").unwrap(),
-            2,
-            "source must start at cell 2: {code:?}"
-        );
+        let arrow_col = col_of(code, "\u{25b4}").unwrap();
+        assert_eq!(arrow_col, 0, "▴ must be at cell 0 (the anchor column): {code:?}");
+        assert_eq!(col_of(code, "fn main() {").unwrap(), 1, "column-0 source must start at cell 1 (the exact-1 shift): {code:?}");
 
         // The note row is the row DIRECTLY ABOVE the code row (adjacency).
-        assert!(
-            code_idx > 0,
-            "no row above the code row — the note row is missing:\n{frame}"
-        );
+        assert!(code_idx > 0, "no row above the code row — the note row is missing:\n{frame}");
         let note = lines[code_idx - 1];
-        assert!(
-            note.contains("my note"),
-            "the row directly above the code row must be the note row: {note:?}\n{frame}"
-        );
+        assert!(note.contains("my note"), "the row directly above the code row must be the note row: {note:?}\n{frame}");
 
-        // ANCHOR: the note row's ╭ sits at the SAME cell as the code row's
-        // ▾ directly below it — asserted per cell, so a corner that moved
-        // one cell either way is RED.
-        let corner_col = col_of(note, "\u{256d}")
-            .unwrap_or_else(|| panic!("no ╭ on the note row: {note:?}"));
+        // ANCHOR: the note row's ╭ sits at the SAME cell as the code row's ▴
+        // directly below it — asserted per cell, so a corner that moved one
+        // cell either way is RED.
+        let corner_col = col_of(note, "\u{256d}").unwrap_or_else(|| panic!("no ╭ on the note row: {note:?}"));
         assert_eq!(
             corner_col, arrow_col,
-            "the note row's ╭ (cell {corner_col}) must anchor at the SAME cell as the code row's ▾ (cell {arrow_col}): note={note:?} code={code:?}"
+            "the note row's ╭ (cell {corner_col}) must anchor at the SAME cell as the code row's ▴ (cell {arrow_col}): note={note:?} code={code:?}"
         );
         assert_eq!(corner_col, 0, "the corner must be at cell 0 (the anchor column): {note:?}");
-        // The cell-1 ─ is the corner's rightward bend (the look depends on
-        // it — a later edit that drops it must be caught here).
+        // The cell-1 ─ is the corner's rightward bend; the note text starts
+        // at cell 2 (anchor + 2).
+        assert!(note.chars().nth(1) == Some('\u{2500}'), "note row cell 1 must be ─ (the corner's bend into the note): {note:?}");
+        assert_eq!(col_of(note, "my note").unwrap(), 2, "note text must start at cell 2 (anchor + 2): {note:?}");
+    }
+
+    /// issue-annotations-anchor-at-symbol: a note's INDENT MIRRORS the
+    /// nesting of the code it annotates — a note for a deeper (more
+    /// indented) symbol starts further right than one for a shallower
+    /// symbol. Asserted as the note text's column growing with the
+    /// indentation.
+    #[test]
+    fn note_indent_mirrors_nesting_deeper_symbol_further_right() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 0: `fn main() {` (col 0, anchor 0, note text at cell 2).
+        // Line 1: `    if x > 0 {` (indent 4, anchor 3, note text at cell 5).
+        let content = "fn main() {\n    if x > 0 {\n}\n";
+        let (store, _lines) = annotated_store(content, &[(0, "outer"), (1, "inner")]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // The outer note's text column (anchor 0 → cell 2).
+        let outer_note = lines.iter().find(|l| l.contains("outer")).expect("outer note row");
+        let outer_col = col_of(outer_note, "outer").unwrap();
+        assert_eq!(outer_col, 2, "outer note text at cell 2 (anchor 0 + 2): {outer_note:?}");
+        // The inner (deeper) note's text column (anchor 3 → cell 5).
+        let inner_note = lines.iter().find(|l| l.contains("inner")).expect("inner note row");
+        let inner_col = col_of(inner_note, "inner").unwrap();
+        assert_eq!(inner_col, 5, "inner note text at cell 5 (anchor 3 + 2): {inner_note:?}");
         assert!(
-            note.chars().nth(1) == Some('\u{2500}'),
-            "note row cell 1 must be ─ (the corner's bend into the note): {note:?}"
+            inner_col > outer_col,
+            "a deeper symbol's note must start further right than a shallower one's: inner={inner_col} outer={outer_col}"
         );
+    }
+
+    /// issue-annotations-anchor-at-symbol — TABS: the anchor is a
+    /// display-column position and a tab advances to the next 8-column tab
+    /// stop. A line indented by a single tab has its code at display column
+    /// 8, so the anchor (the last indentation cell) is column 7 and the code
+    /// does not move. Pinned with a tab-indented fixture — not left to
+    /// chance.
+    #[test]
+    fn annotation_tab_indented_anchors_at_next_tab_stop() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // A single leading tab, then `let`: the code sits at display col 8
+        // (the next tab stop), the anchor at col 7.
+        let content = "fn main() {\n\tlet x = 1;\n}\n";
+        let (store, src_lines) = annotated_store(content, &[(1, "tabbed")]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let code = shown_code_row(&frame, "let x = 1;");
+        let src_line = &src_lines[1]; // "\tlet x = 1;"
+
+        // The tab-expanded indent width is 8: the code must be at display
+        // column 8, and the anchor (▴) at column 7.
+        let rendered_code_col = col_of(&code, "let x = 1;")
+            .unwrap_or_else(|| panic!("code not found in rendered row: {code:?}"));
         assert_eq!(
-            col_of(note, "my note").unwrap(),
-            2,
-            "note text must start at cell 2: {note:?}"
+            rendered_code_col, 8,
+            "a tab-indented line's code must sit at the next 8-column tab stop (col 8): {code:?}"
         );
+        assert_eq!(code.chars().nth(7), Some('\u{25b4}'), "the anchor ▴ must be at col 7 (the last tab-expanded indentation cell): {code:?}");
+        // Cell-for-cell: from col 8 on, the rendered row equals the source's
+        // code region (the tab is stripped; the code sits at the tab stop).
+        let rendered_tail = display_from(&code, 8);
+        let source_tail = code_tail(src_line);
+        assert_eq!(rendered_tail.trim_end(), source_tail, "tabbed code region must be cell-for-cell identical: rendered={rendered_tail:?} source={source_tail:?}");
+    }
+
+    /// issue-annotations-anchor-at-symbol P2-2 (glyph-level): SEVERAL
+    /// annotation records on ONE line share that line's single anchor — the
+    /// note rows stack directly above the (single) code-row indicator in
+    /// record order, and folding hides them all while leaving EXACTLY ONE ▸.
+    /// The `A` key path dedupes/edits to one record per line, so the fixture
+    /// is a HAND-EDITED notes file (annotated_store_from_notes_file), not
+    /// something the UI can produce. `fn main() {` is a column-0 line, so the
+    /// shared anchor is column 0.
+    #[test]
+    fn annotation_multi_per_line_two_notes_one_indicator_fold() {
+        use crate::app::keymap::parse_key;
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // TWO records on line 0 (one line). Hand-edited notes file.
+        let store = annotated_store_from_notes_file("fn main() {\n}\n", &[(0, "outer note"), (0, "inner note")]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // Two note rows, both present.
+        let note_rows = lines.iter().filter(|l| l.contains("outer note") || l.contains("inner note")).count();
+        assert_eq!(note_rows, 2, "two records on one line -> two note rows:\n{frame}");
+        let outer = lines.iter().find(|l| l.contains("outer note")).unwrap();
+        let inner = lines.iter().find(|l| l.contains("inner note")).unwrap();
+        // Both note rows carry the ╭ corner at the SAME anchor column (0 for
+        // this column-0 line).
+        let outer_anchor = col_of(outer, "\u{256d}")
+            .unwrap_or_else(|| panic!("no ╭ on outer note row: {outer:?}"));
+        let inner_anchor = col_of(inner, "\u{256d}")
+            .unwrap_or_else(|| panic!("no ╭ on inner note row: {inner:?}"));
+        assert_eq!(outer_anchor, inner_anchor, "both note rows share the line's single anchor column:\n{frame}");
+
+        // A single ▴ code row (one indicator), with BOTH notes directly
+        // above it.
+        let arrow_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains("fn main() {"))
+            .unwrap_or_else(|| panic!("no ▴ code row in shown frame:\n{frame}"));
+        let arrow_count = lines.iter().filter(|l| l.contains("\u{25b4}") && l.contains("fn main() {")).count();
+        assert_eq!(arrow_count, 1, "exactly one ▴ indicator for the line, despite two notes:\n{frame}");
+        // Both note rows sit DIRECTLY above the code row (record order).
+        assert!(arrow_idx >= 2, "both note rows must precede the code row:\n{frame}");
+        assert!(lines[arrow_idx - 1].contains("outer note") || lines[arrow_idx - 1].contains("inner note"), "immediately-above row is a note:\n{frame}");
+        assert!(lines[arrow_idx - 2].contains("outer note") || lines[arrow_idx - 2].contains("inner note"), "second-above row is a note:\n{frame}");
+        // The note ╭ anchors at the SAME cell as the code row's ▴.
+        let arrow_col = col_of(lines[arrow_idx], "\u{25b4}")
+            .unwrap_or_else(|| panic!("no ▴ at the code row: {:?}", lines[arrow_idx]));
+        assert_eq!(outer_anchor, arrow_col, "the note ╭ anchors at the same cell as the code row's ▴:\n{frame}");
+
+        // Fold: BOTH note rows vanish, and EXACTLY ONE ▸ remains (the single
+        // indicator on the single code row).
+        {
+            let mut st = shared.lock().unwrap();
+            st.key_event(parse_key("C-c").unwrap());
+            st.key_event(parse_key("a").unwrap());
+            st.key_event(parse_key("h").unwrap());
+        }
+        let folded = app.to_string();
+        let flines: Vec<&str> = folded.lines().collect();
+        assert!(
+            !flines.iter().any(|l| l.contains("outer note") || l.contains("inner note")),
+            "folded: both note rows gone:\n{folded}"
+        );
+        let tri_count = flines.iter().filter(|l| l.contains("\u{25b8}") && l.contains("fn main() {")).count();
+        assert_eq!(tri_count, 1, "folded: exactly one ▸ for the line (one code row, one indicator), despite two notes:\n{folded}");
     }
 }
