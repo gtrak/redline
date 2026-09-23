@@ -1429,7 +1429,14 @@ impl AppStore {
     /// position mode-dependent: in `Accurate` mode it inserts at the honest
     /// point (emacs); in `Annotation` mode it appends at the end of the buffer
     /// (matching self-insert's "try append"). Only works in editable buffers.
-    /// Sets the yank-pop state (`yank_pos` = the position just used) for M-y.
+    /// issue-yank-followups: the point lands at the END of the inserted text
+    /// in both modes (emacs C-y parity — oracle-verified on vanilla emacs
+    /// 30.2: "Put point at the end" of the reinserted text); `set_point`'s
+    /// follow-scroll keeps the insertion visible (the Annotation append lands
+    /// at the buffer end, where it can start off-screen). A yank into the
+    /// notes buffer marks the annotation doc dirty like every other notes
+    /// edit. Sets the yank-pop state (`yank_pos` = the range just INSERTED,
+    /// not the moved point) for M-y.
     pub fn yank(&mut self) {
         let text = match self.kill_ring.top() {
             Some(t) => t.to_string(),
@@ -1461,9 +1468,9 @@ impl AppStore {
         // ONE `retain_rope_edit` call below records EXACTLY one undo step —
         // 016-02's M-y coalescing (`coalesce_yank_pop_with_preceding_yank`) keys
         // off that single preceding step, so a doubled record would silently
-        // break the merge. (We do NOT route through `insert_text`: it would add
-        // its own `retain_rope_edit` + `buffer_keep_insert_visible` and would
-        // not set the yank-pop state or clear the mark.)
+        // break the merge. (We do NOT route through `insert_text`: it would
+        // add its own `retain_rope_edit` and would not set the yank-pop state
+        // or clear the mark.)
         let position = if self
             .buffers
             .get(&key)
@@ -1497,30 +1504,34 @@ impl AppStore {
             self.retain_rope_edit(&key, &old_rope, position, position, &text);
         }
         self.invalidate_highlight_for_key(&key);
-        // Set the yank-pop state (char offsets for ropey edit APIs). `yank_pos`
-        // is the position the original yank used, so M-y re-replaces the SAME
-        // range in both modes:
-        //   Accurate: the insertion position. NOTE (gate P3-1, measured):
-        //             `yank` does NOT advance the point — the point is a
-        //             stored (line,col) and nothing here calls
-        //             `land_point_at_char`. In emacs C-y leaves point AFTER
-        //             the inserted text, so that is a pre-existing parity
-        //             gap, filed as issue-yank-followups (with the
-        //             off-screen case below). Do not write a comment claiming
-        //             the point moves; it does not.
-        //   Annotation: the append position (the end), so pop replaces the
-        //             tail that the C-y appended.
-        // Either way M-y must replace the range that was INSERTED, which is
-        // exactly `yank_pos` — using the current point would be wrong in
-        // Annotation mode, where the insertion is at the buffer end.
+        // Set the yank-pop state (char offsets for ropey edit APIs).
+        // `yank_pos` is the range that was INSERTED — and stays that: the
+        // point now advances PAST the inserted text (below), so a pop that
+        // used the current point would replace the wrong range. In
+        // Annotation mode the insertion is at the buffer end while the
+        // point started elsewhere; even in Accurate mode the point ends up
+        // past the inserted text.
         self.yank_pos = Some(position);
-        self.yank_len = Some(text.chars().count());
+        let inserted = text.chars().count();
+        self.yank_len = Some(inserted);
         self.yank_ring_index = Some(0);
-        // No scroll adjustment. In Accurate mode the insertion is at the
-        // point, which is already on screen. In Annotation mode the insertion
-        // is at the buffer END, so a C-y in a long notes buffer can land
-        // off-screen with no feedback — unlike self-insert, which calls
-        // `buffer_keep_insert_visible`. Filed as issue-yank-followups.
+        // issue-yank-followups P3-3: a yank is a notes edit like any other —
+        // `notes_insert_char` / `notes_backspace` / every Accurate edit set
+        // this, and a C-y that skipped it left the annotation doc
+        // un-reparsed (the yank appeared to do nothing until some other
+        // edit triggered a reparse). Measured pre-fix: `false` before AND
+        // after the yank in both modes.
+        self.mark_notes_dirty_if_current(&key);
+        // issue-yank-followups P3-1 (emacs parity): C-y leaves the point at
+        // the END of the inserted text in both modes — Accurate: past the
+        // text at the insertion position; Annotation: at the end of the
+        // appended text (the buffer end). Measured pre-fix: the point did
+        // not move at all (`land_point_at_char` was never called). This is
+        // also the P3-2 fix: `set_point`'s follow-scroll puts the point's
+        // line in the viewport, keeping the insertion visible the way the
+        // accurate self-insert does (`insert_text_at_point` →
+        // `land_point_at_char`).
+        self.land_point_at_char(&key, position + inserted);
     }
 
     /// M-y: yank-pop — replace the last yanked text with the previous kill
@@ -1596,9 +1607,27 @@ impl AppStore {
             self.coalesce_yank_pop_with_preceding_yank(&key, yank_pos);
         }
         self.invalidate_highlight_for_key(&key);
+        // gate P2-2: the notes doc must learn about the POP too. `yank` marks it
+        // dirty, but `file_view_rows()` -> `ensure_notes_doc()` consumes that
+        // flag between keystrokes, so by the time M-y lands the C-y's flag is
+        // already gone — an annotated pop "does nothing" in the doc until some
+        // unrelated edit. Same call as `yank` and every other notes edit path.
+        self.mark_notes_dirty_if_current(&key);
         self.yank_len = Some(text.chars().count());
         self.yank_ring_index = Some(next);
-        // No scroll adjustment: the replacement is at the current top line.
+        // gate P2-1: land the point at the END OF THE REPLACEMENT. `yank-pop`
+        // deletes [yank_pos, end) and then inserts the new text, so in emacs
+        // point ends after the NEW text and it DOES move when the lengths
+        // differ (measured with the oracle: a 4-char replacement leaves point
+        // at 5). The lane that fixed `yank` claimed the opposite — "M-y must
+        // NOT advance the point" — from `simple.el`; the gate contradicted it
+        // from the same source, because `yank-pop` does `delete-region` then
+        // `insert-for-yank`, which leaves point after the replacement.
+        // This also replaces the old "No scroll adjustment: the replacement is
+        // at the current top line" comment (gate P3-2): the pop target is only
+        // on-screen because the C-y just followed it, and `set_point` follows
+        // the scroll, so landing the point here is what keeps it visible.
+        self.land_point_at_char(&key, yank_pos + text.chars().count());
     }
 
     /// plan 016 issue 02 (STATED DECISION, scoped to the yank sequence only —

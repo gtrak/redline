@@ -1468,11 +1468,9 @@ use super::*;
         // plan 015-04 (spec c): M-y re-replaces the SAME range the C-y used.
         // M-y must replace the range that was INSERTED (`yank_pos`), not the
         // current point: in Annotation mode the insertion is at the buffer end
-        // while the point is elsewhere, so a pop that used the point would
-        // corrupt it. (Gate P3-1: the earlier wording here claimed the point
-        // "MOVES past the inserted text" in Accurate mode — measured, it does
-        // NOT move at all, and that parity gap is filed as issue-yank-followups.
-        // The implementation was and is correct; only the rationale was wrong.)
+        // while the point is elsewhere, and since issue-yank-followups the
+        // Accurate-mode point advances past the inserted text too, so a pop
+        // that used the point would corrupt it either way.
 
         // ── Accurate: yank at a mid-buffer point, pop at the inserted start ──
         let (mut s, bk, _dir) = accurate_file_store("top\nmid\nbot\n");
@@ -1481,8 +1479,10 @@ use super::*;
         s.set_point(1, 0, 0);
         s.kill_line(); // kill "mid" → ring ["mid","top"], "\n\nbot\n"
         assert_eq!(s.kill_ring.top(), Some("mid"));
-        // Yank "mid" at (1,0) = char 1 (Accurate: at the point). The point does
-        // NOT advance (see the note above).
+        // Yank "mid" at (1,0) = char 1 (Accurate: at the point). The point
+        // advances past the inserted text (C-y parity, issue-yank-followups),
+        // but M-y replaces at the INSERTED range (`yank_pos`), not the moved
+        // point.
         s.set_point(1, 0, 0);
         s.yank();
         assert_eq!(
@@ -1625,6 +1625,330 @@ use super::*;
             s.buffers.get(&nk).unwrap().text(),
             "# Notes\naa\nbb\n",
             "a single undo must restore the pre-C-y buffer (the whole yank-and-rotate sequence)"
+        );
+    }
+
+    // ── issue-yank-followups: C-y point advance, visibility, notes-dirty ──
+
+    #[test]
+    fn yank_advances_the_point_to_the_end_of_the_inserted_text_in_both_modes() {
+        // issue-yank-followups P3-1 (emacs parity, oracle-verified on vanilla
+        // emacs 30.2: C-y's doc says "Put point at the end" of the reinserted
+        // text, and `emacs --batch` measured point 2 -> 5 after a 3-char
+        // yank): the point lands at the END of the yanked text in both
+        // modes. Measured pre-fix: the point did not move at all (the gate's
+        // fixture, `set_point(0,1,1)` + yank "XYZ", left `point_col()` at 1).
+
+        // ── Accurate: mid-line yank; the point lands past the inserted text ──
+        let (mut s, bk, _dir) = accurate_file_store("ab\nxy\nzz\n");
+        s.set_point(2, 0, 0);
+        s.key_event(key("C-k")); // kill "zz" → ring ["zz"], "ab\nxy\n\n"
+        s.set_point(1, 0, 0);
+        s.key_event(key("C-k")); // kill "xy" → ring ["xy","zz"], "ab\n\n\n"
+        assert_eq!(s.kill_ring.top(), Some("xy"));
+        s.set_point(0, 1, 1); // "a|b" — the gate's fixture position
+        s.yank();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "axyb\n\n\n",
+            "Accurate C-y inserts at the point"
+        );
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (0, 3),
+            "Accurate C-y must leave the point at the END of the inserted text (past 'xy'), not where it started"
+        );
+        // M-y replaces the range that was INSERTED (chars 1..3), NOT the
+        // moved point (char 3): a point-based pop would duplicate the text.
+        s.yank_pop();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "azzb\n\n\n",
+            "Accurate M-y must replace the inserted range, not the moved point"
+        );
+
+        // ── Annotation: append at the end; the point ends at the buffer end ──
+        let (_dir2, mut s2) = notes_store();
+        for c in "aa\nbb\ncc\n".chars() {
+            s2.notes_insert_char(c);
+        }
+        let nk2 = s2.buffers.current().unwrap().to_string();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().mode,
+            BufferMode::Annotation,
+            "the notes buffer starts in Annotation mode"
+        );
+        // Ring ["bb\n","aa\n"] (bb on top) for a two-step yank/pop.
+        s2.set_point(1, 0, 0);
+        s2.set_mark();
+        s2.set_point(2, 0, 0);
+        s2.copy_region(); // "aa\n"
+        s2.set_point(2, 0, 0);
+        s2.set_mark();
+        s2.set_point(3, 0, 0);
+        s2.copy_region(); // "bb\n" (top)
+        assert_eq!(s2.kill_ring.top(), Some("bb\n"));
+        // Point MID-LINE — deliberately far from the append position.
+        s2.set_point(1, 1, 1);
+        s2.yank();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().text(),
+            "# Notes\naa\nbb\ncc\nbb\n",
+            "Annotation C-y appends at the end"
+        );
+        // The appended entry ends with a newline, so "end of the appended
+        // text" is col 0 of the buffer's final (empty) line: char 17 (the
+        // append position) + "bb\n" (3 chars) = char 20 = line 5, col 0.
+        assert_eq!(
+            (s2.point_line(), s2.point_col()),
+            (5, 0),
+            "Annotation C-y must leave the point at the end of the appended text (the buffer end), not where it started"
+        );
+        // M-y replaces the tail that was INSERTED (chars 17..20), NOT the
+        // moved point (char 20, the buffer end): a point-based pop would
+        // append the second entry and leave the first in place.
+        s2.yank_pop();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().text(),
+            "# Notes\naa\nbb\ncc\naa\n",
+            "Annotation M-y must replace the appended tail, not the moved point"
+        );
+    }
+
+    #[test]
+    fn yank_annotation_append_keeps_the_insertion_visible() {
+        // issue-yank-followups P3-2: in Annotation mode the insertion is the
+        // buffer END, so a C-y with the window parked at the top can land
+        // off-screen with no feedback (the landed "No scroll adjustment" note
+        // was false for that mode; self-insert keeps the insertion visible).
+        // The P3-1 point advance fixes it: the point lands on the appended
+        // line and `set_point`'s follow-scroll puts it in the viewport.
+        let (_dir, mut s) = notes_store();
+        s.set_viewport_lines(10);
+        // 20 typed lines: line 0 = "# Notes" (8 chars), lines 1..=20 =
+        // "x00".."x19" (4 chars each: content 88, 22 lines — line 21 is the
+        // empty line after the final newline). The window (10 rows) cannot
+        // cover the buffer end from the top.
+        for i in 0..20 {
+            for c in format!("x{i:02}\n").chars() {
+                s.notes_insert_char(c);
+            }
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        assert_eq!(s.buffers.get(&nk).unwrap().mode, BufferMode::Annotation);
+        // Park the window at the top: the buffer end (line 21) is 12 lines
+        // below the 10-row window, i.e. off-screen.
+        s.set_scroll_top(0);
+        assert_eq!(s.scroll_top(), 0);
+        // Copy "x19" (line 20, cols 0..3 — WITHOUT the newline, so the
+        // appended text has no trailing newline of its own) so the ring
+        // holds it.
+        let l20 = s.buffers.get(&nk).unwrap().rope.try_line_to_byte(20).unwrap();
+        s.buffers.get_mut(&nk).unwrap().mark = Some(l20);
+        s.set_point(20, 3, 3);
+        s.copy_region();
+        assert_eq!(s.kill_ring.top(), Some("x19"));
+        s.set_point(0, 0, 0); // the point starts at the top, far from the end
+        s.yank(); // Annotation: appends "x19" at the buffer end (line 21)
+        let expected = String::from("# Notes\n")
+            + &(0..20).map(|i| format!("x{i:02}\n")).collect::<String>()
+            + "x19";
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            expected,
+            "Annotation C-y appends at the end"
+        );
+        assert_eq!(s.point_line(), 21, "the point lands on the appended line");
+        assert_eq!(s.point_col(), 3, "at the end of the appended text");
+        // The window must have followed: the appended line is the LAST
+        // visible row (keep_cursor_visible lands it on the bottom row).
+        assert_eq!(
+            s.scroll_top(),
+            12,
+            "the appended text must be inside the 10-row window; pre-fix the scroll stayed at 0 (off-screen)"
+        );
+    }
+
+    #[test]
+    fn yank_marks_the_notes_doc_dirty_and_the_reparse_contains_the_yank() {
+        // issue-yank-followups P3-3: a C-y is a notes edit like
+        // `notes_insert_char` / `notes_backspace` / every Accurate edit, so
+        // it must set `notes_buffer_dirty` and let the doc reparse. Measured
+        // pre-fix: the flag stayed `false` before AND after the yank in both
+        // modes, so the yanked text was absent from the parsed doc until
+        // some other edit triggered a reparse. The assertion discriminates
+        // by OCCURRENCE COUNT — the yanked line was already typed into the
+        // buffer, so a stale doc parses it exactly once; the reparsed doc
+        // must parse it twice.
+        // ── Accurate ──
+        let (_dir, mut s) = notes_store();
+        for c in "aa\nbb\ncc\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        assert_eq!(s.buffers.get(&nk).unwrap().mode, BufferMode::Annotation);
+        // Consume the type-run's dirty state: the doc now holds the typed
+        // content and is clean.
+        s.ensure_notes_doc();
+        assert!(!s.notes_buffer_dirty, "baseline: typed content already reparsed");
+        assert_eq!(
+            s.notes_doc.before.iter().filter(|l| *l == "bb").count(),
+            1,
+            "baseline: one typed 'bb' line in the parsed doc"
+        );
+        // Copy "bb\n" (line 2..3) to the ring.
+        s.set_point(2, 0, 0);
+        s.set_mark();
+        s.set_point(3, 0, 0);
+        s.copy_region();
+        assert_eq!(s.kill_ring.top(), Some("bb\n"));
+        s.buffers.get_mut(&nk).unwrap().mode = BufferMode::Accurate;
+        s.set_point(0, 0, 0);
+        s.yank(); // inserts "bb\n" at the start
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "bb\n# Notes\naa\nbb\ncc\n",
+            "Accurate C-y inserts at the point"
+        );
+        assert!(
+            s.notes_buffer_dirty,
+            "Accurate C-y must mark the notes doc dirty (pre-fix it stayed false)"
+        );
+        s.ensure_notes_doc();
+        assert!(!s.notes_buffer_dirty, "the reparse must clear the flag");
+        assert_eq!(
+            s.notes_doc.before.iter().filter(|l| *l == "bb").count(),
+            2,
+            "the reparsed doc must contain the yanked line (a stale doc parses it only once; before={:?}",
+            s.notes_doc.before
+        );
+
+        // ── Annotation ──
+        let (_dir2, mut s2) = notes_store();
+        for c in "aa\nbb\ncc\n".chars() {
+            s2.notes_insert_char(c);
+        }
+        let nk2 = s2.buffers.current().unwrap().to_string();
+        assert_eq!(s2.buffers.get(&nk2).unwrap().mode, BufferMode::Annotation);
+        s2.ensure_notes_doc();
+        assert!(!s2.notes_buffer_dirty, "baseline: typed content already reparsed");
+        s2.set_point(2, 0, 0);
+        s2.set_mark();
+        s2.set_point(3, 0, 0);
+        s2.copy_region();
+        assert_eq!(s2.kill_ring.top(), Some("bb\n"));
+        s2.set_point(1, 1, 1); // mid-line point; the append ignores it
+        s2.yank(); // appends "bb\n" at the end
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().text(),
+            "# Notes\naa\nbb\ncc\nbb\n",
+            "Annotation C-y appends at the end"
+        );
+        assert!(
+            s2.notes_buffer_dirty,
+            "Annotation C-y must mark the notes doc dirty (pre-fix it stayed false)"
+        );
+        s2.ensure_notes_doc();
+        assert_eq!(
+            s2.notes_doc.before.iter().filter(|l| *l == "bb").count(),
+            2,
+            "the reparsed doc must contain the yanked line (a stale doc parses it only once; before={:?}",
+            s2.notes_doc.before
+        );
+    }
+
+    #[test]
+    fn yank_pop_lands_the_point_at_the_end_of_the_replacement() {
+        // gate P2-1: `yank-pop` deletes [yank_pos, end) and then inserts the
+        // new text, so in emacs point ends AFTER the replacement — and it
+        // therefore MOVES when the replacement's length differs. The lane that
+        // fixed `yank` asserted the opposite ("M-y must NOT advance the
+        // point") from `simple.el`; the gate contradicted it from the same
+        // source, because `yank-pop` does `delete-region` then
+        // `insert-for-yank`. Oracle (emacs 30.2, measured): C-y "Q" at bob ->
+        // point 2; then M-y "XYZW" -> point 5, i.e. the END of the new text.
+        //
+        // The fixture must be LENGTH-CHANGING **and end mid-line**. With
+        // equal-length entries the point's end position coincides; and a
+        // fixture like "XYZW\n" -> "Q\n" ends at (line 1, col 0) either way,
+        // so a line/col assertion could not tell the rules apart. Here the
+        // pop's replacement is 4 chars where the yank's was 1, mid-line.
+        let (mut s, bk, _dir) = accurate_file_store("XYZWQ\n");
+        // Ring: ["Q", "XYZW"] — the SHORT entry on top so the M-y
+        // replacement is LONGER.
+        s.set_point(0, 0, 0);
+        s.set_mark();
+        s.set_point(0, 4, 4);
+        s.copy_region(); // "XYZW"
+        s.set_point(0, 4, 4);
+        s.set_mark();
+        s.set_point(0, 5, 5);
+        s.copy_region(); // "Q" -> top
+        assert_eq!(s.kill_ring.top(), Some("Q"));
+        s.set_point(0, 0, 0);
+        s.yank();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "QXYZWQ\n");
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (0, 1),
+            "C-y leaves the point at the end of the inserted text"
+        );
+        s.yank_pop(); // replaces "Q" (1 char) with "XYZW" (4 chars)
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "XYZWXYZWQ\n");
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (0, 4),
+            "M-y must land the point at the END OF THE REPLACEMENT — char 4, \
+             not char 1 where the C-y left it (pre-fix it stayed at 1)"
+        );
+    }
+
+    #[test]
+    fn yank_pop_marks_the_notes_doc_dirty_too() {
+        // gate P2-2: fix 3 was incomplete for M-y. `yank` marks the notes doc
+        // dirty, but `file_view_rows()` -> `ensure_notes_doc()` consumes that
+        // flag BETWEEN keystrokes, so by the time M-y lands the C-y's flag is
+        // already gone and the pop never reaches the doc. Measured pre-fix:
+        // `notes_buffer_dirty` false before AND after the pop, and not even an
+        // explicit reparse picked it up (the flag was false and the doc was
+        // loaded) — the annotated pop "did nothing" until an unrelated edit.
+        let (_dir, mut s) = notes_store();
+        for c in "aa\nbb\ncc\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        s.ensure_notes_doc();
+        assert!(!s.notes_buffer_dirty, "baseline: typed content already reparsed");
+        // Ring: ["bb\n", "aa\n"] — bb on top, aa beneath for the pop.
+        s.set_point(1, 0, 0);
+        s.set_mark();
+        s.set_point(2, 0, 0);
+        s.copy_region(); // "aa\n"
+        s.set_point(2, 0, 0);
+        s.set_mark();
+        s.set_point(3, 0, 0);
+        s.copy_region(); // "bb\n" -> top
+        assert_eq!(s.kill_ring.top(), Some("bb\n"));
+        s.buffers.get_mut(&nk).unwrap().mode = BufferMode::Accurate;
+        s.set_point(0, 0, 0);
+        s.yank();
+        // Consume the C-y's dirty flag, exactly as the render loop does between
+        // keystrokes — this is the step that made the pre-fix pop invisible.
+        s.ensure_notes_doc();
+        assert!(!s.notes_buffer_dirty, "the C-y's flag was consumed by the reparse");
+        s.yank_pop(); // rotates "bb\n" -> "aa\n"
+        assert!(
+            s.notes_buffer_dirty,
+            "M-y must mark the notes doc dirty too — the C-y's flag was already \
+             consumed, so without this call the pop never reaches the doc"
+        );
+        s.ensure_notes_doc();
+        assert_eq!(
+            s.notes_doc.before.iter().filter(|l| *l == "aa").count(),
+            2,
+            "the reparsed doc must contain the popped line (typed once + popped \
+             once); a stale doc parses it only once — before={:?}",
+            s.notes_doc.before
         );
     }
 
