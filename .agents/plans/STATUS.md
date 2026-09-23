@@ -38,7 +38,7 @@ every remaining row's evidence was re-checked against the code at
 
 | Spec | State | Why it is open |
 |---|---|---|
-| `015-04` yank semantics | OPEN | 015-02 has landed; `yank` (`src/app/store/buffers.rs:1223`) still inserts at the honest point in BOTH modes — the spec wants Annotation = append at the end, Accurate = insert at the point, with `M-y` pop replacing at the yank's start under each |
+| `015-04` yank semantics | OPEN | 015-02 has landed; `yank` (`src/app/store/buffers.rs:1430`) still inserts at the honest point in BOTH modes (so **Accurate is already correct** — only the Annotation append is left), and the spec is **REFRESHED 2026-09-22**: the append must record exactly ONE undo step or 016-02's `M-y` coalescing breaks — the spec wants Annotation = append at the end, Accurate = insert at the point, with `M-y` pop replacing at the yank's start under each |
 | `016-undo` (plan, active; 01 landed) | PARTIAL | 01 landed `ff84669`; zero hits for `fn undo` is no longer true | 02–04 open; design settled (inverse-edit stack; BOTH `C-x u` and `C-/` per user directive) |
 | `013-01` iocraft upstream PR | OPEN | user decision on plan 013 not made |
 | `013-02` vendored patch | OPEN | contingent on that decision |
