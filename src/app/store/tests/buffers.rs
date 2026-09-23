@@ -2645,11 +2645,15 @@ use super::*;
         (s, bk, dir)
     }
 
-    /// plan 016 issue 01: a self-insert edit sequence can be FULLY undone,
-    /// with the buffer text byte-identical to the expected intermediate state
-    /// after EVERY undo step (asserted at each step, not just the end). One
-    /// keystroke is one undo step (issue 04 adds the self-insert-run
-    /// coalescing rule; until then this is expected, not a bug).
+    /// plan 016 issue 01 (UPDATED by issue 04): a self-insert edit sequence
+    /// can be FULLY undone, with the buffer text byte-identical to the
+    /// expected intermediate state after EVERY undo step (asserted at each
+    /// step, not just the end). plan 016 issue 04: the consecutive
+    /// self-inserts are ONE coalesced undo step (the self-insert-run rule),
+    /// so ONE undo removes the whole run — a per-keystroke step is no longer
+    /// the shape (the pre-04 expectation is replaced by the coalescing
+    /// pin, and the run boundary itself is pinned in the issue 04 tests
+    /// below).
     #[test]
     fn full_undo_roundtrip_self_insert_asserts_every_step() {
         let (mut s, bk, _dir) = accurate_file_store("hello\n");
@@ -2662,17 +2666,17 @@ use super::*;
         assert_eq!(s.buffers.get(&bk).unwrap().text(), "abhello\n");
         s.key_event(key("c"));
         assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n");
-        // Undo each self-insert, asserting the text at every step.
+        // issue 04: the consecutive self-inserts are ONE coalesced step.
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            1,
+            "the self-insert run is ONE undo step (the coalescing rule)"
+        );
+        // One undo removes the WHOLE run, asserting the text.
         s.key_event(key("C-x"));
         s.key_event(key("u"));
-        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abhello\n", "undo 1");
-        s.key_event(key("C-x"));
-        s.key_event(key("u"));
-        assert_eq!(s.buffers.get(&bk).unwrap().text(), "ahello\n", "undo 2");
-        s.key_event(key("C-x"));
-        s.key_event(key("u"));
-        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "undo 3");
-        // A fourth undo: the stack is empty → a no-op with a message.
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "undo 1: the whole run");
+        // A second undo: the stack is empty → a no-op with a message.
         s.key_event(key("C-x"));
         s.key_event(key("u"));
         assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "past the start: no change");
@@ -3863,5 +3867,688 @@ use super::*;
         assert!(
             killed_seq >= 1,
             "the killed buffer really had recorded steps (seq {killed_seq}) — its state existed but died with it"
+        );
+    }
+
+    // ── plan 016 issue 04: the redo stack + the self-insert-run rule ──
+
+    /// Full round trip (acceptance): two coalesced typing runs, separated
+    /// by a point motion, undone completely and then redone completely,
+    /// with the buffer text asserted BYTE-IDENTICAL at EVERY step (not just
+    /// the endpoints) — including the "undo after redo" flip-flop and the
+    /// step-id stability across the round trip (the marker seam's
+    /// precondition).
+    #[test]
+    fn redo_full_roundtrip_asserts_every_step() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        // Run 1: "abc" — the consecutive self-inserts coalesce into ONE
+        // step (issue 04's stated rule).
+        s.key_event(key("a"));
+        s.key_event(key("b"));
+        s.key_event(key("c"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n");
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 1, "run 1 is ONE step");
+        let id_abc = s.buffers.get(&bk).unwrap().undo.position_id();
+        // A point motion ENDS the run — even one that ends back at the same
+        // column (LEFT then RIGHT): the intervening command, not just the
+        // contiguity, separates the two runs.
+        s.key_event(key("LEFT"));
+        s.key_event(key("RIGHT"));
+        // Run 2: "def" at the same column the first run ended at.
+        s.key_event(key("d"));
+        s.key_event(key("e"));
+        s.key_event(key("f"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abcdefhello\n");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "the two runs are TWO steps (the motion between them ended run 1)"
+        );
+        let id_def = s.buffers.get(&bk).unwrap().undo.position_id();
+        assert!(
+            id_def > id_abc,
+            "precondition: two distinct step ids ({id_abc} vs {id_def})"
+        );
+
+        // UNDO: the "def" run goes first, then the "abc" run.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n", "undo 1: the def run");
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n", "undo 2: the abc run");
+        assert_eq!(s.buffers.get(&bk).unwrap().redo.len(), 2, "both inverses are on the redo stack");
+
+        // REDO: the "abc" run comes back first, then the "def" run — the
+        // universal binding (C-x U) for the first, the byte-based second
+        // binding (C-M-7, the app shape of ESC 0x1F) for the second.
+        s.key_event(key("C-x"));
+        s.key_event(key("U"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n", "redo 1: the abc run");
+        s.key_event(parse_sequence("C-M-7").unwrap()[0]);
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "abcdefhello\n",
+            "redo 2 (C-M-7): the def run"
+        );
+        // Redo past the end: the redo stack is empty → a no-op with a
+        // message, and the text is untouched.
+        s.key_event(key("C-x"));
+        s.key_event(key("U"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "abcdefhello\n",
+            "past the end: no change"
+        );
+        assert!(
+            s.message.contains("nothing to redo"),
+            "empty redo stack must echo a message: {:?}",
+            s.message
+        );
+
+        // UNDO AFTER REDO: the redone steps re-entered the undo stack —
+        // undo flips back, and the inverse re-pops onto redo.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abchello\n", "undo after redo: def off");
+        s.key_event(key("C-x"));
+        s.key_event(key("U"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "abcdefhello\n",
+            "redo after that undo: def back"
+        );
+        // The redone steps kept their ORIGINAL ids (moved, not minted):
+        // the position is exactly where the typing run left it.
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.position_id(),
+            id_def,
+            "the round trip is id-stable: the marker seam reads the same position"
+        );
+    }
+
+    /// issue 04, pinned: a NEW EDIT clears the redo stack (the emacs rule
+    /// — not optional: a stale redo branch after an edit would redo onto
+    /// content that no longer exists). Edit → undo → edit again: redo is
+    /// unavailable, and the redo no-op is a message, not a stale apply.
+    #[test]
+    fn new_edit_clears_redo_stack() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        s.key_event(key("b")); // one coalesced step
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 1);
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "hello\n");
+        assert_eq!(s.buffers.get(&bk).unwrap().redo.len(), 1, "the undo's inverse is on the redo stack");
+        // A new edit (a self-insert in a fresh run) clears it.
+        s.key_event(key("z"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "zhello\n");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().redo.len(),
+            0,
+            "the new edit must clear the redo stack"
+        );
+        s.dispatch("redo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to redo"),
+            "the cleared redo stack is a no-op with a message: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "zhello\n",
+            "the no-op redo must not touch the text (no stale apply)"
+        );
+    }
+
+    /// issue 04, the spec's known-sequence pin: type `abc`, move point with
+    /// an arrow, type `def` — undo removes `def` as its OWN step first, then
+    /// the `abc` run. Two steps, not one; the order is def-then-abc. And the
+    /// "any other command ends the run" half pinned through BOTH paths: the
+    /// arrow key's non-printable path and the registry `dispatch` path
+    /// (C-SPC between two runs).
+    #[test]
+    fn mouse_and_tree_commands_end_the_self_insert_run() {
+        // gate P2 (016-04): the run-ends rule is "any path that RUNS a command
+        // clears the marker", but the mouse/tree handlers never pass through
+        // `key_event`, where the key-path clears live. So a click or a wheel
+        // tick left the run armed, and a later self-insert merged ACROSS it —
+        // measured pre-fix: seq `a`,`b`,click,`c` left ONE undo step, so a
+        // single `C-x u` removed "abc" spanning a mouse command. Each probe
+        // types "ab", runs the command, types "c": a broken run = 2 steps.
+        for (label, which) in [
+            ("mouse_click_position", 0u8),
+            ("mouse_scroll_up", 1),
+            ("mouse_scroll_down", 2),
+        ] {
+            let (mut s, bk, _dir) = accurate_file_store("hello\n");
+            s.set_point(0, 0, 0);
+            s.key_event(key("a"));
+            s.key_event(key("b"));
+            assert!(
+                s.self_insert_run.is_some(),
+                "precondition: the run is armed before {label}"
+            );
+            match which {
+                // A click at the run's end (col 2) IS point motion.
+                0 => s.mouse_click_position(0, 2),
+                1 => s.mouse_scroll_up(),
+                _ => s.mouse_scroll_down(),
+            }
+            // Assert the MECHANISM (the marker), which is the same source of
+            // truth the merge rule reads — the undo count below depends on
+            // where the next key lands, which the tree case in particular
+            // changes by switching the shown file.
+            assert!(
+                s.self_insert_run.is_none(),
+                "{label} must clear the self-insert run marker"
+            );
+            s.key_event(key("c"));
+            assert_eq!(
+                s.buffers.get(&bk).unwrap().undo.len(),
+                2,
+                "{label} must end the self-insert run (1 = the run leaked across it)"
+            );
+        }
+
+        // The tree row click is the same class of non-`key_event` input path.
+        let (mut s, _bk, _dir) = accurate_file_store("hello\n");
+        s.tree.visible = true;
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        s.key_event(key("b"));
+        assert!(
+            s.self_insert_run.is_some(),
+            "precondition: the run is armed before tree_click_row"
+        );
+        s.tree_click_row(1);
+        assert!(
+            s.self_insert_run.is_none(),
+            "tree_click_row must clear the self-insert run marker (it runs a command: it switches the shown file)"
+        );
+
+        // The deliberate other half of the rule: a path that ran NO command
+        // leaves the run ARMED — like a pending prefix press or an
+        // unbound-key echo. This is why the clears sit AFTER each guard
+        // rather than at the top of the handler, and it is the counter-case
+        // that stops someone "simplifying" the fix into a blanket clear.
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        s.push_view(ViewId::Home); // not the buffer view: the click no-ops
+        s.mouse_click_position(0, 2);
+        assert!(
+            s.self_insert_run.is_some(),
+            "a click that ran no command must leave the run armed"
+        );
+        s.key_event(key("b"));
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            1,
+            "a click that ran no command must NOT break the run"
+        );
+    }
+
+    #[test]
+    fn typing_run_arrow_typing_run_is_two_steps_in_order() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        s.key_event(key("b"));
+        s.key_event(key("c"));
+        s.key_event(key("LEFT")); // an arrow between the two runs
+        s.key_event(key("d"));
+        s.key_event(key("e"));
+        s.key_event(key("f"));
+        // "abc", point back one (col 2), "def" inserted at col 2:
+        // "ab" + "def" + "chello".
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "abdefchello\n");
+        assert_eq!(s.buffers.get(&bk).unwrap().undo.len(), 2, "two steps, not one");
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "abchello\n",
+            "the first undo removes the NEWER (def) run"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n",
+            "the second undo removes the abc run"
+        );
+
+        // The registry-command variant of the same rule: ANY registry
+        // command between two typing runs ends the run — pinned here with
+        // C-SPC (set-mark), which runs through `dispatch` (the arrow keys
+        // above end the run through the non-printable path instead). The
+        // mark lands exactly at the run's end, so contiguity alone cannot
+        // save the merge: only the marker's absence may.
+        let (mut s, bk, _dir) = accurate_file_store("word\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("a")); // "aword\n", point 1 — the run's top step: 0..1
+        s.key_event(key("C-SPC")); // set-mark at 1 — a registry command
+        s.key_event(key("b")); // "abword\n" — contiguous at 1, but after a command
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "the set-mark between the runs ends the run: 'a' and 'b' are TWO \
+             steps, not one (contiguity at the same column must not revive it)"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "aword\n",
+            "the first undo removes the post-mark 'b', not the whole run"
+        );
+    }
+
+    /// issue 04, the multibyte acceptance pin: a coalesced typing run
+    /// restores exactly, on CHAR indices. v1 key input is ASCII-only
+    /// (`Key::printable` gates `0x20..=0x7E`, so the key path self-inserts
+    /// only through `char_value`), so the pin is split: the key-path half
+    /// drives the rule with ASCII typing AROUND multibyte text ("café\n":
+    /// char col 4 is byte 5 — a byte-based run record would put the range
+    /// start at byte 4, mid-é, and the undo would chew into the é), and the
+    /// non-ASCII-in-the-run half drives the same recording layer with the
+    /// typing-run marker set exactly as the key path sets it (store-level
+    /// self-inserts — the rule lives in `retain_rope_edit`, which is where
+    /// a multi-byte self-insert would flow once the key gate allows it).
+    /// Byte-identical at every step, char-accurate point.
+    #[test]
+    fn multibyte_self_insert_run_restores_exactly_on_char_indices() {
+        let (mut s, bk, _dir) = accurate_file_store("café\n"); // 5 chars, 6 bytes
+        s.set_point(0, 4, 4); // char col 4 = after the é (byte 5), before the \n
+        s.key_event(key("a"));
+        s.key_event(key("b"));
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "caféab\n"); // 7 chars, 8 bytes
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            1,
+            "the run coalesced across the multibyte boundary"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "café\n",
+            "byte-identical restore (a byte-based range start would land mid-é)"
+        );
+        assert_eq!(s.point_col(), 4, "char-accurate point (byte 4 is the SECOND byte of the é)");
+        s.dispatch("redo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "caféab\n", "byte-identical redo");
+        assert_eq!(s.point_col(), 4, "char-accurate point on the redo");
+
+        // Non-ASCII in the run: store-level self-inserts with the run marker
+        // set as the key path sets it (one successful self-insert).
+        s.set_point(0, 0, 0);
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("a");
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("é"); // the multibyte char continues the run
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("é");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "aéécaféab\n",
+            "10 chars, 12 bytes: the run spans the multibyte boundary"
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "the a-é-é run is ONE step, on top of the (re)done ab run"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "caféab\n",
+            "byte-identical: the run restored exactly on char indices (a byte-based
+            range would stop mid-run and leave the first é or eat the c)"
+        );
+        assert_eq!(s.point_col(), 0, "char-accurate point on the char-indexed undo");
+        s.dispatch("redo", None).unwrap();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "aéécaféab\n",
+            "byte-identical redo of the multibyte run"
+        );
+        assert_eq!(s.point_col(), 0, "char-accurate point on the redo");
+    }
+
+    /// issue 04, the MARKER SEAM (03 owns the mechanism; this pins the redo
+    /// half): a redone step must re-enter the undo stack with its ORIGINAL
+    /// id, and the clean/modified readings through the round trip must be
+    /// right. Both directions:
+    ///
+    ///  - Case A (data-loss direction): edit → save → edit → undo → REDO
+    ///    PAST the saved position: the buffer MUST read modified (it holds
+    ///    the unsaved text again).
+    ///  - Case B (the id discriminator): edit → save → undo PAST the saved
+    ///    position → redo BACK to the saved position: the buffer MUST read
+    ///    clean. That only happens if the re-pushed step carries its
+    ///    ORIGINAL id — a minted id would break the marker match and read
+    ///    modified, hiding a provably-saved state.
+    #[test]
+    fn redo_reenters_with_the_original_id_for_the_marker() {
+        // Case A: redo past the saved position reads modified.
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("X"); // "Xhello\n", step id 1
+        assert!(s.save_buffer_key(&bk));
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified());
+        s.insert_text_at_point("Y"); // "XYhello\n", step id 2 — UNSAVED
+        assert!(s.buffers.get(&bk).unwrap().locally_modified());
+        s.dispatch("undo", None).unwrap(); // "Xhello\n" — back on the saved id
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified(), "undo back to the save reads clean");
+        s.dispatch("redo", None).unwrap(); // "XYhello\n" — PAST the saved position
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "XYhello\n");
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "redo past the saved position must read MODIFIED (unsaved text re-landed)"
+        );
+
+        // Case B: undo past, redo back to the saved position, reads clean.
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.insert_text_at_point("X"); // step id 1
+        s.insert_text_at_point("Y"); // step id 2 — "XYhello\n"
+        assert!(s.save_buffer_key(&bk));
+        assert_eq!(s.buffers.get(&bk).unwrap().saved_marker, Some(2));
+        assert!(!s.buffers.get(&bk).unwrap().locally_modified());
+        s.dispatch("undo", None).unwrap(); // "Xhello\n" — position back to id 1
+        assert!(s.buffers.get(&bk).unwrap().locally_modified(), "past the save: modified");
+        s.dispatch("redo", None).unwrap(); // "XYhello\n" — back to the saved position
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "XYhello\n");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.position_id(),
+            2,
+            "the redone step re-entered with its ORIGINAL id (2), not a minted one"
+        );
+        assert!(
+            !s.buffers.get(&bk).unwrap().locally_modified(),
+            "redo back to the saved position must read CLEAN — a fresh id would read modified"
+        );
+    }
+
+    /// issue 04, the marker × run-merge seam (mirrors 02's
+    /// `m_y_merge_cannot_hijack_the_saved_marker` for the self-insert rule):
+    /// a typing run that COALESCES across a saved-state marker must not
+    /// read clean against it — the merged step keeps the NEW step's id
+    /// (the newest recorded one), so a marker captured mid-run can never
+    /// match the merged step. The key path cannot reach this state (a save
+    /// is a command, and a command ends the run — `dispatch` clears the
+    /// marker), so the pin synthesizes the seam exactly as the store path
+    /// carries it: the run marker set, a second self-insert continues the
+    /// run, and the marker is set to the first keystroke's position — the
+    /// mid-run save the decision exists to survive.
+    #[test]
+    fn self_insert_run_merge_cannot_hijack_the_saved_marker() {
+        let (mut s, bk, _dir) = accurate_file_store("base\n");
+        s.set_point(0, 0, 0);
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("a"); // "abase\n" — step id 1
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("b"); // "babase\n" — coalesces: ONE step
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            1,
+            "the run coalesced into one step"
+        );
+        // A marker captured after the FIRST keystroke (a save mid-run):
+        s.buffers.get_mut(&bk).unwrap().saved_marker = Some(1);
+        let buf = s.buffers.get(&bk).unwrap();
+        assert_ne!(
+            buf.undo.position_id(),
+            1,
+            "precondition: the merged step's position is not the mid-run marker's"
+        );
+        assert!(
+            buf.locally_modified(),
+            "the merged step must NOT carry the first keystroke's id, or this \
+             buffer would read clean while holding unsaved text — the data-loss \
+             direction"
+        );
+    }
+
+    /// issue 04, the two INNER conditions of the stated rule (not just
+    /// the command side pinned by `typing_run_arrow_typing_run_is_two_steps_in_order`):
+    /// with the run marker set, a self-insert is NOT merged when (a) it does
+    /// not start where the run's top step ends (the contiguity arm), (b) the
+    /// run's top step is not itself a pure insertion, (c) the marker's
+    /// buffer is not THIS buffer (the same-buffer arm), or (d) this edit is
+    /// not a pure insertion (the pure-insertion arm). Store-level: the
+    /// marker is set exactly as the key path sets it, and (b)/(d) reach
+    /// the replacement top and the deletion through `retain_rope_edit`
+    /// itself (the key path cannot — a non-self-insert editing key clears
+    /// the marker).
+    #[test]
+    fn each_stated_arm_of_the_run_rule_gates_the_merge() {
+        // (a) contiguity: an insert that starts mid-buffer (not at the
+        // run's end) is its own step even with the marker set.
+        let (mut s, bk, _dir) = accurate_file_store("base\n");
+        s.set_point(0, 0, 0);
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("a"); // "abase\n" — the run's top step: 0..1
+        s.set_point(0, 3, 3); // mid-buffer: NOT where the run's top step ends
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("b"); // "abasbe\n"
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "a non-contiguous self-insert must not join the run: {:?}",
+            s.buffers.get(&bk).unwrap().text()
+        );
+        // (b) pure-insertion top: a replacement (deleted text) at the
+        // run's end is NOT a run top a self-insert may join — even
+        // contiguous.
+        let (mut s, bk, _dir) = accurate_file_store("base\n");
+        let old_rope = s.buffers.get(&bk).unwrap().rope.clone();
+        s.self_insert_run = Some(bk.clone());
+        s.retain_rope_edit(&bk, &old_rope, 0, 1, "z"); // "zase\n" — top step replaced "b"
+        s.set_point(0, 1, 1);
+        let old_rope = s.buffers.get(&bk).unwrap().rope.clone();
+        s.self_insert_run = Some(bk.clone());
+        s.retain_rope_edit(&bk, &old_rope, 1, 1, "q"); // "zqase\n" — contiguous
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "a self-insert must not merge into a top step that deleted text: {:?}",
+            s.buffers.get(&bk).unwrap().text()
+        );
+        // (c) same buffer: the marker names the buffer whose preceding
+        // command was the self-insert — a run in a DIFFERENT buffer never
+        // continues into this one, no matter how contiguous.
+        let (mut s, bk, _dir) = accurate_file_store("base\n");
+        std::fs::write(_dir.path().join("src/g.rs"), "fn g() {}\n").unwrap();
+        s.open_path("src/g.rs");
+        let other = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q")); // Accurate mode for the store-level insert
+        s.set_point(0, 0, 0);
+        // A run INSIDE `other` itself:
+        s.self_insert_run = Some(other.clone());
+        s.insert_text_at_point("x"); // `other`'s run: step 0..1
+        // Now the marker names `bk` (a self-insert just happened in the
+        // OTHER buffer); the edit lands in `other`, contiguous at its top.
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("y");
+        assert_eq!(
+            s.buffers.get(&other).unwrap().undo.len(),
+            2,
+            "the other buffer's run must not continue into this buffer: {:?}",
+            s.buffers.get(&other).unwrap().text()
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            0,
+            "the named buffer's stack is untouched"
+        );
+        // (d) pure insertion: a DELETION at the run's end does not join the
+        // run even with the marker set and contiguity exact — only pure
+        // insertions coalesce (a merged deletion would make the undo step
+        // restore text the typing run never removed).
+        let (mut s, bk, _dir) = accurate_file_store("base\n");
+        s.set_point(0, 0, 0);
+        s.self_insert_run = Some(bk.clone());
+        s.insert_text_at_point("a"); // "abase\n" — the run's top step: 0..1
+        s.set_point(0, 1, 1);
+        let old_rope = s.buffers.get(&bk).unwrap().rope.clone();
+        s.self_insert_run = Some(bk.clone());
+        s.retain_rope_edit(&bk, &old_rope, 1, 2, ""); // delete "a": "base\n"
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            2,
+            "a deletion must not coalesce into the typing run: {:?}",
+            s.buffers.get(&bk).unwrap().text()
+        );
+    }
+
+    /// issue 04, the redo stack's discipline (mirrors the undo stack's):
+    /// per buffer (buffer A's redo never fires on buffer B, and B's edit
+    /// does not clear A's redo), cleared at a rope-replacing site, capped at
+    /// `UndoStack::MAX_ENTRIES` (the undo stack's cap), and dropped with the
+    /// buffer on kill.
+    #[test]
+    fn redo_stack_obey_the_undo_stack_discipline() {
+        // Per buffer: two Accurate buffers, each with its own redo step.
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        std::fs::write(_dir.path().join("src/g.rs"), "fn g() {}\n").unwrap();
+        s.set_point(0, 0, 0);
+        s.key_event(key("a"));
+        s.key_event(key("b")); // buffer A: one coalesced step
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().redo.len(), 1, "A's undo left a redo step");
+        // Buffer B: open, enter Accurate, one edit, one undo.
+        s.open_path("src/g.rs");
+        let bk2 = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q"));
+        s.insert_text("z");
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk2).unwrap().redo.len(), 1, "B's undo left a redo step");
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().redo.len(),
+            1,
+            "B's edit must NOT clear A's redo stack (per buffer)"
+        );
+        // Redo on B (the current buffer) fires B's step only.
+        s.dispatch("redo", None).unwrap();
+        assert!(
+            s.buffers.get(&bk2).unwrap().text().ends_with("z"),
+            "B's redo re-lands B's edit (append-at-end)"
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "hello\n",
+            "B's redo must not touch A's text"
+        );
+        assert_eq!(s.buffers.get(&bk).unwrap().redo.len(), 1, "A's redo step survives B's redo");
+        // Kill B: its redo history dies with the buffer.
+        s.kill_buffer(&bk2);
+        assert!(s.buffers.get(&bk2).is_none(), "the killed buffer (and its redo stack) is gone");
+
+        // Cleared at a rope-replacing site: a disk reload (`g`) drops BOTH
+        // stacks — a stale redo step is the same reachable panic as a stale
+        // undo step (01's gate P1), with a different trigger.
+        let (dir, mut s) = file_buffer_store();
+        let bufk = s.buffers.current().unwrap().to_string();
+        s.key_event(key("C-x"));
+        s.key_event(key("C-q")); // Accurate + editable
+        s.insert_text("X"); // unsaved edit, live history
+        s.dispatch("undo", None).unwrap();
+        assert_eq!(s.buffers.get(&bufk).unwrap().redo.len(), 1, "precondition: a live redo step");
+        std::fs::write(dir.path().join("src/f.rs"), "fn new() {}\n").unwrap();
+        s.reload_current_buffer(); // `g`
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().redo.len(),
+            0,
+            "the reload must clear the REDO stack too (site 1 of 3)"
+        );
+        s.dispatch("redo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to redo"),
+            "the cleared redo stack is a no-op with a message: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bufk).unwrap().text(),
+            "fn new() {}\n",
+            "the no-op redo leaves the reloaded text alone"
+        );
+
+        // Capped at the undo stack's cap: 105 edits → 100 undo steps (the
+        // cap evicts the oldest) → undoing all 100 pushes exactly the cap
+        // onto the redo stack. The redo stack must not grow past it.
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        for _ in 0..105 {
+            s.insert_text_at_point("x");
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().undo.len(),
+            UndoStack::MAX_ENTRIES,
+            "precondition: the undo cap evicted the oldest 5 steps"
+        );
+        for _ in 0..UndoStack::MAX_ENTRIES {
+            s.dispatch("undo", None).unwrap();
+        }
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().redo.len(),
+            UndoStack::MAX_ENTRIES,
+            "the redo stack is bounded by the SAME cap as the undo stack"
+        );
+        s.dispatch("undo", None).unwrap();
+        assert!(
+            s.message.contains("nothing to undo"),
+            "the evicted steps are unrecoverable in either direction"
+        );
+    }
+
+    /// issue 04, the redo half of 01/02's stale-step backstop: a redo step
+    /// whose recorded range no longer fits the CURRENT rope (a content
+    /// replacement that did not clear the redo stack — the class
+    /// `drop_undo_history` exists to prevent) must be dropped and reported,
+    /// never applied (a stale range would make ropey's `remove` panic,
+    /// `Char range out of bounds`). A DELETION step is used: its inverse
+    /// (`inserted` = the deleted char) is the text the redo validates
+    /// against, so a replaced rope mismatches it. Mirrors the mirrored
+    /// tie-break: the saved-state evidence is dropped, so the buffer reads
+    /// modified.
+    #[test]
+    fn stale_redo_guard_drops_and_reports_instead_of_applying() {
+        let (mut s, bk, _dir) = accurate_file_store("hello\n");
+        s.set_point(0, 0, 0);
+        s.key_event(key("C-d")); // delete 'h' → "ello\n"; step: `inserted` = "h"
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "ello\n");
+        s.dispatch("undo", None).unwrap(); // "hello\n"; the inverse is on the redo stack
+        assert_eq!(s.buffers.get(&bk).unwrap().redo.len(), 1);
+        // Sanity: the guard passes against the live rope (not a false
+        // positive) — redo re-lands the deletion exactly.
+        s.dispatch("redo", None).unwrap();
+        assert_eq!(s.buffers.get(&bk).unwrap().text(), "ello\n", "a live redo step applies");
+        s.dispatch("undo", None).unwrap(); // back to "hello\n"
+        // Simulate a rope replacement that did NOT flow through the edit
+        // path (the caller-miss the backstop exists for — the same
+        // scenario 01's gate P1 found on the undo side).
+        s.buffers.get_mut(&bk).unwrap().rope = ropey::Rope::from_str("replaced\n");
+        s.dispatch("redo", None).unwrap();
+        assert!(
+            s.message.contains("stale"),
+            "the stale redo step must be reported: {:?}",
+            s.message
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "replaced\n",
+            "the stale step must not be applied"
+        );
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().redo.len(),
+            0,
+            "the stale step is dropped (it is already popped)"
+        );
+        assert!(
+            s.buffers.get(&bk).unwrap().locally_modified(),
+            "the tie-break: the saved-state evidence is dropped — modified, not clean"
         );
     }

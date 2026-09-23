@@ -286,8 +286,9 @@ mod tests {
         assert!(s.contains("quit"), "filtered candidate missing:\n{s}");
         // annotations-fold-visual: the seed registry now carries annotate-fold
         // (118 → 119; annotate-hide / annotate-show were removed — the fold
-        // is a single `C-c a h` toggle → annotate-toggle).
-        assert!(s.contains("of 119"), "picker count line missing:\n{s}");
+        // is a single `C-c a h` toggle → annotate-toggle). plan 016 issue 04
+        // added `redo` → 120.
+        assert!(s.contains("of 120"), "picker count line missing:\n{s}");
         // "qu" filters out the other seed commands.
         assert!(!s.contains("insert-demo-text"), "{s}");
     }

@@ -229,4 +229,45 @@ mod tests {
             "a CSI-u Ctrl+/ (Char('/') + ctrl) matches the C-/ binding"
         );
     }
+
+    /// plan 016 issue 04: pin the terminal control-code fact for the
+    /// `C-M-7` redo binding — the app-level shape of emacs's `C-M-_`
+    /// (`ESC 0x1F`) on byte-based terminals, then pin the APP BOUNDARY that
+    /// follows from it.
+    ///
+    /// The crossterm half is a CITED fact, not one this test asserts (same
+    /// as `crossterm_0x1f_decodes_to_c_7`: crossterm's unix `parse_event`
+    /// reads from a file descriptor, not a byte buffer a test can hand it).
+    /// Cited source, crossterm 0.29.0 unix parse: after `ESC`, an
+    /// unrecognized introducer byte is handled by the catch-all arm, which
+    /// RECURSES on `buffer[1..]` and ORs `ALT` onto any resulting key
+    /// event (`alt_key_event.modifiers |= KeyModifiers::ALT`). The byte
+    /// `0x1F` in that recursion hits the same `c @ b'\x1C'..=b'\x1F'`
+    /// arm as the bare byte (`Char('7') + CONTROL` — the fact that made
+    /// `C-7` the byte-based undo shape), so `ESC 0x1F` decodes to
+    /// `Char('7') + CONTROL | ALT`.
+    ///
+    /// What this test pins — the app boundary: given the KeyEvent
+    /// crossterm produces for `ESC 0x1F` (`Char('7') + CONTROL | ALT`),
+    /// `to_app_key` yields the app key the `C-M-7` binding stores. Consequence
+    /// (documented at the binding): emacs's `C-M-_` fires `C-M-7` on
+    /// byte-based terminals. On a CSI-u / kitty terminal the same physical
+    /// key arrives as `Char('_') + CONTROL | ALT` (`C-M-_` proper) —
+    /// deliberately unbound; `C-x U` is the universal redo path.
+    #[test]
+    fn c_m_7_arrives_from_esc_0x1f() {
+        // The iocraft/crossterm event for `ESC 0x1F` (Alt+Ctrl-_ / Alt+
+        // Ctrl+/ on byte-based terminals) is Char('7') + CONTROL | ALT →
+        // C-M-7.
+        let mut ev = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('7'));
+        ev.modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let app_key = to_app_key(&ev).unwrap();
+        assert_eq!(
+            app_key,
+            crate::app::keymap::parse_sequence("C-M-7").unwrap()[0],
+            "crossterm's ESC 0x1F (Alt + 0x1F) must arrive as C-M-7"
+        );
+        assert_eq!(app_key.code, crate::app::keymap::KeyCode::Char('7'));
+        assert!(app_key.ctrl && app_key.alt);
+    }
 }

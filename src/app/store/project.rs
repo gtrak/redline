@@ -308,6 +308,14 @@ impl AppStore {
         {
             return;
         }
+        // plan 016 issue 04 (gate P2): a tree row click RUNS A COMMAND (it
+        // moves the tree cursor; the method docs note it never touches the
+        // code point), so it ends the self-insert run — the rule is about
+        // the command, not about whether the point moved. This handler is a
+        // non-`key_event` input path, so it must clear the marker itself.
+        // AFTER the guard, like the buffer click: a click that ran nothing
+        // leaves the run armed.
+        self.self_insert_run = None;
         let Some(rel) = terminal_row.checked_sub(1) else {
             return; // terminal row 0 is the tree title
         };

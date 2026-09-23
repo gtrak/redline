@@ -290,8 +290,9 @@ use super::*;
         store.open_palette();
         // annotations-fold-visual: the seed registry now carries annotate-fold
         // (118 → 119; annotate-hide / annotate-show were removed — the fold
-        // is a single `C-c a h` toggle → annotate-toggle).
-        assert_eq!(store.picker_count().0, 119);
+        // is a single `C-c a h` toggle → annotate-toggle). plan 016 issue 04
+        // added `redo` → 120.
+        assert_eq!(store.picker_count().0, 120);
 
         // Shipped UI path (M-x, Down, Up): Up must wrap-decrement, not
         // reflect — prev(1) is 0, not 8.
@@ -351,8 +352,9 @@ use super::*;
         store.open_palette();
         // annotations-fold-visual: the seed registry now carries annotate-fold
         // (118 → 119; annotate-hide / annotate-show were removed — the fold
-        // is a single `C-c a h` toggle → annotate-toggle).
-        assert_eq!(store.picker_count().0, 119);
+        // is a single `C-c a h` toggle → annotate-toggle). plan 016 issue 04
+        // added `redo` → 120.
+        assert_eq!(store.picker_count().0, 120);
 
         store.key_event(key("q"));
         store.key_event(key("u"));

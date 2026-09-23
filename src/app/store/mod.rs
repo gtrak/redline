@@ -383,6 +383,29 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
     ("C-x u", "undo"),
     ("C-/", "undo"),
     ("C-7", "undo"),
+    // plan 016 issue 04: redo. The binding was settled with the oracle
+    // (emacs 30.2, `where-is-internal 'undo-redo` → `C-?` + `C-M-_`; both
+    // unusable here: `C-?` is DEL/0x7F, which a terminal delivers as
+    // Backspace; `C-M-_` is `ESC 0x1F`). Primary: `C-x U` — free in emacs
+    // (NO parity cost, verified with the oracle), byte-reachable on every
+    // terminal (a plain character after a prefix), and mnemonic: `C-x u`
+    // undoes, `C-x U` redoes, adjacent in the same prefix.
+    //
+    // Second binding: `C-M-7` — the APP-LEVEL shape of emacs's `C-M-_`
+    // on byte-based terminals: Alt+Ctrl-_ sends `ESC 0x1F`, and crossterm
+    // 0.29.0's unix parse handles the byte after `ESC` by recursing with
+    // the ALT flag OR'd onto whatever the byte decodes to — `0x1F`
+    // decodes as `Char('7') + CONTROL` (the same fact that made `C-7` the
+    // byte-based undo shape), so the full sequence arrives as
+    // `Char('7') + CONTROL | ALT` = `C-M-7`. The decode is pinned in the
+    // input-layer test `c_m_7_arrives_from_esc_0x1f`; the app boundary in
+    // `redo_bindings_resolve`. NOTE: on a CSI-u / kitty terminal the same
+    // physical key arrives as `Char('_') + CONTROL | ALT` (`C-M-_` proper)
+    // — deliberately UNBOUND: `C-x U` already covers every terminal, and
+    // a second second-binding that cannot be measured end-to-end is worse
+    // than none (the bare-`SHIFT` lesson). `C-M-7` was free in this table.
+    ("C-x U", "redo"),
+    ("C-M-7", "redo"),
     // Window-split keys (the 3 pre-existing ux_sweep findings),
     // degraded onto the single-pane view-stack model — a full
     // vertical split is a scoped follow-up (per-pane buffer /
@@ -1868,12 +1891,36 @@ pub struct AppStore {
     /// `None` when no yank is in progress.
     yank_ring_index: Option<usize>,
     // ── plan 016 issue 01: undo ─────────────────────────────────────────
-    /// Re-entrancy guard for the undo re-apply path: while `undo` is
-    /// re-applying an inverse edit through `retain_rope_edit`, the inverse
-    /// itself is NOT recorded as a new undo step (recording it would make
-    /// undo flip-flop between two states). Issue 04 routes the undo's
-    /// inverse to a redo stack; this guard is that seam.
+    /// Re-entrancy guard for the undo/redo re-apply path: while `undo` or
+    /// `redo` is re-applying an inverse edit through `retain_rope_edit`, the
+    /// re-application is NOT recorded as a new undo step (recording it
+    /// would make undo flip-flop between two states) and it does not clear
+    /// the redo stack. The undo's inverse goes to the redo stack
+    /// (`Buffer.redo`); the redo step re-enters the undo stack with its
+    /// original id (plan 016 issue 04).
     undo_in_progress: bool,
+    // ── plan 016 issue 04: the self-insert-run coalescing rule ────────
+    /// The buffer key whose IMMEDIATELY PRECEDING command was a self-insert
+    /// (the typing-run marker; the rule is stated in `retain_rope_edit`).
+    /// Set ONLY by a successful self-insert on the key path
+    /// (`notes_edit_key_event`'s printable branch), and it must survive
+    /// ACROSS keystrokes (a run is consecutive self-insert keystrokes). It
+    /// is cleared by every path that runs something else: any registry
+    /// `dispatch` (motion, kills, yanks, saves, buffer switches,
+    /// undo/redo), the non-self-insert editing keys in
+    /// `notes_edit_key_event`, the tree-sidebar consuming keys, C-g, every
+    /// consuming modal, and the **non-`key_event` input paths** — the mouse
+    /// and tree click/wheel handlers (`mouse_click_position`,
+    /// `mouse_scroll_up`/`mouse_scroll_down` in `file_view.rs`,
+    /// `tree_click_row` in `project.rs`), which is where gate P2 found the
+    /// rule being bypassed. So ANY command that RUNS — point motion
+    /// (including a click), a kill, a yank, RET, C-o, a save, a buffer
+    /// switch, undo/redo, modal input — ends the run. A path that ran NO
+    /// command (a pending prefix, an unbound-key echo, a click in a view
+    /// that ignores it) deliberately leaves the marker alone. The rule is
+    /// about the COMMAND, not a clock: there is no duration and no
+    /// "recently" window.
+    self_insert_run: Option<String>,
 }
 
 impl AppStore {
@@ -2013,6 +2060,7 @@ impl AppStore {
             yank_len: None,
             yank_ring_index: None,
             undo_in_progress: false,
+            self_insert_run: None,
         }
     }
 

@@ -306,6 +306,56 @@ use super::*;
         );
     }
 
+    /// plan 016 issue 04: the redo bindings. The choice was settled with the
+    /// oracle (emacs 30.2: `where-is-internal 'undo-redo` → `C-?` + `C-M-_`;
+    /// `C-?` is DEL/0x7F — Backspace on a terminal — so emacs's own redo
+    /// keys cannot be copied into a TUI): PRIMARY `C-x U` (free in emacs →
+    /// no parity cost; a plain character after a prefix → byte-reachable on
+    /// every terminal; the mnemonic beside `C-x u`), SECOND `C-M-7` (the
+    /// app-level shape of `ESC 0x1F` on byte-based terminals — crossterm
+    /// decodes `ESC 0x1F` as `Char('7') + CONTROL | ALT`, pinned in
+    /// `input.rs::c_m_7_arrives_from_esc_0x1f`). The undo bindings stay
+    /// exactly as landed (no rebind).
+    #[test]
+    fn redo_bindings_resolve() {
+        let km = load_bindings(BUFFER_BINDINGS);
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x U").unwrap()),
+            Some(Lookup::Command("redo")),
+            "C-x U must bind redo (the universal, byte-reachable path)"
+        );
+        // C-x U is a leaf of the C-x prefix, not a prefix itself.
+        assert!(!km.is_prefix(&parse_sequence("C-x U").unwrap()));
+        // The second binding: C-M-7 — Char('7') + CONTROL | ALT, the app
+        // key crossterm yields for ESC 0x1F (Alt+Ctrl-_ on byte-based
+        // terminals). The bare C-M-_ shape (Char('_') + CONTROL | ALT, the
+        // CSI-u/kitty form) is deliberately UNBOUND — C-x U covers every
+        // terminal and an unmeasurable second second-binding is worse than
+        // none (the bare-SHIFT lesson).
+        assert_eq!(
+            km.lookup(&parse_sequence("C-M-7").unwrap()),
+            Some(Lookup::Command("redo")),
+            "C-M-7 (ESC 0x1F on byte-based terminals) must reach redo"
+        );
+        assert!(!km.is_prefix(&parse_sequence("C-M-7").unwrap()));
+        assert_eq!(
+            km.lookup(&parse_sequence("C-M-_").unwrap()),
+            None,
+            "C-M-_ proper is deliberately unbound (CSI-u shape; C-x U is universal)"
+        );
+        // The undo bindings are untouched (no rebind).
+        assert_eq!(
+            km.lookup(&parse_sequence("C-x u").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-x u must still bind undo (C-x U must not steal it)"
+        );
+        assert_eq!(
+            km.lookup(&parse_sequence("C-7").unwrap()),
+            Some(Lookup::Command("undo")),
+            "C-7 must still bind undo (C-M-7 adds alt, not ctrl-7)"
+        );
+    }
+
     /// annotations-render-fold: the `C-c a` tree and its genuine aliases are
     /// pinned so a later refactor cannot silently drop one: `C-c a n` reaches
     /// the SAME command as `A` (annotate — the new-annotation prompt) and

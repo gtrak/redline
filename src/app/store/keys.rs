@@ -12,10 +12,20 @@ impl AppStore {
         if self.quit {
             return;
         }
+        // plan 016 issue 04: the self-insert run marker (`self_insert_run`)
+        // must survive ACROSS keystrokes — a run is consecutive self-insert
+        // keystrokes. So it is cleared only by the non-self-insert paths
+        // that actually run: every modal below that consumes a key ran
+        // something else, so each clears the marker; `dispatch` clears it
+        // too (any registry command ends the run); and only
+        // `notes_edit_key_event`'s printable branch re-arms it. (A pending
+        // prefix press and an unbound-key echo run no command, so they
+        // leave the marker alone — the rule is about the command.)
         // Quit save-prompt (plan 004 issue 04): swallows every key
         // (y / n / ! / C-g; anything else is a no-op, no "unbound key"
         // echo mid-prompt) and routes to the state machine.
         if self.quit_prompt_active() {
+            self.self_insert_run = None;
             self.quit_prompt_key(key);
             return;
         }
@@ -23,12 +33,14 @@ impl AppStore {
         // except C-g (a listed leaf closes and runs, a listed prefix
         // descends, non-listed keys are ignored).
         if self.menu_open() {
+            self.self_insert_run = None;
             self.menu_key_event(key);
             return;
         }
         // Armed discard confirmation (issue 002): `y` executes,
         // `n`/C-g/ESC cancel; other keys are swallowed.
         if self.discard_armed() {
+            self.self_insert_run = None;
             self.discard_key_event(key);
             return;
         }
@@ -36,6 +48,7 @@ impl AppStore {
         // discards and makes the buffer read-only, `n`/C-g/ESC cancel;
         // every other key is swallowed (no "unbound key" echo mid-prompt).
         if self.toggle_ro_active() {
+            self.self_insert_run = None;
             self.toggle_ro_key(key);
             return;
         }
@@ -44,47 +57,55 @@ impl AppStore {
         // cancel (the edits and the changed-on-disk marker stay); every
         // other key is swallowed (no "unbound key" echo mid-prompt).
         if self.reload_confirm_active() {
+            self.self_insert_run = None;
             self.reload_confirm_key(key);
             return;
         }
         // Picker: printable chars extend the query, Backspace/C-h edit it,
         // RET / arrows / C-n / C-p drive it; other keys fall through.
         if self.picker.is_some() && self.picker_key_event(key) {
+            self.self_insert_run = None;
             return;
         }
         // Commit editor: edits the message; every key is routed (to the
         // editor or the keymap engine).
         if self.top_view() == ViewId::CommitEditor {
+            self.self_insert_run = None;
             self.commit_editor_key_event(key);
             return;
         }
         // Branch-create name prompt: printable chars extend, RET creates,
         // C-g / ESC cancel; other keys are swallowed.
         if self.branch_create.is_some() {
+            self.self_insert_run = None;
             self.branch_create_key_event(key);
             return;
         }
         // Isearch: printable self-inserts, C-s/C-r navigate, RET/C-g;
         // other keys are swallowed.
         if self.isearch.active {
+            self.self_insert_run = None;
             self.isearch_key_event(key);
             return;
         }
         // Goto-line: digits build the number, RET confirms, C-g cancels;
         // other keys are swallowed.
         if self.goto_line_active {
+            self.self_insert_run = None;
             self.goto_line_key_event(key);
             return;
         }
         // Annotation prompt: printable chars build the note, RET commits,
         // C-g/ESC cancel; other keys are swallowed.
         if self.note_prompt_active {
+            self.self_insert_run = None;
             self.note_prompt_key_event(key);
             return;
         }
         // Search-query prompt: printable chars extend, RET starts,
         // C-g/ESC cancel; other keys are swallowed.
         if self.search_prompt.is_some() {
+            self.self_insert_run = None;
             self.search_prompt_key_event(key);
             return;
         }
@@ -121,6 +142,9 @@ impl AppStore {
         // closes the picker before the keymap engine can start one.
         if key == Key::ctrl_char('g') {
             self.cancel();
+            // plan 016 issue 04: C-g (cancel) is an intervening command —
+            // it ends the self-insert run.
+            self.self_insert_run = None;
             return;
         }
         self.dispatch_key(key);
@@ -369,6 +393,9 @@ impl AppStore {
         // including while editing (the advertised C-g matrix).
         if key == Key::ctrl_char('g') {
             self.cancel();
+            // plan 016 issue 04: cancel is an intervening command — it
+            // ends the self-insert run.
+            self.self_insert_run = None;
             return true;
         }
         let mut seq = self.pending.clone();
@@ -406,13 +433,26 @@ impl AppStore {
             .and_then(|k| self.buffers.get(k).map(|b| b.mode == BufferMode::Accurate))
             .unwrap_or(false);
         if let Some(c) = key.char_value() {
+            // plan 016 issue 04: a SUCCESSFUL self-insert is the only path
+            // that re-arms the typing-run marker (the rule is stated in
+            // `retain_rope_edit`); a refused insert (no buffer / not
+            // editable) leaves the run dead.
+            let run_key = self.buffers.current().map(str::to_string);
             if accurate {
-                self.insert_text_at_point(&c.to_string());
-            } else {
-                self.notes_insert_char(c);
+                if self.insert_text_at_point(&c.to_string()) {
+                    self.self_insert_run = run_key;
+                }
+            } else if self.notes_insert_char(c) {
+                self.self_insert_run = run_key;
             }
             return true;
         }
+        // plan 016 issue 04: every NON-self-insert editing key is an
+        // intervening command — it ends the typing run. (The prefix /
+        // engine path above needs no clear here: a fired command clears
+        // via `dispatch`, and a bare pending-prefix press runs no
+        // command, so it leaves the marker alone.)
+        self.self_insert_run = None;
         if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
             // M-DEL (Alt+Backspace) is kill-word-backward in `Accurate` mode;
             // a plain Backspace / C-h is the one-char delete.
@@ -476,15 +516,21 @@ impl AppStore {
     /// through.
     fn tree_key_event(&mut self, key: Key) -> bool {
         match key.code {
+            // plan 016 issue 04: every consuming tree key is an intervening
+            // command — it ends the self-insert run. Non-consuming keys
+            // fall through (the marker is left alone: no command ran).
             KeyCode::Down | KeyCode::PageDown => {
+                self.self_insert_run = None;
                 self.tree_move_down();
                 true
             }
             KeyCode::Up | KeyCode::PageUp => {
+                self.self_insert_run = None;
                 self.tree_move_up();
                 true
             }
             KeyCode::Enter => {
+                self.self_insert_run = None;
                 self.tree_open_selected();
                 true
             }
@@ -522,6 +568,10 @@ impl AppStore {
             .get(name)
             .cloned()
             .ok_or_else(|| RegistryError::UnknownCommand(name.to_string()))?;
+        // plan 016 issue 04: ANY registry command ends the self-insert run
+        // (a dispatched command IS an intervening command: motion, kill,
+        // yank, save, buffer switch, undo/redo — all of them).
+        self.self_insert_run = None;
         // jump-highlight lifetime: the landing highlight lives ONE command
         // — it is set during the jump and cleared at the start of the
         // next command dispatch (a jump command replaces it: the clear

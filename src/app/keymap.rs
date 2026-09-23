@@ -710,7 +710,7 @@ mod tests {
             );
         }
 
-        // Per-view maps: 125 total bindings across 9 views (121 minus the
+        // Per-view maps: 127 total bindings across 9 views (121 minus the
         // 015-03 `C-d` freeing from the Buffer view → 120, then plan 016
         // issue 01 added `C-x u` and `C-/` → undo to the Buffer view, a net
         // +2 → 122, then plan 016 issue 02 added `C-7` → undo (the byte-based
@@ -718,14 +718,17 @@ mod tests {
         // replaced the `C-c a` → annotate-toggle leaf with the `C-c a` tree
         // (`C-c a n`/`h`/`l` — annotations-fold-visual collapsed the `C-c a
         // s` show leaf into the `C-c a h` toggle, so 3 leaves), a net +2 →
-        // 125. A 5th leaf — bare `SHIFT` → annotate-fold — was added and then
+        // 125, then plan 016 issue 04 added `C-x U` → redo (the oracle-settled
+        // universal path) and `C-M-7` → redo (the byte-based shape of
+        // `ESC 0x1F`) to the Buffer view, a net +2 → 127. A 5th leaf — bare
+        // `SHIFT` → annotate-fold — was added and then
         // REMOVED (gate P1: a `KeyCode::Modifier` event is unreachable — crossterm requires both
         // DISAMBIGUATE_ESCAPE_CODES and REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         // iocraft 0.9.1 pushes only REPORT_EVENT_TYPES — so the binding
         // could never fire on any terminal). It was added and then removed,
-        // a net of 0, so the total above (net +2 → 125) stands — the
-        // `assert_eq!(total_per_view, 125, ...)` below is the count of
-        // record.
+        // a net of 0, so the total above (net +2 → 127) stands — the
+        // `assert_eq!(total_per_view, 127, ...)` below is the count
+        // of record.
         let views: &[(&str, &[(&str, &str)])] = &[
             ("Buffer", BUFFER_BINDINGS),
             ("BufferList", BUFFER_LIST_BINDINGS),
@@ -738,7 +741,7 @@ mod tests {
             ("Search", SEARCH_BINDINGS),
         ];
         let total_per_view: usize = views.iter().map(|(_, t)| t.len()).sum();
-        assert_eq!(total_per_view, 125, "total per-view bindings must be 125");
+        assert_eq!(total_per_view, 127, "total per-view bindings must be 127");
         for (name, table) in views {
             let km = load_bindings(table);
             assert_eq!(km.command_pairs().len(), table.len(), "{name} binding count");

@@ -116,14 +116,25 @@ pub struct UndoStep {
 /// the `Buffer` (a reopened file must not inherit stale offsets). Capped
 /// at `MAX_ENTRIES`; when the cap is hit the OLDEST step is dropped, so
 /// undo simply stops earlier (the newest steps always win).
+///
+/// Plan 016 issue 04: this same type backs the per-buffer REDO stack
+/// (`Buffer.redo`), so the redo history obeys the undo history's discipline
+/// exactly — per buffer, dropped with the buffer, cleared wherever
+/// `drop_undo_history` clears the undo stack, bounded by this same cap.
+/// A redone step re-enters the undo stack carrying its ORIGINAL id (the
+/// step's own `id` is moved, never re-minted): the saved-state marker
+/// speaks in these ids, and re-minting would silently break the
+/// clean/modified reading (plan 016 issue 03's seam).
 #[derive(Clone, Debug, Default)]
 pub struct UndoStack {
     steps: Vec<UndoStep>,
 }
 
 impl UndoStack {
-    /// The undo-history cap (entries). A long session cannot grow the
-    /// history without limit; the byte footprint of one step is bounded
+    /// The undo-history cap (entries) — shared by the redo stack (plan
+    /// 016 issue 04: the redo history is bounded by the same cap and must
+    /// not become an unbounded second history). A long session cannot grow
+    /// the history without limit; the byte footprint of one step is bounded
     /// by the size of the single edit it records.
     pub const MAX_ENTRIES: usize = 100;
 
@@ -140,6 +151,16 @@ impl UndoStack {
     /// when the stack is empty.
     pub fn pop(&mut self) -> Option<UndoStep> {
         self.steps.pop()
+    }
+
+    /// The most recent step WITHOUT removing it (plan 016 issue 04): the
+    /// self-insert-run coalescing decision peeks the run's top step before
+    /// committing to a merge — peeking, not popping, in the condition is
+    /// what keeps a non-qualifying decision from silently dropping the
+    /// peeked step (the side-effect trap 02's M-y helper avoids with an
+    /// explicit restore).
+    pub fn last(&self) -> Option<&UndoStep> {
+        self.steps.last()
     }
 
     /// Whether the stack holds no steps (test-only: production drives the
@@ -225,6 +246,16 @@ pub struct Buffer {
     /// cleared on a disk reload (issue 03 owns that hook — see the
     /// `reload_in_place` / `toggle_ro_accept` rope-assign sites).
     pub undo: UndoStack,
+    /// The per-buffer redo stack (plan 016 issue 04): the inverses of edits
+    /// that were undone, most recent last. One undo pushes the inverse onto
+    /// this stack; redo re-applies it and pushes the step (its ORIGINAL id,
+    /// never re-minted) back onto `undo`. Any new edit clears this stack
+    /// (the emacs rule — a stale redo branch after an edit would redo onto
+    /// content that no longer exists). Same discipline as `undo`: per
+    /// buffer, dropped with the buffer, cleared by the store's
+    /// `drop_undo_history` at the three rope-assigning sites, capped at
+    /// `UndoStack::MAX_ENTRIES`.
+    pub redo: UndoStack,
 }
 
 impl std::fmt::Debug for Buffer {
@@ -260,6 +291,7 @@ impl Buffer {
             changed_on_disk: false,
             mark: None,
             undo: UndoStack::default(),
+            redo: UndoStack::default(),
         }
     }
 

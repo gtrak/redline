@@ -716,8 +716,46 @@ impl AppStore {
     /// inverse is derived purely from `(old_rope, char_start, char_end,
     /// new_text)`. The inverse is NOT recorded while an undo itself is
     /// re-applying its inverse (`undo_in_progress`): that would make undo
-    /// flip-flop. Issue 04 routes the undo's inverse to a redo stack; this
-    /// guard is that seam.
+    /// flip-flop. Plan 016 issue 04 completes that seam: the undo's inverse
+    /// goes to the buffer's REDO stack (`AppStore::undo` pushes it, `redo`
+    /// re-applies it and pushes the step back with its original id), and a
+    /// GENUINE new edit recorded here clears the redo stack (the emacs
+    /// rule). The re-apply paths are suppressed by the guard, so they
+    /// never clear it.
+    ///
+    /// Plan 016 issue 04 — the self-insert-run coalescing rule, STATED
+    /// (the emacs rule is about the COMMAND, not a clock — no `Instant`,
+    /// no duration, no "recently" window):
+    ///
+    /// A self-insert CONTINUES the typing run — and is merged into the
+    /// run's top undo step — IFF ALL of:
+    ///   1. it is a pure insertion (zero-width in the pre-edit rope);
+    ///   2. the IMMEDIATELY PRECEDING command was a self-insert in THIS
+    ///      buffer — `self_insert_run` carries that buffer's key; it is set
+    ///      only by the self-insert key path and cleared by EVERY other
+    ///      command (any registry dispatch, every other editing key,
+    ///      point motion, modal input);
+    ///   3. the insertion starts exactly where the run's top step ends
+    ///      (contiguous: `top.range.end == char_start`); and
+    ///   4. the run's top step is itself a pure insertion.
+    ///
+    /// ANY OTHER command ENDS the run: point motion (even motion that ends
+    /// back at the same column — the intervening command breaks the run,
+    /// not just the contiguity), kills, yanks, RET, C-o, saves, buffer
+    /// switches, undo/redo, and the mouse/tree click and wheel handlers
+    /// (gate P2 — a non-`key_event` input path runs a command too, so it
+    /// must clear the marker; a path that ran NO command, like a pending
+    /// prefix or a click in a view that ignores it, leaves it armed). A
+    /// merged step keeps the NEW step's id (the
+    /// newest recorded one — the same decision 02 made for the M-y merge,
+    /// for the same reason: a saved-state marker set between the run's
+    /// keystrokes must never match the merged step and read a false clean).
+    ///
+    /// The two rules compose without interaction: 02's M-y coalescing
+    /// (`coalesce_yank_pop_with_preceding_yank`) fires AFTER this hook
+    /// returns, and the yank sequence never sets `self_insert_run` (C-y and
+    /// M-y are registry commands, which clear it), so a typing run can
+    /// neither re-split the yank-and-rotate merge nor merge across it.
     pub(super) fn retain_rope_edit(
         &mut self,
         key: &str,
@@ -735,7 +773,18 @@ impl AppStore {
             // pure insertion). Clamped so an out-of-range record can never
             // panic the slice (ropey slice panics on an over-long range).
             let old_text = old_rope.slice(char_start.min(len)..char_end.min(len)).to_string();
+            // plan 016 issue 04: copy the typing-run marker out BEFORE the
+            // borrow below; it is the buffer key of the immediately
+            // preceding command IFF that command was a self-insert.
+            let self_insert_run = self.self_insert_run.clone();
             if let Some(buf) = self.buffers.get_mut(key) {
+                // plan 016 issue 04: ANY NEW EDIT clears the buffer's redo
+                // stack (the emacs rule): keeping a stale redo branch after
+                // an edit would let a later redo re-apply onto content that
+                // no longer exists — the correctness problem the rule
+                // exists to prevent. Only genuine new edits reach here
+                // (the undo/redo re-apply paths are guarded above).
+                buf.redo = UndoStack::default();
                 // plan 016 issue 03: assign the step's unique monotonically
                 // increasing id from the buffer's counter BEFORE pushing —
                 // the id is the position's identity, and the saved-state
@@ -754,7 +803,41 @@ impl AppStore {
                     removed: new_text.to_string(),
                     inserted: old_text,
                 };
-                buf.undo.push(step);
+                // plan 016 issue 04 (the rule stated in the docs above):
+                // continue the self-insert run — merge into the run's top
+                // step — IFF this is a pure insertion at the very end of a
+                // top pure-insertion step AND the preceding command was a
+                // self-insert in this buffer. The decision PEEKS the top
+                // step (a `pop` inside a condition chain would drop the
+                // peeked step when a later arm fails — the side-effect
+                // trap 02's M-y helper avoids with an explicit restore);
+                // the pop below runs only after the peek passed.
+                let run_continues = char_start == char_end
+                    && !new_text.is_empty()
+                    && self_insert_run.as_deref() == Some(key)
+                    && buf
+                        .undo
+                        .last()
+                        .is_some_and(|p| p.inserted.is_empty() && p.range.end == char_start);
+                if run_continues {
+                    // Merge: one undo removes the WHOLE typing run. The
+                    // merged step keeps `step.id` (the newer id — see the
+                    // doc: a marker set mid-run must never match it).
+                    let prev = buf
+                        .undo
+                        .pop()
+                        .expect("the peek above just proved the top is here");
+                    let mut removed = prev.removed;
+                    removed.push_str(&step.removed);
+                    buf.undo.push(UndoStep {
+                        id: step.id,
+                        range: prev.range.start..step.range.end,
+                        removed,
+                        inserted: prev.inserted,
+                    });
+                } else {
+                    buf.undo.push(step);
+                }
             }
         }
         let Some(buf) = self.buffers.get(key) else { return };
@@ -786,9 +869,14 @@ impl AppStore {
     /// Only in an EDITABLE buffer: a read-only buffer is a no-op with a
     /// message, and undo must NOT resurrect the mode or `editable` state
     /// (the `Accurate` ⟹ `editable` invariant stays untouched). The commit
-    /// editor has its own text model and is out of scope. Without the
-    /// 04 coalescing rule every keystroke is one undo step — expected at
-    /// this stage, NOT a bug. Point lands on the undone edit.
+    /// editor has its own text model and is out of scope. Point lands on
+    /// the undone edit.
+    ///
+    /// Plan 016 issue 04: on success the inverse goes to the buffer's REDO
+    /// stack — the popped step itself (its original id, never re-minted),
+    /// so redo re-applies exactly what the undo removed. The re-apply
+    /// itself is guarded (`undo_in_progress`), so it records no NEW undo
+    /// step and does not clear the redo stack.
     ///
     /// Stale-step guard (gate P1): before applying, the inverse is validated
     /// against the CURRENT rope. A step is stale when the buffer's rope was
@@ -854,7 +942,8 @@ impl AppStore {
         }
         // Re-apply the inverse through the edit path. The guard suppresses
         // recording this re-application as a NEW undo step (the undo's
-        // inverse belongs to a redo stack, issue 04).
+        // inverse belongs to a redo stack, plan 016 issue 04) and keeps the
+        // re-apply from clearing the redo stack.
         self.undo_in_progress = true;
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
@@ -868,9 +957,125 @@ impl AppStore {
             self.retain_rope_edit(&key, &old_rope, start, end, &step.inserted);
         }
         self.undo_in_progress = false;
+        // plan 016 issue 04: the inverse of what was undone IS the redo
+        // step — push the SAME step (its original id; a fresh id would
+        // silently break the saved-state marker's clean/modified reading
+        // when the redo re-enters the undo stack) onto the redo stack.
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.redo.push(step);
+        }
         self.invalidate_highlight_for_key(&key);
         self.mark_notes_dirty_if_current(&key);
         // The point lands on the undone edit (char-accurate).
+        self.land_point_at_char(&key, start);
+    }
+
+    /// Redo the current buffer's most recently undone edit (plan 016 issue
+    /// 04, the second half of `C-x u`'s model: one undo stack; an undo
+    /// pushes the inverse onto a redo stack; any new edit clears the redo
+    /// stack — emacs's behaviour, pinned in `retain_rope_edit`'s record
+    /// block). Re-applies the top redo step through the SAME path as an
+    /// edit — `retain_rope_edit` + `invalidate_highlight_for_key` — so the
+    /// retained parse tree never drifts from the rope (the reparse
+    /// invariant still holds for redo).
+    ///
+    /// The re-applied edit is guarded (`undo_in_progress`): it records no
+    /// new undo step and does not clear the redo stack. Instead the step
+    /// re-enters the UNDO stack carrying its ORIGINAL id (the id 03's
+    /// marker seam requires — a re-pushed step with a fresh id would
+    /// silently break the clean/modified reading), so a later undo walks
+    /// back through the redone state and the saved-state marker compares
+    /// the right identity.
+    ///
+    /// The same discipline as `undo`: only in an EDITABLE buffer (read-only
+    /// is a no-op with a message), stale-step guard included — the redo
+    /// step is validated against the CURRENT rope (its range must fit and
+    /// must still contain the text the undo put back) before re-applying; a
+    /// stale step (a rope replacement this store did not clear the redo
+    /// stack for) is dropped (it is already popped) and reported, never
+    /// applied. The redo stack is capped at `UndoStack::MAX_ENTRIES` (the
+    /// undo stack's cap) — over the cap the OLDEST redo step is dropped.
+    /// Point lands at the start of the redone edit.
+    pub fn redo(&mut self) {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            self.minibuffer_message("nothing to redo");
+            return;
+        };
+        let editable = self
+            .buffers
+            .get(&key)
+            .map(|b| b.editable)
+            .unwrap_or(false);
+        if !editable {
+            self.minibuffer_message("Buffer is read-only");
+            return;
+        }
+        let Some(step) = self.buffers.get_mut(&key).and_then(|b| b.redo.pop()) else {
+            self.minibuffer_message("nothing to redo");
+            return;
+        };
+        // The redo is the forward edit in disguise: the undo removed the
+        // step's `removed` text (the original forward insertion) and put
+        // back `step.inserted` (the original forward deletion) at
+        // `step.range.start` — the text before it was untouched, so that
+        // put-back now sits at [start, start + |inserted|). Redo removes
+        // it and reinserts `step.removed`.
+        let (start, end) = (
+            step.range.start,
+            step.range.start + step.inserted.chars().count(),
+        );
+        // Validate the re-apply against the CURRENT rope (same backstop as
+        // `undo`, mirrored): a stale redo step's range would otherwise
+        // make an unclamped `remove` PANIC in ropey (`Char range out of
+        // bounds`). The record is trustworthy only while the range still
+        // fits AND the text the undo put back still sits there.
+        let valid = self
+            .buffers
+            .get(&key)
+            .map(|b| {
+                let len = b.rope.len_chars();
+                start <= end
+                    && end <= len
+                    && b.rope.slice(start..end).chars().eq(step.inserted.chars())
+            })
+            .unwrap_or(false);
+        if !valid {
+            // Mirrored tie-break from `undo`: a rejected step proves the
+            // content was replaced BEHIND this history, so the marker's
+            // comparison is no longer trustworthy either. Drop the
+            // saved-state evidence — the buffer reads modified until the
+            // next save/load re-establishes the marker — and report it.
+            if let Some(buf) = self.buffers.get_mut(&key) {
+                buf.saved_marker = None;
+            }
+            self.minibuffer_message("redo history is stale — ignored");
+            return;
+        }
+        // Re-apply through the edit path. The guard suppresses recording
+        // this re-application as a NEW undo step (the step itself re-
+        // enters the undo stack below, with its original id) and keeps it
+        // from clearing the redo stack.
+        self.undo_in_progress = true;
+        let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.rope.remove(start..end);
+            buf.rope.insert(start, &step.removed);
+            // plan 016 issue 03: no flag to set — the re-pushed step's id
+            // versus the saved-state marker IS the dirty state.
+            buf.mark = None;
+        }
+        if let Some(old_rope) = old_rope {
+            self.retain_rope_edit(&key, &old_rope, start, end, &step.removed);
+        }
+        self.undo_in_progress = false;
+        // plan 016 issue 04: the step re-enters the undo stack with its
+        // ORIGINAL id (moved, not minted) — the marker seam 03 owns.
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.undo.push(step);
+        }
+        self.invalidate_highlight_for_key(&key);
+        self.mark_notes_dirty_if_current(&key);
+        // The point lands at the start of the redone edit (char-accurate).
         self.land_point_at_char(&key, start);
     }
 
@@ -1010,7 +1215,11 @@ impl AppStore {
     /// invalid — MUST call this so a later undo cannot re-apply a stale
     /// range (a stale range would make ropey's `remove` panic; see the
     /// stale-step guard in `undo`, which stays as the backstop for any
-    /// replacement this helper's callers cannot cover). The three
+    /// replacement this helper's callers cannot cover). The REDO stack is
+    /// cleared here as well (plan 016 issue 04): a stale REDO step is the
+    /// same reachable panic with a different trigger — every redo step's
+    /// range referred to the replaced content, so none of them may survive
+    /// either. The three
     /// rope-assigning sites this is wired into:
     ///
     ///   1. `reload_in_place` (`index_wiring.rs`) — a disk reload re-reads
@@ -1033,6 +1242,7 @@ impl AppStore {
     pub(super) fn drop_undo_history(&mut self, key: &str) {
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.undo = UndoStack::default();
+            buf.redo = UndoStack::default();
             buf.saved_marker = None;
         }
     }

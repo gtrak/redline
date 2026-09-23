@@ -130,6 +130,7 @@ impl CommandRegistry {
         reg.register_annotations();
         reg.register_region();
         reg.register_undo();
+        reg.register_redo();
         reg
     }
     fn register_navigation(&mut self) {
@@ -955,16 +956,34 @@ impl CommandRegistry {
         ));
     }
 
-    /// plan 016 issue 01: the undo command (undo only; redo + the
-    /// self-insert-run coalescing rule are issue 04). Bound to BOTH `C-x u`
-    /// and `C-/` (SETTLED). Only in editable buffers; a read-only buffer is
-    /// a no-op with a message.
+    /// plan 016 issue 01: the undo command (the self-insert-run
+    /// coalescing rule landed in issue 04). Bound to BOTH `C-x u` and
+    /// `C-/` (SETTLED) plus `C-7` (issue 02: the byte-based-terminal shape
+    /// of the same physical Ctrl+/). Only in editable buffers; a read-only
+    /// buffer is a no-op with a message.
     fn register_undo(&mut self) {
         self.register(Command::new(
             "undo",
             "Undo the last edit in the current buffer (C-x u or C-/); only in editable buffers",
             "editing",
             |store, _arg| store.undo(),
+        ));
+    }
+
+    /// plan 016 issue 04: the redo command. Bound to `C-x U` (settled by
+    /// the oracle amendment: free in emacs → no parity cost; a plain
+    /// character after a prefix → byte-reachable on every terminal; the
+    /// mnemonic beside `C-x u`) and `C-M-7` (the app-level shape of
+    /// `ESC 0x1F` on byte-based terminals — the decode is pinned in the
+    /// input layer). Only in editable buffers; a read-only buffer is a
+    /// no-op with a message; an empty redo stack is a no-op with a
+    /// message.
+    fn register_redo(&mut self) {
+        self.register(Command::new(
+            "redo",
+            "Redo the last undone edit in the current buffer (C-x U); only in editable buffers",
+            "editing",
+            |store, _arg| store.redo(),
         ));
     }
 }
@@ -985,7 +1004,7 @@ mod tests {
     fn registry_has_the_seed_commands() {
         let reg = CommandRegistry::seed();
         let names: Vec<_> = reg.list().map(|c| c.name).collect();
-        assert_eq!(names.len(), 119, "expected 119 seed commands: {names:?}");
+        assert_eq!(names.len(), 120, "expected 120 seed commands: {names:?}");
         for expected in [
             "quit",
             "cancel",
@@ -1103,6 +1122,7 @@ mod tests {
             "open-line",
             "transpose-chars",
             "undo",
+            "redo",
         ] {
             assert!(names.contains(&expected), "missing `{expected}`");
         }

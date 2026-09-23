@@ -67,6 +67,13 @@ impl AppStore {
     /// window-scroll behavior). List views keep their cursor model: the
     /// selection moves by 3 rows.
     pub fn mouse_scroll_up(&mut self) {
+        // plan 016 issue 04 (gate P2): a mouse command ends the self-insert
+        // run. The rule is "any path that RUNS a command clears the marker",
+        // and these handlers never pass through `key_event`, where the
+        // key-path clears live — so before this a click or a wheel tick left
+        // the run armed and a later self-insert merged ACROSS it into one
+        // undo step (one `C-x u` removed "abc" spanning a mouse click).
+        self.self_insert_run = None;
         const STEP: usize = 3;
         match self.top_view() {
             ViewId::Buffer => {
@@ -92,6 +99,9 @@ impl AppStore {
     /// scroll with the point's screen row pinned in the file view; the
     /// selection moves by 3 rows in list views.
     pub fn mouse_scroll_down(&mut self) {
+        // plan 016 issue 04 (gate P2): see `mouse_scroll_up` — a mouse
+        // command ends the self-insert run.
+        self.self_insert_run = None;
         const STEP: usize = 3;
         match self.top_view() {
             ViewId::Buffer => {
@@ -130,6 +140,12 @@ impl AppStore {
         if self.top_view() != ViewId::Buffer {
             return;
         }
+        // plan 016 issue 04 (gate P2): a click that PLACES THE POINT ends the
+        // self-insert run — it is point motion, and the run rule says any
+        // command that runs ends the run. Placed AFTER the guard on purpose:
+        // a click that ran no command (wrong view) must leave the run armed,
+        // exactly like a pending prefix press or an unbound-key echo.
+        self.self_insert_run = None;
         // Map-aware (plan 005 issue 02): with note rows visible a rendered
         // row is NOT `scroll_top + row` buffer lines — translate through
         // the rendered-row list (a note row maps to its anchored code
