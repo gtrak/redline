@@ -673,3 +673,26 @@ easily have produced a **commit containing the wrong blob**, or a confusing
    dir.** And when a worktree's suite fails in a way that contradicts the lane's
    report, run `cargo clean -p <crate>` (or grep the binary for the scratch path)
    before believing the failure — a false red is as misleading as a false green.
+
+## Commit at the first green build; never pipe a battery to `tail`
+
+Two lanes in one week ran a ten-minute battery with ~11 files of work **completely uncommitted**.
+The brief already said "commit before you report", which is not enough: a lane reads that as
+"commit at the end". State the rule with a trigger instead.
+
+- **Commit at the first green build, then keep working** (amend, or add commits). A git commit does
+  not disturb a running cargo process. The deliverable is the COMMIT, and the model backend has
+  killed runs mid-flight twice in one week (`503` "request queue is full", then `502`) — an
+  uncommitted tree is one dropped connection away from work nobody can see. Corollary: **verify the
+  commit exists before dispatching a gate** (`git log --oneline <base>..<branch>`), because four
+  lanes have left zero commits.
+- **Never pipe a battery to `tail`** — `tools/gate.sh full 2>&1 | tail -30` costs you twice, and the
+  second cost is the one nobody expects:
+  1. the full log is discarded, so nothing can be grepped or compared afterwards;
+  2. **the pipeline's exit status is `tail`'s, not the gate's** — so a failing gate reads as a pass,
+     and (measured this week) a *passing* gate can read as a **FAIL**. A lane piped the battery,
+     saw `GATE RESULT: FAIL`, and only found the truth by re-running with a log file; its own
+     report had to disclose the false negative.
+
+  Redirect and print the status:
+  `timeout 900 tools/gate.sh full > /tmp/gate.log 2>&1; echo "GATE_EXIT=$?"` — then grep the file.
