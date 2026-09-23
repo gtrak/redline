@@ -23,6 +23,18 @@ Everything else is the text rules: the stored line still holds the anchor text, 
 content search (`ANNOTATION_REANCHOR_WINDOW`), else **flag `orphaned` and never guess** — that last
 rule is good and must survive.
 
+## Disclosure — it is not "silent", and that is part of the finding
+
+I first described this as a silent downgrade. **That was wrong.** `docs/language-coverage.md:121–123`
+says plainly *"notes add a Rust-only syntax anchor on top of the line text"*, and the README says
+*"Rust files get a syntax anchor"*. So the limitation is **documented**.
+
+The user — who has been working on this application for weeks and wrote the annotation feature — was
+still surprised by it. A limitation that is documented only in a coverage grid is, in practice,
+discoverable by nobody. So this is a **discoverability** failure, and any fix should make the
+per-language truth visible **where the annotation is made** (the prompt, the annotations list, or
+the note's own row), not only in a doc.
+
 ## Requirement
 
 An annotation attaches to **the symbol at point, in every supported language**, and follows that
