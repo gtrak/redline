@@ -99,3 +99,36 @@ drives. Disclose anything else with before/after.
 Say which languages got a real kind set and which did not (and why). For the matrix, give the
 literal per-language evidence that the annotation followed the symbol. If stage 2 is not landed,
 say so plainly rather than describing stage 1 as if it solved the repeated-name case.
+
+---
+
+## AMENDMENT 2026-09-23 — "land on that symbol" (the user's clarification)
+
+> *"if I am cursored on a symbol, and I press 'A', I want the annotation to land on that symbol."*
+
+That is **two** requirements, and the second was not implemented when this was written:
+
+1. **Tie** the note to the symbol at point (stages 1 and 2 above).
+2. **Land the marker ON it.** `record`'s `col` was `self.point_col()` (`notes.rs:535`) — the **raw
+   cursor column** — and `capture_syntax_anchor` recorded only `(kind, name)`, never the node's
+   start. So pressing `A` with the cursor *inside* `target_one` (after `target_`) stored the middle
+   column and the marker rendered mid-token.
+
+Requirements added:
+
+- **When a symbol is captured, `col` is the SYMBOL'S START column**, in the same units the record
+  already uses (char offset; `record_anchor` converts to display). Not the cursor cell, not the
+  line start.
+- **Re-anchoring refreshes the column too.** `reanchor_for_key` updated only `a.line`, so a symbol
+  that moved to a line with different leading whitespace (a re-indent, a wrap, a moved block) left a
+  **stale** `col` — the note found the right line and the marker pointed at the wrong cell.
+- **A point that is not on a symbol keeps the raw cursor column** and stays line-tied. Do not snap
+  to the nearest symbol: a wrong tie is worse than no tie, and a wrong column is the same class of
+  error.
+
+Pinned: (a) `A` mid-token lands the marker at the symbol's **start**; (b) a re-anchor that changes
+the symbol's column refreshes the marker, while an insertion above that does *not* change the column
+leaves it correct; (c) an EOL/whitespace annotation keeps the raw column.
+
+This is the difference between "the note is attached to the symbol" and "the marker is ON the
+symbol" — the user asked for the second explicitly, so it is requirement-level, not polish.
