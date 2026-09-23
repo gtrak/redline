@@ -88,8 +88,13 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 // is translated onto the stripped text by `indent_chars`,
                 // then offset by the code's start column. A non-annotated
                 // line keeps its full
-                // text at column 0. The fallback is the char index when the
-                // point line is outside the pre-computed visible slice.
+                // text at column 0. issue-annotation-marker-cell: each
+                // inserted marker cell at or before the point's char
+                // (char index into the stripped text; a gap AT the point's
+                // own char sits before it, so it counts) pushes the
+                // cursor one cell right. The fallback is the char index
+                // when the point line is outside the pre-computed visible
+                // slice.
                 FileViewRow::row_for_line(rows, target_line)
                     .and_then(|i| rows.get(i))
                     .map(|r| {
@@ -97,10 +102,16 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                             let code_start = r.code_start;
                             let code_col =
                                 snap.file_view_point_col.saturating_sub(r.indent_chars);
+                            let inserted = r
+                                .insertions
+                                .iter()
+                                .filter(|&&g| g <= code_col)
+                                .count();
                             code_start
                                 + crate::model::text_width::char_index_to_display_col(
                                     &r.text, code_col,
                                 )
+                                + inserted
                         } else {
                             crate::model::text_width::char_index_to_display_col(
                                 &r.text,
@@ -161,6 +172,7 @@ mod tests {
                 anchors: Vec::new(),
                 code_start: 0,
                 indent_chars: 0,
+                insertions: Vec::new(),
                 text: (*t).to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -300,6 +312,7 @@ mod tests {
                         anchors: vec![0],
                         code_start: 0,
                         indent_chars: 0,
+                        insertions: Vec::new(),
                         text: format!("note {l}"),
                         spans: Vec::new(),
                         matches: Vec::new(),
@@ -316,6 +329,7 @@ mod tests {
                     anchors: vec![0],
                     code_start: 1,
                     indent_chars: 0,
+                    insertions: Vec::new(),
                     text: (*text).to_string(),
                     spans: Vec::new(),
                     matches: Vec::new(),
@@ -458,6 +472,7 @@ mod tests {
                 anchors: vec![7],
                 code_start: 0,
                 indent_chars: 0,
+                insertions: Vec::new(),
                 text: "a note".to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -470,6 +485,7 @@ mod tests {
                 anchors: vec![7],
                 code_start: 4,
                 indent_chars: 4,
+                insertions: Vec::new(),
                 text: "fn deep() {}".to_string(), // stripped of the 4 spaces
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -486,6 +502,69 @@ mod tests {
         // Point at char 5 (the `n`) → stripped char 1 → cursor at 4 + 1 = 5.
         snap.file_view_point_col = 5;
         assert_eq!(cursor_cell(&snap), Some((5, 2)), "indented: point one code char in → col 5");
+    }
+
+    /// issue-annotation-marker-cell: the cursor's cell accounts for the
+    /// line's inserted marker cell: a point ON the inserted symbol sits in
+    /// the symbol's cell (behind the marker — the gap at its own char
+    /// counts), a point in the tail sits one cell right of the plain
+    /// display column, and a point before the gap is unaffected.
+    #[test]
+    fn cursor_cell_inserted_marker_cell_counts_before_the_point() {
+        // `    map: HashMap<String, u32>,` — the store strips the leading
+        // 4 spaces (code_start 4, indent_chars 4) and inserts one marker
+        // cell before char 13 of the row text (the `S` of `String`): the
+        // marker occupies display cell 17, the code after it shifts +1.
+        let rows = vec![
+            FileViewRow {
+                line: 0,
+                is_note: true,
+                annotated: false,
+                anchors: vec![17],
+                code_start: 0,
+                indent_chars: 0,
+                insertions: Vec::new(),
+                text: "the key type".to_string(),
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+            },
+            FileViewRow {
+                line: 0,
+                is_note: false,
+                annotated: true,
+                anchors: vec![17],
+                code_start: 4,
+                indent_chars: 4,
+                insertions: vec![13],
+                text: "map: HashMap<String, u32>,".to_string(),
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+            },
+        ];
+        let mut snap = buffer_snapshot(&["    map: HashMap<String, u32>,"], 0, 0);
+        snap.file_view_rows = rows;
+        // Point at char 4 (the `m`) → stripped char 0 → 4 + 0 + 0 = 4.
+        snap.file_view_point_col = 4;
+        assert_eq!(cursor_cell(&snap), Some((4, 2)), "before the gap: the plain column");
+        // Point at char 6 (the `p` of `map`) → stripped char 2 → 4 + 2 + 0 = 6.
+        snap.file_view_point_col = 6;
+        assert_eq!(cursor_cell(&snap), Some((6, 2)), "a point before the gap is unaffected");
+        // Point at char 17 (the `S` — the inserted symbol) → stripped char
+        // 13 → 4 + 13 + 1 (the gap at its own char counts: the cursor
+        // sits in the symbol's cell, BEHIND the marker) = 18.
+        snap.file_view_point_col = 17;
+        assert_eq!(cursor_cell(&snap), Some((18, 2)), "the point on the symbol sits in the symbol's cell (18), not the marker's (17)");
+        // Point at char 18 (the `t` of `String`) → stripped char 14 →
+        // 4 + 14 + 1 = 19 (the tail shifted +1 by the insertion).
+        snap.file_view_point_col = 18;
+        assert_eq!(cursor_cell(&snap), Some((19, 2)), "the tail is shifted +1 by the insertion");
+        // EOL (char 30 — the line is 4 spaces + 26 code chars) →
+        // stripped char 26 → 4 + 26 + 1 = 31 (past the whole shifted
+        // tail).
+        snap.file_view_point_col = 30;
+        assert_eq!(cursor_cell(&snap), Some((31, 2)), "EOL counts the inserted cell too");
     }
 
     /// plan 005 issue 02b regression: a note row above the point must not
@@ -508,6 +587,7 @@ mod tests {
                 anchors: Vec::new(),
                 code_start: 0,
                 indent_chars: 0,
+                insertions: Vec::new(),
                 text: format!("line {}", line),
                 spans: Vec::new(),
                 matches: Vec::new(),

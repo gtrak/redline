@@ -991,6 +991,18 @@ pub struct FileViewRow {
     /// mapping use it to translate a full-line point column back onto the
     /// stripped row text.
     pub indent_chars: usize,
+    /// Code rows only (issue-annotation-marker-cell): the char indexes
+    /// into `text` at which the line INSERTS one marker cell — one per
+    /// distinct record tied to a symbol whose marker could not overwrite
+    /// a blank cell (the cell before its symbol is not whitespace). The
+    /// inserted cell sits BEFORE the char at the index, so that char and
+    /// its tail each shift right by one display cell: the renderer skips
+    /// the cell when placing the text (the marker glyph itself is drawn
+    /// from `anchors`), and the hardware cursor / click mapping count the
+    /// cell. Empty when no insertion applies (unannotated rows, note
+    /// rows, and annotated rows whose markers all overwrote blank cells
+    /// or borrowed the line's indent).
+    pub insertions: Vec<usize>,
     /// The row's text (without trailing newline; an orphaned note row
     /// carries an `(orphaned)` tag in its text). For an ANNOTATED code row
     /// the leading indentation run (`indent_chars` chars of spaces/tabs) is

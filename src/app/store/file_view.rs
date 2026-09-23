@@ -1,5 +1,25 @@
 use super::*;
 
+/// issue-annotation-marker-cell: which rule placed a record's marker
+/// (see `AppStore::record_anchor` for the rule text).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnchorRule {
+    /// The cell before the symbol is whitespace: the indicator overwrites
+    /// that blank cell (`display - 1`) — the code does not move. The
+    /// anchor moves +1 whenever the line's code shifts.
+    Blank,
+    /// The cell before the symbol is NOT whitespace: the line INSERTS one
+    /// cell at the symbol's start; the indicator occupies the new cell
+    /// (the raw anchor is the symbol's display column `display`), shifting
+    /// the symbol and its tail right by one.
+    Insert,
+    /// No symbol at the point (column 0, EOL, whitespace, comment — the
+    /// record carries no syntax capture, or the char at the point is not
+    /// a symbol): the line's indent anchor (`indent_width - 1`); it never
+    /// moves with a code shift.
+    Fallback,
+}
+
 impl AppStore {
     /// The scroll position (top line) for the current buffer.
     pub fn scroll_top(&self) -> usize {
@@ -178,9 +198,13 @@ impl AppStore {
         // right of `code_start` maps within the code: the code tail (the
         // full line minus its leading whitespace) starts at display column
         // `code_start`, so the char index is `indent_chars +
-        // display_col_to_char_index(code_tail, col - code_start)`. A
-        // non-annotated line maps the display column straight onto its full
-        // line (the old, unchanged behavior).
+        // display_col_to_char_index(code_tail, col - code_start)` — minus
+        // one text cell per inserted marker cell strictly left of the
+        // click (issue-annotation-marker-cell: a click at or after the
+        // inserted cell refers to the code cell behind it; a click ON the
+        // marker cell is the indicator case above). A non-annotated line
+        // maps the display column straight onto its full line (the old,
+        // unchanged behavior).
         let target_row = rows.iter().find(|r| !r.is_note && r.line == target_line);
         let line_len = self.line_char_len(target_line);
         let key = self.buffers.current().map(String::from);
@@ -210,7 +234,8 @@ impl AppStore {
                     .current_buffer()
                     .and_then(|b| b.line_text(target_line))
                     .map(|t| {
-                        let pairs = Self::line_anchors(&t, &line_records);
+                        let (pairs, insertions) =
+                            Self::line_anchor_plan(&t, &line_records);
                         // 1) An indicator cell maps to its record's
                         // symbol char (the record's char column).
                         pairs
@@ -241,17 +266,38 @@ impl AppStore {
                                     None
                                 }
                             })
-                            // 3) The code region: display col -> char in the
-                            // code tail (`indent` is the leading run's byte
-                            // length (spaces/tabs are single-byte), a
+                            // 3) The code region: display col -> char in
+                            // the code tail (`indent` is the leading run's
+                            // byte length (spaces/tabs are single-byte), a
                             // valid char boundary; the code tail starts
-                            // there).
+                            // there). issue-annotation-marker-cell: the
+                            // line's inserted marker cells (char indexes
+                            // into the tail, BEFORE each gap char) each
+                            // shift the cells after them right by one —
+                            // a click at or after an inserted cell refers
+                            // to the code cell behind it. Only gaps
+                            // strictly LEFT of the click subtract from the
+                            // text column (a click on the marker cell
+                            // itself is the indicator case (1) above, so
+                            // `gap_col < col`, never `<=`).
                             .unwrap_or_else(|| {
                                 let tail = &t[indent.min(t.len())..];
+                                let mut text_col = col.saturating_sub(code_start);
+                                for (k, &g) in insertions.iter().enumerate() {
+                                    let g = g.saturating_sub(indent.min(t.len()));
+                                    let gap_col = code_start
+                                        + crate::model::text_width::char_index_to_display_col(
+                                            tail, g,
+                                        )
+                                        + k;
+                                    if gap_col < col {
+                                        text_col = text_col.saturating_sub(1);
+                                    }
+                                }
                                 indent
                                     + crate::model::text_width::display_col_to_char_index(
                                         tail,
-                                        col - code_start,
+                                        text_col,
                                     )
                             })
                     })
@@ -477,27 +523,34 @@ impl AppStore {
             let full_text = buf.line_text(line).unwrap_or_default();
             // issue-annotations-symbol-precise: the indicator sits before
             // the SYMBOL the annotation was made on — one anchor PER RECORD.
-            // `line_anchors` returns each record's (final anchor, record
-            // char col) in record order: the record's stored `col` is a
-            // CHAR offset (notes.rs `point_col`), converted to a DISPLAY
-            // column against the line's text (wide chars 2 cells, tabs to
-            // the next 8-column stop) so the anchor agrees with the
-            // renderer's own column arithmetic — a symbol after two CJK
-            // chars sits 2 display columns further right than its char
-            // offset, and after a tab up to 7. When the cell before the
-            // symbol is whitespace the anchor is `display_col - 1` (the
-            // indicator overwrites a blank cell — the code does not move);
-            // otherwise it falls back to the line's indent anchor
-            // (`indent_width - 1`, itself column 0 when the indent is 0 —
-            // the exact-1 column-0 shift the line-based rule 78989f7 landed
-            // as a special case: when the annotated symbol IS the line's
-            // first token the two rules coincide).
+            // `line_anchor_plan` returns each record's (final anchor,
+            // record char col) in record order plus the line's inserted
+            // marker cells (issue-annotation-marker-cell — the records
+            // whose marker could not overwrite a blank cell): the record's
+            // stored `col` is a CHAR offset (notes.rs `point_col`),
+            // converted to a DISPLAY column against the line's text (wide
+            // chars 2 cells, tabs to the next 8-column stop) so the anchor
+            // agrees with the renderer's own column arithmetic — a symbol
+            // after two CJK chars sits 2 display columns further right
+            // than its char offset, and after a tab up to 7. When the cell
+            // before the symbol is whitespace the anchor is `display_col -
+            // 1` (the indicator overwrites a blank cell — the code does
+            // not move); when the record is tied to a symbol but the cell
+            // is NOT whitespace the line INSERTS one cell at the symbol's
+            // start (the marker occupies it, the symbol and its tail
+            // shift); a record with no symbol at the point falls back to
+            // the line's indent anchor (`indent_width - 1`, itself column
+            // 0 when the indent is 0 — the exact-1 column-0 shift the
+            // line-based rule 78989f7 landed as a special case: when the
+            // annotated symbol IS the line's first token the two rules
+            // coincide).
             let line_records: Vec<&Annotation> = records
                 .iter()
                 .filter(|a| a.line == line)
                 .copied()
                 .collect();
-            let anchors_pairs = Self::line_anchors(&full_text, &line_records);
+            let (anchors_pairs, insertions_full) =
+                Self::line_anchor_plan(&full_text, &line_records);
             let annotated = !line_records.is_empty();
             // issue-annotations-anchor-at-symbol: the row's `text` is drawn
             // at `code_start` — the line's leading indentation run's
@@ -514,6 +567,15 @@ impl AppStore {
             // (stripped) row text.
             let (indent_chars, indent_width) =
                 if annotated { Self::leading_indent(&full_text) } else { (0, 0) };
+            // issue-annotation-marker-cell: re-base the inserted marker
+            // cells onto the stripped row text (by the leading run's CHAR
+            // count — spaces/tabs are single-char, and a symbol char can
+            // never sit inside the leading run, so every insertion index
+            // is at or past it).
+            let insertions = insertions_full
+                .iter()
+                .map(|c| c.saturating_sub(indent_chars))
+                .collect();
             let code_start = if !annotated {
                 0
             } else if indent_width > 0 {
@@ -569,6 +631,10 @@ impl AppStore {
                         anchors: vec![anchor],
                         code_start: 0,
                         indent_chars: 0,
+                        // The note row is NOT shifted by the code's
+                        // insertion: the ╭ sits at the marker's own
+                        // column (the anchor relationship).
+                        insertions: Vec::new(),
                         matches: Vec::new(),
                         highlight: None,
                         text: note,
@@ -634,6 +700,7 @@ impl AppStore {
                 anchors,
                 code_start,
                 indent_chars,
+                insertions,
                 matches,
                 // jump-highlight: the snapshot attaches the landing row's
                 // highlight (with the frame's fade intensity) after this.
@@ -674,61 +741,124 @@ impl AppStore {
         (chars, col)
     }
 
-    /// issue-annotations-symbol-precise: the per-record anchor columns for
-    /// the records on ONE line (in record order): each entry is
-    /// `(final anchor column, record char col)` — the row's `anchors` set
-    /// dedups the first halves, and the click mapping walks the pairs.
+    /// issue-annotations-symbol-precise / issue-annotation-marker-cell:
+    /// the per-record anchor plan for the records on ONE line (in record
+    /// order): `(Vec<(final anchor column, record char col)>,
+    /// Vec<inserted char index into the full line>)`.
     ///
-    /// The column-0 shift is a LINE property (a column-0 indicator present
-    /// → the whole line moves right by exactly one), so it is decided up
-    /// front: when the line has no leading indentation AND some record's
-    /// anchor is column 0 (a symbol at the line's start, or a
-    /// no-whitespace fallback on an unindented line), every RULE-1 anchor
-    /// (a whitespace-preceded mid-line symbol) moves WITH the code — the
-    /// cell before the symbol stays the (shifted) blank cell, and the
-    /// symbol's indicator still sits one cell left of it. The column-0
-    /// anchors themselves stay at 0 (the code now starts at 1, behind
-    /// them). Records whose anchors are rule-1 but whose display column
-    /// exceeds 0 can never resolve to 0 on an unindented line (the char
-    /// before a rule-1 symbol is whitespace, and an unindented line's
-    /// first char is not), so the two kinds never collide after the shift.
-    fn line_anchors(text: &str, line_records: &[&Annotation]) -> Vec<(usize, usize)> {
+    /// The shifts are decided once, up front:
+    /// - the column-0 shift (the PREFIX shift by exactly one cell) fires
+    ///   when the line has no leading indentation AND some record's
+    ///   fallback anchor is column 0;
+    /// - every BLANK and every INSERTED anchor lives in the code: the
+    ///   column-0 shift moves them +1 (the existing rule_one/shift
+    ///   logic), and every inserted marker cell strictly left of them
+    ///   pushes them +1 more (the symbol and its tail shift with the
+    ///   code). Fallback anchors are indent-cell facts and never move.
+    ///   The line shifts at most once per inserted marker, and the
+    ///   anchors stay distinct: an inserted cell and a blank cell can
+    ///   never claim the same display column (the char under one is a
+    ///   symbol, under the other is whitespace).
+    fn line_anchor_plan(
+        text: &str,
+        line_records: &[&Annotation],
+    ) -> (Vec<(usize, usize)>, Vec<usize>) {
         if line_records.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
-        let raw: Vec<(bool, usize, usize)> = line_records
+        let raw: Vec<(AnchorRule, usize, usize)> = line_records
             .iter()
-            .map(|a| Self::record_anchor(text, a.col))
+            .map(|a| Self::record_anchor(text, a))
             .collect();
-        let shift = Self::leading_indent(text).1 == 0
-            && raw.iter().any(|&(_, a, _)| a == 0);
-        raw.into_iter()
-            .map(|(rule_one, a, cc)| (if rule_one && shift { a + 1 } else { a }, cc))
-            .collect()
+        // The column-0 shift (issue-annotations-symbol-precise): decided
+        // by a FALLBACK anchor at column 0 on an unindented line — a
+        // blank anchor cannot be 0 on an unindented line (the char before
+        // a blank-cell symbol is whitespace, and an unindented line's
+        // first char is not), and an insertion anchor is the symbol's own
+        // display column (always >= 1), so the two kinds never collide
+        // with the shift or each other after it.
+        let shift = (Self::leading_indent(text).1 == 0
+            && raw
+                .iter()
+                .any(|&(r, a, _)| matches!(r, AnchorRule::Fallback) && a == 0)) as usize;
+        // The line's inserted marker cells: one per DISTINCT symbol char
+        // (two records on one symbol share the one inserted cell), in
+        // char order. `gaps[k]` = (the symbol's char index, its raw
+        // display column).
+        let gaps: Vec<(usize, usize)> = {
+            let mut set: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            for &(r, a, cc) in &raw {
+                if matches!(r, AnchorRule::Insert) {
+                    set.entry(cc).or_insert(a);
+                }
+            }
+            set.into_iter().collect()
+        };
+        // gate P1-2: count the gaps by CHAR index. The gaps' `gap_cols` were
+        // FINAL (already-shifted) display columns while the blank arm compared
+        // them against the record's RAW anchor `a` — mixing two coordinate
+        // systems. It under-counted whenever a later blank cell's raw column
+        // equalled an earlier gap's shifted column, putting the marker one cell
+        // left: ON the rendered symbol, which is the exact defect this issue
+        // exists to kill. Mirrors the Insert arm below.
+        let pairs = raw
+            .into_iter()
+            .map(|(r, a, cc)| {
+                let col = match r {
+                    AnchorRule::Fallback => a,
+                    AnchorRule::Blank => {
+                        a + shift + gaps.iter().filter(|&&(_, cc2)| cc2 < cc).count()
+                    }
+                    // The record's own inserted cell: its gap index is the
+                    // count of gaps at a SMALLER char index (a zero-width
+                    // predecessor at the same display column still counts
+                    // — it occupies a cell before this one).
+                    AnchorRule::Insert => {
+                        a + shift + gaps.iter().filter(|&&(cc2, _)| cc2 < cc).count()
+                    }
+                };
+                (col, cc)
+            })
+            .collect();
+        let insertions: Vec<usize> = gaps.iter().map(|&(cc, _)| cc).collect();
+        (pairs, insertions)
     }
 
-    /// issue-annotations-symbol-precise: `(rule_one, anchor, char_col)`
-    /// for ONE record on line `line`, where `record_col` is the record's
-    /// stored column — a CHAR offset, not a display column (notes.rs sets
-    /// it with `self.point_col()`, and the code comments say so): the char
-    /// → display conversion below treats a wide (CJK/emoji) char as 2
-    /// cells and a tab as advancing to the next 8-column stop (tab width
-    /// 8 from column 0 — the same arithmetic `leading_indent` owns, so the
-    /// anchor agrees with the renderer's own column arithmetic).
+    /// issue-annotations-symbol-precise / issue-annotation-marker-cell:
+    /// `(rule, raw anchor, char_col)` for ONE record on line `line`, where
+    /// the record's stored `col` is a CHAR offset, not a display column
+    /// (notes.rs sets it with `self.point_col()`, and the code comments
+    /// say so): the char → display conversion below treats a wide
+    /// (CJK/emoji) char as 2 cells and a tab as advancing to the next
+    /// 8-column stop (tab width 8 from column 0 — the same arithmetic
+    /// `leading_indent` owns, so the anchor agrees with the renderer's
+    /// own column arithmetic).
     ///
-    /// The rule:
-    /// 1. `display_col > 0` and the cell at `display_col - 1` is
-    ///    whitespace → the anchor is `display_col - 1` (the indicator
-    ///    overwrites a blank cell — the code does not move). `rule_one`
-    ///    is true here (the caller may shift it with the code, `line_
-    ///    anchors`).
-    /// 2. The cell before the symbol is NOT whitespace (e.g. `x+y`
-    ///    annotated at `y`), or the record is at display column 0 (there
-    ///    is no cell before the symbol to point at) → fall back to the
-    ///    line's indent anchor, `indent_width - 1`. `rule_one` is false —
-    ///    a fallback anchor is an indent-cell fact, and it never moves
-    ///    with a code shift (it is the cell the code starts behind, or
-    ///    the last indent cell).
+    /// The rules:
+    /// 1. **Blank**: `display_col > 0` and the cell at `display_col - 1`
+    ///    is whitespace → the anchor is `display_col - 1` (the indicator
+    ///    overwrites a blank cell — the code does not move). The anchor
+    ///    moves +1 whenever the line's code shifts (`line_anchor_plan`).
+    /// 2. **Insert** (issue-annotation-marker-cell): `display_col > 0`,
+    ///    the cell before the symbol is NOT whitespace, and the record is
+    ///    TIED TO A SYMBOL (its capture found an identifier-ish node at
+    ///    the point — EOL / whitespace / comment points capture nothing
+    ///    and stay line-tied, unchanged) with a symbol char at the point
+    ///    → the anchor is the symbol's display column `display` itself:
+    ///    the line INSERTS one cell at the symbol's start, the indicator
+    ///    occupies the new cell, and the symbol and its tail shift right
+    ///    by one. Marking whatever the cursor is on is the rule — the
+    ///    marker must sit on the symbol the record is tied to, never fall
+    ///    back to a different symbol's column (the tie stays exact; it is
+    ///    NOT coarsened to an enclosing node).
+    /// 3. **Fallback**: no symbol at the point (column 0, EOL,
+    ///    whitespace, comment) → the line's indent anchor,
+    ///    `indent_width - 1` (itself column 0 when the indent is 0 — the
+    ///    exact-1 column-0 shift the line-based rule 78989f7 landed as a
+    ///    special case: when the annotated symbol IS the line's first
+    ///    token the two rules coincide). A fallback anchor is an
+    ///    indent-cell fact, and it never moves with a code shift.
     ///
     ///    There is deliberately NO standalone `display_col == 0` rule. A
     ///    record at column 0 on an INDENTED line falls back to the indent
@@ -736,11 +866,12 @@ impl AppStore {
     ///    annotate a character that is whitespace rather than a symbol is
     ///    the very "the code moved" defect this rule exists to prevent.
     ///    When the line has NO leading indentation the fallback IS column
-    ///    0, and `line_anchors` shifts the code right by exactly one cell
-    ///    to make room — the one case where the code moves.
-    fn record_anchor(line: &str, record_col: usize) -> (bool, usize, usize) {
+    ///    0, and `line_anchor_plan` shifts the code right by exactly one
+    ///    cell to make room — the one case where the code moves as a
+    ///    prefix.
+    fn record_anchor(line: &str, record: &Annotation) -> (AnchorRule, usize, usize) {
         let char_len = line.chars().count();
-        let char_col = record_col.min(char_len);
+        let char_col = record.col.min(char_len);
         // Char index → display column (wide = 2 cells, tab = next 8-column
         // stop — a `\t` char's own `char_display_width` is 1, so it is
         // special-cased here; `leading_indent` uses the same rule for the
@@ -755,20 +886,47 @@ impl AppStore {
                 _ => display += crate::model::text_width::char_display_width(c),
             }
         }
-        if display > 0 && char_col > 0 {
-            // The cell at `display - 1` is whitespace iff the char just
-            // before the symbol is a space or a tab (both single-cell, and
-            // a tab's last cell is that one). A zero-width (combining)
-            // predecessor shares its base's cell, so the cell before the
-            // symbol is not a whitespace cell — the fallback applies.
-            if let Some(prev) = line.chars().nth(char_col - 1)
-                && (prev == ' ' || prev == '\t')
+        // gate P1-1: a let-chain, not nested `if`s. `clippy::collapsible_if` is
+        // suppressed by a comment sitting between an outer block's `{` and the
+        // inner `if` — moving that comment (as this issue's edit did) makes
+        // `-D warnings` fail, which it did (exit 101, while the base export is
+        // clean). One condition chain, and the comments live inside the body
+        // where they cannot affect the lint.
+        if display > 0
+            && char_col > 0
+            && let Some(prev) = line.chars().nth(char_col - 1)
+        {
+            // The cell at `display - 1` is whitespace iff the char just before
+            // the symbol is a space or a tab (both single-cell, and a tab's last
+            // cell is that one). A zero-width (combining) predecessor shares its
+            // base's cell, so the cell before the symbol is not a whitespace
+            // cell — the rules below apply.
+            if prev == ' ' || prev == '\t' {
+                return (AnchorRule::Blank, display - 1, char_col);
+            }
+            // issue-annotation-marker-cell: the cell before the symbol is NOT
+            // whitespace. When the record is tied to a symbol (its capture found
+            // the identifier-ish node at the point) the marker does NOT fall
+            // back to the line's indent — that would point at a DIFFERENT symbol
+            // from the one the record ties to. The line inserts one cell at the
+            // symbol's start; the marker occupies it.
+            //
+            // gate P3-1: `!record.orphaned` is PART of the predicate. The
+            // re-anchor pass never clears `syntax` (it only sets `orphaned`), so
+            // `syntax.is_some()` means "this record ONCE captured a symbol", not
+            // "it is tied to one now". Without this, an orphaned record still
+            // inserted a cell — SHIFTING THE CODE to point at a tie that no
+            // longer exists, where the old behaviour moved nothing at all.
+            if let Some(at) = line.chars().nth(char_col)
+                && !record.orphaned
+                && record.syntax.is_some()
+                && !matches!(at, ' ' | '\t')
             {
-                return (true, display - 1, char_col);
+                return (AnchorRule::Insert, display, char_col);
             }
         }
         let (_, indent_width) = Self::leading_indent(line);
-        (false, indent_width.saturating_sub(1), char_col)
+        (AnchorRule::Fallback, indent_width.saturating_sub(1), char_col)
     }
 
     /// The `annotate-fold` command (annotations-render-fold / annotations-
@@ -1452,42 +1610,107 @@ pub(super) fn match_ranges_for_line(
 mod tests {
     use super::*;
 
-    // ── issue-annotations-symbol-precise: the pure anchor rule ─────────
+    // ── issue-annotations-symbol-precise / issue-annotation-marker-cell:
+    // the pure anchor rule ─────────
 
-    /// One record wrapper for `line_anchors` tests: only `col` is read.
+    /// One record wrapper for `line_anchors` tests: only `col` is read —
+    /// and `syntax` stays `None` (NO symbol at the point: the record rides
+    /// the text rules alone, exactly as before — the regression net).
     fn rec(col: usize) -> Annotation {
         Annotation { col, ..Default::default() }
+    }
+
+    /// A record TIED TO A SYMBOL (its capture found an identifier-ish
+    /// node at the point) — the record the insertion rule applies to.
+    fn rec_sym(col: usize) -> Annotation {
+        Annotation {
+            col,
+            syntax: Some(SyntaxAnchor {
+                kind: "type_identifier".to_string(),
+                name: "sym".to_string(),
+                scope: None,
+            }),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn record_anchor_rule_one_mid_line_ascii() {
         // `let x = 1;`, record on `x` (char 4, display 4, preceded by a
-        // space) → the anchor is display col 3 (rule 1, no fallback).
-        assert_eq!(AppStore::record_anchor("let x = 1;", 4), (true, 3, 4));
+        // space) → the anchor is display col 3 (rule 1 / Blank, no
+        // fallback, no insertion). The rule is the same whether or not
+        // the record is tied to a symbol.
+        assert_eq!(
+            AppStore::record_anchor("let x = 1;", &rec(4)),
+            (AnchorRule::Blank, 3, 4)
+        );
+        assert_eq!(
+            AppStore::record_anchor("let x = 1;", &rec_sym(4)),
+            (AnchorRule::Blank, 3, 4)
+        );
         // A symbol that IS the line's first token (char 0): display 0 →
-        // rule 2's fallback (column 0 when the line is unindented).
-        assert_eq!(AppStore::record_anchor("let x = 1;", 0), (false, 0, 0));
+        // the fallback (column 0 when the line is unindented).
+        assert_eq!(
+            AppStore::record_anchor("let x = 1;", &rec(0)),
+            (AnchorRule::Fallback, 0, 0)
+        );
     }
 
     #[test]
     fn record_anchor_rule_two_column_zero() {
         // `fn main() {` annotated at its first token: display 0 → the
         // anchor is 0 (the line shifts right by exactly one cell, decided
-        // in `line_anchors`).
-        assert_eq!(AppStore::record_anchor("fn main() {", 0), (false, 0, 0));
+        // in `line_anchor_plan`).
+        assert_eq!(
+            AppStore::record_anchor("fn main() {", &rec(0)),
+            (AnchorRule::Fallback, 0, 0)
+        );
     }
 
     #[test]
-    fn record_anchor_rule_three_no_whitespace_fallback() {
-        // `x+y` annotated at `y`: the cell before the symbol is `+` (not
-        // whitespace) → fall back to the line's indent anchor. No indent:
-        // the fallback is itself column 0 (rule 2), the exact-1 shift.
-        assert_eq!(AppStore::record_anchor("x+y", 2), (false, 0, 2));
-        // Indented `x+y`: the fallback is the INDENT anchor (col 3), and
-        // the code does not move (the indicator borrows the last indent
-        // cell) — the no-whitespace case that makes "the code never moves"
-        // absolute.
-        assert_eq!(AppStore::record_anchor("    x+y", 6), (false, 3, 6));
+    fn record_anchor_no_whitespace_not_tied_stays_fallback() {
+        // issue-annotation-marker-cell regression net: the cell before
+        // the point is NOT whitespace, but the record is NOT tied to a
+        // symbol (no capture — the char at the point is not an
+        // identifier-ish node) → the line's indent anchor, unchanged
+        // (the line is not shifted into a mid-line insertion).
+        assert_eq!(
+            AppStore::record_anchor("x+y", &rec(2)),
+            (AnchorRule::Fallback, 0, 2)
+        );
+        assert_eq!(
+            AppStore::record_anchor("    x+y", &rec(6)),
+            (AnchorRule::Fallback, 3, 6)
+        );
+    }
+
+    #[test]
+    fn record_anchor_rule_two_inserts_when_no_whitespace() {
+        // issue-annotation-marker-cell: `x+y` annotated at `y` (char 2,
+        // display 2, preceded by `+` — NOT whitespace), record tied to a
+        // symbol → the anchor is the symbol's OWN display column (2):
+        // the line inserts one cell at the symbol's start, the marker
+        // occupies it. The old behavior (fallback to the line's indent
+        // anchor, pointing at a different symbol) is the bug this rule
+        // replaces.
+        assert_eq!(
+            AppStore::record_anchor("x+y", &rec_sym(2)),
+            (AnchorRule::Insert, 2, 2)
+        );
+        // Indented `    x+y`: the insertion is at the symbol's display
+        // column 6 (NOT the indent anchor 3 — that would point at a
+        // different symbol).
+        assert_eq!(
+            AppStore::record_anchor("    x+y", &rec_sym(6)),
+            (AnchorRule::Insert, 6, 6)
+        );
+        // The live reproduction: `    map: HashMap<String, u32>,` — the
+        // record on the inner `String` (char 17, display 17, preceded by
+        // `<`) anchors at 17, not the indent anchor 3.
+        assert_eq!(
+            AppStore::record_anchor("    map: HashMap<String, u32>,", &rec_sym(17)),
+            (AnchorRule::Insert, 17, 17)
+        );
     }
 
     #[test]
@@ -1496,45 +1719,85 @@ mod tests {
         // occupy 4 display cells → `x` sits at display col 5, anchor 4.
         // (The char-offset error anchors at 2 — inside the second CJK
         // glyph. Invisible on ASCII lines; the units trap.)
-        assert_eq!(AppStore::record_anchor("中中 x = 1;", 3), (true, 4, 3));
+        assert_eq!(
+            AppStore::record_anchor("中中 x = 1;", &rec(3)),
+            (AnchorRule::Blank, 4, 3)
+        );
         // Emoji (🦀 = 2 cells in the non-CJK table) behaves the same.
-        assert_eq!(AppStore::record_anchor("🦀🦀 x;", 3), (true, 4, 3));
+        assert_eq!(
+            AppStore::record_anchor("🦀🦀 x;", &rec(3)),
+            (AnchorRule::Blank, 4, 3)
+        );
         // Annotating the CJK char itself (char 1): the cell before it is
-        // `中` (not whitespace) → the fallback (column 0 here), NOT
-        // display 1.
-        assert_eq!(AppStore::record_anchor("中中 x;", 1), (false, 0, 1));
+        // `中` (not whitespace). No symbol tie → the fallback (column 0
+        // here), NOT display 1; tied → the insertion at the symbol's own
+        // display column (2 — the CJK char is TWO cells wide, so its
+        // display column is 2, not 1: the units trap again).
+        assert_eq!(
+            AppStore::record_anchor("中中 x;", &rec(1)),
+            (AnchorRule::Fallback, 0, 1)
+        );
+        assert_eq!(
+            AppStore::record_anchor("中中 x;", &rec_sym(1)),
+            (AnchorRule::Insert, 2, 1)
+        );
     }
 
     #[test]
     fn record_anchor_tabs_advance_to_eight_column_stops() {
         // Leading tab: `\tz;` — `z` at char 1, display col 8 (the tab
         // stop) → anchor 7 (the last tab cell), rule 1 (the tab IS the
-        // whitespace before the symbol).
-        assert_eq!(AppStore::record_anchor("\tz;", 1), (true, 7, 1));
-        // Mid-line tab: `x\ty;` — `y` at char 2; x = 1 cell, the tab to col
-        // 8 → anchor 7. A char-offset (or tab-as-1-cell) error anchors at
-        // 1 or 2.
-        assert_eq!(AppStore::record_anchor("x\ty;", 2), (true, 7, 2));
+        // whitespace before the symbol: a tab participates as a display
+        // cell, it does not trigger an insertion).
+        assert_eq!(
+            AppStore::record_anchor("\tz;", &rec(1)),
+            (AnchorRule::Blank, 7, 1)
+        );
+        // Mid-line tab: `x\ty;` — `y` at char 2; x = 1 cell, the tab to
+        // col 8 → anchor 7. A char-offset (or tab-as-1-cell) error
+        // anchors at 1 or 2.
+        assert_eq!(
+            AppStore::record_anchor("x\ty;", &rec(2)),
+            (AnchorRule::Blank, 7, 2)
+        );
         // Mixed leading run: ` \tz;` — space (col 0→1) then tab (col 1 →
         // the next 8-column stop, i.e. col 8) → `z` sits at display col 8,
         // anchor 7 — the same cell the indent-anchor fallback would pick
         // (the run's display width is 8: a tab advances TO the stop, it
         // does not stack on top of it).
-        assert_eq!(AppStore::record_anchor(" \tz;", 2), (true, 7, 2));
+        assert_eq!(
+            AppStore::record_anchor(" \tz;", &rec(2)),
+            (AnchorRule::Blank, 7, 2)
+        );
     }
 
     #[test]
     fn record_anchor_eol_and_clamping() {
         // A record past EOL clamps to EOL; the last char (`b`) is not
-        // whitespace → the fallback (column 0 here).
-        assert_eq!(AppStore::record_anchor("ab", 99), (false, 0, 2));
+        // whitespace, but EOL has no symbol char at the point → the
+        // fallback (column 0 here), unchanged.
+        assert_eq!(
+            AppStore::record_anchor("ab", &rec(99)),
+            (AnchorRule::Fallback, 0, 2)
+        );
         // A trailing space: the cell before EOL is whitespace → rule 1 at
-        // display 1.
-        assert_eq!(AppStore::record_anchor("a ", 2), (true, 1, 2));
+        // display 1 (unchanged — the marker overwrites the blank cell).
+        assert_eq!(
+            AppStore::record_anchor("a ", &rec(2)),
+            (AnchorRule::Blank, 1, 2)
+        );
         // A zero-width (combining) predecessor shares its base's cell, so
-        // the cell before the symbol is not a whitespace cell → the
-        // fallback.
-        assert_eq!(AppStore::record_anchor("a\u{301}x", 2), (false, 0, 2));
+        // the cell before the symbol is not a whitespace cell. No symbol
+        // tie → the fallback (unchanged); tied → the insertion at the
+        // symbol's display column (1 — the combining mark adds no cell).
+        assert_eq!(
+            AppStore::record_anchor("a\u{301}x", &rec(2)),
+            (AnchorRule::Fallback, 0, 2)
+        );
+        assert_eq!(
+            AppStore::record_anchor("a\u{301}x", &rec_sym(2)),
+            (AnchorRule::Insert, 1, 2)
+        );
     }
 
     #[test]
@@ -1545,35 +1808,166 @@ mod tests {
         // (3 → 4 — the cell before the shifted symbol stays the blank
         // one), while the column-0 anchor stays at 0 (the code starts at
         // 1, behind it).
-        let pairs = AppStore::line_anchors("let x = 1;", &[&rec(0), &rec(4)]);
+        let pairs = AppStore::line_anchor_plan("let x = 1;", &[&rec(0), &rec(4)]).0;
         assert_eq!(pairs, vec![(0, 0), (4, 4)]);
         // No column-0 record: no shift, the rule-1 anchor stays put.
-        let pairs = AppStore::line_anchors("let x = 1;", &[&rec(4)]);
+        let pairs = AppStore::line_anchor_plan("let x = 1;", &[&rec(4)]).0;
         assert_eq!(pairs, vec![(3, 4)]);
     }
 
     #[test]
     fn line_anchors_no_shift_for_fallback_on_unindented_line() {
-        // `x+y` annotated at `y`: the fallback lands at column 0 on the
-        // unindented line — the shift is decided by `line_anchors` (the
-        // pair itself stays (0, 2): the fallback anchor is an indent-cell
-        // fact, never a rule-1 anchor, so it does not move).
-        let pairs = AppStore::line_anchors("x+y", &[&rec(2)]);
-        assert_eq!(pairs, vec![(0, 2)]);
+        // `x+y` annotated at `y` (NO symbol tie): the fallback lands at
+        // column 0 on the unindented line — the shift is decided by
+        // `line_anchor_plan` (the pair itself stays (0, 2): the fallback
+        // anchor is an indent-cell fact, never a rule-1 anchor, so it
+        // does not move).
+        let plan = AppStore::line_anchor_plan("x+y", &[&rec(2)]);
+        assert_eq!(plan.0, vec![(0, 2)]);
+        assert!(plan.1.is_empty(),
+            "no symbol tie -> no insertion");
+    }
+
+    #[test]
+    fn line_anchors_blank_after_insertions_counts_by_char_index() {
+        // gate P1-2: the Blank arm compared the record's RAW anchor `a` against
+        // the gaps' already-SHIFTED display columns — two coordinate systems —
+        // and under-counted whenever a later blank cell's raw column equalled an
+        // earlier gap's final column. The marker then landed one cell LEFT, ON
+        // the rendered symbol: the exact defect this issue exists to kill.
+        // `a+b+c d`: inserts on `b`(2) and `c`(4), and a BLANK anchor on `d`
+        // (char 6, raw anchor 5, final 7). The third record must sit ON `d`, not
+        // on the space before it — a record on whitespace is a Fallback, not a
+        // Blank, and would not exercise this at all (which my first fixture got
+        // wrong, and the test passed for the wrong reason).
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("a+b+c d", &[&rec_sym(2), &rec_sym(4), &rec_sym(6)]);
+        assert_eq!(insertions, vec![2, 4], "one inserted cell per tied symbol");
+        assert_eq!(
+            pairs,
+            vec![(2, 2), (5, 4), (7, 6)],
+            "the blank anchor counts BOTH insertions before it (cell 6, not 5)"
+        );
+    }
+
+    #[test]
+    fn line_anchors_blank_counts_insertions_alongside_the_col0_shift() {
+        // The same defect with the column-0 shift active, so a gap's final
+        // column and a later raw anchor collide across BOTH offsets at once.
+        // `a+b c`: a col-0 record on `a`, an insert on `b`(2), and a BLANK
+        // anchor on `c` (char 4, raw anchor 3, final 5).
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("a+b c", &[&rec_sym(0), &rec_sym(2), &rec_sym(4)]);
+        assert_eq!(insertions, vec![2], "only the tied mid-line symbol inserts");
+        assert_eq!(
+            pairs,
+            vec![(0, 0), (3, 2), (5, 4)],
+            "one shift + one insertion before `c` (cell 4, not 3)"
+        );
+    }
+
+    #[test]
+    fn line_anchors_orphaned_record_does_not_insert_a_cell() {
+        // gate P3-1: the re-anchor pass never clears `syntax` (it only sets
+        // `orphaned`), so `syntax.is_some()` means "this record ONCE captured a
+        // symbol", not "it is tied to one now". Without the `!orphaned`
+        // predicate an orphaned record still inserted a cell and SHIFTED THE
+        // CODE to point at a tie that no longer exists — where the pre-lane
+        // behaviour moved nothing at all.
+        //
+        // An INDENTED line, so the fallback anchor is the indent cell (3) and
+        // the assertion is meaningful: a bare `a+b c` has indent 0, so its
+        // fallback anchor is 0 (the `saturating_sub`) and would assert nothing.
+        let mut orphan = rec_sym(6);
+        orphan.orphaned = true;
+        let (pairs, insertions) = AppStore::line_anchor_plan("    a+b c", &[&orphan]);
+        assert!(
+            insertions.is_empty(),
+            "an orphaned record must not insert a cell (it would move the code for a dead tie)"
+        );
+        assert_eq!(pairs.len(), 1, "it still gets a fallback anchor");
+        assert_eq!(pairs[0].0, 3, "the line's indent anchor (4-space indent -> cell 3)");
+    }
+
+    #[test]
+    fn line_anchors_insertion_at_the_symbol_not_the_indent() {
+        // The live reproduction, plan-level: `    map: HashMap<String,
+        // u32>,` with the record on the inner `String` (char 17, display
+        // 17, preceded by `<`). The marker sits at the symbol's OWN
+        // display column (17) — one inserted cell at the symbol's start —
+        // NOT at the line's indent anchor (3, which points at the field
+        // name, a different symbol from the one the record ties to).
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("    map: HashMap<String, u32>,", &[&rec_sym(17)]);
+        assert_eq!(pairs, vec![(17, 17)], "the marker is AT the symbol's display column");
+        assert_eq!(insertions, vec![17], "one inserted cell at the symbol's char index");
+    }
+
+    #[test]
+    fn line_anchors_insertion_shifts_later_anchors_with_the_code() {
+        // `let a=b<c, d>;` — record on `b` (char 6, display 6, preceded by
+        // `=` → insertion at 6) and on `d` (char 11, display 11, preceded
+        // by a space → blank anchor 10, AFTER the insertion): the line
+        // shifts once (the inserted cell at 6), and the later blank anchor
+        // moves +1 WITH the code (10 → 11 — the cell before the shifted
+        // `d` stays the blank one). The two anchors stay distinct.
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("let a=b<c, d>;", &[&rec_sym(6), &rec(11)]);
+        assert_eq!(pairs, vec![(6, 6), (11, 11)]);
+        assert_eq!(insertions, vec![6]);
+        // An anchor LEFT of the insertion stays put (only the symbol and
+        // its tail shift): record on `a` (char 4, preceded by a space →
+        // blank anchor 3).
+        let (pairs, _) =
+            AppStore::line_anchor_plan("let a=b<c, d>;", &[&rec(4), &rec_sym(6)]);
+        assert_eq!(pairs, vec![(3, 4), (6, 6)]);
+        // A fallback anchor never moves with the shift: record at char 0
+        // (`fn`, unindented → column-0 fallback 0, the shift trigger) AND
+        // a symbol-tied record on `b` (char 5, display 5, preceded by `,`
+        // → insertion at 5): the prefix shift and the insertion compose
+        // (the marker lands at 6 — the cell before the shifted `b`), the
+        // fallback stays at 0 (the code starts at 1, behind it).
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("fn(a,b) x", &[&rec(0), &rec_sym(5)]);
+        assert_eq!(pairs, vec![(0, 0), (6, 5)], "column-0 shift (fn) + insertion (b) compose");
+        assert_eq!(insertions, vec![5]);
+    }
+
+    #[test]
+    fn line_anchors_two_insertions_each_symbol_keeps_its_marker() {
+        // `a+b+c` — records on `b` (char 1, display 1, preceded by `+`) and
+        // on `c` (char 3, display 3, preceded by `+`): each symbol keeps
+        // its own inserted cell (`a▴b▴c`), each marker adjacent to its own
+        // symbol, the anchors distinct (1 and 4 — the second shifted +1
+        // by the first inserted cell, with the code).
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("a+b+c", &[&rec_sym(1), &rec_sym(3)]);
+        assert_eq!(pairs, vec![(1, 1), (4, 3)]);
+        assert_eq!(insertions, vec![1, 3]);
+        // Two records on the SAME symbol share the one inserted cell.
+        let (pairs, insertions) =
+            AppStore::line_anchor_plan("a+b", &[&rec_sym(2), &rec_sym(2)]);
+        assert_eq!(pairs, vec![(2, 2), (2, 2)]);
+        assert_eq!(insertions, vec![2], "one cell for one symbol");
     }
 
     #[test]
     fn line_anchors_fallbacks_share_one_column() {
         // `    a+b`: record on `a` (char 4 — first token, rule 1 at anchor
-        // 3) and on `b` (char 5 — no whitespace before it, the fallback
-        // indent anchor 3): BOTH resolve to column 3 — the deduplicated
-        // anchor set (the caller's business) holds a single indicator, one
-        // ▸ when folded.
-        let pairs = AppStore::line_anchors("    a+b", &[&rec(4), &rec(5)]);
+        // 3) and on `b` (char 5 — no whitespace before it, NO symbol tie,
+        // the fallback indent anchor 3): BOTH resolve to column 3 — the
+        // deduplicated anchor set (the caller's business) holds a single
+        // indicator, one ▸ when folded.
+        let pairs = AppStore::line_anchor_plan("    a+b", &[&rec(4), &rec(5)]).0;
         assert_eq!(pairs, vec![(3, 4), (3, 5)]);
         let dedup: std::collections::BTreeSet<usize> =
             pairs.iter().map(|&(a, _)| a).collect();
         assert_eq!(dedup.len(), 1, "both records share the one anchor column");
+        // The SAME line with a symbol-tied record on `b`: the marker
+        // moves to the symbol's own column (the insertion at 5), and the
+        // two anchors become distinct (3 and 5).
+        let pairs = AppStore::line_anchor_plan("    a+b", &[&rec(4), &rec_sym(5)]).0;
+        assert_eq!(pairs, vec![(3, 4), (5, 5)]);
     }
 
     #[test]
@@ -1581,7 +1975,7 @@ mod tests {
         // The landed line-based rule (78989f7) is a special case: a record
         // at char 0 on an indented line falls back to the indent anchor —
         // identical to the landed `indent_width - 1`.
-        let pairs = AppStore::line_anchors("    if x > 0 {", &[&rec(0)]);
+        let pairs = AppStore::line_anchor_plan("    if x > 0 {", &[&rec(0)]).0;
         assert_eq!(pairs, vec![(3, 0)]);
     }
 }

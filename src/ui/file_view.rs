@@ -217,6 +217,22 @@ impl Component for FileViewCanvas {
     }
 }
 
+/// issue-annotation-marker-cell: the display column (in cells, RELATIVE
+/// to the row text's start) of char index `idx` when an annotation
+/// marker cell is INSERTED before every char index in `gaps` (sorted
+/// ascending — one per record whose marker could not overwrite a blank
+/// cell). Each gap pushes the char at its index and every char after it
+/// right by one cell; a gap AT `idx` sits before that char, so it counts
+/// too (hence `<=` — the same rule `cursor_cell` applies to the point's
+/// own char). This is the mid-line re-base the whole line's highlight
+/// spans and search-match ranges run through: a one-cell error here is
+/// silently mis-coloured text on exactly the annotated lines, pinned by
+/// `display_col_of_char_with_gaps_pins_the_span_after_the_marker`.
+fn display_col_of_char_with_gaps(text: &str, gaps: &[usize], idx: usize) -> usize {
+    crate::model::text_width::char_index_to_display_col(text, idx)
+        + gaps.iter().filter(|&&g| g <= idx).count()
+}
+
 /// Render one line on the canvas: the base text in the default face,
 /// then overlay each span with its face color, then the match overlay
 /// (issue match-highlight) substitutes the search faces over the match
@@ -229,6 +245,13 @@ impl Component for FileViewCanvas {
 /// the available cell count from `x_start` to the right edge (the
 /// truncation budget). `matches` are this line's search-match ranges (byte
 /// offsets relative to the line start; empty when no match context applies).
+/// issue-annotation-marker-cell: `file_row.insertions` names the char
+/// indexes at which one marker cell is INSERTED (before that char) — the
+/// row's text is placed with a blank cell skipped at each such index
+/// (the marker glyph itself is drawn from `file_row.anchors` by the
+/// caller), so every char from the gap on — and every span / match range
+/// over them — sits one display cell further right than in the plain
+/// line.
 fn draw_line(
     canvas: &mut iocraft::CanvasSubviewMut<'_>,
     row: isize,
@@ -240,10 +263,11 @@ fn draw_line(
     let text = &file_row.text;
     let spans = &file_row.spans;
     let matches = &file_row.matches;
+    let gaps = &file_row.insertions;
     if text.is_empty() || width == 0 {
         return;
     }
-    if spans.is_empty() && matches.is_empty() {
+    if spans.is_empty() && matches.is_empty() && gaps.is_empty() {
         let face = t.view;
         let style = text_style(face.foreground, false, face.bold);
         let display = truncate(text, width);
@@ -289,48 +313,68 @@ fn draw_line(
     // on overlap (the newest information is the landing itself).
     let segments = overlay_jump_range(text, &segments, file_row.highlight);
 
-    let mut x = x_start as isize;
     for (cs, ce, face) in &segments {
         if *cs >= *ce || *cs >= total_chars {
             continue;
         }
-        let end = (*ce).min(total_chars);
-        let segment: String = chars[*cs..end].iter().collect();
-        let used = (x - x_start as isize) as usize;
-        let remaining = width.saturating_sub(used);
-        let segment = truncate(&segment, remaining);
-        if segment.is_empty() {
-            continue;
-        }
-        // The band: the selected match's background (issue match-highlight)
-        // or the landing-highlight fade band (jump-highlight — interpolated
-        // toward the base background by intensity under truecolor).
-        let (face, band) = match face {
-            RowFace::View => (t.view, None),
-            RowFace::Syntax(idx) => (t.syntax_face(*idx), None),
-            RowFace::Match => (t.search_match, None),
-            RowFace::MatchCurrent => (
-                t.search_match_current,
-                Some(color(t.search_match_current.background)),
-            ),
-            RowFace::Jump(intensity) => (t.jump_highlight, Some(crate::ui::jump_band_bg(t, *intensity))),
-        };
-        // The selected match's background band (issue match-highlight):
-        // the user's complaint was the cursor being hard to see when
-        // jumping to a search result — the inverse-video band under the
-        // matched text is the prominence the fg-only faces can't give.
-        if let Some(bg) = band {
-            canvas.set_background_color(x, row, display_width(&segment), 1, bg);
-        }
-        let style = text_style(face.foreground, false, face.bold);
-        canvas.set_text(x, row, &segment, style);
-        // Advance by DISPLAY width, not char count: a segment ending in a
-        // wide char occupies one more cell than its char count, and the
-        // next segment must start where the terminal actually is
-        // (plan 004 issue 05d — the dropped-space-after-wide-char bug).
-        x += display_width(&segment) as isize;
-        if (x - x_start as isize) >= width as isize {
-            break;
+        let end_bound = (*ce).min(total_chars);
+        // issue-annotation-marker-cell: the inserted marker cells — the
+        // segment's runs are split at every gap char index (the inserted
+        // cell sits BEFORE that char, so no run ever crosses a gap), and
+        // each run's x is the text's display column at its start plus the
+        // gaps at or before it (the mid-line re-base: spans and matches
+        // over a shifted tail land one cell right, per inserted cell).
+        let mut s = (*cs).min(total_chars);
+        while s < end_bound {
+            let next_gap = gaps.iter().copied().find(|&g| g > s).unwrap_or(usize::MAX);
+            let e = next_gap.min(end_bound);
+            let full: String = chars[s..e].iter().collect();
+            let x =
+                x_start as isize + display_col_of_char_with_gaps(text, gaps, s) as isize;
+            let used = (x - x_start as isize) as usize;
+            if used >= width {
+                break;
+            }
+            let segment = truncate(&full, width - used);
+            if segment.is_empty() {
+                break;
+            }
+            // The band: the selected match's background (issue
+            // match-highlight) or the landing-highlight fade band
+            // (jump-highlight — interpolated toward the base background by
+            // intensity under truecolor).
+            let (face, band) = match face {
+                RowFace::View => (t.view, None),
+                RowFace::Syntax(idx) => (t.syntax_face(*idx), None),
+                RowFace::Match => (t.search_match, None),
+                RowFace::MatchCurrent => (
+                    t.search_match_current,
+                    Some(color(t.search_match_current.background)),
+                ),
+                RowFace::Jump(intensity) => (
+                    t.jump_highlight,
+                    Some(crate::ui::jump_band_bg(t, *intensity)),
+                ),
+            };
+            // The selected match's background band (issue match-highlight):
+            // the user's complaint was the cursor being hard to see when
+            // jumping to a search result — the inverse-video band under the
+            // matched text is the prominence the fg-only faces can't give.
+            if let Some(bg) = band {
+                canvas.set_background_color(x, row, display_width(&segment), 1, bg);
+            }
+            let style = text_style(face.foreground, false, face.bold);
+            canvas.set_text(x, row, &segment, style);
+            // Advance by DISPLAY width, not char count: a run ending in a
+            // wide char occupies one more cell than its char count, and
+            // the next run must start where the terminal actually is
+            // (plan 004 issue 05d — the dropped-space-after-wide-char
+            // bug). A truncated run means the right edge was reached — the
+            // later runs do not fit either.
+            if display_width(&segment) < display_width(&full) {
+                break;
+            }
+            s = e;
         }
     }
 }
@@ -722,6 +766,7 @@ mod tests {
         assert!(row.anchors.is_empty());
         assert_eq!(row.code_start, 0);
         assert_eq!(row.indent_chars, 0);
+        assert!(row.insertions.is_empty());
     }
 
     // ── issue match-highlight: the match overlay's second pass ─────
@@ -983,6 +1028,7 @@ mod tests {
             anchors: vec![0],
             code_start: 1,
             indent_chars: 0,
+            insertions: Vec::new(),
             text: format!("line {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -995,6 +1041,7 @@ mod tests {
             anchors: vec![0],
             code_start: 0,
             indent_chars: 0,
+            insertions: Vec::new(),
             text: format!("  \u{25b8} note {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -1195,6 +1242,39 @@ mod tests {
         store.open_path("src/target.rs");
         // Force the lazy notes load (ensure_notes_doc reads the hand-edited
         // file + re-anchors) so the render below sees BOTH records.
+        let _ = store.file_view_rows();
+        store
+    }
+
+    /// Build a store with `content` and a HAND-EDITED `.redline-notes.md`
+    /// where each record ALSO carries a syntax tie (`syntax_kind:
+    /// type_identifier`, `syntax_name: name`) — issue-annotation-
+    /// marker-cell: the records the INSERTION rule applies to (tied to a
+    /// symbol), which the `A` key path cannot create at arbitrary columns
+    /// and the plain hand-edited helper above does not carry. Each `notes`
+    /// entry is `(line, char_col, text, symbol_name)`.
+    fn annotated_store_from_notes_file_tied(content: &str, notes: &[(usize, usize, &str, &str)]) -> crate::app::store::AppStore {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        std::fs::create_dir_all(dir_path.join("src")).unwrap();
+        std::fs::write(dir_path.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir_path.join("src/target.rs"), content).unwrap();
+        let mut notes_file = String::from("<!-- redline-annotations:begin -->\n");
+        for (line, col, text, name) in notes {
+            let anchor = content.lines().nth(*line).unwrap_or("");
+            notes_file.push_str(&format!(
+                "[annotation]\npath: src/target.rs\nline: {line}\ncol: {col}\nanchor: {anchor}\nnote: {text}\norphaned: false\nsyntax_kind: type_identifier\nsyntax_name: {name}\n"
+            ));
+        }
+        notes_file.push_str("<!-- redline-annotations:end -->\n");
+        std::fs::write(dir_path.join(".redline-notes.md"), &notes_file).unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut store = crate::app::store::AppStore::at(&dir_path, base.path().to_path_buf());
+        store.set_viewport_lines(24);
+        store.open_path("src/target.rs");
+        // Force the lazy notes load (ensure_notes_doc reads the hand-edited
+        // file + re-anchors) so the render below sees the records.
         let _ = store.file_view_rows();
         store
     }
@@ -1862,5 +1942,317 @@ mod tests {
         let fcode = flines.iter().find(|l| l.contains("\u{25b8}") && l.contains('a') && l.contains('b'))
             .unwrap_or_else(|| panic!("no folded code row with ▸:\n{folded}"));
         assert_eq!(cols_of(fcode, '\u{25b8}'), vec![3, 5], "folded: one ▸ PER ANNOTATION (two, at the two anchors): {fcode:?}");
+    }
+
+    // ── issue-annotation-marker-cell: the inserted marker cell ───────
+
+    /// issue-annotation-marker-cell — the mid-line re-base, pinned: a span
+    /// that STARTS AFTER the inserted marker cell must map one cell right
+    /// of its plain display column (a one-cell error here is silently
+    /// mis-coloured / mis-placed text on exactly the annotated lines, and
+    /// no full-frame test would catch it without this pin).
+    #[test]
+    fn display_col_of_char_with_gaps_pins_the_span_after_the_marker() {
+        // `ab cd` with one inserted cell before `c` (char 2): chars left
+        // of the gap keep their columns; the gap's own char sits BEHIND
+        // the inserted cell; the tail re-bases by one.
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[], 3), 3, "no gaps: the plain column");
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[2], 0), 0);
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[2], 1), 1);
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[2], 2), 3, "the gap's own char counts its own gap (it sits behind the inserted cell)");
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[2], 3), 4, "a span starting AFTER the marker re-bases by one");
+        assert_eq!(display_col_of_char_with_gaps("ab cd", &[2], 5), 6, "EOL re-bases too");
+        // Two inserted cells: the tail shifts by both; a gap strictly left
+        // of the char counts, one right of it does not.
+        assert_eq!(display_col_of_char_with_gaps("abcdef", &[1, 4], 1), 2, "the first gap's own char counts it");
+        assert_eq!(display_col_of_char_with_gaps("abcdef", &[1, 4], 3), 4, "one gap (char 1) strictly left of char 3");
+        assert_eq!(display_col_of_char_with_gaps("abcdef", &[1, 4], 4), 6, "the second gap's own char counts both");
+        assert_eq!(display_col_of_char_with_gaps("abcdef", &[1, 4], 5), 7, "the tail shifts by both cells");
+    }
+
+    /// issue-annotation-marker-cell — the RENDER level: a syntax span that
+    /// starts after the inserted marker cell must be drawn one cell right
+    /// of its plain position, the inserted cell left empty for the marker
+    /// glyph, and the head of the line byte-identical.
+    #[test]
+    fn draw_line_inserted_marker_shifts_text_and_the_span_after_it() {
+        // The live reproduction's row: the full line is
+        // `    map: HashMap<String, u32>,`; the leading 4 spaces are
+        // stripped (code_start 4), the marker cell is INSERTED before char
+        // 13 of the row text (the `S` of `String`): cells 4..16 render
+        // `map: HashMap<` byte-identical, cell 17 is the inserted cell
+        // (empty here — the ▴ is drawn by the caller's anchor loop), and
+        // `String` renders at cells 18..24 with its syntax face.
+        let row = FileViewRow {
+            line: 0,
+            is_note: false,
+            annotated: true,
+            anchors: vec![17],
+            code_start: 4,
+            indent_chars: 4,
+            insertions: vec![13],
+            text: "map: HashMap<String, u32>,".to_string(),
+            spans: vec![redline_syntax::highlight::LineSpan {
+                start: 13, // the span STARTS after the marker (row-text byte 13)
+                end: 19,
+                face: Some(4),
+            }],
+            matches: Vec::new(),
+            highlight: None,
+        };
+        let t = theme::current();
+        let view_fg = color(t.view.foreground);
+        let span_fg = color(t.syntax_face(4).foreground);
+        let mut canvas = iocraft::Canvas::new(80, 1);
+        let mut sv = canvas.subview_mut(0, 0, 0, 0, 80, 1);
+        draw_line(&mut sv, 0, 4, 76, &row, &t);
+        let cell = |x: usize| canvas.cell(x, 0).unwrap();
+        // The head is byte-identical (nothing before the marker moved):
+        for (i, c) in "map: HashMap<".char_indices() {
+            assert_eq!(
+                cell(4 + i).text(),
+                Some(c.to_string().as_str()),
+                "cell {} — `map:` and `HashMap<` must be byte-identical",
+                4 + i
+            );
+        }
+        // Cell 17 is the inserted cell — empty (a one-cell error would
+        // start `String` there and fill it):
+        assert!(
+            cell(17).text().is_none(),
+            "the inserted marker cell must be empty (the ▴ is the caller's glyph): {:?}",
+            cell(17).text()
+        );
+        // The span that starts after the marker: `String` (row-text chars
+        // 13..19) renders at cells 18..24 with its syntax face — a
+        // one-cell error here is silently mis-coloured, mis-placed text.
+        for (i, c) in "String".char_indices() {
+            let cc = cell(18 + i);
+            assert_eq!(
+                cc.text(),
+                Some(c.to_string().as_str()),
+                "cell {} — `String` must sit BEHIND the inserted cell",
+                18 + i
+            );
+            assert_eq!(
+                cc.text_style().and_then(|s| s.color),
+                Some(span_fg),
+                "cell {} — the span's face re-based by the insertion",
+                18 + i
+            );
+        }
+        // The tail after the span re-bases by the same one cell: `,` at
+        // cell 24 (plain position 23), the view face.
+        assert_eq!(cell(24).text(), Some(","));
+        assert_eq!(cell(24).text_style().and_then(|s| s.color), Some(view_fg));
+    }
+
+    /// issue-annotation-marker-cell — THE live reproduction, cell-for-cell:
+    /// a nested type with the record on the inner symbol (preceded by `<`
+    /// — no whitespace to overwrite). The old behavior fell back to the
+    /// line's indent anchor (the cell before the FIELD NAME — a different
+    /// symbol). Now the line INSERTS one cell at the symbol's start: the
+    /// marker's cell is adjacent to the symbol, and `map:` / `HashMap<`
+    /// are byte-identical.
+    #[test]
+    fn annotation_nested_type_inserts_marker_cell_adjacent_to_the_symbol() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    let map: HashMap<String, u32> = HashMap::new();` —
+        // the record on the inner `String` (char 21; the char before it
+        // is `<` — not whitespace; the capture ties the record to the
+        // `String` type_identifier — the reproduction's exact tie).
+        let content = "fn main() {\n    let map: HashMap<String, u32> = HashMap::new();\n}\n";
+        let (store, src_lines) = annotated_store(content, &[(1, 21, "the key type")]);
+        assert!(!store.note_rows_folded(), "notes shown by default");
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        let src_line = &src_lines[1]; // "    let map: HashMap<String, u32> = HashMap::new();"
+        let code = shown_code_row(&frame, "u32");
+
+        let arrow_col = col_of(&code, "\u{25b4}")
+            .unwrap_or_else(|| panic!("no ▴ on the code row: {code:?}"));
+        let symbol_col = col_of(&code, "String")
+            .unwrap_or_else(|| panic!("String missing from the code row: {code:?}"));
+        // THE anchor relationship, per cell: the marker sits at the
+        // symbol's OWN display column (21) — one cell LEFT of `String`
+        // (the inserted cell) — NOT at the line's indent anchor (7) or
+        // before the field name (the old, wrong, fallback position).
+        assert_eq!(arrow_col, 21, "the marker is at the symbol's own display column (21), not the indent anchor 7: {code:?}");
+        assert_eq!(symbol_col, 22, "`String` shifted right by EXACTLY one (the inserted cell): {code:?}");
+        assert_eq!(arrow_col + 1, symbol_col, "the marker's cell must be ADJACENT to the symbol it marks");
+        // `map:` and `HashMap<` byte-identical: the 21 cells before the
+        // marker are the source's cells 0..21 (all ASCII, one char each).
+        let head_src = &src_line[..21]; // "    let map: HashMap<"
+        assert_eq!(
+            &code[..21], head_src,
+            "the cells before the marker must be byte-identical to the source: code={code:?} source={src_line:?}"
+        );
+        // From the symbol on, cell-for-cell the source's tail (shifted by
+        // the one inserted cell):
+        let rendered_tail = display_from(&code, 22).trim_end().to_string();
+        assert_eq!(
+            rendered_tail, &src_line[21..],
+            "from the symbol on, cell-for-cell the source: rendered={rendered_tail:?} source={:?}", &src_line[21..]
+        );
+
+        // ANCHOR RELATIONSHIP (per cell): the note row DIRECTLY ABOVE the
+        // code row carries its ╭ at the SAME column as the ▴ (21) — the
+        // note row is NOT shifted by the code's insertion.
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains("map: HashMap"))
+            .unwrap_or_else(|| panic!("code row not found in frame:\n{frame}"));
+        assert!(code_idx > 0, "no row above the code row — the note row is missing:\n{frame}");
+        let note = lines[code_idx - 1];
+        assert!(note.contains("the key type"), "the row directly above the code row must be the note row: {note:?}\n{frame}");
+        let corner_col = col_of(note, "\u{256d}")
+            .unwrap_or_else(|| panic!("no ╭ on the note row: {note:?}"));
+        assert_eq!(
+            corner_col, arrow_col,
+            "the note row's ╭ (col {corner_col}) must stay at the marker's column (col {arrow_col}) — the code's insertion must not shift it: note={note:?} code={code:?}"
+        );
+        assert_eq!(corner_col, 21, "the note's ╭ sits at the marker's column (21): {note:?}");
+        assert!(note.chars().nth(22) == Some('\u{2500}'), "note row col 22 must be ─ (the corner's bend): {note:?}");
+        assert_eq!(col_of(note, "the key type").unwrap(), 23, "note text at col 23 (anchor + 2): {note:?}");
+    }
+
+    /// issue-annotation-marker-cell — SEVERAL annotations on one line:
+    /// one insertion (the leftmost symbol with no whitespace before it),
+    /// the later marker MOVES +1 WITH the code (the existing shift logic),
+    /// each marker stays adjacent to its own symbol, and the anchors stay
+    /// distinct. The `A` key path dedupes per line, so the fixture is a
+    /// HAND-EDITED notes file (with syntax ties), not something the UI can
+    /// produce.
+    #[test]
+    fn annotation_multi_line_one_insertion_later_marker_moves_with_the_code() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    let v = Vec<Hmm, u32>;` — record 1 on `Hmm` (char
+        // 16, display 16, preceded by `<` — the INSERTION at 16), record
+        // 2 on `u32` (char 21, display 21, preceded by a space — blank
+        // anchor 20, which moves +1 WITH the code to 21: the cell before
+        // the shifted `u32` stays the blank one).
+        let content = "fn main() {\n    let v = Vec<Hmm, u32>;\n}\n";
+        let store = annotated_store_from_notes_file_tied(content, &[
+            (1, 16, "note hmm", "Hmm"),
+            (1, 21, "note u32", "u32"),
+        ]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        let code = shown_code_row(&frame, "u32");
+        let src_line = "    let v = Vec<Hmm, u32>;";
+        // ONE inserted cell (at 16); the later marker moved +1 WITH the
+        // code (20 → 21). Each marker adjacent to its own symbol.
+        let arrows = cols_of(&code, '\u{25b4}');
+        assert_eq!(
+            arrows, vec![16, 21],
+            "one insertion at 16; the later blank-cell marker moves +1 with the code (20 -> 21): {code:?}"
+        );
+        assert_eq!(col_of(&code, "Hmm").unwrap(), 17, "the inserted symbol sits behind its marker: {code:?}");
+        assert_eq!(col_of(&code, "u32").unwrap(), 22, "`u32` shifted +1 by the earlier insertion: {code:?}");
+        // The head is byte-identical (the insertion is at 16):
+        assert_eq!(&code[..16], &src_line[..16], "cells 0..15 byte-identical: {code:?}");
+        // Both note rows sit directly above the code row (record order),
+        // each ╭ at its own ▴.
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains("Vec<"))
+            .unwrap_or_else(|| panic!("code row not found:\n{frame}"));
+        assert!(
+            code_idx >= 2 && lines[code_idx - 1].contains("note u32") && lines[code_idx - 2].contains("note hmm"),
+            "record order: hmm then u32, directly above the code row:\n{frame}"
+        );
+        let note_hmm = lines.iter().find(|l| l.contains("note hmm")).unwrap();
+        let note_u32 = lines.iter().find(|l| l.contains("note u32")).unwrap();
+        assert_eq!(
+            col_of(note_hmm, "\u{256d}").unwrap(), 16,
+            "note hmm's ╭ at its record's insertion anchor (16): {note_hmm:?}"
+        );
+        assert_eq!(
+            col_of(note_u32, "\u{256d}").unwrap(), 21,
+            "note u32's ╭ at its record's (shifted) anchor (21): {note_u32:?}"
+        );
+    }
+
+    /// issue-annotation-marker-cell — two symbols on one line with no
+    /// whitespace before EITHER: each keeps its own inserted cell
+    /// (`a▴b▴c`-shaped), each marker adjacent to its own symbol, the
+    /// tail shifted by both cells, the anchors distinct.
+    #[test]
+    fn annotation_multi_line_two_insertions_each_symbol_keeps_its_marker() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    let r = (a,b);` — record on `a` (char 13, display
+        // 13, preceded by `(`) and on `b` (char 15, display 15, preceded
+        // by `,`): two insertions (13 and 15). Rendered: cells 0..12 byte-
+        // identical, ▴@13, `a`@14, `,`@15 (shifted), ▴@16, `b`@17, `)`@18,
+        // `;`@19.
+        let content = "fn main() {\n    let r = (a,b);\n}\n";
+        let store = annotated_store_from_notes_file_tied(content, &[
+            (1, 13, "note a", "a"),
+            (1, 15, "note b", "b"),
+        ]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        let src_line = "    let r = (a,b);";
+        let code = shown_code_row(&frame, ")");
+        let arrows = cols_of(&code, '\u{25b4}');
+        assert_eq!(
+            arrows, vec![13, 16],
+            "two inserted cells: the first at 13, the second pushed +1 by the first (15 -> 16): {code:?}"
+        );
+        // Each marker adjacent to its own symbol, the tail shifted by both
+        // cells — asserted cell-for-cell:
+        assert_eq!(col_of(&code, "a").unwrap(), 14, "`a` behind its marker: {code:?}");
+        assert_eq!(code.chars().nth(15), Some(','), "`,` shifted +1 by the first insertion: {code:?}");
+        assert_eq!(col_of(&code, "b").unwrap(), 17, "`b` behind its marker: {code:?}");
+        assert_eq!(
+            code.trim_end(),
+            &format!("{}\u{25b4}a,\u{25b4}b);", &src_line[..13]),
+            "the whole rendered row cell-for-cell: {code:?}"
+        );
+        assert_eq!(&code[..13], &src_line[..13], "the cells before the first marker are byte-identical: {code:?}");
+
+        // Both note rows above the code row, each ╭ at its own ▴.
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains("let r = ("))
+            .unwrap_or_else(|| panic!("code row not found:\n{frame}"));
+        let note_a = lines.iter().find(|l| l.contains("note a")).unwrap();
+        let note_b = lines.iter().find(|l| l.contains("note b")).unwrap();
+        assert_eq!(col_of(note_a, "\u{256d}").unwrap(), 13, "note a's ╭ at its anchor (13): {note_a:?}");
+        assert_eq!(col_of(note_b, "\u{256d}").unwrap(), 16, "note b's ╭ at its anchor (16): {note_b:?}");
+        assert!(
+            code_idx >= 2 && lines[code_idx - 1].contains("note b") && lines[code_idx - 2].contains("note a"),
+            "record order: a then b, directly above:\n{frame}"
+        );
     }
 }

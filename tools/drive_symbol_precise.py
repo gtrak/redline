@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""issue-annotations-symbol-precise — the symbol-precise anchor frames
-(thin PTY tier). The ANCHOR rule is unit-pinned in
-src/app/store/file_view.rs (tests) + src/app/store/tests/file_view.rs;
-this drive captures the literal per-cell frames the user judges:
+"""issue-annotations-symbol-precise + issue-annotation-marker-cell — the
+symbol-precise anchor frames (thin PTY tier). The ANCHOR rule is
+unit-pinned in src/app/store/file_view.rs (tests) +
+src/app/store/tests/file_view.rs; this drive captures the literal
+per-cell frames the user judges:
 
   1. a MID-LINE symbol (`    let x = 1;`, record on `x` char 8): the
      indicator sits at display col 7 (the cell before the symbol), not
@@ -13,20 +14,28 @@ this drive captures the literal per-cell frames the user judges:
   3. a TAB-indented mid-line symbol (`\\tlet z = 3;`, record on `z`
      char 5): the anchor is display col 11, the code at the 8-column
      tab stop;
-  4. the NO-WHITESPACE fallback (`a+b`, record on `b` char 2): the
-     fallback lands at column 0 on the unindented line — the exact-1
-     shift (`\\u25b4a+b`);
+  4. the NO-WHITESPACE INSERT (issue-annotation-marker-cell, `    a+b`,
+     record on `b` char 6): the record is tied to a symbol and the cell
+     before it is not whitespace, so the line INSERTS one cell at the
+     symbol's start — `a+b` renders `a+\\u25b4b` (\\u25b4 at 6, `b` at
+     7), NOT the old fallback at the line's indent (col 4, a different
+     symbol);
   5. TWO ANNOTATIONS on one line (`    a b`, records on `a` char 4 and
      `b` char 6): two indicators at two columns (3 and 5), two note
      rows, each \\u256d at its own anchor. The `A` key path dedupes per
      line, so leg 5 is a HAND-EDITED `.redline-notes.md` (pre-seeded
-     before the app starts), not something the UI can produce.
+     before the app starts), not something the UI can produce;
+  6. the NO-SYMBOL POINT (issue-annotation-marker-cell, `    // hi`,
+     record on `h` char 7): a comment point captures nothing, so the
+     record stays line-tied and the behavior is UNCHANGED — the
+     marker overwrites the blank cell before the point (`//\\u25b4hi`),
+     no insertion.
 
-Legs 1-4 drive the real `A` key path (the A key event with the point
-moved onto the symbol via `M-g g` goto-line + C-f steps). This suite
-owns the shared fixture under the shared PTY flock (via pyte_driver),
-resets the baseline at start and end, and removes its own strays. Wrap
-the invocation in `timeout`.
+Legs 1-4 and 6 drive the real `A` key path (the A key event with the
+point moved onto the symbol via `M-g g` goto-line + C-f steps). This
+suite owns the shared fixture under the shared PTY flock (via
+pyte_driver), resets the baseline at start and end, and removes its
+own strays. Wrap the invocation in `timeout`.
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -90,6 +99,7 @@ def dump(app, rows, label):
 def cleanup():
     for p in (os.path.join(REPO, "src", "symleg.rs"),
               os.path.join(REPO, "src", "symleg2.rs"),
+              os.path.join(REPO, "src", "symleg3.rs"),
               os.path.join(REPO, ".redline-notes.md")):
         try:
             os.remove(p)
@@ -97,8 +107,9 @@ def cleanup():
             pass
 
 
-LEG1 = "fn main() {\n    let x = 1;\n  \u4e2d\u4e2d y = 2;\n\tlet z = 3;\na+b\n}\n"
+LEG1 = "fn main() {\n    let x = 1;\n  \u4e2d\u4e2d y = 2;\n\tlet z = 3;\n}\n"
 
+LEG3 = "fn main() {\n    a+b\n    // hi\n}\n"
 NOTES2 = """<!-- redline-annotations:begin -->
 [annotation]
 path: src/symleg2.rs
@@ -156,6 +167,10 @@ def main():
     # ── Legs 1-4: the A-key path, one record per line ─────────────────
     with open(os.path.join(REPO, "src", "symleg.rs"), "w", encoding="utf-8") as f:
         f.write(LEG1)
+    # symleg3.rs must exist before the app boots — the find-file
+    # candidate index is built at startup.
+    with open(os.path.join(REPO, "src", "symleg3.rs"), "w", encoding="utf-8") as f:
+        f.write(LEG3)
     app = App(REPO, rows=ROWS, cols=COLS)
     try:
         rec("L0: the app reached ready", "ready" in text(app))
@@ -169,10 +184,8 @@ def main():
         annotate(app, 2, 5, "cjk note")
         # Line 3: `\tlet z = 3;` — record on `z` (char 5, tab-indented).
         annotate(app, 3, 5, "tabbed")
-        # Line 4: `a+b` — record on `b` (char 2, no whitespace before).
-        annotate(app, 4, 2, "no ws")
         saved = "note saved" in text(app)
-        rec("L2: all four A-key notes committed", saved,
+        rec("L2: all three A-key notes committed", saved,
             f"minibuffer={app.row_text(app.rows - 2)!r}")
         app.wait(0.8)
 
@@ -238,23 +251,59 @@ def main():
                 f"\u256d col={col_of(row_cells(app, c3n), '\u256d')}")
             dump(app, [c3n, c3], "case 3: tab-indented symbol")
 
-        # ── Case 4: the no-whitespace fallback (line 4) ────────────────
+        # ── Cases 4 + 6: the no-whitespace INSERT and the no-symbol
+        # point (a clean file — the marker-cell rule's premise is the
+        # record's syntax tie, which needs a clean parse) ───────────────
+        open_file(app, "symleg3.rs")
+        rec("L3: symleg3.rs is open", "a+b" in text(app),
+            f"row0={app.row_text(0)!r}")
+
+        # Line 1: `    a+b` — record on `b` (char 6, no whitespace
+        # before; the capture ties the record to `b`).
+        annotate(app, 1, 6, "no ws")
+        # Line 2: `    // hi` — record on `h` (char 7; a comment point
+        # captures nothing — the record stays line-tied, unchanged).
+        annotate(app, 2, 7, "comment point")
+        app.wait(0.8)
+
+        # ── Case 4: the no-whitespace insert (line 1) ───────────────────
         c4n = find_row(app, "no ws")
-        c4 = find_row(app, "a+b")
+        c4 = find_row(app, "a+\u25b4b")
         ok = c4n is not None and c4 is not None and c4n == c4 - 1
         rec("C4: note row directly above the code row", ok,
             f"note_row={c4n} code_row={c4}")
         if ok:
             code_cells = row_cells(app, c4)
             arrow = col_of(code_cells, "\u25b4")
-            rec("C4: fallback \u25b4 at column 0, code shifted exactly one",
-                arrow == 0 and col_of(code_cells, "a") == 1
-                and col_of(code_cells, "b") == 3,
-                f"\u25b4 col={arrow} a col={col_of(code_cells, 'a')} b col={col_of(code_cells, 'b')}")
-            rec("C4: the note row's \u256d anchors at col 0",
-                col_of(row_cells(app, c4n), "\u256d") == 0,
+            rec("C4: inserted \u25b4 at the symbol's own column (6), NOT the indent anchor (4)",
+                arrow == 6, f"\u25b4 col={arrow}")
+            rec("C4: `a` stays put (col 4), `b` shifted exactly one (col 7)",
+                col_of(code_cells, "a") == 4
+                and col_of(code_cells, "b") == 7,
+                f"a col={col_of(code_cells, 'a')} b col={col_of(code_cells, 'b')}")
+            rec("C4: the note row's \u256d anchors at col 6",
+                col_of(row_cells(app, c4n), "\u256d") == 6,
                 f"\u256d col={col_of(row_cells(app, c4n), '\u256d')}")
-            dump(app, [c4n, c4], "case 4: no-whitespace fallback")
+            dump(app, [c4n, c4], "case 4: no-whitespace insert")
+
+        # ── Case 6: the no-symbol point is unchanged (line 2) ──────
+        c6n = find_row(app, "comment point")
+        c6 = find_row(app, "//\u25b4hi")
+        ok = c6n is not None and c6 is not None and c6n == c6 - 1
+        rec("C6: note row directly above the code row", ok,
+            f"note_row={c6n} code_row={c6}")
+        if ok:
+            code_cells = row_cells(app, c6)
+            arrow = col_of(code_cells, "\u25b4")
+            rec("C6: \u25b4 overwrites the blank cell before the point (6) — no insertion",
+                arrow == 6, f"\u25b4 col={arrow}")
+            rec("C6: the code does not move (`h` keeps col 7)",
+                col_of(code_cells, "h") == 7,
+                f"h col={col_of(code_cells, 'h')}")
+            rec("C6: the note row's \u256d anchors at col 6",
+                col_of(row_cells(app, c6n), "\u256d") == 6,
+                f"\u256d col={col_of(row_cells(app, c6n), '\u256d')}")
+            dump(app, [c6n, c6], "case 6: no-symbol point unchanged")
     finally:
         app.kill()
 

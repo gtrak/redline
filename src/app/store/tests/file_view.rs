@@ -502,6 +502,55 @@ use super::*;
     }
 
     #[test]
+    fn mouse_click_after_an_inserted_marker_cell_maps_to_the_rendered_char() {
+        // gate P2-1: the inserted-cell accounting in the click mapping was
+        // COMPLETELY UNPINNED — deleting its subtraction loop left all 945 tests
+        // green, because every existing click pin uses `syntax: None`, which can
+        // never insert. The code was right; the guard was vacuous.
+        // Fixture is the live reproduction, `    map: HashMap<String, u32>,`
+        // with a TIED record on the inner `String` (char 17), so the line
+        // inserts one marker cell and every later char renders one cell right:
+        //   cell 16 = '<' · 17 = the MARKER · 18 = 'S' (char 17) · 24 = ',' (char 23).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annins.rs", "c0\n    map: HashMap<String, u32>,\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: Some(SyntaxAnchor {
+                kind: "type_identifier".to_string(),
+                name: "String".to_string(),
+                scope: None,
+            }),
+            path: "src/annins.rs".to_string(),
+            line: 1,
+            col: 17,
+            anchor: "    map: HashMap<String, u32>,".to_string(),
+            text: "tied".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // Rows: 0 = c0, 1 = the note row, 2 = the code row.
+        s.mouse_click_position(2, 18); // the rendered `S`
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (1, 17),
+            "one cell right of the marker is the symbol's own char — the inserted-cell offset is subtracted"
+        );
+        s.mouse_click_position(2, 24); // the rendered `,`
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (1, 23),
+            "every later cell is exactly one text char behind its rendered cell"
+        );
+        s.mouse_click_position(2, 17); // the marker's own cell
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (1, 17),
+            "the marker cell maps to the record's char"
+        );
+    }
+
+    #[test]
     fn mouse_click_mid_line_indicator_maps_to_the_symbol() {
         // issue-annotations-symbol-precise: re-verify the click/cursor
         // mapping at the moved indicator — clicking an indicator cell maps
