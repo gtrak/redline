@@ -1286,6 +1286,7 @@ mod tests {
     /// (kind `string`, raw text WITH its quotes — `NodeInfo.text` is the
     /// node's source text), but a value string at the SAME offset does
     /// not (`string` is not identifier-ish outside the `key` field).
+
     #[test]
     fn json_key_resolves_but_value_string_does_not() {
         let src = "{\"k\": \"text\"}\n";
