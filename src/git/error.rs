@@ -37,10 +37,25 @@ pub enum GitError {
     #[error("cannot unstage a hunk in `{0}`: content is not valid UTF-8")]
     NotUtf8(String),
 
-    /// Commit identity is unset: `user.name` / `user.email` are not in git
-    /// config (tests set them explicitly).
-    #[error("no author identity: set user.name and user.email in git config")]
-    NoAuthor,
+    /// Commit identity cannot be resolved the way git resolves it (the
+    /// `user.name`/`user.email` config chain → `GIT_AUTHOR_*` /
+    /// `GIT_COMMITTER_*` → `EMAIL`/`user@hostname` invention, with
+    /// `user.useConfigOnly` honoured). `detail` is self-diagnosing: it
+    /// distinguishes `useConfigOnly` forbidding the invented fallback from
+    /// a plain "nothing resolves in this environment", quotes git's own
+    /// error, and names the config files and env vars consulted.
+    #[error("no commit identity: {detail}")]
+    NoAuthor { detail: String },
+
+    /// The `git var` subprocess that resolves the commit identity could not
+    /// be started (e.g. git is not in this process's `PATH`).
+    #[error("could not run `git var` to resolve the commit identity: {0}")]
+    IdentityCommand(std::io::Error),
+
+    /// `git var` succeeded but its identity line was unparseable (should be
+    /// impossible with a healthy git).
+    #[error("unparseable identity from `git var`: {0}")]
+    IdentityUnparseable(String),
 
     /// A branch switch was refused because the working tree or index has
     /// uncommitted changes (magit's default: `git checkout` refuses a dirty

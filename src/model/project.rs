@@ -349,6 +349,13 @@ mod tests {
 
     #[test]
     fn project_store_paths_and_default_base() {
+        // gate P3-1: `default_base()` reads HOME (via `dirs::cache_dir()`), and
+        // this test does NOT mutate env — but the git-commit tests pin HOME,
+        // XDG_CONFIG_HOME and TZ process-wide while holding `ENV_LOCK`. An
+        // unguarded READER can therefore observe a pinned HOME mid-flight,
+        // which is how the whole suite went flaky once this lane added
+        // XDG_CONFIG_HOME to the pinned set. Readers take the same lock.
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = tempfile::tempdir().unwrap();
         let mut store = ProjectStore::open(base.path().join("redline-cache"));
         assert_eq!(store.registry_path().file_name().unwrap(), "projects.json");
