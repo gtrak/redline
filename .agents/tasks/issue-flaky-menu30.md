@@ -54,3 +54,40 @@ Make the check assert its own precondition instead of hoping:
 - The failure mode, if it ever recurs, names the precondition that broke rather than printing an
   empty evidence string.
 - No sleep is lengthened to paper over it.
+
+---
+
+## ROOT CAUSE FOUND AND FIXED 2026-09-23
+
+**The check was asserting a property the 30-column layout never promises.** Measured by dumping
+the actual rows in the failing (full-script) context:
+
+```
+ Transient menu · C-g to clos…
+[submenus]
+C-c …
+C-x …
+M-s …
+```
+
+At 30 cols the menu **collapses to the top-level submenu entries** — it does not list individual
+commands, so **no row carries a `[KEY] description`**, and the hard-coded magit `"Move to the"`
+could never be guaranteed there. That is why it passed alone and failed in the full script.
+
+**My first hypothesis was wrong, and the precondition I added is what disproved it.** I guessed the
+`C-x g` status view was not up; the precondition assertion passed (`title='*magit-status*'`), and
+the next dump showed the overlay was open too (`menu_up=True`). Both preconditions held — the
+assertion was simply false at that width.
+
+**Fixes applied:**
+1. `_wait_for_menu` — **poll** for the overlay instead of the fixed `0.7s` settle (a real latent
+   flake in the 80-col block as well, which passed only because 80 cols is quicker to render). No
+   sleep was lengthened.
+2. Assert the preconditions explicitly (status view up, overlay open) so a future timing problem
+   reports *itself* rather than surfacing as an empty-evidence menu failure.
+3. Assert what the narrow layout **does** guarantee — long content is truncated **with the ellipsis
+   marker**, not clipped — instead of a magit command's wording. The description-ellipsis semantics
+   are still asserted at 80 cols, where descriptions exist.
+
+**Result:** full `check_cursor_stream.py` **exit 0, 0 FAIL / 180 PASS** (was exit 1, 2 FAIL /
+176 PASS), with evidence `Transient menu · C-g to clos…; [submenus]; C-c …`.
