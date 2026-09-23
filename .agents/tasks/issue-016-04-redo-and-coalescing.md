@@ -93,3 +93,36 @@ and implement the minimum. Disclose anything else with before/after.
 * The rope-*replacement* path `insert_rope` discards the whole `Buffer` (so it is fresh/clean
   by construction); the three sites that replace content **in place** are the ones that must
   clear both stacks.
+---
+
+## AMENDMENT 2026-09-23 — the redo binding, settled with the oracle
+
+Measured with the parity reference (`emacs --batch --quick`, emacs 30.2), not recalled:
+
+| query | result |
+|---|---|
+| `(where-is-internal 'undo-redo)` | **`C-?`** *and* **`C-M-_`**, plus `[menu-bar edit undo-redo]` |
+| `C-x u` | `undo` |
+| **`C-x U`** | **nil — free** |
+| `M-_` | nil — free |
+| `C-x r` | the register prefix (confirmed NOT free) |
+| `C-x C-u` | `upcase-region` (taken) |
+
+So emacs's redo has **two** bindings, and the earlier note that it lives on `C-?` was incomplete —
+`C-M-_` is the second. Both are still unusable as-is here: `C-?` is DEL (`0x7F`), which a terminal
+delivers as Backspace.
+
+**`C-M-_` is `ESC` + `0x1F` — reachable in principle, but do NOT assume it decodes.** `0x1F` is
+exactly the byte crossterm reports as **`C-7`** (that is why `C-7` is already bound to undo), so
+whether `ESC 0x1F` arrives as `M-C-…` at all is a **reachability question to be MEASURED** — a
+supported keycode is not a reachable event, and this project has already shipped one binding
+(bare `SHIFT`) that could fire on no terminal because its enabling preconditions were never read.
+
+**Decision for this lane:**
+- **Primary redo binding: `C-x U`.** It is free in emacs (so it costs **no parity**), it is
+  byte-reachable on every terminal (a plain character after a prefix), and it is mnemonic —
+  `C-x u` undoes, `C-x U` redoes, adjacent in the same prefix.
+- `C-M-_` / `ESC 0x1F` may be added as a **second** binding **only if** you demonstrate the
+  decode is reachable, with the evidence in the commit. If you cannot measure it, leave it out
+  and say so — an unreachable second binding is worse than none.
+- Keep `C-x u` and `C-/` (and `C-7`) on undo exactly as landed. Do **not** rebind undo.
