@@ -68,3 +68,34 @@ renderer), `src/model/text_width.rs`, plus spans/matches if option 1 is taken, t
   tab, pinned by a test that would catch a one-byte error.
 - The click mapping and the cursor position agree with the rendered cell after a mid-line tab.
 - `cargo test --workspace`, clippy `--workspace --all-targets -- -D warnings`, `tools/gate.sh full`.
+---
+
+## AMENDMENT 2026-09-23 — the fix option is chosen: expand, do not special-case
+
+The two options above are not equivalent, and the deciding question is **what the terminal
+actually does with the bytes the canvas emits**. The canvas streams cell values including a raw
+`\t`, so the **terminal expands it to the next 8-column stop** and every cell after it on that row
+shifts. The canvas model, the anchor, the click mapping and the cursor all assume one cell. So:
+
+- **Option 2 (declare the tab-stop rule leading-run-only) leaves the screen wrong.** It would make
+  the *model* self-consistent while the *rendered* line still shifts under the terminal. Rejected.
+- **Option 1 (expand) is chosen**, and the reason is that it is **already how the leading run
+  works**: the store strips the leading run's bytes and re-draws the code at `code_start` (its
+  display width), so a leading tab becomes the right number of cells today. The mid-line case is
+  the same idea, not a new mechanism.
+
+**Do it in one place: the row text handed to the renderer must contain no raw tabs.** Replace each
+mid-line tab with spaces out to the next 8-column stop, using the same arithmetic `record_anchor`
+already uses, so the anchor (computed from the source line) and the rendered cells (from the
+expanded text) agree by construction. A useful consequence: `char_display_width('\t') == 1` then
+never sees a tab at all, so the two disagreeing width helpers stop mattering.
+
+**The hazard, and it is the whole risk of this fix:** expanding a tab **changes the text the
+renderer draws**, so every highlight span and search-match range must be re-based with it — *a tab
+is 1 byte but 8 columns*. A one-byte error is silently mis-coloured text on exactly the lines
+carrying a tab, which no existing test would catch. Pin it with a test that colours a span
+**after** a mid-line tab and would fail on a one-byte offset error.
+
+**Acceptance, restated for this option:** the indicator is one cell left of the symbol **in the
+frame**; highlight spans and search matches are still correct on lines carrying a tab; the click
+mapping and cursor agree with the rendered cell; leading tabs unchanged.
