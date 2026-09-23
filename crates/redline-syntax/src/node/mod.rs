@@ -202,6 +202,218 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
     crate::language::spec(lang).identifier_kinds.contains(&kind)
 }
 
+// ── issue-annotations-symbol-identity: the scope-aware identity ──────────
+//
+// The annotation re-anchor (the store's `reanchor_for_key`) keys an
+// occurrence by MORE than the (kind, name) pair, because a name repeats at
+// its definition and at every call site. What the STORE keys on is the
+// **(kind, name, enclosing-scope)** triple: a group is usable only when it
+// has exactly one member, so a name repeating across scopes is
+// disambiguated, and a name repeating WITHIN one scope stays ambiguous
+// and orphans rather than guessing.
+//
+// `SymbolIdentity` also carries an ORDINAL within the scope (a node's scope
+// is computed from the node itself in both places, and the ordinal is the
+// number of same-key nodes before it). **The ordinal has no production
+// consumer** — it exists for callers and for the proposed stage-2b, which
+// would key on it *only together with* a content/stability validation that
+// forces an orphan when a shift changes which occurrence it names. Keying on
+// the raw ordinal is unsafe: a check on the `unit_flow_ann_orphan` fixture
+// showed it migrating a note to a sibling line whose text no longer matches
+// the anchor when an earlier same-scope occurrence is deleted.
+//
+// `symbol_identity_at` reads the identity of the symbol under a byte offset;
+// `build_annotation_symbol_index` reads every occurrence's identity for a
+// whole buffer. Both share the same "nearest identifier" + scope walk AND
+// the same position gate, so a captured identity and the index's view of the
+// same node agree (gate P2: the index previously filtered on kind alone and
+// counted nodes the capture could never return).
+
+/// The scope-aware identity of the identifier-ish node at a byte offset:
+/// its (kind, name), its ENCLOSING-SCOPE chain (outermost → innermost, from
+/// the per-language scope walk), its ORDINAL within that (kind, name, scope)
+/// group in document order, and its start byte (for the store to turn into a
+/// column). `None` for out-of-range offsets, non-parseable languages, and
+/// offsets with no identifier-ish node (a keyword / whitespace / EOL).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolIdentity {
+    pub kind: String,
+    pub name: String,
+    /// The enclosing definition chain, outermost → innermost (the same
+    /// answer `NodeInfo::scope_path` reports). Empty for top-level code.
+    pub scope: Vec<String>,
+    /// The occurrence's position (0-based, document order) among every node
+    /// of the same (kind, name, scope). Stable under an insertion above.
+    pub ordinal: usize,
+    pub start_byte: usize,
+}
+
+/// One occurrence in an annotation symbol index: the 0-based line and the
+/// symbol's START column (a char offset within that line), in document
+/// order (the ordinal is the index into the owning group's vec).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolOccurrence {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Every identifier-ish node's (kind, name, scope) identity for a whole
+/// buffer, built from ONE parse. `by_name` groups by (kind, name) (the
+/// legacy, scope-blind uniqueness rule); `by_scope` groups by
+/// (kind, name, enclosing-scope) (the scope-aware rule, where an
+/// occurrence's ordinal is its index in the vec). Both are in document
+/// order. `None` for non-parseable languages or languages with no
+/// identifier-ish kind.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationSymbolIndex {
+    pub by_name: std::collections::HashMap<(String, String), Vec<SymbolOccurrence>>,
+    pub by_scope:
+        std::collections::HashMap<(String, String, Vec<String>), Vec<SymbolOccurrence>>,
+}
+
+/// The byte offset of the FIRST character of each line (line `i` starts at
+/// `line_starts[i]`), used to turn an absolute byte offset into a column.
+fn line_start_bytes(source: &[u8]) -> Vec<usize> {
+    let mut out = vec![0usize];
+    for (i, &b) in source.iter().enumerate() {
+        if b == b'\n' {
+            out.push(i + 1);
+        }
+    }
+    out
+}
+
+/// The CHARACTER offset of `start_byte` within its line (never panics: an
+/// out-of-range line or malformed slice degrades to 0).
+fn char_offset_in_line(source: &[u8], line_starts: &[usize], row: usize, start_byte: usize) -> usize {
+    let Some(&ls) = line_starts.get(row) else {
+        return 0;
+    };
+    if start_byte < ls {
+        return 0;
+    }
+    match std::str::from_utf8(&source[ls..start_byte]) {
+        Ok(s) => s.chars().count(),
+        Err(_) => start_byte - ls,
+    }
+}
+
+/// The scope-aware identity of the symbol at `byte` (see [`SymbolIdentity`]).
+pub fn symbol_identity_at(lang: LanguageId, source: &str, byte: usize) -> Option<SymbolIdentity> {
+    let tree = parse_source(lang, source)?;
+    let root = tree.root_node();
+    let leaf = innermost_at(root, byte)?;
+    let node = nearest_identifier(leaf, lang)?;
+    let bytes = source.as_bytes();
+    let kind = node.kind().to_string();
+    let name = node.utf8_text(bytes).ok()?.to_string();
+    let scope = scope_path_for(lang, node, bytes);
+    let target = node.start_byte();
+    // The ordinal: the number of SAME-KEY (kind, name, scope) nodes that
+    // start earlier in document order. The walk is a plain kind+name+scope
+    // filter (no position gate) — deliberately the same set the index
+    // counts, so the captured ordinal and the index's view agree.
+    let mut earlier = 0usize;
+    count_earlier_same_key(root, lang, (&kind, &name), &scope, target, bytes, &mut earlier);
+    Some(SymbolIdentity {
+        kind,
+        name,
+        scope,
+        ordinal: earlier,
+        start_byte: target,
+    })
+}
+
+/// Count, in document order, the named nodes with the same
+/// (kind, name, scope) that start strictly before `target_byte`.
+fn count_earlier_same_key(
+    node: Node,
+    lang: LanguageId,
+    key: (&str, &str),
+    scope: &[String],
+    target_byte: usize,
+    bytes: &[u8],
+    count: &mut usize,
+) {
+    if node.is_named()
+        && node.kind() == key.0
+        && let Ok(text) = node.utf8_text(bytes)
+        && text == key.1
+        && scope_path_for(lang, node, bytes) == scope
+        && node.start_byte() < target_byte
+    {
+        *count += 1;
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            count_earlier_same_key(child, lang, key, scope, target_byte, bytes, count);
+        }
+    }
+}
+
+/// Build the whole-buffer scope-aware symbol index (see
+/// [`AnnotationSymbolIndex`]).
+pub fn build_annotation_symbol_index(
+    lang: LanguageId,
+    source: &str,
+) -> Option<AnnotationSymbolIndex> {
+    let kinds = crate::language::spec(lang).identifier_kinds;
+    if kinds.is_empty() {
+        return None;
+    }
+    let tree = parse_source(lang, source)?;
+    let bytes = source.as_bytes();
+    let line_starts = line_start_bytes(bytes);
+    let mut index = AnnotationSymbolIndex::default();
+    collect_annotatable(tree.root_node(), lang, kinds, bytes, &line_starts, &mut index);
+    Some(index)
+}
+
+/// Walk the tree collecting every NAMED node of the language's
+/// identifier-ish kinds into the index's two maps (document order). A node
+/// contributes its (kind, text) to `by_name` and (kind, text, enclosing-scope)
+/// to `by_scope`.
+fn collect_annotatable(
+    node: Node,
+    lang: LanguageId,
+    kinds: &[&str],
+    bytes: &[u8],
+    line_starts: &[usize],
+    index: &mut AnnotationSymbolIndex,
+) {
+    if node.is_named()
+        && kinds.contains(&node.kind())
+        && !is_path_segment(node, lang)
+        && in_identifier_position(lang, node)
+        // gate P2 (017 symbol-identity): mirror `nearest_identifier`'s FULL
+        // gate, not just the kind check. Without this the index counts nodes
+        // the capture can never return — e.g. a JSON *value* string whose text
+        // repeats its own key (`{"key": "key"}`), which made the key's group
+        // length 2 and so unresolvable forever, silently degrading that
+        // annotation to the text rules. Degradation only, never a wrong tie,
+        // but silent. The two gates must agree by construction.
+        && let Ok(text) = node.utf8_text(bytes)
+    {
+        let row = node.start_position().row;
+        let col = char_offset_in_line(bytes, line_starts, row, node.start_byte());
+        let occ = SymbolOccurrence { line: row, col };
+        let kind = node.kind().to_string();
+        let name = text.to_string();
+        index
+            .by_name
+            .entry((kind.clone(), name.clone()))
+            .or_default()
+            .push(occ);
+        let scope = scope_path_for(lang, node, bytes);
+        index.by_scope.entry((kind, name, scope)).or_default().push(occ);
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_annotatable(child, lang, kinds, bytes, line_starts, index);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,6 +1261,27 @@ mod tests {
 
     // ── JSON (lang-pred) ──────────────────────────────────
 
+    #[test]
+    fn json_index_does_not_count_the_value_string_as_a_key_occurrence() {
+        // gate P2 (017 symbol-identity): the index and the capture must use
+        // the SAME gate. `collect_annotatable` filtered on kind alone, so for
+        // `{"key": "key"}` it ALSO counted the value string — whose text is
+        // identical to the key's — making the key's group length 2 and so
+        // permanently unresolvable, with the annotation silently falling back
+        // to the text rules. `nearest_identifier` never returns a value
+        // string (that is what `json_key_resolves_but_value_string_does_not`
+        // asserts), so the index must not count one either.
+        let src = "{\"key\": \"key\"}\n";
+        let idx = build_annotation_symbol_index(LanguageId::Json, src).expect("index");
+        assert_eq!(
+            idx.by_name
+                .get(&(String::from("string"), String::from("\"key\"")))
+                .map(|v| v.len()),
+            Some(1),
+            "only the KEY position is identifier-ish; the value string must not be counted"
+        );
+    }
+
     /// Discriminating for the JSON position rule: a `pair` KEY resolves
     /// (kind `string`, raw text WITH its quotes — `NodeInfo.text` is the
     /// node's source text), but a value string at the SAME offset does
@@ -1469,5 +1702,106 @@ mod tests {
         assert_eq!(info.text, "inner");
         assert_eq!(info.kind, "sym_lit");
         assert!(scope_path_at(LanguageId::Clojure, src, at).is_empty());
+    }
+
+    // ── issue-annotations-symbol-identity: the scope-aware identity ────
+
+    /// The Nth occurrence (0-based, document order) of `needle` in `src`, as
+    /// a byte offset.
+    fn nth(src: &str, needle: &str, n: usize) -> usize {
+        let mut start = 0usize;
+        for _ in 0..=n {
+            let rel = src[start..].find(needle).expect("fixture has more occurrences");
+            start = start + rel + needle.len();
+        }
+        start - needle.len()
+    }
+
+    /// Discriminating: a repeated name is identified by its ENCLOSING SCOPE
+    /// and its ORDINAL within that scope — `foo` called twice in `bar` and
+    /// once in `baz` gives distinct identities, stable under an insertion
+    /// above (the scope + ordinal are unchanged by it).
+    #[test]
+    fn symbol_identity_repeated_name_by_scope_and_ordinal() {
+        let src = "fn bar() {\n    foo();\n    foo();\n}\nfn baz() {\n    foo();\n}\n";
+        let p0 = nth(src, "foo", 0); // in bar, 1st
+        let p1 = nth(src, "foo", 1); // in bar, 2nd
+        let p2 = nth(src, "foo", 2); // in baz, 1st
+        let a = symbol_identity_at(LanguageId::Rust, src, p0).unwrap();
+        assert_eq!((a.kind.as_str(), a.name.as_str()), ("identifier", "foo"));
+        assert_eq!(a.scope, vec![String::from("bar")]);
+        assert_eq!(a.ordinal, 0, "first `foo` in `bar`");
+        let b = symbol_identity_at(LanguageId::Rust, src, p1).unwrap();
+        assert_eq!(b.scope, vec![String::from("bar")]);
+        assert_eq!(b.ordinal, 1, "second `foo` in `bar`");
+        let c = symbol_identity_at(LanguageId::Rust, src, p2).unwrap();
+        assert_eq!(c.scope, vec![String::from("baz")], "a different enclosing scope");
+        assert_eq!(c.ordinal, 0, "first `foo` in `baz`");
+    }
+
+    /// The index agrees with the per-point identity: `by_scope` groups the
+    /// same (kind, name, scope) into an ordered vec whose index IS the
+    /// ordinal, and `by_name` (the legacy, scope-blind view) counts them
+    /// all.
+    #[test]
+    fn symbol_index_matches_identity_and_keeps_legacy_name_count() {
+        let src = "fn bar() {\n    foo();\n    foo();\n}\nfn baz() {\n    foo();\n}\n";
+        let idx = build_annotation_symbol_index(LanguageId::Rust, src).unwrap();
+        let bar = idx
+            .by_scope
+            .get(&("identifier".to_string(), "foo".to_string(), vec![String::from("bar")]))
+            .expect("(identifier, foo, [bar]) group");
+        assert_eq!(bar.len(), 2, "two `foo` in `bar`");
+        let baz = idx
+            .by_scope
+            .get(&("identifier".to_string(), "foo".to_string(), vec![String::from("baz")]))
+            .expect("(identifier, foo, [baz]) group");
+        assert_eq!(baz.len(), 1, "one `foo` in `baz`");
+        // The legacy, scope-blind count: 3 occurrences of (identifier, foo).
+        let all = idx
+            .by_name
+            .get(&("identifier".to_string(), "foo".to_string()))
+            .expect("(identifier, foo) legacy group");
+        assert_eq!(all.len(), 3, "3 total `foo` (the old uniqueness rule sees them all)");
+        // A UNIQUE symbol (the fn name `baz`) is a 1-element group in both.
+        let baz_name = idx
+            .by_name
+            .get(&("identifier".to_string(), "baz".to_string()))
+            .expect("(identifier, baz)");
+        assert_eq!(baz_name.len(), 1);
+    }
+
+    /// The Python repeated-name case (the acceptance matrix language): a
+    /// call repeated in two functions is disambiguated by scope + ordinal.
+    #[test]
+    fn symbol_identity_python_repeated_name() {
+        let src = "def bar():\n    foo()\n    foo()\ndef baz():\n    foo()\n";
+        let p0 = nth(src, "foo", 0);
+        let p2 = nth(src, "foo", 2);
+        let a = symbol_identity_at(LanguageId::Python, src, p0).unwrap();
+        assert_eq!(a.name, "foo");
+        assert_eq!(a.scope, vec![String::from("bar")]);
+        assert_eq!(a.ordinal, 0);
+        let c = symbol_identity_at(LanguageId::Python, src, p2).unwrap();
+        assert_eq!(c.scope, vec![String::from("baz")]);
+        assert_eq!(c.ordinal, 0);
+    }
+
+    /// A keyword / no-symbol offset yields `None` (the honest answer), and
+    /// out-of-range offsets never panic.
+    #[test]
+    fn symbol_identity_keyword_and_bounds_are_none() {
+        let src = "fn bar() {\n    foo();\n}\n";
+        // Byte 0 is the `f` of the `fn` keyword → not identifier-ish.
+        assert!(symbol_identity_at(LanguageId::Rust, src, 0).is_none());
+        // End-of-file / past EOF: nothing contains the offset.
+        assert!(symbol_identity_at(LanguageId::Rust, src, src.len()).is_none());
+        assert!(symbol_identity_at(LanguageId::Rust, src, usize::MAX).is_none());
+    }
+
+    /// A language with no identifier-ish kind (Yaml) builds no index.
+    #[test]
+    fn symbol_index_none_for_no_kind_language() {
+        assert!(build_annotation_symbol_index(LanguageId::Yaml, "a: 1\n").is_none());
     }
 }

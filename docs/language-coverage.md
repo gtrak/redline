@@ -119,9 +119,15 @@ buffers: works (live, provider-matrix U-F7); external landings:
 (`store.rs::open_blame` external branch, live-pinned in the python leg
 L-P3) — same for every language. Editing (commit messages) and notes
 (`.redline-notes.md`, README "Annotations") are text-based and
-language-agnostic; notes add a Rust-only syntax anchor on top of the
-line text ("Rust files get a syntax anchor" — README), degrading to the
-plain line anchor for every other language.
+language-agnostic; notes add a per-language syntax anchor on top of the
+line text — every grammar-bearing language with an identifier-ish kind gets
+a symbol anchor (issue-annotations-symbol-identity; the old Rust-only gate
+is gone), and the ones that ALSO have a scope walker key it by scope
+(Scheme and Clojure have an identifier kind but no scope walker, so their
+scope is always empty and they resolve across distances but not across
+same-scope name repeats), degrading to the plain line anchor for languages
+with no identifier kind (Yaml, Markdown, Plain), for legacy records, and
+for points off a symbol.
 
 ## In-project M-. vs cross-project M-. (reading the grid)
 

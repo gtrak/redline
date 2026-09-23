@@ -85,9 +85,15 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
     let mut rec = Annotation::default();
     let mut have = [false; 4]; // path, line, anchor, note
     // The syntax anchor's keys (plan 007 issue 02) are OPTIONAL: both must
-    // be present for `syntax: Some`; either missing → `None` (legacy).
+    // be present for `syntax: Some`; either missing → `None` (legacy). The
+    // scope-aware identity (issue-annotations-symbol-identity, stage 2) adds
+    // further OPTIONAL keys: `syntax_scope` (one line per enclosing
+    // definition, outermost → innermost). Their PRESENCE marks a stage-2
+    // (scope-aware) identity; a legacy record or a top-level symbol (no
+    // enclosing definition) carries none and rides the scope-blind rule.
     let mut syntax_kind: Option<String> = None;
     let mut syntax_name: Option<String> = None;
+    let mut syntax_scope: Vec<String> = Vec::new();
     for line in &block[1..] {
         // Lines without a `:` (stray text, blank lines) are skipped, not
         // fatal: a record stays valid as long as the required fields are
@@ -132,6 +138,11 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
             "syntax_name" => {
                 syntax_name = Some(value.to_string());
             }
+            "syntax_scope" => {
+                // One line per enclosing definition; collected in order
+                // (outermost → innermost, exactly as serialized).
+                syntax_scope.push(value.to_string());
+            }
             // Unknown keys inside a record block: the block stays valid
             // (forward compatibility), they are simply not re-emitted.
             _ => {}
@@ -141,9 +152,15 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
         // The syntax anchor is OPTIONAL: absent keys (legacy records) and a
         // half-written pair (a hand-edited `syntax_kind` without a
         // `syntax_name`) both degrade to `None` — the record stays valid
-        // (tolerant parse), the anchor simply does not half-fire.
+        // (tolerant parse), the anchor simply does not half-fire. The scope
+        // is OPTIONAL too: present → a stage-2 (scope-aware) identity; absent
+        // → the scope-blind `(kind, name)` rule (legacy / top-level).
         rec.syntax = match (syntax_kind, syntax_name) {
-            (Some(kind), Some(name)) => Some(SyntaxAnchor { kind, name }),
+            (Some(kind), Some(name)) => Some(SyntaxAnchor {
+                kind,
+                name,
+                scope: if syntax_scope.is_empty() { None } else { Some(syntax_scope) },
+            }),
             _ => None,
         };
         Some(rec)
@@ -175,12 +192,19 @@ pub fn serialize_notes(doc: &NotesDoc) -> String {
                 out.push_str(&format!("note: {}\n", a.text));
                 out.push_str(&format!("orphaned: {}\n", a.orphaned));
                 // The syntax keys are emitted ONLY when present, appended
-                // after `orphaned` (additive): a record without a syntax
-                // anchor serializes byte-identically to the pre-007-02
-                // shape (no migration of legacy files).
+                // after `orphaned` (additive): a legacy record / top-level
+                // symbol (no scope) serializes byte-identically to the
+                // pre-007-02 shape (no migration of legacy files). The
+                // scope-aware key (stage 2) is one `syntax_scope` line per
+                // enclosing definition.
                 if let Some(sa) = &a.syntax {
                     out.push_str(&format!("syntax_kind: {}\n", sa.kind));
                     out.push_str(&format!("syntax_name: {}\n", sa.name));
+                    if let Some(scope) = &sa.scope {
+                        for name in scope {
+                            out.push_str(&format!("syntax_scope: {}\n", name));
+                        }
+                    }
                 }
             }
             NotesEntry::Raw(s) => {

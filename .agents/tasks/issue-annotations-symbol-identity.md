@@ -102,6 +102,31 @@ say so plainly rather than describing stage 1 as if it solved the repeated-name 
 
 ---
 
+## AMENDMENT 2026-09-23 (post-gate) — the lane was right to narrow stage 2, and stage 2b is the fix
+
+**The gate reproduced the lane's objection, twice, so the narrowing is CORRECT — and my spec was
+wrong.** An ordinal genuinely produces a wrong tie:
+
+- the cited fixture (`unit_flow_ann_orphan`): deleting the anchored line makes ordinal 2 name a
+  *different line whose text no longer matches the anchor*;
+- and in a genuine **non-empty** scope: `fn bar() { foo(); foo(); foo(); }`, annotate the **2nd**
+  `foo()` (ordinal 1), delete the **1st** → ordinal 1 now names the OLD 3rd `foo()` — a **sibling**.
+
+So keying on `(scope, ordinal)` migrates notes, which the never-guess invariant forbids. The lane
+shipped the scope-only key instead and disclosed the tradeoff, which is the right call.
+
+**But the narrowing is incomplete**: two same-name symbols in **one** scope now orphan on *any*
+drift — the symbol never moved and nothing was ambiguous at re-anchor time, because the ambiguity
+was baked in at capture. Safe, but useless.
+
+**Stage 2b (filed, not yet implemented):** key on the ordinal **only together with** a
+content/stability validation — validate the occurrence it resolves to against a fingerprint (the
+anchor text on that occurrence's own line, or the count of same-key occurrences before it) — so a
+**shift orphans instead of migrating**. `SymbolIdentity.ordinal` is already computed and shipped
+with no production consumer, so 2b is a resolver change plus that validation, not new parsing.
+
+The spec's original stage 2 said "the enclosing definition + the ordinal"; that is unsafe as
+written and this amendment supersedes it.
 ## AMENDMENT 2026-09-23 — "land on that symbol" (the user's clarification)
 
 > *"if I am cursored on a symbol, and I press 'A', I want the annotation to land on that symbol."*

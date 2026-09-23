@@ -34,12 +34,22 @@ line shows the project name and current view.
 
 In the file view, `A` records a note anchored to the line under the cursor;
 notes live in `.redline-notes.md` in the project root and re-anchor
-automatically as the file drifts. Rust files get a syntax anchor on top of
-the line text: when the point is on a symbol, the record stores the
-symbol's node kind + name, and re-anchoring first follows that node
-ANYWHERE in the file (surviving big insertions and reformats); zero or
-multiple matches fall back to the line text (±25-line search). An anchor
-whose text is gone is flagged orphaned, never moved to a guessed line.
+automatically as the file drifts. Every language whose grammar has an
+identifier-ish kind gets a syntax anchor on top of the line text
+(issue-annotations-symbol-identity — the old Rust-only gate is gone; Yaml
+and Markdown have grammars but no identifier kind, so they stay line
+text-only): when the point is on a symbol, the record stores the symbol's
+node kind + name + its enclosing scope (empty at top level, and always
+empty in Scheme and Clojure, which have no scope walker), and the marker
+lands on the symbol's start (not the raw cursor cell). Re-anchoring first
+follows that node: a name that repeats across scopes is disambiguated by its
+enclosing scope, and a unique symbol follows it ANYWHERE in the file
+(surviving big insertions, reformats, and re-indents). A name repeated within
+one scope is left ambiguous (never a guessed sibling); when the identity
+otherwise degrades it falls back to the line text (±25-line search). An
+anchor whose text is gone is flagged orphaned, never moved to a guessed
+line. Legacy records (no syntax keys) and points off a symbol ride the line
+text alone, exactly as before.
 
 On quit (`C-x C-c`), the annotations print to stdout as a self-contained
 brief — project root header, then per note: `path:line`, the anchored code

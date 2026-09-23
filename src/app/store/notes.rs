@@ -171,19 +171,66 @@ impl AppStore {
             if a.path != rel {
                 continue;
             }
-            // Order matters (007-02): syntax first — a unique (kind, name)
-            // node ANYWHERE in the file re-anchors to its line regardless
-            // of distance (this is what survives a 100-line insertion),
-            // even when the stored line still holds the anchor text (the
-            // note follows the symbol, not a coincidental text match).
-            // Zero or multiple matches fall through to the text rules.
-            if let Some(idx) = &syntax_index
-                && let Some(sa) = a.syntax.as_ref()
-                && let Some(lines) = idx.get(&(sa.kind.clone(), sa.name.clone()))
-                && lines.len() == 1
-            {
-                if a.line != lines[0] {
-                    a.line = lines[0];
+            // Order matters (007-02): syntax first — the record's symbol
+            // identity resolves to exactly one node in the file and the note
+            // re-anchors there regardless of distance (this is what survives
+            // a 100-line insertion), even when the stored line still holds
+            // the anchor text (the note follows the symbol, not a
+            // coincidental text match). When the identity cannot be resolved
+            // to exactly one node it falls through to the text rules (never
+            // guess — a wrong tie is worse than no tie).
+            //
+            // Two rules, by the record's stored identity (issue-annotations-
+            // symbol-identity):
+            // - stage 2 (the record carries an enclosing scope): the name is
+            //   UNIQUE within that scope → this is the occurrence. This is
+            //   what makes a repeated name follow its own scope — a `foo` in
+            //   `bar` never collides with a `foo` in `baz`, or with `bar`
+            //   repeated in a sibling scope (the full scope chain disambiguates
+            //   same-named definitions in different modules too).
+            // - the scope-blind `(kind, name)` uniqueness rule (exactly ONE
+            //   occurrence file-wide): the answer for a UNIQUE symbol — it
+            //   follows across a 100-line insertion AND across a scope move
+            //   (the recorded scope is a disambiguator, not a pin, so an
+            //   indented/moved unique symbol still follows) — and for LEGACY
+            //   and top-level records (absent scope key → `None`), exactly as
+            //   before.
+            //
+            // Same-scope name repeats are deliberately NOT resolved here: the
+            // name is ambiguous within its scope, so it falls through to the
+            // text rules (orphan, never a guess). An ordinal tie would be
+            // worse — an ordinal shifts when a sibling is added or deleted,
+            // migrating the note to a sibling (a wrong tie, which is worse
+            // than no tie).
+            let resolved = syntax_index.as_ref().and_then(|idx| {
+                let sa = a.syntax.as_ref()?;
+                if let Some(scope) = &sa.scope {
+                    let scope_key = (sa.kind.clone(), sa.name.clone(), scope.clone());
+                    if let Some(occ) = idx
+                        .by_scope
+                        .get(&scope_key)
+                        .filter(|occ| occ.len() == 1)
+                        .map(|occ| occ[0])
+                    {
+                        return Some(occ);
+                    }
+                }
+                let key = (sa.kind.clone(), sa.name.clone());
+                idx.by_name.get(&key).filter(|occ| occ.len() == 1).map(|occ| occ[0])
+            });
+            if let Some(occ) = resolved {
+                if a.line != occ.line {
+                    a.line = occ.line;
+                    changed = true;
+                }
+                // The marker rides the symbol: refresh the record's col to
+                // the symbol's START column in its (possibly new) line. A
+                // plain insertion above leaves the column unchanged (a no-op
+                // here); a re-indent / wrap / moved block moves the symbol's
+                // cell and the marker follows it (issue-annotations-
+                // symbol-identity, the col-on-symbol requirement).
+                if a.col != occ.col {
+                    a.col = occ.col;
                     changed = true;
                 }
                 if a.orphaned {
@@ -205,8 +252,16 @@ impl AppStore {
                 continue;
             }
             // Drift: content search within ±ANNOTATION_REANCHOR_WINDOW.
+            // `saturating_add` (gate P3, 017): `a.line` comes from the notes
+            // file and `notes_doc` accepts ANY `usize`, so a hand-edited or
+            // corrupt record with a huge line made this `+` panic with
+            // "attempt to add with overflow". Pre-existing, but the fix is a
+            // word and a panic is a panic.
             let lo = a.line.saturating_sub(ANNOTATION_REANCHOR_WINDOW);
-            let hi = (a.line + ANNOTATION_REANCHOR_WINDOW).min(total - 1);
+            let hi = a
+                .line
+                .saturating_add(ANNOTATION_REANCHOR_WINDOW)
+                .min(total - 1);
             let matches: Vec<usize> = (lo..=hi)
                 .filter(|l| {
                     buf.line_text(*l)
@@ -231,18 +286,22 @@ impl AppStore {
         }
     }
 
-    /// The syntax re-anchor index for the buffer at `key` (plan 007
-    /// issue 02): `(kind, name) → the 0-based lines of every node of that
-    /// kind + text`, built from ONE parse of the buffer's current text.
-    /// `None` unless at least one record with annotation key `rel` carries
-    /// a `SyntaxAnchor` AND the buffer's language parses (Rust today — the
-    /// same single grammar pin 007-01 uses, via `queries::language_for`):
-    /// the common legacy file pays no parse at all on a re-anchor pass.
+    /// The scope-aware syntax re-anchor index for the buffer at `key`
+    /// (plan 007 issue 02, generalised + scope-aware by issue-annotations-
+    /// symbol-identity): every identifier-ish node's `(kind, name)` and
+    /// `(kind, name, enclosing-scope)` occurrences (line + start column,
+    /// document order), built by the crate from ONE parse of the buffer's
+    /// current text. `None` unless at least one record with annotation key
+    /// `rel` carries a `SyntaxAnchor` AND the buffer's language has at least
+    /// one identifier-ish kind (the per-language set from the descriptor
+    /// table, derived from each pinned grammar's `node-types.json` — the
+    /// Rust-only gate is gone). The common legacy / no-symbol-kind file
+    /// (Yaml, Markdown, Plain) pays no parse at all on a re-anchor pass.
     fn build_syntax_index_for_key(
         &self,
         key: &str,
         rel: &str,
-    ) -> Option<HashMap<(String, String), Vec<usize>>> {
+    ) -> Option<redline_syntax::node::AnnotationSymbolIndex> {
         let any_syntax = self.notes_doc.entries.iter().any(|e| {
             matches!(e, NotesEntry::Record(a) if a.path == rel && a.syntax.is_some())
         });
@@ -255,64 +314,12 @@ impl AppStore {
             (path.to_string_lossy().into_owned(), buf.text())
         };
         let lang = self.grammar_registry.language_for(&path_str);
-        if lang != redline_syntax::registry::LanguageId::Rust {
-            return None;
-        }
-        // One fresh parse of the buffer's rope (the 007-02 contract: tree
-        // reuse / incremental reparse is 007-04's job, not this one's).
-        let language = redline_syntax::queries::language_for(lang)?;
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&language).ok()?;
-        let tree = parser.parse(source.as_bytes(), None)?;
-        let mut index: HashMap<(String, String), Vec<usize>> = HashMap::new();
-        Self::collect_syntax_anchor_nodes(tree.root_node(), source.as_bytes(), &mut index);
-        Some(index)
+        // The crate builds the whole-buffer index (one fresh parse — the
+        // 007-02 contract: tree reuse / incremental reparse is 007-04's job,
+        // not this one's). A language with no identifier-ish kind returns
+        // `None` (nothing to anchor; the text rules run, no parse).
+        redline_syntax::node::build_annotation_symbol_index(lang, &source)
     }
-
-/// Walk the parse tree collecting every NAMED node of one of 007-01's
-/// identifier-ish kinds as `(kind, text) → lines` (plan 007 issue 02).
-/// Restricting to those kinds keeps the walk cheap and correct: a
-/// captured `SyntaxAnchor.kind` always belongs to the closed set, so no
-/// other node kind can ever contribute a false match. `::` paths stay
-/// whole (a `scoped_identifier` is one node — exactly as `node_at`
-/// returns it). Multiple nodes may share a line (`x = x`); each is
-/// counted, so uniqueness is over NODES, never lines.
-fn collect_syntax_anchor_nodes(
-    node: tree_sitter::Node,
-    source: &[u8],
-    index: &mut HashMap<(String, String), Vec<usize>>,
-) {
-    if node.is_named()
-        && Self::is_syntax_anchor_kind(node.kind())
-        && let Ok(text) = node.utf8_text(source)
-    {
-        index
-            .entry((node.kind().to_string(), text.to_string()))
-            .or_default()
-            .push(node.start_position().row);
-    }
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            Self::collect_syntax_anchor_nodes(child, source, index);
-        }
-    }
-}
-
-/// The identifier-ish node kinds `node_at` (007-01) can return — the
-/// closed set a captured `SyntaxAnchor.kind` belongs to. Kept in
-/// lockstep with `src/syntax/node.rs`'s `is_rust_identifier_kind`
-/// (007-01 is frozen — mirrored here, not shared).
-fn is_syntax_anchor_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "identifier"
-            | "field_identifier"
-            | "type_identifier"
-            | "scoped_identifier"
-            | "scoped_type_identifier"
-            | "primitive_type"
-    )
-}
 
     /// Re-anchor every open file buffer's annotations (the "on load"
     /// pass: runs after the notes document is (re)loaded from disk).
@@ -532,10 +539,17 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
         let line = line.min(total - 1);
         let anchor = buf.line_text(line).map(|t| t.into_owned()).unwrap_or_default();
-        let col = self.point_col();
-        // 007-02: capture the syntax anchor at the point (None for
-        // non-Rust / keyword offsets — the text rules alone keep working).
-        let syntax = self.capture_syntax_anchor(&key, line);
+        // 007-02 + issue-annotations-symbol-identity: capture the syntax
+        // anchor at the point (None for non-symbol offsets — the text rules
+        // alone keep working). When a symbol IS captured, the record's `col`
+        // becomes the symbol's START column (the marker lands on the symbol,
+        // not the raw cursor cell); a non-symbol point keeps the raw column.
+        let captured = self.capture_syntax_anchor(&key, line);
+        let syntax = captured.as_ref().map(|(sa, _)| sa.clone());
+        let col = captured
+            .as_ref()
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| self.point_col());
         let existing = self.notes_doc.entries.iter().position(|e| {
             matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line)
         });
@@ -544,13 +558,15 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
                 // Edit: only the note text changes (the record's stored
                 // position stays — the re-anchor pass maintains it). A
                 // re-capture at commit refreshes the syntax anchor when the
-                // point lands on an identifier-ish node; a `None` capture
+                // point lands on an identifier-ish node (and the record's
+                // col to the symbol's start column); a `None` capture
                 // (the cursor slid onto a keyword) keeps the record's
                 // existing anchor rather than discarding a good one.
                 if let Some(a) = self.notes_doc.entries[i].as_record_mut() {
                     a.text = text.clone();
-                    if let Some(sa) = syntax.clone() {
-                        a.syntax = Some(sa);
+                    if let Some((sa, c)) = &captured {
+                        a.syntax = Some(sa.clone());
+                        a.col = *c;
                     }
                 }
             }
@@ -582,34 +598,38 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
         }
     }
 
-    /// 007-02: capture the syntax anchor for a record committed at buffer
-    /// `key`'s line `line`, taken at the CURRENT POINT's byte offset via
-    /// 007-01's `node_at`.
+    /// 007-02 + issue-annotations-symbol-identity: capture the syntax anchor
+    /// for a record committed at buffer `key`'s line `line`, taken at the
+    /// CURRENT POINT's byte offset via 007-01's `node_at`.
     ///
     /// Capture rule (explicit):
     /// - **Offset: the point, not the line's first non-whitespace byte.**
     ///   The point is where the user's attention is (the same target `M-.`
-    ///   acts on), and in Rust a line's first non-whitespace byte is
-    ///   usually a KEYWORD (`fn`, `let`, `if`, `struct`) where `node_at`
-    ///   has no identifier-ish node — the line-head rule would silently
-    ///   strip the anchor from exactly the item-header lines most worth
-    ///   anchoring. What is stored is the (kind, text) pair, so the
-    ///   criterion is landing on a meaningful node, which the point does
+    ///   acts on), and in a language a line's first non-whitespace byte is
+    ///   usually a KEYWORD (`fn`, `let`, `if`, `struct`, `def`, `func`, …)
+    ///   where `node_at` has no identifier-ish node — the line-head rule
+    ///   would silently strip the anchor from exactly the item-header lines
+    ///   most worth anchoring. What is stored is the (kind, text) pair, so
+    ///   the criterion is landing on a meaningful node, which the point does
     ///   best.
     /// - **Node: the identifier-ish node at the point verbatim** — `kind`
     ///   is `node_at`'s kind and `name` its text. `node_at` returns only
-    ///   identifier-ish nodes (007-01's frozen surface: it has no
-    ///   item-kind or statement surface), so there is no "statement →
-    ///   enclosing item" fallback to take: a local/call identifier
-    ///   anchors on itself, and re-anchoring's uniqueness filter keeps it
-    ///   honest (a name shadowed or repeated anywhere in the file →
-    ///   ambiguous → text rules, never a guess).
-    /// - **`None`** for non-Rust buffers, EOL points, and offsets with no
-    ///   identifier-ish node — the record then rides the text rules alone
-    ///   (today's behavior).
-    fn capture_syntax_anchor(&self, key: &str, line: usize) -> Option<SyntaxAnchor> {
-        let col = self.point_col();
-        let (path_str, source, byte) = {
+    ///   identifier-ish nodes (007-01's frozen surface: it has no item-kind
+    ///   or statement surface), so there is no "statement → enclosing item"
+    ///   fallback to take: a local/call identifier anchors on itself, and
+    ///   re-anchoring's uniqueness filter keeps it honest (a name shadowed or
+    ///   repeated anywhere in the file → ambiguous → text rules, never a
+    ///   guess).
+    /// - **col-on-symbol**: the returned column is the symbol's START column
+    ///   (a char offset), not the raw cursor cell — so `A` pressed mid-token
+    ///   lands the marker on the symbol's first cell, not where the cursor
+    ///   happened to be.
+    /// - **`None`** for languages with no identifier-ish kind, EOL points, and
+    ///   offsets with no identifier-ish node — the record then rides the text
+    ///   rules alone (today's behavior).
+    fn capture_syntax_anchor(&self, key: &str, line: usize) -> Option<(SyntaxAnchor, usize)> {
+        let point_col = self.point_col();
+        let (path_str, source, byte, line_start) = {
             let buf = self.buffers.get(key)?;
             let path = buf.path.as_ref()?;
             let line_start = buf.try_line_to_byte(line)?;
@@ -620,24 +640,50 @@ fn is_syntax_anchor_kind(kind: &str) -> bool {
             // `node_at` finds nothing (the honest answer for EOL).
             let byte_in_line = line_text
                 .char_indices()
-                .nth(col)
+                .nth(point_col)
                 .map(|(b, _)| b)
                 .unwrap_or(line_text.len());
             (
                 path.to_string_lossy().into_owned(),
                 buf.text(),
                 line_start + byte_in_line,
+                line_start,
             )
         };
         let lang = self.grammar_registry.language_for(&path_str);
-        if lang != redline_syntax::registry::LanguageId::Rust {
+        // Generalised: capture for every grammar-bearing language that has an
+        // identifier-ish kind (the per-language set from the descriptor
+        // table); a language with no identifier kind (Yaml, Markdown, Plain)
+        // degrades to the text rules exactly as the old Rust gate did.
+        if redline_syntax::language::spec(lang).identifier_kinds.is_empty() {
             return None;
         }
-        let info = redline_syntax::node::node_at(lang, &source, byte)?;
-        Some(SyntaxAnchor {
-            kind: info.kind,
-            name: info.text,
-        })
+        let info = redline_syntax::node::symbol_identity_at(lang, &source, byte)?;
+        // col-on-symbol (issue-annotations-symbol-identity): the marker sits
+        // on the symbol's START, not the raw cursor cell. The captured node
+        // is a single-line identifier-ish node on `line`, so its start column
+        // is the char count of source[line_start..info.start_byte]. A `None`
+        // answer (EOL / keyword / no identifier node) keeps `point_col()` —
+        // a wrong column is worse than the honest cursor cell, so never snap
+        // to a neighbouring symbol.
+        let col = match source.as_bytes().get(line_start..info.start_byte) {
+            Some(prefix) => match std::str::from_utf8(prefix) {
+                Ok(s) => s.chars().count(),
+                Err(_) => point_col,
+            },
+            None => point_col,
+        };
+        Some((
+            SyntaxAnchor {
+                kind: info.kind,
+                name: info.name,
+                // A top-level symbol has no enclosing definition to key on
+                // (an empty scope): it stores the scope-blind identity,
+                // exactly the legacy shape. A scoped symbol stores the chain.
+                scope: if info.scope.is_empty() { None } else { Some(info.scope) },
+            },
+            col,
+        ))
     }
 
     /// `d` in the buffer view (plan 005 issue 02): delete the annotation

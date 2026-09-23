@@ -1050,18 +1050,36 @@ impl FileViewRow {
 /// WHOLE file for a unique node with this kind + name (surviving a
 /// 100-line insertion and a reformat alike); zero or multiple matches
 /// fall through to the text rules. `None` for legacy records (no
-/// `syntax_*` keys), non-Rust files, and points where `node_at` has no
-/// identifier-ish answer (keywords, whitespace, operators) — those
+/// `syntax_*` keys), languages with no identifier kind (Yaml, Markdown,
+/// Plain), and points where `node_at` has no identifier-ish answer
+/// (keywords, whitespace, operators) — those
 /// records ride the text rules alone, exactly as before.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyntaxAnchor {
-    /// The tree-sitter node kind — always one of 007-01's identifier-ish
-    /// kinds (`identifier`, `field_identifier`, `type_identifier`,
-    /// `scoped_identifier`, `scoped_type_identifier`, `primitive_type`).
+    /// The tree-sitter node kind — always one of the buffer's language's
+    /// identifier-ish kinds (from the descriptor table, e.g. Rust
+    /// `identifier` / `scoped_identifier`, Python `identifier` /
+    /// `attribute`, Go `identifier` / `selector_expression`).
     pub kind: String,
     /// The node's source text (e.g. `target_one`; a `::` path comes back
     /// whole, exactly as `node_at` returns it — `tokio::spawn`).
     pub name: String,
+    /// The enclosing-definition chain (outermost → innermost) at the point
+    /// of capture (issue-annotations-symbol-identity, stage 2). This is the
+    /// DISAMBIGUATOR for a repeated name: `foo` inside `fn bar` is keyed by
+    /// `bar` + `foo`, so it never collides with a `foo` in `baz` or with
+    /// `bar`'s own definition. It is stable under an insertion above (the
+    /// enclosing definitions don't change).
+    ///
+    /// `None` for LEGACY records (no `syntax_scope` keys) AND for a top-level
+    /// symbol (no enclosing definition to key on) — both ride the scope-blind
+    /// `(kind, name)` uniqueness rule exactly as before. Same-scope name
+    /// repeats are deliberately treated as AMBIGUOUS (the text rules run,
+    /// then `orphaned`) rather than tracked by an ordinal: an ordinal is
+    /// unstable under edits (adding/removing a sibling shifts it), so an
+    /// ordinal tie would migrate a note to a sibling — a wrong tie, which is
+    /// worse than no tie.
+    pub scope: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -592,8 +592,12 @@ use super::*;
             Some(SyntaxAnchor {
                 kind: "identifier".to_string(),
                 name: "target_one".to_string(),
+                // The fn name sees its own definition as the enclosing scope
+                // (the scope walk includes the `function_item`'s name); a
+                // top-level definition has no outer container.
+                scope: Some(vec!["target_one".to_string()]),
             }),
-            "the fn name captures a syntax anchor"
+            "the fn name captures a syntax anchor (with its scope-aware identity)"
         );
         assert_eq!(a.anchor, "fn target_one() {");
         // Simulate the 100-line insertion + the reformat.
@@ -733,6 +737,10 @@ use super::*;
             syntax: Some(SyntaxAnchor {
                 kind: "identifier".to_string(),
                 name: "helper".to_string(),
+                // Legacy shape (no scope): the scope-blind `(kind, name)`
+                // uniqueness rule applies — 3 `helper` nodes → not unique →
+                // falls through to the text rules.
+                scope: None,
             }),
         }));
         // The signature line is reformatted (the anchor text is gone);
@@ -749,8 +757,9 @@ use super::*;
         assert_eq!(a.line, 0, "the orphan keeps its last known line");
     }
 
-    /// A record WITH a syntax anchor round-trips exactly: serialize →
-    /// parse → an equal record (the keys are re-emitted in full).
+    /// A record WITH a LEGACY syntax anchor (no scope/ordinal keys) round-
+    /// trips exactly and serializes WITHOUT the scope-aware keys —
+    /// byte-identical to the pre-017 shape (no migration of legacy records).
     #[test]
     fn notes_syntax_anchor_round_trip() {
         let rec = Annotation {
@@ -763,6 +772,7 @@ use super::*;
             syntax: Some(SyntaxAnchor {
                 kind: "identifier".to_string(),
                 name: "x".to_string(),
+                scope: None,
             }),
         };
         let doc = NotesDoc {
@@ -773,8 +783,68 @@ use super::*;
         let out = serialize_notes(&doc);
         assert!(out.contains("syntax_kind: identifier\n"), "{out}");
         assert!(out.contains("syntax_name: x\n"), "{out}");
+        assert!(
+            !out.contains("syntax_scope"),
+            "a legacy / top-level record emits no scope-aware key: {out}"
+        );
         let back = parse_notes(&out);
         assert_eq!(back.entries, vec![NotesEntry::Record(rec)]);
+    }
+
+    /// A STAGE-2 record (carrying an enclosing scope) round-trips exactly:
+    /// the `syntax_scope` key is re-emitted and re-parsed to an equal record
+    /// (issue-annotations-symbol-identity).
+    #[test]
+    fn notes_stage_two_anchor_round_trip() {
+        // A scoped record: `foo` inside `fn bar`.
+        let rec = Annotation {
+            path: "src/rep.rs".to_string(),
+            line: 2,
+            col: 4,
+            anchor: "    foo();".to_string(),
+            text: "rt".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "foo".to_string(),
+                scope: Some(vec!["bar".to_string()]),
+            }),
+        };
+        let doc = NotesDoc {
+            before: Vec::new(),
+            entries: vec![NotesEntry::Record(rec.clone())],
+            after: Vec::new(),
+        };
+        let out = serialize_notes(&doc);
+        assert!(out.contains("syntax_kind: identifier\n"), "{out}");
+        assert!(out.contains("syntax_name: foo\n"), "{out}");
+        assert!(out.contains("syntax_scope: bar\n"), "{out}");
+        let back = parse_notes(&out);
+        assert_eq!(back.entries, vec![NotesEntry::Record(rec)]);
+
+        // A nested scope chain (two enclosing definitions) round-trips in
+        // order (outermost → innermost, one `syntax_scope` line each).
+        let nested = Annotation {
+            path: "src/nested.rs".to_string(),
+            line: 1,
+            col: 4,
+            anchor: "    foo();".to_string(),
+            text: "t".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "foo".to_string(),
+                scope: Some(vec!["mod".to_string(), "bar".to_string()]),
+            }),
+        };
+        let out = serialize_notes(&NotesDoc {
+            before: Vec::new(),
+            entries: vec![NotesEntry::Record(nested.clone())],
+            after: Vec::new(),
+        });
+        let scope_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("syntax_scope:")).collect();
+        assert_eq!(scope_lines, vec!["syntax_scope: mod", "syntax_scope: bar"], "{out}");
+        assert_eq!(parse_notes(&out).entries, vec![NotesEntry::Record(nested)]);
     }
 
     /// A half-written anchor (`syntax_kind` without `syntax_name`) degrades
@@ -826,13 +896,15 @@ use super::*;
         }
     }
 
-    /// A non-Rust buffer captures no syntax anchor (007-01 returns None
-    /// for every non-Rust language — and no parse happens at all) and
-    /// rides the text rules as before; a Rust point on a KEYWORD (col 0
-    /// of the `fn` header) is the same: `None`, not a guess.
+    /// A grammar-bearing buffer WITH an identifier-ish kind captures a
+    /// syntax anchor (issue-annotations-symbol-identity: the old Rust-only
+    /// gate is gone), while a point on a KEYWORD still captures none — the
+    /// honest `None`, never a guess.
     #[test]
-    fn notes_non_rust_and_keyword_points_have_no_syntax_anchor() {
-        // Non-Rust: the record has `syntax: None` (old behavior intact).
+    fn notes_python_symbol_and_keyword_points() {
+        // Python: the point on the `f` in `def f():` NOW captures a syntax
+        // anchor (identifier / f) — the non-Rust gate is removed, and the
+        // marker lands on the symbol's start column (col 4).
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/ann_py.py", "def f():\n    return 1\n");
         s.set_point(0, 4, 4); // on the `f` in `def f():`
@@ -840,12 +912,22 @@ use super::*;
         s.note_prompt_char('p');
         s.note_prompt_confirm();
         let a = ann_records(&s)[0];
-        assert!(a.syntax.is_none(), "non-Rust → no syntax anchor");
+        assert_eq!(
+            a.syntax,
+            Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "f".to_string(),
+                scope: Some(vec!["f".to_string()]),
+            }),
+            "a non-Rust symbol now captures a syntax anchor (the Rust gate is gone)"
+        );
+        assert_eq!(a.col, 4, "the marker lands on the symbol's start column");
         assert_eq!(a.anchor, "def f():");
         drop(s);
 
         // Rust, point on the `fn` keyword (col 0): `node_at` has no
-        // identifier-ish node there → honest None.
+        // identifier-ish node there → honest None (the keyword-point rule
+        // is unchanged across languages).
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/ann_kw.rs", "fn kw_target() {\n    let y = 2;\n}\n");
         s.set_point(0, 0, 0); // col 0: the `f` of `fn`
@@ -1607,4 +1689,398 @@ use super::*;
     }
 
     // ── 011-02: per-language import walks (bare-symbol hints) ───────
+
+    // ── issue-annotations-symbol-identity ──────────────────────────
+
+    /// The per-language matrix (issue-annotations-symbol-identity): in each
+    /// of Python, TypeScript, Go, C, C++, and Rust, an annotation on a
+    /// symbol's name is captured at creation (a real `SyntaxAnchor`, not
+    /// `None`) and, after a 100-line insertion ABOVE it (far outside the
+    /// ±25 text window), the record follows the symbol to its new line via
+    /// the real re-anchor path — the exact case the old Rust-only comment
+    /// claimed to survive, now for every grammar-bearing language with an
+    /// identifier-ish kind.
+    #[test]
+    fn annotation_follows_symbol_across_insertion_per_language() {
+        // (rel, original, comment-prefix for filler, cursor-col ON the name,
+        //  expected captured name). The name is unique in each file, so the
+        // (kind, name) syntax match is unique and the re-anchor fires.
+        let cases: Vec<(&str, &str, &str, usize, &str)> = vec![
+            (
+                "matrix.py",
+                "def target_one():\n    return 1\n",
+                "#",
+                5,
+                "target_one",
+            ),
+            (
+                "matrix.ts",
+                "function targetOne() {\n  return 1;\n}",
+                "//",
+                11,
+                "targetOne",
+            ),
+            (
+                "matrix.go",
+                "func targetOne() {\n\treturn 1\n}",
+                "//",
+                7,
+                "targetOne",
+            ),
+            (
+                "matrix.c",
+                "int target_one(void) {\n    return 1;\n}",
+                "//",
+                6,
+                "target_one",
+            ),
+            (
+                "matrix.cpp",
+                "int target_one() {\n    return 1;\n}",
+                "//",
+                6,
+                "target_one",
+            ),
+            (
+                "matrix.rs",
+                "fn target_one() {\n    let x = 1;\n    x\n}",
+                "//",
+                5,
+                "target_one",
+            ),
+        ];
+        for (rel, original, comment, cursor_col, name) in cases {
+            let mut s = store_with_project();
+            open_ann_file(&mut s, rel, original);
+            s.set_point(0, cursor_col, cursor_col); // on the symbol's name
+            s.annotate();
+            s.note_prompt_char('n');
+            s.note_prompt_confirm();
+            let cap = ann_records(&s)[0].syntax.clone();
+            assert!(
+                cap.is_some(),
+                "{rel}: a symbol at the point must capture a syntax anchor at creation"
+            );
+            assert_eq!(cap.unwrap().name, name, "{rel}: captured the symbol's name");
+
+            // A 100-line insertion above (far outside ±25); the anchored
+            // line's text is now 100 lines down — the text path cannot reach
+            // it, only the symbol tie can.
+            let key = s.buffers.current().unwrap().to_string();
+            let filler: Vec<String> = (0..100).map(|i| format!("{comment} filler {i}")).collect();
+            let rewritten = filler.join("\n") + "\n" + original;
+            {
+                let buf = s.buffers.get_mut(&key).unwrap();
+                buf.rope = Rope::from_str(&rewritten);
+            }
+            s.reanchor_for_key(&key);
+            let a = ann_records(&s)[0];
+            assert_eq!(
+                a.line, 100,
+                "{rel}: the note must follow its symbol across the 100-line insertion"
+            );
+            assert!(!a.orphaned, "{rel}: a unique symbol match must clear orphaned");
+            drop(s);
+        }
+    }
+
+    /// The per-language kind evidence (issue-annotations-symbol-identity):
+    /// the captured `SyntaxAnchor.kind` is one of the language's identifier-
+    /// ish kinds (from the descriptor table), proving the mechanism is
+    /// driven by the per-language `node-types.json`-derived set, not a
+    /// guessed list. (The matrix test above proves the symbol is followed;
+    /// this pins the literal kind per language.)
+    #[test]
+    fn annotation_capture_kinds_match_the_per_language_sets() {
+        // (rel, original, cursor-col, expected (kind, name)).
+        let cases: Vec<(&str, &str, usize, (&str, &str))> = vec![
+            ("kinds.py", "def target_one():\n    return 1\n", 5, ("identifier", "target_one")),
+            (
+                "kinds.ts",
+                "function targetOne() {\n  return 1;\n}",
+                11,
+                ("identifier", "targetOne"),
+            ),
+            ("kinds.go", "func targetOne() {\n\treturn 1\n}", 7, ("identifier", "targetOne")),
+            (
+                "kinds.rs",
+                "fn target_one() {\n    let x = 1;\n    x\n}",
+                5,
+                ("identifier", "target_one"),
+            ),
+        ];
+        for (rel, original, cursor_col, (kind, name)) in cases {
+            let mut s = store_with_project();
+            open_ann_file(&mut s, rel, original);
+            s.set_point(0, cursor_col, cursor_col);
+            s.annotate();
+            s.note_prompt_char('n');
+            s.note_prompt_confirm();
+            let cap = ann_records(&s)[0].syntax.clone().expect("a symbol captured");
+            assert_eq!(
+                (cap.kind.as_str(), cap.name.as_str()),
+                (kind, name),
+                "{rel}: the captured kind is one of the language's identifier-ish kinds"
+            );
+            drop(s);
+        }
+    }
+
+    /// col-on-symbol, case (a) (issue-annotations-symbol-identity): pressing
+    /// `A` with the cursor MID-token lands the marker on the symbol's START
+    /// column, not the raw cursor cell.
+    #[test]
+    fn annotation_col_lands_on_symbol_start_not_cursor_cell() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/coltok.rs",
+            "fn target_one() {\n    let x = 1;\n    x\n}\n",
+        );
+        // Cursor is deep inside the name (col 9, past "target_").
+        s.set_point(0, 9, 9);
+        s.annotate();
+        s.note_prompt_char('c');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert!(a.syntax.is_some(), "a mid-token cursor still captures the symbol");
+        assert_eq!(
+            a.col, 3,
+            "the marker lands on the symbol's START column (3), not the cursor cell (9)"
+        );
+        assert_eq!(a.line, 0);
+    }
+
+    /// col-on-symbol, case (b) (issue-annotations-symbol-identity): a re-anchor
+    /// that changes the symbol's column refreshes the marker, while a plain
+    /// insertion above (which does NOT move the column) leaves it correct.
+    #[test]
+    fn annotation_col_refreshes_on_column_move_but_not_on_insertion() {
+        let original = "fn target_one() {\n    let x = 1;\n    x\n}\n";
+        let start_col = 3usize;
+
+        // Part 1: a plain 100-line insertion ABOVE — the symbol's column is
+        // unchanged, so the marker's col stays at the symbol's start (3).
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/colline.rs", original);
+        s.set_point(0, start_col, start_col);
+        s.annotate();
+        s.note_prompt_char('c');
+        s.note_prompt_confirm();
+        assert_eq!(ann_records(&s)[0].col, start_col, "capture: marker at the symbol's start");
+        let key = s.buffers.current().unwrap().to_string();
+        let filler: Vec<String> = (0..100).map(|i| format!("// filler {i}")).collect();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&(filler.join("\n") + "\n" + original));
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 100, "follows the symbol across the insertion");
+        assert_eq!(
+            a.col, start_col,
+            "a plain insertion above leaves the column unchanged (the marker stays on the symbol)"
+        );
+        drop(s);
+
+        // Part 2: the symbol is re-indented (moved into a `mod`) — its column
+        // CHANGES, and the syntax re-anchor refreshes the marker to the new
+        // start column.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/colline.rs", original);
+        s.set_point(0, start_col, start_col);
+        s.annotate();
+        s.note_prompt_char('c');
+        s.note_prompt_confirm();
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope =
+                Rope::from_str("mod m {\n    fn target_one() {\n        let x = 1;\n        x\n    }\n}\n");
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 1, "the symbol moved to line 1");
+        assert_eq!(
+            a.col, 7,
+            "the marker refreshed to the symbol's new start column (4 spaces + 'fn ')"
+        );
+        assert!(!a.orphaned);
+    }
+
+    /// col-on-symbol, case (c) (issue-annotations-symbol-identity): a point
+    /// that is NOT on a symbol (EOL / whitespace) keeps the raw cursor column
+    /// and stays line-tied (no syntax anchor) — never snapped to a nearby
+    /// symbol, exactly as today.
+    #[test]
+    fn annotation_on_a_comment_point_yields_no_syntax_anchor() {
+        // gate P3 (017): the spec names EOL, whitespace AND a comment as
+        // non-symbol points; the lane pinned only the first two. The gate
+        // verified the behaviour was correct but unpinned, so a regression
+        // could silently snap a comment annotation to a NEIGHBOURING symbol —
+        // a wrong tie, the one outcome the whole feature forbids.
+        for (label, file, src, line, col) in [
+            ("rust line comment", "src/noanchor.rs", "fn f() {}\n// a comment here\n", 1usize, 4usize),
+            ("python comment", "src/noanchor.py", "# a python comment\nx = 1\n", 0, 4),
+        ] {
+            let mut s = store_with_project();
+            open_ann_file(&mut s, file, src);
+            s.set_point(line, col, col);
+            s.annotate();
+            s.note_prompt_char('n');
+            s.note_prompt_confirm();
+            let a = ann_records(&s)[0];
+            assert!(
+                a.syntax.is_none(),
+                "{label}: a comment point yields no syntax anchor (never snapped to a neighbour)"
+            );
+            assert_eq!(a.col, col, "{label}: the raw cursor column is kept");
+        }
+    }
+
+    #[test]
+    fn annotation_not_on_symbol_keeps_raw_col_and_stays_line_tied() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/nosym.rs", "fn target_one() {\n    let x = 1;\n    x\n}\n");
+        // EOL of line 0 (past the last char) → nothing under the point.
+        let eol = "fn target_one() {".chars().count();
+        s.set_point(0, eol, eol);
+        s.annotate();
+        s.note_prompt_char('e');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert!(
+            a.syntax.is_none(),
+            "an EOL cursor yields no syntax anchor (behaves exactly as today)"
+        );
+        assert_eq!(
+            a.col, eol,
+            "a non-symbol point keeps the raw cursor column (never snapped)"
+        );
+        assert_eq!(a.line, 0);
+
+        // Whitespace point: the space after `fn` (col 1) is not identifier-
+        // ish either — no anchor, raw col kept.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/nosym.rs", "fn target_one() {\n    let x = 1;\n    x\n}\n");
+        s.set_point(0, 1, 1);
+        s.annotate();
+        s.note_prompt_char('w');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert!(a.syntax.is_none(), "a whitespace point yields no syntax anchor");
+        assert_eq!(a.col, 1, "the raw cursor column is kept");
+    }
+
+    /// Stage 2 (issue-annotations-symbol-identity): a usage site of a
+    /// REPEATED name follows its OWN scope across an insertion above — the
+    /// exact case the old `(kind, name)` uniqueness rule broke. The name
+    /// `foo` appears in TWO scopes (`bar` and `baz`); annotating `foo` in
+    /// `bar` is keyed by scope `[bar]`, so a 100-line insertion moves it to
+    /// its own line, not `baz`'s.
+    #[test]
+    fn annotation_repeated_name_follows_its_own_scope() {
+        let original = "fn bar() {\n    foo();\n}\nfn baz() {\n    foo();\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "rep.rs", original);
+        // Annotate the `foo()` in `bar` (line 1).
+        s.set_point(1, 4, 4);
+        s.annotate();
+        s.note_prompt_char('r');
+        s.note_prompt_confirm();
+        let cap = ann_records(&s)[0].syntax.clone().expect("a repeated name captures an anchor");
+        assert_eq!(cap.scope, Some(vec!["bar".to_string()]), "the enclosing scope");
+        // A 100-line insertion above: `foo` in `bar` moves from line 1 to
+        // line 101; `foo` in `baz` moves to line 104.
+        let key = s.buffers.current().unwrap().to_string();
+        let filler: Vec<String> = (0..100).map(|i| format!("// filler {i}")).collect();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&(filler.join("\n") + "\n" + original));
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        // Discriminating: the scope-blind `(kind, name)` rule sees TWO `foo`
+        // (bar's and baz's) → ambiguous → orphan. The scope-aware identity
+        // resolves to bar's own occurrence (line 101), not baz's (104).
+        assert_eq!(a.line, 101, "the repeated name follows its own scope, not a sibling");
+        assert!(!a.orphaned);
+    }
+
+    /// Stage 2 (issue-annotations-symbol-identity): when a repeated name's
+    /// scope can no longer be resolved (its occurrence was removed) and the
+    /// name still repeats AND the text rules are also ambiguous, the record
+    /// NEVER migrates to a sibling — it degrades to the text rules and
+    /// orphans at its last known line.
+    #[test]
+    fn annotation_repeated_name_degrades_honestly_when_unresolvable() {
+        let original =
+            "fn bar() {\n    a = 1;\n    foo();\n}\nfn baz() {\n    foo();\n}\nfn qux() {\n    foo();\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "rep2.rs", original);
+        // Annotate the `foo()` in `bar` (line 2) → scope [bar].
+        s.set_point(2, 4, 4);
+        s.annotate();
+        s.note_prompt_char('r');
+        s.note_prompt_confirm();
+        let cap = ann_records(&s)[0].syntax.clone().unwrap();
+        assert_eq!(cap.scope, Some(vec!["bar".to_string()]), "the enclosing scope");
+        // Remove bar's `foo` (its scope [bar] now holds none), keep `foo`
+        // repeated in two other scopes, and change the record's line text so
+        // the text rules are also ambiguous.
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(
+                "fn bar() {\n    a = 1;\n    b = 2;\n}\nfn baz() {\n    foo();\n}\nfn qux() {\n    foo();\n}\n",
+            );
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(
+            a.orphaned,
+            "unresolvable scope + ambiguous name + ambiguous text → orphan (never a wrong tie)"
+        );
+        assert_eq!(a.line, 2, "the orphan keeps its last known line (never migrated to a sibling)");
+    }
+
+    /// Ambiguity still degrades honestly for a LEGACY (no scope) record in a
+    /// NON-Rust language (issue-annotations-symbol-identity): a repeated name
+    /// with the scope-blind identity is ambiguous, so when the text path also
+    /// has nothing to match the record orphans — it never migrates to a wrong
+    /// symbol.
+    #[test]
+    fn annotation_legacy_ambiguous_name_orphans_in_python() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "amb.py", "def target():\n    pass\n\ndef target():\n    pass\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            path: "amb.py".to_string(),
+            line: 0,
+            col: 5,
+            anchor: "def target():".to_string(),
+            text: "amb".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "target".to_string(),
+                scope: None, // legacy / top-level: the scope-blind (kind, name) rule
+            }),
+        }));
+        // Reformat both defs so the anchor text `def target():` is GONE
+        // (the text path has 0 matches), while `target` still appears twice
+        // (the syntax path has 2 matches → ambiguous).
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope =
+                Rope::from_str("def target() -> None:\n    pass\n\ndef target() -> None:\n    pass\n");
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(
+            a.orphaned,
+            "2 name matches + 0 text matches → no guess → orphaned (a wrong tie is worse than no tie)"
+        );
+        assert_eq!(a.line, 0, "the orphan keeps its last known line");
+    }
 
