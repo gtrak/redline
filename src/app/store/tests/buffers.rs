@@ -1020,6 +1020,9 @@ use super::*;
     fn yank_inserts_at_point_in_editable_buffer() {
         let (mut s, _dir) = notes_store_with_lines(5);
         let bkey = s.buffers.current().unwrap().to_string();
+        // Accurate mode: C-y inserts at the point (plan 015-04). Annotation
+        // would append at the end, so this test pins the Accurate half.
+        s.buffers.get_mut(&bkey).unwrap().mode = BufferMode::Accurate;
         // First, copy some text to the kill ring.
         let line1_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
         let _line3_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(3).unwrap();
@@ -1082,6 +1085,10 @@ use super::*;
         for c in "BBBB\n".chars() { s.notes_insert_char(c); }
         for c in "CCCC\n".chars() { s.notes_insert_char(c); }
         let bkey = s.buffers.current().unwrap().to_string();
+        // Accurate mode (plan 015-04): C-y inserts at the point, M-y replaces
+        // at that same point — the start-of-buffer assertions below assume
+        // point-insert, so the notes buffer must be Accurate, not Annotation.
+        s.buffers.get_mut(&bkey).unwrap().mode = BufferMode::Accurate;
         // Buffer: line 0="# Notes", line 1="AAAA", line 2="BBBB", line 3="CCCC"
         // Copy lines 1-2 ("AAAA\n") to the ring.
         let line1_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
@@ -1236,6 +1243,10 @@ use super::*;
             s.notes_insert_char(c);
         }
         let key = s.buffers.current().unwrap().to_string();
+        // Accurate mode (plan 015-04): C-y inserts at the point (line 0 start),
+        // so the multi-byte char-offset arithmetic is what this asserts. In
+        // Annotation the same yank would append at the end instead.
+        s.buffers.get_mut(&key).unwrap().mode = BufferMode::Accurate;
         // Copy "héllo\n" to the kill ring (lines 1-2).
         let line1_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
         let _line2_byte = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
@@ -1268,6 +1279,9 @@ use super::*;
         for c in "naïve\n".chars() { s.notes_insert_char(c); }
         for c in "end\n".chars() { s.notes_insert_char(c); }
         let key = s.buffers.current().unwrap().to_string();
+        // Accurate mode (plan 015-04): C-y / M-y operate at the point (line 0
+        // start), so the multi-byte replace arithmetic is what this asserts.
+        s.buffers.get_mut(&key).unwrap().mode = BufferMode::Accurate;
         // Copy "café\n" (lines 1-2) to the ring.
         let l1 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(1).unwrap();
         let _l2 = s.buffers.get(&key).unwrap().rope.try_line_to_byte(2).unwrap();
@@ -1397,6 +1411,11 @@ use super::*;
             s.notes_insert_char(c);
         }
         let key = s.buffers.current().unwrap().to_string();
+        // Accurate mode (plan 015-04): the honest point's consumer. This is the
+        // discriminator — in Annotation the same mid-line yank would APPEND at
+        // the end, not insert at col 5, so an Accurate-mode buffer is required
+        // to keep pinning the point-insert behaviour.
+        s.buffers.get_mut(&key).unwrap().mode = BufferMode::Accurate;
         // Copy "world" (line 1, cols 6..11) to the ring.
         s.set_point(1, 6, 6);
         s.set_mark();
@@ -1407,6 +1426,206 @@ use super::*;
         s.yank();
         assert_eq!(s.buffers.get(&key).unwrap().text(), "# Notes\nhelloworld world\n",
             "yank must insert at the point's column, not the line start");
+    }
+
+    #[test]
+    fn yank_in_annotation_mode_appends_at_the_end() {
+        // plan 015-04 (spec b): in Annotation mode C-y APPENDS at the end of
+        // the buffer (matching self-insert's "try append"), NOT at the point.
+        // The fixture is DISCRIMINATING: the point sits mid-line and the
+        // buffer does NOT end at that line, so the old point-insert behaviour
+        // would have landed the yanked text mid-line ("helloworld world")
+        // while the Annotation append lands it after the final newline.
+        let (_dir, mut s) = notes_store();
+        for c in "hello world\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().mode,
+            BufferMode::Annotation,
+            "the notes buffer starts in Annotation mode"
+        );
+        // Copy "world" (line 1, cols 6..11) to the ring.
+        s.set_point(1, 6, 6);
+        s.set_mark();
+        s.set_point(1, 11, 11);
+        s.copy_region();
+        assert_eq!(s.kill_ring.top(), Some("world"));
+        // Point MID-LINE (after "hello", col 5) — deliberately NOT the end.
+        s.set_point(1, 5, 5);
+        s.yank();
+        // Annotation append: "world" lands at the very end, not at col 5.
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "# Notes\nhello world\nworld",
+            "Annotation C-y must append at the end, not at the point"
+        );
+    }
+
+    #[test]
+    fn yank_pop_replaces_at_the_original_yank_position_in_both_modes() {
+        // plan 015-04 (spec c): M-y re-replaces the SAME range the C-y used.
+        // M-y must replace the range that was INSERTED (`yank_pos`), not the
+        // current point: in Annotation mode the insertion is at the buffer end
+        // while the point is elsewhere, so a pop that used the point would
+        // corrupt it. (Gate P3-1: the earlier wording here claimed the point
+        // "MOVES past the inserted text" in Accurate mode — measured, it does
+        // NOT move at all, and that parity gap is filed as issue-yank-followups.
+        // The implementation was and is correct; only the rationale was wrong.)
+
+        // ── Accurate: yank at a mid-buffer point, pop at the inserted start ──
+        let (mut s, bk, _dir) = accurate_file_store("top\nmid\nbot\n");
+        s.set_point(0, 0, 0);
+        s.kill_line(); // kill "top" → ring ["top"], "\nmid\nbot\n"
+        s.set_point(1, 0, 0);
+        s.kill_line(); // kill "mid" → ring ["mid","top"], "\n\nbot\n"
+        assert_eq!(s.kill_ring.top(), Some("mid"));
+        // Yank "mid" at (1,0) = char 1 (Accurate: at the point). The point does
+        // NOT advance (see the note above).
+        s.set_point(1, 0, 0);
+        s.yank();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "\nmid\nbot\n",
+            "Accurate C-y inserts at the point (char 1)"
+        );
+        // M-y replaces at the inserted range's start (char 1).
+        s.yank_pop();
+        assert_eq!(
+            s.buffers.get(&bk).unwrap().text(),
+            "\ntop\nbot\n",
+            "Accurate M-y must replace at the inserted range's start"
+        );
+
+        // ── Annotation: yank appends at the end, pop replaces the tail ──
+        let (_dir2, mut s2) = notes_store();
+        for c in "aa\nbb\ncc\n".chars() {
+            s2.notes_insert_char(c);
+        }
+        let nk2 = s2.buffers.current().unwrap().to_string();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().mode,
+            BufferMode::Annotation,
+            "the notes buffer starts in Annotation mode"
+        );
+        // Copy "aa\n" then "bb\n" → ring ["bb\n","aa\n"] (bb on top).
+        s2.set_point(1, 0, 0);
+        s2.set_mark();
+        s2.set_point(2, 0, 0);
+        s2.copy_region(); // "aa\n"
+        s2.set_point(2, 0, 0);
+        s2.set_mark();
+        s2.set_point(3, 0, 0);
+        s2.copy_region(); // "bb\n"
+        assert_eq!(s2.kill_ring.top(), Some("bb\n"));
+        // Annotation C-y appends "bb\n" at the end.
+        s2.yank();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().text(),
+            "# Notes\naa\nbb\ncc\nbb\n",
+            "Annotation C-y appends at the end"
+        );
+        // M-y replaces the tail with "aa\n".
+        s2.yank_pop();
+        assert_eq!(
+            s2.buffers.get(&nk2).unwrap().text(),
+            "# Notes\naa\nbb\ncc\naa\n",
+            "Annotation M-y must replace the appended tail"
+        );
+    }
+
+    #[test]
+    fn yank_annotation_append_is_char_accurate_with_multibyte() {
+        // plan 015-04 (spec e): the Annotation append position is the buffer's
+        // CHAR length (`rope.len_chars()`), never its byte length. A byte-based
+        // position would over-index on a multi-byte line (é is 2 bytes) and
+        // corrupt or panic the insert. Both the ring text and the existing
+        // content carry multi-byte chars.
+        let (_dir, mut s) = notes_store();
+        for c in "héllo\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        assert_eq!(s.buffers.get(&nk).unwrap().mode, BufferMode::Annotation);
+        // Copy "héllo\n" (line 1..2) to the ring.
+        let l1 = s.buffers.get(&nk).unwrap().rope.try_line_to_byte(1).unwrap();
+        let _l2 = s.buffers.get(&nk).unwrap().rope.try_line_to_byte(2).unwrap();
+        s.buffers.get_mut(&nk).unwrap().mark = Some(l1);
+        s.set_point_line(2);
+        s.copy_region();
+        assert_eq!(s.kill_ring.top(), Some("héllo\n"));
+        // Annotation append: char-accurate position = len_chars, so the
+        // appended "héllo\n" lands cleanly after the existing content.
+        s.yank();
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "# Notes\nhéllo\nhéllo\n",
+            "Annotation append must be char-accurate (len_chars, not len_bytes)"
+        );
+    }
+
+    #[test]
+    fn yank_pop_coalesces_with_annotation_yank_into_one_undo_step() {
+        // plan 015-04 (spec f) + 016-02: the Annotation-mode C-y is a PURE
+        // insertion at the buffer end (the yank position), so the M-y
+        // coalescing rule still fires: the yank-and-rotate sequence collapses
+        // into ONE undo step even though the position is the end, not a
+        // mid-line point. A doubled `retain_rope_edit` (a second undo step on
+        // the C-y) would leave 2 steps here and break the merge.
+        let (_dir, mut s) = notes_store();
+        for c in "aa\nbb\n".chars() {
+            s.notes_insert_char(c);
+        }
+        let nk = s.buffers.current().unwrap().to_string();
+        assert_eq!(s.buffers.get(&nk).unwrap().mode, BufferMode::Annotation);
+        // Two copies for the ring (copies record no undo step): "aa\n" then
+        // "bb\n" → ring ["bb\n","aa\n"] (bb on top).
+        let l1 = s.buffers.get(&nk).unwrap().rope.try_line_to_byte(1).unwrap();
+        let l2 = s.buffers.get(&nk).unwrap().rope.try_line_to_byte(2).unwrap();
+        s.buffers.get_mut(&nk).unwrap().mark = Some(l1);
+        s.set_point_line(2);
+        s.copy_region(); // "aa\n"
+        s.buffers.get_mut(&nk).unwrap().mark = Some(l2);
+        s.set_point_line(3);
+        s.copy_region(); // "bb\n"
+        assert_eq!(s.kill_ring.top(), Some("bb\n"));
+        // Copies record no undo step — the stack holds only the six typed
+        // chars. Track the base so the coalescing delta is what's asserted.
+        let base = s.buffers.get(&nk).unwrap().undo.len();
+        // Annotation C-y appends "bb\n" at the end → ONE undo step (stack+1).
+        s.yank();
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "# Notes\naa\nbb\nbb\n",
+            "Annotation C-y appends the top ring entry at the end"
+        );
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().undo.len(),
+            base + 1,
+            "C-y must be EXACTLY one undo step (a doubled record would make this base+2)"
+        );
+        // M-y replaces the tail with "aa\n" and COALESCES with the C-y step:
+        // the stack stays at base+1 (no coalescing would leave base+2).
+        s.yank_pop();
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "# Notes\naa\nbb\naa\n",
+            "Annotation M-y replaces the appended tail"
+        );
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().undo.len(),
+            base + 1,
+            "C-y and M-y must coalesce into ONE undo step; a doubled C-y record would leave base+2 here"
+        );
+        // ONE undo removes the whole yank-and-rotate → pre-C-y.
+        s.key_event(key("C-x"));
+        s.key_event(key("u"));
+        assert_eq!(
+            s.buffers.get(&nk).unwrap().text(),
+            "# Notes\naa\nbb\n",
+            "a single undo must restore the pre-C-y buffer (the whole yank-and-rotate sequence)"
+        );
     }
 
     #[test]

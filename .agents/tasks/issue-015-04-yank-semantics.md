@@ -48,11 +48,21 @@ The user's decision:
 - **In Annotation mode set `yank_pos` to the PRE-insert length** (the append position), not
   to the post-insert end, or `M-y` will replace the wrong range.
 - **Yank-pop (`M-y`) must keep working in both modes.** It re-replaces the previous yank,
-  so it needs the *same* position the original yank used: in Accurate mode the point
-  moves with the inserted text, so `M-y` must replace at the yank's start, not at the
-  moved point. Check `yank_pos`/`yank_len`/`yank_ring_index` and state how you keep
-  pop correct — this is the subtle part of the issue. In annotation mode the append
-  position is the end, so pop replaces the tail.
+  so it needs the *same* position the original yank used: `M-y` must replace the range that
+  was **inserted** (`yank_pos`), not the current point — in Annotation mode the insertion is
+  at the buffer end while the point is elsewhere, so a point-based pop would corrupt it.
+  Check `yank_pos`/`yank_len`/`yank_ring_index` and state how you keep pop correct — this is
+  the subtle part of the issue.
+
+  **CORRECTED 2026-09-23 by the gate (P3-1).** This paragraph used to say "in Accurate mode
+  the point moves with the inserted text, so `M-y` must replace at the yank's start, not at
+  the moved point". **Measured: the point does NOT move.** The point is a stored `(line,col)`
+  and `yank` never calls `land_point_at_char`, so after a `C-y` at `(1,0)` the point is still
+  `(1,0)`. The implementation was correct either way — `yank_pos` is the inserted range and
+  that is what must be replaced — but the rationale was false. In emacs `C-y` leaves point
+  *after* the inserted text, so **redline not advancing the point is a real parity gap**, filed
+  as `issue-yank-followups` along with the off-screen case in Annotation mode. Do not
+  re-introduce a comment claiming the point moves.
 - **Do not touch** `kill_region`/`copy_region` (they already push to the kill ring) or
   the kill ring itself.
 

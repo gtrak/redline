@@ -1425,8 +1425,11 @@ impl AppStore {
         self.minibuffer_message(&format!("{} bytes copied to kill ring", range.1 - range.0));
     }
 
-    /// C-y: yank the most recent kill ring entry at the current point.
-    /// Only works in editable buffers. Sets the yank-pop state for M-y.
+    /// C-y: yank the most recent kill ring entry. Plan 015 issue 04 makes the
+    /// position mode-dependent: in `Accurate` mode it inserts at the honest
+    /// point (emacs); in `Annotation` mode it appends at the end of the buffer
+    /// (matching self-insert's "try append"). Only works in editable buffers.
+    /// Sets the yank-pop state (`yank_pos` = the position just used) for M-y.
     pub fn yank(&mut self) {
         let text = match self.kill_ring.top() {
             Some(t) => t.to_string(),
@@ -1451,33 +1454,73 @@ impl AppStore {
             self.minibuffer_message("Buffer is read-only");
             return;
         }
-        let point_byte = match self.current_point_byte() {
-            Some(p) => p,
-            None => {
-                self.minibuffer_message("no buffer");
-                return;
-            }
-        };
-        let point_char = {
-            let buf = self.buffers.get(&key).unwrap();
-            buf.rope.byte_to_char(point_byte)
+        // Plan 015 issue 04: C-y means different things per mode.
+        //   Accurate: insert at the honest point (emacs).
+        //   Annotation: append at the end (matching self-insert's "try append").
+        // Either way this is a PURE insertion at a single `position`, and the
+        // ONE `retain_rope_edit` call below records EXACTLY one undo step —
+        // 016-02's M-y coalescing (`coalesce_yank_pop_with_preceding_yank`) keys
+        // off that single preceding step, so a doubled record would silently
+        // break the merge. (We do NOT route through `insert_text`: it would add
+        // its own `retain_rope_edit` + `buffer_keep_insert_visible` and would
+        // not set the yank-pop state or clear the mark.)
+        let position = if self
+            .buffers
+            .get(&key)
+            .map(|b| b.mode == BufferMode::Accurate)
+            .unwrap_or(false)
+        {
+            let point_byte = match self.current_point_byte() {
+                Some(p) => p,
+                None => {
+                    self.minibuffer_message("no buffer");
+                    return;
+                }
+            };
+            self.buffers
+                .get(&key)
+                .unwrap()
+                .rope
+                .byte_to_char(point_byte)
+        } else {
+            // Annotation: the PRE-insert length (the append position) — NOT the
+            // post-insert end, so M-y replaces the same range the C-y used.
+            self.buffers.get(&key).unwrap().rope.len_chars()
         };
         let old_rope = self.buffers.get(&key).map(|b| b.rope.clone());
         if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.rope.insert(point_char, &text);
+            buf.rope.insert(position, &text);
             // Clear the mark (the text insertion shifts byte offsets).
             buf.mark = None;
         }
         if let Some(old_rope) = old_rope {
-            self.retain_rope_edit(&key, &old_rope, point_char, point_char, &text);
+            self.retain_rope_edit(&key, &old_rope, position, position, &text);
         }
         self.invalidate_highlight_for_key(&key);
-        // Set the yank-pop state (char offsets for ropey edit APIs).
-        self.yank_pos = Some(point_char);
+        // Set the yank-pop state (char offsets for ropey edit APIs). `yank_pos`
+        // is the position the original yank used, so M-y re-replaces the SAME
+        // range in both modes:
+        //   Accurate: the insertion position. NOTE (gate P3-1, measured):
+        //             `yank` does NOT advance the point — the point is a
+        //             stored (line,col) and nothing here calls
+        //             `land_point_at_char`. In emacs C-y leaves point AFTER
+        //             the inserted text, so that is a pre-existing parity
+        //             gap, filed as issue-yank-followups (with the
+        //             off-screen case below). Do not write a comment claiming
+        //             the point moves; it does not.
+        //   Annotation: the append position (the end), so pop replaces the
+        //             tail that the C-y appended.
+        // Either way M-y must replace the range that was INSERTED, which is
+        // exactly `yank_pos` — using the current point would be wrong in
+        // Annotation mode, where the insertion is at the buffer end.
+        self.yank_pos = Some(position);
         self.yank_len = Some(text.chars().count());
         self.yank_ring_index = Some(0);
-        // No scroll adjustment: the insertion is at the current top line,
-        // so the view is already anchored correctly (finding 4 fix).
+        // No scroll adjustment. In Accurate mode the insertion is at the
+        // point, which is already on screen. In Annotation mode the insertion
+        // is at the buffer END, so a C-y in a long notes buffer can land
+        // off-screen with no feedback — unlike self-insert, which calls
+        // `buffer_keep_insert_visible`. Filed as issue-yank-followups.
     }
 
     /// M-y: yank-pop — replace the last yanked text with the previous kill
