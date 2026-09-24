@@ -971,9 +971,11 @@ pub struct FileViewRow {
     /// e.g. two records on one line both falling back to the same indent
     /// anchor — share that ONE indicator (the dedup is what keeps a code
     /// cell from ever hosting two glyphs). Empty when the line has no
-    /// annotations. A note row carries its own record's anchor (a single
-    /// entry) — the corner sits in the same column as that record's arrow
-    /// on the code row directly below.
+    /// annotations. A note row carries its note slots' anchors, one entry
+    /// per slot (issue-annotations-layout: a PACKED note row carries
+    /// several, one per `note_slots` entry — no dedup, in slot order):
+    /// each corner sits in the same column as that record's arrow on the
+    /// code row directly below.
     /// Each entry is the display column of the cell directly BEFORE the
     /// record's symbol when that cell is whitespace (the indicator
     /// overwrites a blank cell — the code does not move); otherwise the
@@ -1013,8 +1015,9 @@ pub struct FileViewRow {
     /// rows, and annotated rows whose markers all overwrote blank cells
     /// or borrowed the line's indent).
     pub insertions: Vec<usize>,
-    /// The row's text (without trailing newline; an orphaned note row
-    /// carries an `(orphaned)` tag in its text). For an ANNOTATED code row
+    /// The row's text (without trailing newline; an orphaned note row's
+    /// first slot carries an `(orphaned)` tag in its text — note rows are
+    /// drawn from `note_slots`, `text` is the first slot's text). For an ANNOTATED code row
     /// the leading indentation run (`indent_chars` chars of spaces/tabs) is
     /// stripped so the code begins at cell `code_start` and no code
     /// character moves (a column-0 line keeps its full text — its
@@ -1039,6 +1042,42 @@ pub struct FileViewRow {
     /// landing's age; 0.0 at or past the duration). `None` for note rows
     /// and whenever no landing highlight applies to this line.
     pub highlight: Option<(usize, usize, f32)>,
+    /// Note rows only (issue-annotations-layout): the note SLOTS this
+    /// canvas row carries — one `NoteSlot` per annotation note, in
+    /// ascending anchor order (record order at a shared anchor). A PACKED
+    /// note row carries several slots (the records whose display-cell
+    /// footprints do not collide share the row, each ╭ still at its own
+    /// anchor cell); a plain note row carries exactly one. Empty for code
+    /// rows. `anchors` carries the same columns in the same order, and
+    /// `text` is the first slot's text (the renderer draws from
+    /// `note_slots`, never from `text` for note rows).
+    pub note_slots: Vec<NoteSlot>,
+}
+
+/// One annotation note on a (possibly PACKED) note row —
+/// issue-annotations-layout. A note row is one CANVAS row: two or more
+/// records' notes share it when their display-cell footprints (the ╭
+/// cell, the ─ leader, and the text span) do not collide; a colliding
+/// note gets its own stacked row instead.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NoteSlot {
+    /// The record's anchor (the record's display column): the ╭'s cell —
+    /// the SAME cell as that record's ▴ on the code row directly below
+    /// (the anchor relationship, asserted per cell in the tests).
+    pub anchor: usize,
+    /// The ─ leader length in cells (always ≥ 1): the plain note draws a
+    /// single bend at `anchor + 1` and the text at `anchor + 2`. A
+    /// larger value is the longer leader issue-annotations-layout adds
+    /// for the FURTHER-OUT note when its base footprint collides with an
+    /// earlier note's on the same line: the text then starts at
+    /// `anchor + 1 + leader`, strictly to the right of the colliding
+    /// note's text end, so the connector still reads as reaching THIS
+    /// record's own anchor rather than its neighbour's. See
+    /// `AppStore::pack_line_note_rows` for the stated rule.
+    pub leader: usize,
+    /// The note text (bare content; an `(orphaned)` suffix when the
+    /// record is orphaned — the suffix is part of the footprint).
+    pub text: String,
 }
 
 impl FileViewRow {

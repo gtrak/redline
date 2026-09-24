@@ -586,18 +586,45 @@ impl AppStore {
         // guarantee. If the point's line is excluded by the span, advance
         // start so the point is always drawn.
         if self.show_note_rows && !records.is_empty() {
-            let n_notes: usize = records
-                .iter()
-                .filter(|a| a.line >= start && a.line < end)
-                .count();
+            // issue-annotations-layout: packing changes the note-row count
+            // — several non-overlapping records' notes on one line emit
+            // ONE row (see `pack_line_note_rows`), while colliding notes
+            // stack (one row each, the further-out one with a longer
+            // leader). The cap must count PACKED rows, not records, or a
+            // packed window reserves rows it never emits and the emitted
+            // tail comes up short of the viewport (the half-blank pane —
+            // gate-measured 8 code + 8 note in a 24-row viewport where the
+            // packed answer is 12 + 12, pinned by
+            // `file_view_span_cap_counts_packed_rows_not_records`). That is
+            // the RATIONALE for counting packed rows, not an invariant
+            // (gate P3-6 correction): the invariant is
+            // `code_rows + note_rows <= viewport_lines` — the tail can
+            // still be short of the pane (a past-EOF record counts a row
+            // it never draws), and counting packed rows merely fills as
+            // much as the packing allows.
+            let line_note_rows: Vec<usize> = (start..end)
+                .map(|line| {
+                    let line_records: Vec<&Annotation> = records
+                        .iter()
+                        .filter(|a| a.line == line)
+                        .copied()
+                        .collect();
+                    if line_records.is_empty() {
+                        0
+                    } else if let Some(text) = buf.line_text(line) {
+                        let (anchors_pairs, _) = Self::line_anchor_plan(&text, &line_records);
+                        Self::pack_line_note_rows(&line_records, &anchors_pairs).len()
+                    } else {
+                        line_records.len() // past-EOF line: one row per record
+                    }
+                })
+                .collect();
+            let n_notes: usize = line_note_rows.iter().sum();
             if n_notes > 0 {
                 let window = end - start; // <= viewport_lines
                 let mut code_span = 1; // the floor: blank-view guarantee
                 for s in (1..=window).rev() {
-                    let in_span = records
-                        .iter()
-                        .filter(|a| a.line >= start && a.line < start + s)
-                        .count();
+                    let in_span: usize = line_note_rows[..s].iter().sum();
                     if s + in_span <= self.viewport_lines {
                         code_span = s;
                         break;
@@ -709,34 +736,34 @@ impl AppStore {
             // row — the note reads as a header for the code it annotates,
             // not a trailer under it. The budget bookkeeping is unchanged
             // (the code rows are never reduced; the note-row budget is
-            // final). issue-annotations-symbol-precise: each note row
-            // carries its OWN record's anchor (replacing the landed
-            // "several records on one line share one anchor" rule) — two
-            // annotations on one line get two note rows, each ╭ at its own
-            // record's anchor. Their note rows stack above the code row in
-            // record order, and folding hides them all while the code-row
-            // indicators (▸) survive. `line_records[i]` and
-            // `anchors_pairs[i]` are the same record (record order).
+            // final). issue-annotations-symbol-precise: each note carries
+            // its OWN record's anchor (replacing the landed "several
+            // records on one line share one anchor" rule). Two annotations
+            // on one line at distinct symbols get indicators at two
+            // columns; their note rows are then PACKED (issue-annotations-
+            // layout): the records whose display-cell footprints do not
+            // collide share ONE row (each ╭ still at its own anchor cell),
+            // and colliding notes stack directly above the code row in
+            // (anchor, record) order, the further-out (larger-anchor) note
+            // with a longer ─ leader (see `pack_line_note_rows`). Folding
+            // hides them all while the code-row indicators (▸) survive.
+            // `line_records[i]` and `anchors_pairs[i]` are the same record
+            // (record order).
             if self.show_note_rows {
-                for (i, a) in line_records.iter().enumerate() {
+                let packed = Self::pack_line_note_rows(&line_records, &anchors_pairs);
+                for slots in packed {
                     if notes_left == 0 {
                         break; // the note-row budget is final: stop here
                     }
                     notes_left -= 1;
-                    // annotations-fold-visual: the note row's text is now the
-                    // BARE note content — the old `  ▸ ` text prefix is gone
-                    // (the canvas's curved corner ╭ at the anchor cell carries
-                    // the "this is a note" meaning now).
-                    let mut note = a.text.clone();
-                    if a.orphaned {
-                        note.push_str(" (orphaned)");
-                    }
-                    let anchor = anchors_pairs[i].0;
                     out.push(FileViewRow {
                         line,
                         is_note: true,
                         annotated: false,
-                        anchors: vec![anchor],
+                        // One anchor entry per slot (a packed row may
+                        // carry several; record order is kept at a shared-
+                        // anchor tie).
+                        anchors: slots.iter().map(|s| s.anchor).collect(),
                         code_start: 0,
                         indent_chars: 0,
                         // The note row is NOT shifted by the code's
@@ -745,8 +772,15 @@ impl AppStore {
                         insertions: Vec::new(),
                         matches: Vec::new(),
                         highlight: None,
-                        text: note,
+                        // The first slot's text (consumers reading the
+                        // note row's text as a string; the renderer draws
+                        // from `note_slots`).
+                        text: slots
+                            .first()
+                            .map(|s| s.text.clone())
+                            .unwrap_or_default(),
                         spans: Vec::new(),
+                        note_slots: slots,
                     });
                 }
             }
@@ -815,6 +849,7 @@ impl AppStore {
                 highlight: None,
                 text,
                 spans,
+                note_slots: Vec::new(),
             });
         }
         out
@@ -1037,6 +1072,120 @@ impl AppStore {
         (AnchorRule::Fallback, indent_width.saturating_sub(1), char_col)
     }
 
+    /// issue-annotations-layout: pack the records of ONE line into note
+    /// ROWS (canvas rows) in display cells. Returns the rows, each a
+    /// `Vec<NoteSlot>` in ascending anchor order (record order at a
+    /// shared anchor).
+    ///
+    /// **The packing rule.** A note's footprint is its display-cell span:
+    /// the ╭ at `anchor`, the ─ leader, and the text (with the
+    /// `(orphaned)` suffix where the record is orphaned). Two notes share
+    /// a row iff their footprints are disjoint — never by char count:
+    /// the anchors and the text widths are display cells (wide chars
+    /// count 2, tabs run to the next 8-column stop), the same cell space
+    /// the code row and the inserted marker cells live in.
+    ///
+    /// **The "further out" rule (stated, not inferred).** "Further out"
+    /// means the note with the LARGER display anchor — the one further
+    /// right on the line (the deeper/inner symbol; the same direction the
+    /// existing note-indent mirroring already encodes, where a deeper
+    /// symbol's note starts further right). The reason is geometric and
+    /// it is what the rule pins: for two notes with anchors
+    /// `a_j <= a_i`, note `i`'s cells (`a_i`, `a_i + 1`, text from
+    /// `a_i + 2`) can never intrude on note `j`'s span — only `j`'s text,
+    /// which extends right, can reach into `i`'s connector or text. So
+    /// the ONLY note that can ever be overlapped is the later,
+    /// larger-anchor one, and it is the one whose connector must keep
+    /// reading as reaching its OWN anchor.
+    ///
+    /// **The leader rule.** Notes are processed in (anchor, record)
+    /// order. When an earlier note's ACTUAL (possibly already extended)
+    /// footprint overlaps this note's base footprint, this note is the
+    /// further-out one: its ─ leader extends so its text starts strictly
+    /// to the right of every colliding earlier note's text end
+    /// (`text_start = max(anchor + 2, max(colliding text ends))`, so
+    /// `leader = text_start - anchor - 1 >= 1`). A note that collides
+    /// with no earlier note keeps the plain single-bend leader (leader
+    /// 1). Row assignment is first-fit: the first row whose occupants'
+    /// actual footprints are all disjoint from this note's actual
+    /// footprint (the extension counts — a later note must never be
+    /// written over a neighbour's extended text); otherwise a new row
+    /// stacks directly above the previous one.
+    fn pack_line_note_rows(
+        line_records: &[&Annotation],
+        anchors_pairs: &[(usize, usize)],
+    ) -> Vec<Vec<NoteSlot>> {
+        let n = line_records.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        // Base slots, in record order: the anchor plus the note text
+        // (the `(orphaned)` suffix is part of the footprint — an
+        // orphaned record's longer text packs/stacks by the same rule).
+        let base: Vec<(usize, String)> = line_records
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let mut note = a.text.clone();
+                if a.orphaned {
+                    note.push_str(" (orphaned)");
+                }
+                (anchors_pairs[i].0, note)
+            })
+            .collect();
+        let widths: Vec<usize> = base
+            .iter()
+            .map(|(_, t)| crate::model::text_width::display_width(t))
+            .collect();
+        // (anchor, record order): left to right, ties keep record order.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| base[i].0);
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        let mut text_start: Vec<usize> = vec![0; n];
+        for (pos, &i) in order.iter().enumerate() {
+            let a = base[i].0;
+            let base_span_end = a + 2 + widths[i]; // occupied [a, base_span_end)
+            // The further-out rule: every EARLIER note whose actual span
+            // overlaps this note's base span extends this note's leader.
+            // (Only such notes can overlap this one — see the rule text
+            // above: a later note's cells never reach left into an
+            // earlier note's span.)
+            let mut start = a + 2;
+            for &j in &order[..pos] {
+                let j_end = text_start[j] + widths[j]; // actual [a_j, j_end)
+                if base[j].0 < base_span_end && a < j_end {
+                    start = start.max(j_end);
+                }
+            }
+            text_start[i] = start;
+            let i_end = start + widths[i]; // actual [a, i_end)
+            // First-fit row: every occupant's actual span disjoint from
+            // this note's actual span (the extension counts).
+            let row = rows.iter().position(|occ| {
+                occ.iter().all(|&j| {
+                    let j_end = text_start[j] + widths[j];
+                    !(base[j].0 < i_end && a < j_end)
+                })
+            })
+            .unwrap_or(rows.len());
+            if row == rows.len() {
+                rows.push(Vec::new());
+            }
+            rows[row].push(i);
+        }
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|i| NoteSlot {
+                        anchor: base[i].0,
+                        leader: text_start[i] - base[i].0 - 1, // >= 1
+                        text: base[i].1.clone(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// The `annotate-fold` command (annotations-render-fold / annotations-
     /// fold-visual): the read-only-mode fold toggle (hide ↔ show), reachable
     /// from the M-x palette only — deliberately UNBOUND (gate P1 on this
@@ -1072,7 +1221,10 @@ impl AppStore {
     /// (plan 005 issue 02): the buffer's line count plus the visible
     /// annotation note rows (zero when the fold hid them — `C-c a h`). The
     /// renderer's bottom scroll indicator compares the slice length against
-    /// this in rendered-row space.
+    /// this in rendered-row space. issue-annotations-layout: the note rows
+    /// are the PACKED rows (several non-overlapping notes on one line are
+    /// ONE row — see `pack_line_note_rows`), so the count runs the packer
+    /// per annotated line rather than counting records.
     pub fn file_view_total_rows(&mut self) -> usize {
         let total = self
             .buffers
@@ -1083,16 +1235,39 @@ impl AppStore {
             return total;
         }
         self.ensure_notes_doc();
+        let Some(buf) = self.buffers.current_buffer() else {
+            return total;
+        };
         let key = self.buffers.current().map(String::from);
         let Some(rel) = key.as_deref().and_then(|k| self.buffer_annotation_path(k)) else {
             return total;
         };
-        total + self
+        let records: Vec<&Annotation> = self
             .notes_doc
             .entries
             .iter()
-            .filter(|e| matches!(e, NotesEntry::Record(a) if a.path == rel))
-            .count()
+            .filter_map(|e| e.as_record())
+            .filter(|a| a.path == rel)
+            .collect();
+        // Group by line (record order within a line), then pack.
+        let mut by_line: std::collections::BTreeMap<usize, Vec<&Annotation>> =
+            std::collections::BTreeMap::new();
+        for a in &records {
+            by_line.entry(a.line).or_default().push(a);
+        }
+        let mut note_rows = 0usize;
+        for (line, line_records) in by_line {
+            match buf.line_text(line) {
+                Some(text) => {
+                    let (anchors_pairs, _) = Self::line_anchor_plan(&text, &line_records);
+                    note_rows += Self::pack_line_note_rows(&line_records, &anchors_pairs).len();
+                }
+                // A record past the end of the buffer (an out-of-range
+                // orphan): one row per record, as the old count did.
+                None => note_rows += line_records.len(),
+            }
+        }
+        total + note_rows
     }
 
     /// Whether the buffer at `key` is PROJECT-OWNED (006-02b item 1, the

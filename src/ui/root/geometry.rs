@@ -177,6 +177,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             })
             .collect();
         Snapshot {
@@ -317,6 +318,7 @@ mod tests {
                         spans: Vec::new(),
                         matches: Vec::new(),
                         highlight: None,
+                        note_slots: Vec::new(),
                     })
                     .collect();
                 let code_row = FileViewRow {
@@ -334,6 +336,7 @@ mod tests {
                     spans: Vec::new(),
                     matches: Vec::new(),
                     highlight: None,
+                    note_slots: Vec::new(),
                 };
                 notes.into_iter().chain(std::iter::once(code_row))
             })
@@ -477,6 +480,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             },
             FileViewRow {
                 line: 0,
@@ -490,6 +494,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             },
         ];
         let mut snap = buffer_snapshot(&["    fn deep() {}"], 0, 0);
@@ -528,6 +533,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             },
             FileViewRow {
                 line: 0,
@@ -541,6 +547,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             },
         ];
         let mut snap = buffer_snapshot(&["    map: HashMap<String, u32>,"], 0, 0);
@@ -592,6 +599,7 @@ mod tests {
                 spans: Vec::new(),
                 matches: Vec::new(),
                 highlight: None,
+                note_slots: Vec::new(),
             });
         }
         let snap = Snapshot {

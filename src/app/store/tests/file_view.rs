@@ -449,6 +449,362 @@ use super::*;
         assert_eq!(folded_code[0].anchors, vec![3, 5], "folded: one ▸ PER ANNOTATION (two, at 3 and 5): {folded:?}");
     }
 
+    /// issue-annotations-layout — the PACKING: two records on one line
+    /// whose display-cell footprints do not collide emit ONE note row
+    /// (not two), each slot still at its own anchor, and the rendered-row
+    /// total counts the packed row once. By char count these notes also
+    /// fit (short texts) — the discriminator is the cell-space decision
+    /// the packer must take in the wide-char test below.
+    #[test]
+    fn file_view_rows_disjoint_notes_pack_onto_one_row() {
+        // Line 1: `    a` + 10 spaces + `b` — record 1 on `a` (char 4,
+        // anchor 3), record 2 on `b` (char 15, anchor 14). Slot 1's
+        // footprint is [3, 7) (╭ @3, ─ @4, "aa" @5-6); slot 2's is
+        // [14, 18) — disjoint.
+        let line = "    a".to_string() + &" ".repeat(10) + "b";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annpack.rs", &format!("c0\n{line}\nc2\n"));
+        for (col, text) in [(4usize, "aa"), (15usize, "bb")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/annpack.rs".to_string(),
+                line: 1,
+                col,
+                anchor: line.clone(),
+                text: text.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 1, "disjoint footprints -> ONE packed note row (not two): {rows:?}");
+        let packed = &note_rows[0];
+        assert_eq!(
+            packed.note_slots,
+            vec![
+                crate::app::store::NoteSlot {
+                    anchor: 3,
+                    leader: 1,
+                    text: "aa".to_string()
+                },
+                crate::app::store::NoteSlot {
+                    anchor: 14,
+                    leader: 1,
+                    text: "bb".to_string()
+                }
+            ],
+            "each slot at its own anchor, plain single-bend leaders: {rows:?}"
+        );
+        assert_eq!(packed.anchors, vec![3, 14], "one anchor entry per slot, slot order: {rows:?}");
+        assert_eq!(packed.text, "aa", "the row's text is the first slot's text: {rows:?}");
+        // The row still sits directly above its code row, and the code row
+        // carries both indicators.
+        let code_idx = rows.iter().position(|r| !r.is_note && r.line == 1).unwrap();
+        assert!(rows[code_idx - 1].is_note, "the packed row is directly above the code row: {rows:?}");
+        assert_eq!(rows[code_idx].anchors, vec![3, 14], "the code row keeps its two indicators: {rows:?}");
+        // Total rendered rows: 3 buffer lines + 1 packed note row (NOT +2).
+        let lines = s.buffers.current_buffer().unwrap().line_count();
+        assert_eq!(s.file_view_total_rows(), lines + 1, "the packed row counts ONCE in the total: {rows:?}");
+
+        // Fold: the packed row vanishes (a fold emits no note rows at all),
+        // the code row keeps both ▸.
+        s.annotate_toggle();
+        let folded = s.file_view_rows();
+        assert!(
+            folded.iter().all(|r| !r.is_note),
+            "folded: the packed note row is gone: {folded:?}"
+        );
+        let folded_code: Vec<_> = folded.iter().filter(|r| !r.is_note && r.line == 1).collect();
+        assert_eq!(folded_code[0].anchors, vec![3, 14], "folded: one ▸ per annotation: {folded:?}");
+    }
+
+    /// issue-annotations-layout — the FURTHER-OUT rule, pinned at the
+    /// store level: when the footprints collide the notes stack, and the
+    /// LARGER-display-anchor note (the one further right on the line — the
+    /// note whose connector the other note's text can actually reach) is
+    /// the one whose leader extends, to start strictly to the right of the
+    /// colliding note's text end. Line 1 `    a b`: note 1 on `a`
+    /// (anchor 3, "aaaaaaaaa" spans [3, 14)); note 2 on `b` (anchor 5,
+    /// "bb" base [5, 9)) collides with note 1's text -> note 2's text
+    /// starts at 14 (leader 8), note 1 keeps the plain leader (its text
+    /// cannot reach left into note 2's cells).
+    #[test]
+    fn file_view_rows_overlapping_notes_stack_and_further_out_leader_extends() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annstack.rs", "c0\n    a b\nc2\n");
+        for (col, text) in [(4usize, "aaaaaaaaa"), (6usize, "bb")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/annstack.rs".to_string(),
+                line: 1,
+                col,
+                anchor: "    a b".to_string(),
+                text: text.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 2, "colliding footprints -> two stacked rows: {rows:?}");
+        // The shallower note keeps the plain single-bend leader.
+        assert_eq!(
+            note_rows[0].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 3,
+                leader: 1,
+                text: "aaaaaaaaa".to_string()
+            }],
+            "the shallower note is NOT the further-out one — its leader stays plain: {rows:?}"
+        );
+        // The further-out note: anchor 5, text pushed to 14 (note 1's text
+        // end) -> leader = 14 - 5 - 1 = 8.
+        assert_eq!(
+            note_rows[1].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 5,
+                leader: 8,
+                text: "bb".to_string()
+            }],
+            "the larger-anchor note's leader extends past the colliding note's text end: {rows:?}"
+        );
+        assert_eq!(note_rows[1].text, "bb", "the stacked row's text is its slot's text: {rows:?}");
+        // Stacked rows still sit directly above the code row (record order:
+        // the later record's row is closest to the code).
+        let code_idx = rows.iter().position(|r| !r.is_note && r.line == 1).unwrap();
+        assert!(rows[code_idx - 1].is_note && rows[code_idx - 2].is_note, "both stacked rows above the code row: {rows:?}");
+        let lines = s.buffers.current_buffer().unwrap().line_count();
+        assert_eq!(s.file_view_total_rows(), lines + 2, "stacked notes count as two rows: {rows:?}");
+    }
+
+    /// issue-annotations-layout — an ORPHANED record packs/stacks by the
+    /// same stated rule: the `(orphaned)` suffix is part of the footprint,
+    /// and the orphan's anchor still lands per `record_anchor` (orphaned
+    /// records never insert a marker cell — gate P3-1 — so this line's
+    /// orphan keeps a plain anchor and the rule is the same display-cell
+    /// arithmetic for everyone).
+    #[test]
+    fn file_view_rows_orphaned_note_packs_by_the_same_rule() {
+        // Line 1 `    a b`: note 1 on `a` (anchor 3, "aaaaaa" spans
+        // [3, 11)); the ORPHAN record on `b` (anchor 5, "cc" + " (orphaned)"
+        // = 13 cells -> base [5, 19)) collides -> it stacks, and its text
+        // starts at 11 (note 1's text end) with leader 5.
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/annorph.rs", "c0\n    a b\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annorph.rs".to_string(),
+            line: 1,
+            col: 4,
+            anchor: "    a b".to_string(),
+            text: "aaaaaa".to_string(),
+            orphaned: false,
+        }));
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annorph.rs".to_string(),
+            line: 1,
+            col: 6,
+            // A non-matching anchor keeps the record orphaned through any
+            // re-anchor pass (the exact-text match is what would clear it).
+            anchor: "    a bb".to_string(),
+            text: "cc".to_string(),
+            orphaned: true,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 2, "the orphan's suffixed text collides -> two rows: {rows:?}");
+        assert_eq!(
+            note_rows[1].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 5,
+                leader: 5,
+                text: "cc (orphaned)".to_string()
+            }],
+            "the orphan packs/stacks by the same display-cell rule, suffix included: {rows:?}"
+        );
+        let orphan_rec = ann_records(&s).into_iter().find(|a| a.text == "cc");
+        assert!(orphan_rec.is_some_and(|a| a.orphaned), "the record is still flagged orphaned: {rows:?}");
+    }
+
+    /// issue-annotations-layout — the SPAN CAP counts PACKED rows, not
+    /// records, pinned by the gate's half-blank-pane measurement. 25 lines
+    /// each carrying TWO disjoint notes in a 24-row viewport: each line
+    /// emits ONE packed note row, so the largest fitting span is
+    /// 12 code + 12 note = 24 (the canvas fills). The cap must not count
+    /// records — under `line_records.len()` the window reserves two rows
+    /// per line, the span shrinks to 8, and the emitter (which packs the
+    /// two notes onto one row) emits 8 code + 8 note = 16 rows in a 24-row
+    /// pane: the same arithmetic, a half-blank pane. This test is the
+    /// mutation's discriminator: reverting the cap to record counts
+    /// reddens `code_rows == 12` / `note_rows == 12`.
+    ///
+    /// The colliding twin pins the other end of the same arithmetic: two
+    /// COLLIDING notes per line emit two rows, so the span lands at
+    /// 8 code + 16 note = 24 — the packed-row count and the record count
+    /// agree there, and the pin keeps the cap from "helping" the colliding
+    /// case by under-counting it.
+    ///
+    /// Rationale, not invariant (gate P3-6 correction): counting packed
+    /// rows fills the canvas where the packing allows — it is not a
+    /// guarantee that `code_rows + note_rows == viewport_lines`; the
+    /// invariant is `<= viewport_lines` and the emitted tail can still be
+    /// short of the pane (a past-EOF record counts a row it never draws).
+    #[test]
+    fn file_view_span_cap_counts_packed_rows_not_records() {
+        // 25 lines, each `    a` + 10 spaces + `b` (disjoint note pair,
+        // the `file_view_rows_disjoint_notes_pack_onto_one_row` shape,
+        // one packed row per line).
+        let line = "    a".to_string() + &" ".repeat(10) + "b";
+        let content = (0..25).map(|_| line.clone()).collect::<Vec<_>>().join("\n") + "\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/spanpack.rs", &content);
+        for l in 0..25 {
+            for (col, text) in [(4usize, "aa"), (15usize, "bb")] {
+                s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                    syntax: None,
+                    path: "src/spanpack.rs".to_string(),
+                    line: l,
+                    col,
+                    anchor: line.clone(),
+                    text: text.to_string(),
+                    orphaned: false,
+                }));
+            }
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(24);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let code_rows = rows.iter().filter(|r| !r.is_note).count();
+        let note_rows = rows.iter().filter(|r| r.is_note).count();
+        // 24 lines in the window, one packed row each: the largest span
+        // with `s + s <= 24` is s = 12 -> 12 code + 12 note = 24 rows.
+        assert_eq!(code_rows, 12, "the cap counts the 24 packed rows, reserving 12: the span is 12 code rows: {rows:?}");
+        assert_eq!(note_rows, 12, "each of the 12 emitted lines carries its ONE packed row: {rows:?}");
+        assert_eq!(rows.len(), 24, "the canvas fills: 12 code + 12 note == the 24-row viewport: {rows:?}");
+        // Every emitted note row carries BOTH slots (packing, not stacking):
+        // the record-count mutant emits 8 code + 8 note and leaves the
+        // lower half of the pane blank.
+        assert!(
+            rows.iter().filter(|r| r.is_note).all(|r| r.note_slots.len() == 2),
+            "every emitted note row is a two-slot packed row: {rows:?}"
+        );
+
+        // The colliding twin: the same 25-line shape with notes that
+        // COLLIDE (each line packs to TWO rows) -> the largest span with
+        // `s + 2s <= 24` is s = 8 -> 8 code + 16 note = 24 rows.
+        let mut s = store_with_project();
+        let content = (0..25).map(|_| "    a b".to_string()).collect::<Vec<_>>().join("\n") + "\n";
+        open_ann_file(&mut s, "src/spancollide.rs", &content);
+        for l in 0..25 {
+            for (col, text) in [(4usize, "aaaaaaaaaa"), (6usize, "bb")] {
+                s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                    syntax: None,
+                    path: "src/spancollide.rs".to_string(),
+                    line: l,
+                    col,
+                    anchor: "    a b".to_string(),
+                    text: text.to_string(),
+                    orphaned: false,
+                }));
+            }
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(24);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let code_rows = rows.iter().filter(|r| !r.is_note).count();
+        let note_rows = rows.iter().filter(|r| r.is_note).count();
+        assert_eq!(code_rows, 8, "colliding notes: two packed rows per line, so the span is 8 code rows: {rows:?}");
+        assert_eq!(note_rows, 16, "colliding notes: 8 lines x 2 stacked rows = 16 note rows: {rows:?}");
+        assert_eq!(rows.len(), 24, "the canvas fills: 8 code + 16 note == the 24-row viewport: {rows:?}");
+    }
+
+    /// issue-annotations-layout — the LEADER-EXTENSION CASCADE, pinned at
+    /// the store level: when THREE notes all collide, the third note's
+    /// extension runs against the second note's ACTUAL (already-extended)
+    /// text end, not its base end. Line 1 `    a b` + 6 spaces + `c`
+    /// (a@char 4, b@char 6, c@char 13; all anchor cells are spaces, so
+    /// display col == char col and no marker cell is inserted): note 1
+    /// on `a` (anchor 3, "aaaaaaaaaa" spans [3, 15)); note 2 on `b`
+    /// (anchor 5, "b" base [5, 8)) collides with note 1 -> note 2's text
+    /// starts at 15 (note 1's text end), so note 2's ACTUAL end is
+    /// 16 — not its base end 8; note 3 on `c` (anchor 12, "cc" base
+    /// [12, 16)) collides with both -> its text starts at 16 (note 2's
+    /// actual end), leader 3. The emitted slots are [(3,1),(5,9),(12,3)]
+    /// (the gate's independent arithmetic). The base-end mutant (extending
+    /// against `anchor_j + 2 + width_j`) starts note 3 at 15 — leader 2,
+    /// slot (12,2) — and this test reddens on `leader == 3` / text at 16.
+    #[test]
+    fn file_view_rows_leader_extension_cascades_against_the_actual_end() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/anncascade.rs", "c0\n    a b      c\nc2\n");
+        for (col, text) in [(4usize, "aaaaaaaaaa"), (6usize, "b"), (13usize, "cc")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/anncascade.rs".to_string(),
+                line: 1,
+                col,
+                anchor: "    a b      c".to_string(),
+                text: text.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let note_rows: Vec<_> = rows.iter().filter(|r| r.is_note && r.line == 1).collect();
+        assert_eq!(note_rows.len(), 3, "all three footprints collide -> three stacked rows: {rows:?}");
+        assert_eq!(
+            note_rows[0].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 3,
+                leader: 1,
+                text: "aaaaaaaaaa".to_string()
+            }],
+            "note 1 keeps the plain leader: {rows:?}"
+        );
+        assert_eq!(
+            note_rows[1].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 5,
+                leader: 9,
+                text: "b".to_string()
+            }],
+            "note 2's text starts at note 1's text end (15) -> leader 9: {rows:?}"
+        );
+        // The cascade pin: the extension is against the colliding note's
+        // ACTUAL end — note 2's text ends at 16 (15 + width 1), so note 3
+        // starts at 16: leader = 16 - 12 - 1 = 3, text at 16.
+        assert_eq!(
+            note_rows[2].note_slots,
+            vec![crate::app::store::NoteSlot {
+                anchor: 12,
+                leader: 3,
+                text: "cc".to_string()
+            }],
+            "note 3 extends against note 2's ACTUAL (extended) end 16, not its base end — a base-end extension gives leader 2 / text at 15 (slot (12,2)): {rows:?}"
+        );
+        let lines = s.buffers.current_buffer().unwrap().line_count();
+        assert_eq!(s.file_view_total_rows(), lines + 3, "three stacked rows count as three: {rows:?}");
+    }
+
     #[test]
     fn file_view_rows_wide_and_tab_records_use_display_columns() {
         // issue-annotations-symbol-precise, the UNITS TRAP pinned at the

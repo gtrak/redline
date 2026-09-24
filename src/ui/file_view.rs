@@ -115,35 +115,86 @@ impl Component for FileViewCanvas {
                 // at all). issue-annotations-symbol-precise: the note's
                 // indent mirrors the nesting of the code it annotates — the
                 // curved corner (\u{256d} "╭") sits at THIS note's record's
-                // ANCHOR column (`r.anchors[0]`), the SAME cell as the ▴ of
-                // that record on the code row directly below (the anchor
-                // relationship that makes the branch read as attached),
-                // whose stroke comes up from that junction and bends right
-                // into the straight ─ (\u{2500}) at `anchor + 1`, then the
-                // note text at `anchor + 2` — so a note for a deeper symbol
-                // starts further right, and two notes on one line sit at
-                // two columns.
-                let anchor = r.anchors.first().copied().unwrap_or(0);
-                canvas.set_text(
-                    anchor as isize,
-                    row as isize,
-                    "\u{256d}",
-                    text_style(t.preview.foreground, false, false),
-                );
-                // The corner's rightward bend: the note row's ─ at
-                // anchor+1, so the curve connects to the note text at
-                // anchor+2.
-                canvas.set_text(
-                    (anchor + 1) as isize,
-                    row as isize,
-                    "\u{2500}",
-                    text_style(t.preview.foreground, false, false),
-                );
+                // ANCHOR column, the SAME cell as the ▴ of that record on
+                // the code row directly below (the anchor relationship that
+                // makes the branch read as attached), whose stroke comes up
+                // from that junction and bends right into the straight ─
+                // (\u{2500}) leader, then the note text.
+                // issue-annotations-layout: a row may carry SEVERAL note
+                // slots (a PACKED note row — the records whose display-cell
+                // footprints do not collide share the row, each ╭ still at
+                // its own anchor cell, the anchor relationship per slot);
+                // each slot draws its own corner, its ─ leader, and its
+                // text. The store (`pack_line_note_rows`) owns the packing
+                // and the leader lengths: the plain slot has a single bend
+                // (text at `anchor + 2`); the FURTHER-OUT slot — the
+                // larger-anchor note whose base footprint collides with an
+                // earlier note's text — carries the longer leader, so its
+                // text starts strictly to the right of the colliding note's
+                // text end and the connector still reads as reaching its
+                // own anchor. A slot's text is truncated to the row width
+                // AND to the next slot's own cells — a note is never
+                // truncated away or overwritten by a neighbour.
                 let note_style = text_style_italic(t.preview.foreground);
-                let note_start = anchor + 2;
-                let display = truncate(&r.text, w.saturating_sub(note_start));
-                if !display.is_empty() {
-                    canvas.set_text(note_start as isize, row as isize, &display, note_style);
+                let slots: Vec<(usize, usize, &str)> = if r.note_slots.is_empty() {
+                    // A hand-built legacy note row (the tests' row-map
+                    // fixtures): one plain slot from the row's own anchor
+                    // and text — the pre-packing shape.
+                    vec![(
+                        r.anchors.first().copied().unwrap_or(0),
+                        1,
+                        r.text.as_str(),
+                    )]
+                } else {
+                    r.note_slots
+                        .iter()
+                        .map(|s| (s.anchor, s.leader, s.text.as_str()))
+                        .collect()
+                };
+                for (k, (anchor, leader, text)) in slots.iter().enumerate() {
+                    canvas.set_text(
+                        *anchor as isize,
+                        row as isize,
+                        "\u{256d}",
+                        text_style(t.preview.foreground, false, false),
+                    );
+                    // The leader: the ─ run from `anchor + 1` to just
+                    // before the text (one cell for the plain single bend).
+                    let note_start = anchor + 1 + leader;
+                    for cell in (anchor + 1)..note_start {
+                        canvas.set_text(
+                            cell as isize,
+                            row as isize,
+                            "\u{2500}",
+                            text_style(t.preview.foreground, false, false),
+                        );
+                    }
+                    // The neighbour guard: on a packed row the text may not
+                    // reach the next slot's own cells (its ╭ at
+                    // `next.anchor`) — truncate at the earlier of the row
+                    // width and that boundary. Defence-in-depth, not the
+                    // real guarantee: store-built rows never reach it —
+                    // `pack_line_note_rows`'s first-fit disjointness is
+                    // pinned in the store tests (the gate's 2,743-check
+                    // sweep found 0 violations of
+                    // `slot[k].anchor + 1 + leader + width(text) <=
+                    // slot[k+1].anchor` for store-built rows) — so for them
+                    // this min never binds; it is reachable for hand-built
+                    // rows only, pinned by
+                    // `note_packing_neighbour_guard_truncates_at_the_next_slot`.
+                    let mut avail = w.saturating_sub(note_start);
+                    if let Some((next_anchor, _, _)) = slots.get(k + 1) {
+                        avail = avail.min(next_anchor.saturating_sub(note_start));
+                    }
+                    let display = truncate(text, avail);
+                    if !display.is_empty() {
+                        canvas.set_text(
+                            note_start as isize,
+                            row as isize,
+                            &display,
+                            note_style,
+                        );
+                    }
                 }
             } else {
                 // issue-annotations-symbol-precise: the row's `text` is
@@ -1039,6 +1090,7 @@ mod tests {
             spans: Vec::new(),
             matches: Vec::new(),
             highlight: None,
+            note_slots: Vec::new(),
         };
         let note = |line: usize| FileViewRow {
             line,
@@ -1052,6 +1104,7 @@ mod tests {
             spans: Vec::new(),
             matches: Vec::new(),
             highlight: None,
+            note_slots: Vec::new(),
         };
         let rows = vec![
             code(0),
@@ -1694,6 +1747,18 @@ mod tests {
             .unwrap_or_else(|| panic!("no ╭ on inner note row: {inner:?}"));
         assert_eq!(outer_anchor, inner_anchor, "both fallback records share the one anchor column:\n{frame}");
 
+        // issue-annotations-layout: same anchor = maximal overlap -> they
+        // stack, and the FURTHER-OUT one (the LATER record at the shared
+        // anchor — its cells cannot reach left into the earlier record's,
+        // only the reverse) gets the longer leader: its text starts at
+        // 12 (the outer note's text end, [0, 12)), the outer keeps the
+        // plain single bend and its text at 2.
+        assert_eq!(col_of(outer, "outer note").unwrap(), 2, "the outer (earlier) note keeps the plain leader (text at anchor + 2): {outer:?}");
+        assert_eq!(col_of(inner, "inner note").unwrap(), 12, "the further-out note's text starts at the colliding note's text end (12), not anchor + 2 (2): {inner:?}");
+        for i in 2..=11 {
+            assert_eq!(inner.chars().nth(i), Some('\u{2500}'), "the inner note's extended leader cell {i} is ─: {inner:?}");
+        }
+
         // A single ▴ code row (one indicator), with BOTH notes directly
         // above it.
         let arrow_idx = lines
@@ -1884,6 +1949,11 @@ mod tests {
     /// (two here). The fixture is a HAND-EDITED notes file (pushed
     /// directly); the `A` key path now addresses per symbol (not per line),
     /// so a line MAY host several records.
+    /// issue-annotations-layout: these two notes MUST overlap ("note a"
+    /// at anchor 3 spans cells [3, 11), reaching note b's ╭ at 5), so they
+    /// stack — and note b is the FURTHER-OUT one (the larger anchor):
+    /// its leader extends and its text starts at 11, strictly right of
+    /// note a's text end; note a keeps the plain single-bend leader.
     #[test]
     fn annotation_multi_per_line_two_records_two_indicators_two_note_rows() {
         use crate::app::keymap::parse_key;
@@ -1912,6 +1982,22 @@ mod tests {
         let corner_b = col_of(note_b, "\u{256d}").unwrap_or_else(|| panic!("no ╭ on note b: {note_b:?}"));
         assert_eq!(corner_a, 3, "note a's ╭ at its record's anchor (col 3 — `a` is the first token): {note_a:?}");
         assert_eq!(corner_b, 5, "note b's ╭ at its record's anchor (col 5 — the cell before `b`): {note_b:?}");
+
+        // issue-annotations-layout, the OVERLAP case pinned cell-for-cell:
+        // the notes collide (note a spans [3, 11), reaching note b's ╭ at
+        // 5), so they stack. The FURTHER-OUT note — the LARGER display
+        // anchor (note b, the deeper symbol; the only note the other's
+        // text can actually reach) — gets the longer leader: its text
+        // starts at 11 (note a's text end), not at anchor + 2 (7); note a
+        // (the shallower note) keeps the plain single bend and its text at
+        // 5. A rule that extended the OTHER note (or shortened b's leader
+        // back to 7) is RED here.
+        assert_eq!(col_of(note_a, "note a").unwrap(), 5, "the shallower note keeps the plain leader (text at anchor + 2 = 5): {note_a:?}");
+        assert!(note_a.chars().nth(4) == Some('\u{2500}'), "the shallower note's single bend at cell 4: {note_a:?}");
+        assert_eq!(col_of(note_b, "note b").unwrap(), 11, "the further-out note's text starts at the colliding note's text end (11), not anchor + 2 (7): {note_b:?}");
+        for i in 6..=10 {
+            assert_eq!(note_b.chars().nth(i), Some('\u{2500}'), "note b's extended leader cells {i} are ─: {note_b:?}");
+        }
 
         // The code row carries TWO ▴ at the two anchors (3 and 5), and the
         // code keeps its source column (`a` at 4, `b` at 6). (The rendered
@@ -1949,6 +2035,428 @@ mod tests {
         let fcode = flines.iter().find(|l| l.contains("\u{25b8}") && l.contains('a') && l.contains('b'))
             .unwrap_or_else(|| panic!("no folded code row with ▸:\n{folded}"));
         assert_eq!(cols_of(fcode, '\u{25b8}'), vec![3, 5], "folded: one ▸ PER ANNOTATION (two, at the two anchors): {fcode:?}");
+    }
+
+    // ── issue-annotations-layout: the packed note row + the longer leader ──
+
+    /// issue-annotations-layout — the PACKING: two records on one line whose
+    /// display-cell footprints do not collide are drawn on ONE note row, and
+    /// the anchor relationship holds for BOTH glyphs on that row (not just
+    /// the first): each ╭ at its own record's anchor cell — the same cell as
+    /// that record's ▴ on the code row directly below — the ─ bend one cell
+    /// right, the text at anchor + 2, and no text truncated or overwritten
+    /// by the neighbour. A packing that lost the second glyph, misplaced it
+    /// one cell, or let the first text run into the second is RED here.
+    #[test]
+    fn note_packing_disjoint_notes_share_one_row_and_anchor_per_glyph() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    a` + 10 spaces + `b` — record 1 on `a` (char 4,
+        // anchor 3), record 2 on `b` (char 15, anchor 14). "note a"
+        // occupies [3, 11), "note b" [14, 22) — disjoint, so they pack.
+        let mid = "    a".to_string() + &" ".repeat(10) + "b";
+        let content = format!("fn main() {{\n{mid}\n}}\n");
+        let store = annotated_store_from_notes_file_at(
+            &content,
+            &[(1, 4, "note a"), (1, 15, "note b")],
+        );
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // The code row: two ▴ at the two anchors (3 and 14), the code keeps
+        // its source columns (`a` at 4, `b` at 15).
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains('a') && l.contains('b'))
+            .unwrap_or_else(|| panic!("no ▴ code row:\n{frame}"));
+        let code = lines[code_idx];
+        assert_eq!(cols_of(code, '\u{25b4}'), vec![3, 14], "two indicators at the two anchors: {code:?}");
+
+        // ONE note row carries BOTH notes — directly above the code row.
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("note a")).count(),
+            1,
+            "exactly one row hosts note a:\n{frame}"
+        );
+        let packed = lines[code_idx - 1];
+        assert!(
+            packed.contains("note a") && packed.contains("note b"),
+            "the row directly above the code row carries BOTH notes (packed): {packed:?}\n{frame}"
+        );
+
+        // THE ANCHOR RELATIONSHIP FOR EVERY GLYPH ON THE ROW: both ╭ at
+        // their own anchor cells, each the SAME cell as its ▴ below.
+        let corners = cols_of(packed, '\u{256d}');
+        assert_eq!(corners, vec![3, 14], "both corners at their own anchor cells: {packed:?}");
+        for &c in &corners {
+            assert!(
+                cols_of(code, '\u{25b4}').contains(&c),
+                "each ╭ (cell {c}) anchors at the ▴ in the same cell on the row below: packed={packed:?} code={code:?}"
+            );
+        }
+        // Each glyph's own bend and text: ─ at 4 and 15, texts at 5 and 16.
+        assert!(packed.chars().nth(4) == Some('\u{2500}'), "note a's bend at cell 4 (anchor + 1): {packed:?}");
+        assert!(packed.chars().nth(15) == Some('\u{2500}'), "note b's bend at cell 15 (anchor + 1): {packed:?}");
+        assert_eq!(col_of(packed, "note a").unwrap(), 5, "note a's text at cell 5 (anchor + 2): {packed:?}");
+        assert_eq!(col_of(packed, "note b").unwrap(), 16, "note b's text at cell 16 (anchor + 2): {packed:?}");
+        // Neither text is truncated or overwritten: both are intact, and the
+        // cells between the two spans stay blank.
+        for i in 11..14 {
+            assert_eq!(packed.chars().nth(i), Some(' '), "cell {i} between the two notes stays blank: {packed:?}");
+        }
+    }
+
+    /// issue-annotations-layout — the STACK + LONGER-LEADER case: two
+    /// records on one line whose footprints DO collide stack on separate
+    /// rows, and the further-out one's leader is measurably longer (an
+    /// assertion about cells, not a screenshot): its text starts strictly
+    /// to the right of the colliding note's text end, so the connector
+    /// still reads as reaching its own anchor rather than its neighbour's.
+    /// Both ╭ still anchor at their own ▴ cells.
+    #[test]
+    fn note_packing_overlapping_notes_stack_and_further_out_leader_is_longer() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    a b` — anchors 3 and 5. "note a" spans [3, 11) and
+        // reaches note b's ╭ (5) — they MUST stack.
+        let store = annotated_store_from_notes_file_at("fn main() {\n    a b\n}\n", &[(1, 4, "note a"), (1, 6, "note b")]);
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // TWO stacked rows, both directly above the code row.
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains('a') && l.contains('b'))
+            .unwrap_or_else(|| panic!("no ▴ code row:\n{frame}"));
+        assert!(
+            lines[code_idx - 1].contains("note b") && lines[code_idx - 2].contains("note a"),
+            "stacked in (anchor, record) order, both above the code row:\n{frame}"
+        );
+        let row_a = lines[code_idx - 2];
+        let row_b = lines[code_idx - 1];
+        let code = lines[code_idx];
+
+        // Note a (the shallower note): the plain single bend, text at 5.
+        assert_eq!(col_of(row_a, "\u{256d}").unwrap(), 3, "note a's ╭ at its own anchor (3): {row_a:?}");
+        assert!(row_a.chars().nth(4) == Some('\u{2500}'), "note a keeps the single bend at 4: {row_a:?}");
+        assert_eq!(col_of(row_a, "note a").unwrap(), 5, "note a's text at anchor + 2 (5) — its leader is NOT extended: {row_a:?}");
+
+        // Note b (the FURTHER-OUT one): the longer leader. Its text starts
+        // at 11 — note a's text end, four cells past the plain anchor + 2
+        // (7) — with ─ filling every cell between its ╭ and its text.
+        assert_eq!(col_of(row_b, "\u{256d}").unwrap(), 5, "note b's ╭ at its own anchor (5): {row_b:?}");
+        assert_eq!(col_of(row_b, "note b").unwrap(), 11, "note b's longer leader: text at the colliding note's text end (11), not anchor + 2 (7): {row_b:?}");
+        for i in 6..=10 {
+            assert_eq!(row_b.chars().nth(i), Some('\u{2500}'), "note b's leader cell {i} is ─ (the extension is cells, not a screenshot): {row_b:?}");
+        }
+        // Both anchors hold on the stacked rows: each ╭ in the same cell as
+        // its ▴ on the code row below.
+        let arrows = cols_of(code, '\u{25b4}');
+        assert!(arrows.contains(&3) && arrows.contains(&5), "the code row keeps both ▴ (3 and 5): {code:?}");
+        assert!(arrows.contains(&col_of(row_a, "\u{256d}").unwrap()) && arrows.contains(&col_of(row_b, "\u{256d}").unwrap()), "each stacked ╭ anchors at its own ▴ cell: code={code:?}");
+        // No text truncated or overwritten: both notes are intact on their
+        // rows (each stacked note has its own canvas row — they never share
+        // one).
+        assert!(row_a.contains("note a") && row_b.contains("note b"), "both texts intact: {row_a:?} {row_b:?}");
+    }
+
+    /// issue-annotations-layout — the "further out" RULE, stated and pinned.
+    ///
+    /// **Rule.** "Further out" means the note with the LARGER display
+    /// anchor — the note further right on the line (the deeper/inner
+    /// symbol; the same direction the existing note-indent mirroring
+    /// encodes, where a deeper symbol's note starts further right). It is
+    /// NOT "the anchor further from where the text sits" (both texts sit
+    /// anchor + leader right of their own anchor — no discriminator there)
+    /// and not the outer/shallower note.
+    ///
+    /// **Why.** The geometry forces it: for two notes with anchors
+    /// `a_j <= a_i`, note i's cells (╭ at `a_i`, leader, text from
+    /// `a_i + 2`) can never reach LEFT into note j's span — only note j's
+    /// text, which extends right, can cover note i's ╭/leader/text. The
+    /// only note that can ever be overlapped is the later, larger-anchor
+    /// one, and it is the one whose connector must keep reading as
+    /// reaching its OWN anchor. Extending the other note's leader would
+    /// push its text further INTO the collision, not out of it.
+    #[test]
+    fn further_out_rule_is_the_larger_display_anchor() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    a b` — the SMALLER-anchor note (a, anchor 3) carries
+        // the long text ("aaaaaaaaa" spans [3, 14), reaching past note b's
+        // base start 7); note b (anchor 5, "bb") is the larger-anchor, i.e.
+        // the further-out, note.
+        let store = annotated_store_from_notes_file_at(
+            "fn main() {\n    a b\n}\n",
+            &[(1, 4, "aaaaaaaaa"), (1, 6, "bb")],
+        );
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains('a') && l.contains('b'))
+            .unwrap_or_else(|| panic!("no ▴ code row:\n{frame}"));
+        let row_a = lines[code_idx - 2]; // the smaller-anchor note's row
+        let row_b = lines[code_idx - 1]; // the larger-anchor note's row
+
+        // The LARGER-anchor note (b) is the one with the longer leader:
+        // its text starts at 14 (note a's text end), five cells past the
+        // plain anchor + 2 (7).
+        assert_eq!(col_of(row_b, "\u{256d}").unwrap(), 5, "note b's ╭ at its own anchor (5): {row_b:?}");
+        assert_eq!(col_of(row_b, "bb").unwrap(), 14, "the larger-anchor (further-out) note's leader extends to 14: {row_b:?}");
+        for i in 6..=13 {
+            assert_eq!(row_b.chars().nth(i), Some('\u{2500}'), "the extended leader cell {i} is ─: {row_b:?}");
+        }
+        // The SMALLER-anchor note (a) is NOT the further-out one: its leader
+        // stays the plain single bend and its text stays at 5. A rule that
+        // extended note a (or both) instead is RED at these cells.
+        assert_eq!(col_of(row_a, "\u{256d}").unwrap(), 3, "note a's ╭ at its own anchor (3): {row_a:?}");
+        assert!(row_a.chars().nth(4) == Some('\u{2500}'), "note a's single bend at 4: {row_a:?}");
+        assert_eq!(col_of(row_a, "aaaaaaaaa").unwrap(), 5, "the smaller-anchor note's leader is NOT extended (text at 5): {row_a:?}");
+    }
+
+    /// issue-annotations-layout — the UNITS TRAP for packing: the collision
+    /// decision is in DISPLAY CELLS, never char counts. The CJK note text
+    /// (5 chars = 10 cells) reaches note b's connector in cells while the
+    /// char count (5 chars) would claim the notes fit; a char-based packer
+    /// would draw them on one row and overwrite note b's ╭.
+    #[test]
+    fn note_packing_footprint_collision_counts_display_cells_not_chars() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    a       b` (7 spaces) — note a on `a` (char 4,
+        // anchor 3) with the CJK text (five \u{4e2d} = 10 display cells: span
+        // [3, 15)); note b on `b` (char 12, display 12, anchor 11, base
+        // span [11, 15)). In cells they collide (15 > 11); by char count
+        // (5 chars -> char-cells [5, 10), which a char-based packer would
+        // claim fits left of anchor 11) they would not — the cells must
+        // win.
+        let store = annotated_store_from_notes_file_at(
+            "fn main() {\n    a       b\n}\n",
+            &[(1, 4, "\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}"), (1, 12, "bb")],
+        );
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        // TWO rows: the CJK text's cell span reaches note b's ╭ (11), so
+        // the char-count "they fit" packing is forbidden.
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains('a') && l.contains('b'))
+            .unwrap_or_else(|| panic!("no ▴ code row:\n{frame}"));
+        assert!(
+            lines[code_idx - 1].contains("bb") && lines[code_idx - 2].contains('\u{4e2d}'),
+            "the CJK note and note b stack on separate rows (a char-count packer would share one and overwrite the ╭):\n{frame}"
+        );
+        let row_a = lines[code_idx - 2];
+        let row_b = lines[code_idx - 1];
+        // Note a's CJK text is intact at cells 5-14 (anchor + 2, 10
+        // cells; a char-count width would have claimed 5).
+        assert_eq!(col_of(row_a, "\u{256d}").unwrap(), 3, "note a's ╭ at anchor 3: {row_a:?}");
+        assert_eq!(col_of(row_a, "\u{4e2d}").unwrap(), 5, "the CJK text at cell 5, untruncated: {row_a:?}");
+        // Note b's further-out leader extends to the CJK text's cell end
+        // (15), not the char end (10): its text starts at 15, not 13.
+        assert_eq!(col_of(row_b, "\u{256d}").unwrap(), 11, "note b's ╭ at anchor 11: {row_b:?}");
+        assert_eq!(col_of(row_b, "bb").unwrap(), 15, "note b's text at the CJK note's CELL end (15), not the char end (10 → would start at 13): {row_b:?}");
+        for i in 12..=14 {
+            assert_eq!(row_b.chars().nth(i), Some('\u{2500}'), "note b's extended leader cell {i} is ─: {row_b:?}");
+        }
+    }
+
+    /// issue-annotations-layout — THREE notes: the two whose footprints are
+    /// disjoint pack onto one row, the third (whose base span collides with
+    /// the second's text) stacks below with its extended leader. One line
+    /// can thus produce exactly as many note rows as its collision depth
+    /// requires — not one row per record.
+    #[test]
+    fn note_packing_three_notes_two_pack_one_stacks() {
+        use crate::ui::root::Root;
+        use iocraft::prelude::*;
+        use std::sync::{Arc, Mutex};
+
+        // Line 1: `    a     b     c` — anchors 3, 9, 15. "aa" spans
+        // [3, 7); "bbbbbbbbbb" [9, 21) — disjoint from "aa", so they pack.
+        // "cc" base [15, 19) collides with "bbbbbbbbbb" (reaches 21) -> it
+        // stacks, its text starting at 21 (leader 5).
+        let store = annotated_store_from_notes_file_at(
+            "fn main() {\n    a     b     c\n}\n",
+            &[(1, 4, "aa"), (1, 10, "bbbbbbbbbb"), (1, 16, "cc")],
+        );
+        let shared = Arc::new(Mutex::new(store));
+        let mut app = element! {
+            ContextProvider(value: Context::owned(shared.clone())) {
+                Root
+            }
+        };
+        let frame = app.to_string();
+        let lines: Vec<&str> = frame.lines().collect();
+
+        let code_idx = lines
+            .iter()
+            .position(|l| l.contains("\u{25b4}") && l.contains('a') && l.contains('b') && l.contains('c'))
+            .unwrap_or_else(|| panic!("no ▴ code row:\n{frame}"));
+        let code = lines[code_idx];
+        assert_eq!(cols_of(code, '\u{25b4}'), vec![3, 9, 15], "three indicators at the three anchors: {code:?}");
+
+        // Exactly TWO note rows: the packed row (aa + bbbbbbbbbb) above the
+        // stacked row (cc).
+        let row_c = lines[code_idx - 1];
+        let row_packed = lines[code_idx - 2];
+        assert!(
+            row_packed.contains("aa") && row_packed.contains("bbbbbbbbbb"),
+            "the two disjoint notes share one row: {row_packed:?}\n{frame}"
+        );
+        assert!(!row_packed.contains('\u{25b4}'), "the packed row is a note row, not the code row: {row_packed:?}");
+        assert!(row_c.contains("cc") && !row_c.contains("aa") && !row_c.contains("bbbbbbbbbb"), "the colliding note stacks alone: {row_c:?}\n{frame}");
+        // Packed-row glyphs at their own cells: ╭ at 3 and 9, texts at 5
+        // and 11.
+        assert_eq!(cols_of(row_packed, '\u{256d}'), vec![3, 9], "both packed corners at their own anchors: {row_packed:?}");
+        assert_eq!(col_of(row_packed, "aa").unwrap(), 5, "aa's text at anchor + 2 (5): {row_packed:?}");
+        assert_eq!(col_of(row_packed, "bbbbbbbbbb").unwrap(), 11, "b's text at anchor + 2 (11): {row_packed:?}");
+        for &c in &[3usize, 9] {
+            assert!(cols_of(code, '\u{25b4}').contains(&c), "each packed ╭ (cell {c}) anchors at its own ▴ below");
+        }
+        // The stacked note: ╭ at 15, extended leader (five ─), text at 21.
+        assert_eq!(col_of(row_c, "\u{256d}").unwrap(), 15, "the stacked note's ╭ at its own anchor (15): {row_c:?}");
+        assert_eq!(col_of(row_c, "cc").unwrap(), 21, "the stacked note's text at the colliding note's text end (21): {row_c:?}");
+        for i in 16..=20 {
+            assert_eq!(row_c.chars().nth(i), Some('\u{2500}'), "the stacked note's leader cell {i} is ─: {row_c:?}");
+        }
+    }
+
+    /// issue-annotations-layout — the NEIGHBOUR GUARD (defence in depth at
+    /// the render boundary): store-built rows never reach it — the
+    /// packer's first-fit disjointness is pinned at the store level, and
+    /// the gate's sweep of store-built rows found 0 violations of
+    /// `slot[k].anchor + 1 + leader + width(text) <= slot[k+1].anchor` —
+    /// so this HAND-BUILT packed row with a colliding pair is the guard's
+    /// only reachable input, and the pin is the truncation itself: slot 1's
+    /// text stops at slot 2's own corner, never written past it. Deleting
+    /// the guard leaves slot 1's text running cells 13..15 past slot 2's
+    /// text end (slot 2's own glyphs overdraw cells 10..12 in draw order,
+    /// but the tail past its text end is only the guard's to stop) and
+    /// REDS here.
+    #[test]
+    fn note_packing_neighbour_guard_truncates_at_the_next_slot() {
+        use iocraft::prelude::*;
+
+        // The collision the store can never emit: slot 1's base span
+        // [3, 16) (╭ @3, ─ @4, text @5..15) covers slot 2's corner (10)
+        // AND its text end (13).
+        let note_row = FileViewRow {
+            line: 0,
+            is_note: true,
+            annotated: false,
+            anchors: vec![3, 10],
+            code_start: 0,
+            indent_chars: 0,
+            insertions: Vec::new(),
+            text: String::new(),
+            spans: Vec::new(),
+            matches: Vec::new(),
+            highlight: None,
+            note_slots: vec![
+                crate::app::store::NoteSlot {
+                    anchor: 3,
+                    leader: 1,
+                    text: "aaaaaaaaaaa".to_string(),
+                },
+                crate::app::store::NoteSlot {
+                    anchor: 10,
+                    leader: 1,
+                    text: "b".to_string(),
+                },
+            ],
+        };
+        let code_row = FileViewRow {
+            line: 0,
+            is_note: false,
+            annotated: true,
+            anchors: vec![3, 10],
+            code_start: 0,
+            indent_chars: 0,
+            insertions: Vec::new(),
+            text: "code".to_string(),
+            spans: Vec::new(),
+            matches: Vec::new(),
+            highlight: None,
+            note_slots: Vec::new(),
+        };
+        // Render the canvas directly at a pinned 80x2: the guard's
+        // boundary is min(row width, next slot's corner), so the width must
+        // exceed the collision for the slot boundary — not the row width —
+        // to be the discriminator. The bare canvas is content-sized (its own
+        // layout is height 0 + flex_grow, width 100%), so a fixed 80x2
+        // column View gives it the rows and width to draw into.
+        let mut app = element! {
+            View(flex_direction: FlexDirection::Column, width: 80, height: 2) {
+                FileViewCanvas(
+                    rows: vec![note_row, code_row],
+                    total_rows: 2usize,
+                    top_line: 0usize,
+                    region_lines: None,
+                    notes_folded: false,
+                )
+            }
+        };
+        let canvas = app.render(Some(80));
+        // get_text trims each row at its last DRAWN cell, so the pins below
+        // work on the trimmed row: slot 2's text (12) is the last drawn
+        // cell, and the guard's effect is the ABSENCE of 'a' anywhere else.
+        let row = canvas.get_text(0, 0, 80, 1);
+        // Slot 1's own cells are intact: ╭ at 3, bend at 4, text at 5.
+        assert_eq!(col_of(&row, "\u{256d}"), Some(3), "slot 1's ╭ at its anchor (3): {row:?}");
+        assert_eq!(col_of(&row, "aaaaa"), Some(5), "slot 1's text starts at anchor + 2 (5): {row:?}");
+        // Slot 2's cells are untouched: ╭ at 10, bend at 11, text at 12.
+        assert!(row.chars().nth(10) == Some('\u{256d}'), "slot 2's ╭ at its own corner (10): {row:?}");
+        assert!(row.chars().nth(11) == Some('\u{2500}'), "slot 2's bend at 11: {row:?}");
+        assert!(row.chars().nth(12) == Some('b'), "slot 2's text at 12: {row:?}");
+        // THE GUARD: slot 1's "aaaaaaaaaaa" (base span 5..15) is truncated
+        // to the 5 cells before slot 2's corner (5..9). Without the guard
+        // it would run 5..15 and cells 13..15 would keep 'a' past slot 2's
+        // text — slot 2's own glyphs overdraw only 10..12 in draw order.
+        assert_eq!(
+            row.chars().filter(|&c| c == 'a').count(),
+            5,
+            "slot 1's text is truncated to the 5 cells before the next slot's corner (5..9): {row:?}"
+        );
+        assert!(
+            row.chars().skip(13).all(|c| c != 'a'),
+            "no 'a' past slot 2's text — cells 13..15 would be the unguarded intrusion: {row:?}"
+        );
     }
 
     // ── issue-annotation-marker-cell: the inserted marker cell ───────
@@ -2006,6 +2514,7 @@ mod tests {
             }],
             matches: Vec::new(),
             highlight: None,
+            note_slots: Vec::new(),
         };
         let t = theme::current();
         let view_fg = color(t.view.foreground);
