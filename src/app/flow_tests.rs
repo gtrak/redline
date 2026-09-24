@@ -2189,10 +2189,12 @@ fn unit_flow_ann_delete() {
     let disk_gone = !std::fs::read_to_string(repo.path().join(".redline-notes.md"))
         .unwrap()
         .contains("check bounds");
-    // d on an unannotated line: the clear no-op message.
+    // d on an unannotated line: the clear no-op message (issue-annotation-
+    // per-symbol-creation: the delete keys on the record at the point's
+    // cell, so the message says "at point").
     s.key_event(key("C-p"));
     s.key_event(key("d"));
-    let no_ann_msg = s.message.contains("no annotation on this line");
+    let no_ann_msg = s.message.contains("no annotation at point");
     assert!(
         echo && cue_gone && count_gone && disk_gone && no_ann_msg,
         "echo={echo} cue-gone={cue_gone} count-gone={count_gone} disk-gone={disk_gone} \

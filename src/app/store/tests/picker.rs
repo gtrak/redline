@@ -622,6 +622,107 @@ use super::*;
         assert!(content.contains("A stray line inside the section."));
     }
 
+    // ── annot-picker-repair: several records on ONE line ─────────────
+
+    /// Fixture: TWO annotation records on the SAME (path, line) at two
+    /// different columns (record 1 on `a` at char col 8, record 2 on `b` at
+    /// char col 12 of `    let a = b;`). This is the shape the `A` key path
+    /// now produces (per-symbol, not per-line), so the two rows share the
+    /// detail `src/perc.rs:2` and are distinguishable ONLY by the record's
+    /// own `col` — the identity the picker used to drop.
+    fn project_with_two_annotations_on_one_line(dir: &std::path::Path) {
+        project_with_files(dir);
+        std::fs::write(dir.join("src/perc.rs"), "fn f() {\n    let a = b;\n}\n").unwrap();
+        std::fs::write(
+            dir.join(".redline-notes.md"),
+            "# Notes\n\n<!-- redline-annotations:begin -->\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 8\nanchor:     let a = b;\nnote: note a\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 12\nanchor:     let a = b;\nnote: note b\n<!-- redline-annotations:end -->\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn annotations_picker_d_deletes_the_selected_record_not_the_lines_first() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_two_annotations_on_one_line(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        assert_eq!(store.picker_count(), (2, 2));
+        // Both rows carry the SAME detail; only the record's own `col`
+        // distinguishes them (this is what the picker used to lose).
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.name.as_str(), c.detail.as_str(), c.ann_col))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("note a", "src/perc.rs:2", Some(8)),
+                ("note b", "src/perc.rs:2", Some(12)),
+            ]
+        );
+        // Select the SECOND row (note b, col 12) and delete it.
+        store.key_event(key("C-n"));
+        assert_eq!(store.picker_selected(), 1);
+        store.key_event(key("d"));
+        assert!(store.picker_open(), "d must not close the picker");
+        // The list recomputes: only the col-8 sibling survives. Pre-fix the
+        // line-keyed delete resolved the FIRST record, so this deleted
+        // "note a" and left "note b" behind (the gate's FAIL).
+        assert_eq!(store.picker_count(), (1, 1));
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["note a"], "the sibling must survive: {names:?}");
+        // The echo NAMES the second record, not the first.
+        assert!(
+            store.message.contains("deleted annotation: note b"),
+            "the echo must name the deleted (second) record: {}",
+            store.message
+        );
+        let content = std::fs::read_to_string(dir.path().join(".redline-notes.md")).unwrap();
+        assert!(content.contains("note a"), "the sibling record must survive: {content}");
+        assert!(!content.contains("note b"), "the second record must be gone: {content}");
+    }
+
+    #[test]
+    fn annotations_picker_ret_lands_on_the_selected_records_own_col() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_two_annotations_on_one_line(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        // Select the SECOND row (note b, col 12); RET must land on THAT
+        // record's column, not the line's first record (col 8) — the gate's
+        // FAIL landed where `A` pre-filled the FIRST note.
+        store.key_event(key("C-n"));
+        assert_eq!(store.picker_selected(), 1);
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
+        assert_eq!(store.view_name_display(), "src/perc.rs");
+        assert_eq!(store.point_line(), 1, "the point must land on the annotation's 0-based line");
+        assert_eq!(
+            store.point_col(),
+            12,
+            "the point must land on the SECOND record's col, not the first's (8)"
+        );
+        assert!(
+            store.message.contains("jumped to src/perc.rs:2"),
+            "{}",
+            store.message
+        );
+        // A following `A` pre-fills the SECOND note (the record at point),
+        // not the first — the user's original report.
+        store.key_event(key("A"));
+        assert!(store.note_prompt_active());
+        assert_eq!(
+            store.note_prompt_input(),
+            "note b",
+            "A must pre-fill the second note, not the first"
+        );
+    }
+
     #[test]
     fn annotations_picker_without_project_explains_itself() {
         let dir = tempfile::tempdir().unwrap(); // no markers → no project

@@ -409,8 +409,9 @@ use super::*;
         // anchor — replacing the landed "several records on one line share
         // one anchor" rule. `    a b`: record 1 on `a` (char 4 — first
         // token, anchor 3), record 2 on `b` (char 6 — mid-line, anchor 5).
-        // The `A` key path dedupes per line, so the fixture is a hand-built
-        // pair of records (not something the UI can produce).
+        // The fixture is a hand-built pair of records (the test pushes the
+        // entries directly); the `A` key path now addresses per symbol (not
+        // per line), so a line MAY host several records.
         let mut s = store_with_project();
         open_ann_file(&mut s, "src/ann2.rs", "c0\n    a b\nc2\n");
         for (col, text) in [(4usize, "note a"), (6usize, "note b")] {

@@ -400,6 +400,7 @@ mod tests {
             detail: "[fn] src/app/store.rs:1234".to_string(),
             docs: String::new(),
             category: String::new(),
+            ann_col: None,
         };
         let w = 80;
         let mut canvas = iocraft::Canvas::new(w, 1);
@@ -454,6 +455,7 @@ mod tests {
             detail: "*".into(),
             docs: String::new(),
             category: "branch".into(),
+            ann_col: None,
         };
         let other = PickerCandidate {
             name: "feature".into(),
@@ -462,6 +464,7 @@ mod tests {
             detail: String::new(),
             docs: String::new(),
             category: "branch".into(),
+            ann_col: None,
         };
         let w = 80;
         let cand_w = w - 1; // right edge 1 + cand_w = 80, inside the canvas

@@ -675,11 +675,13 @@ def flow_annotation_delete(app):
     # orphan leg's disk write) overwrote the echo, re-arm with the same
     # idempotent no-op `d`: the echo re-prints, the assertion is unchanged,
     # and a `d` that never echoes still FAILs both polls.
-    no_ann_msg = wait_for(app, lambda: "no annotation on this line"
+    # issue-annotation-per-symbol-creation: the message is now at-point
+    # (the delete keys on the record at the point's cell, not the line).
+    no_ann_msg = wait_for(app, lambda: "no annotation at point"
                           in app.row_text(app.rows - 2), 1.5)
     if not no_ann_msg:
         app.key("d")
-        no_ann_msg = wait_for(app, lambda: "no annotation on this line"
+        no_ann_msg = wait_for(app, lambda: "no annotation at point"
                               in app.row_text(app.rows - 2), 4.0)
     ok = echo and cue_gone and count_gone and disk_gone and no_ann_msg
     record("ann-delete", "d on annotated line; d on clean line", ok,

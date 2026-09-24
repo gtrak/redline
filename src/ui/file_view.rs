@@ -1875,8 +1875,9 @@ mod tests {
     /// at two columns and two note rows, each ╭ at its own anchor (the
     /// code row carries a SET of anchors — the landed "several records
     /// share one anchor" rule is gone). Folding leaves one ▸ PER ANNOTATION
-    /// (two here). The `A` key path dedupes per line, so the fixture is a
-    /// HAND-EDITED notes file, not something the UI can produce.
+    /// (two here). The fixture is a HAND-EDITED notes file (pushed
+    /// directly); the `A` key path now addresses per symbol (not per line),
+    /// so a line MAY host several records.
     #[test]
     fn annotation_multi_per_line_two_records_two_indicators_two_note_rows() {
         use crate::app::keymap::parse_key;
@@ -2130,9 +2131,9 @@ mod tests {
     /// one insertion (the leftmost symbol with no whitespace before it),
     /// the later marker MOVES +1 WITH the code (the existing shift logic),
     /// each marker stays adjacent to its own symbol, and the anchors stay
-    /// distinct. The `A` key path dedupes per line, so the fixture is a
-    /// HAND-EDITED notes file (with syntax ties), not something the UI can
-    /// produce.
+    /// distinct. The fixture is a HAND-EDITED notes file (with syntax
+    /// ties); the `A` key path now addresses per symbol (not per line), so
+    /// a line MAY host several records.
     #[test]
     fn annotation_multi_line_one_insertion_later_marker_moves_with_the_code() {
         use crate::ui::root::Root;

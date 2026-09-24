@@ -828,6 +828,16 @@ pub struct PickerCandidate {
     pub detail: String,
     pub docs: String,
     pub category: String,
+    /// (annotations-picker identity) the annotation record's own `col` —
+    /// present ONLY on the Annotations picker's rows, so a line that hosts
+    /// several records stays distinguishable (the `detail` `path:line` is
+    /// shared by every record on that line). `None` for every other picker.
+    /// Rendering caveat (wording, not a defect): a pre-marker-cell legacy
+    /// record with a raw mid-token `col` can render sharing its marker cell
+    /// with a new sibling on the same line (2 note rows, 1 marker); both
+    /// stay visible AND deletable — `ann_col` keeps each addressable even
+    /// when the marker cells collide.
+    pub ann_col: Option<usize>,
 }
 
 /// Picker overlay state. The filtered list is recomputed in the store

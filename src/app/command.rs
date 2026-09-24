@@ -883,13 +883,13 @@ impl CommandRegistry {
     fn register_annotations(&mut self) {
         self.register(Command::new(
             "annotate",
-            "Annotate the line at point (A / C-c a n): prompts in the minibuffer, RET commits (a record in .redline-notes.md, the inline cue appears immediately); on an annotated line the existing note pre-fills for edit",
+            "Annotate at point (A / C-c a n): prompts in the minibuffer, RET commits (a record in .redline-notes.md, the inline cue appears immediately); a record at the point's cell pre-fills for edit, and a point with no record of its own creates one (even on a line that already has annotations — a symbol, not the line, is the unit)",
             "annotations",
             |store, _arg| store.annotate(),
         ));
         self.register(Command::new(
             "annotate-delete",
-            "Delete the annotation on the line at point (d in the buffer view); echoes the removed note",
+            "Delete the annotation at point (d in the buffer view); echoes the removed note",
             "annotations",
             |store, _arg| store.annotate_delete(),
         )); // ── plan 004 issue 03: mark/region + kill ring ─────────────────

@@ -518,10 +518,11 @@ use super::*;
         s.annotate_delete();
         assert!(s.message.contains("deleted annotation: fi"), "{}", s.message);
         assert_eq!(ann_records(&s).len(), 0);
-        // d on an unannotated line: message, no record, no unbound-key echo.
+        // d at a point with no record at its cell: message, no record, no
+        // unbound-key echo.
         s.set_point_line(0);
         s.annotate_delete();
-        assert_eq!(s.message, "no annotation on this line");
+        assert_eq!(s.message, "no annotation at point");
         assert!(ann_records(&s).is_empty());
     }
 
@@ -550,6 +551,325 @@ use super::*;
         s.note_prompt_confirm();
         assert_eq!(ann_records(&s).len(), 0);
         assert_eq!(s.message, "note cancelled");
+    }
+
+    // ── issue-annotation-per-symbol-creation: the A / d key paths key on
+    // the record at POINT (path + line + the point's col after the
+    // symbol-start snap), not on the line ──────────────────────────────────
+
+    /// The user's exact report: on `    map: HashMap<String, u32>,`,
+    /// annotate the inner `String`, then press `A` on `map` — a SECOND
+    /// annotation is created and the first is untouched; a third `A` on
+    /// `String` edits the FIRST record (String's), not the second.
+    #[test]
+    fn annotation_a_at_point_creates_second_record_not_edits_the_line_first() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        // (1) Annotate the inner `String` (point mid-symbol, col 19 → the
+        // marker snaps to the symbol's start, col 17).
+        s.set_point(1, 19, 19);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "");
+        s.note_prompt_char('i');
+        s.note_prompt_char('n');
+        s.note_prompt_char('n');
+        s.note_prompt_char('e');
+        s.note_prompt_confirm();
+        // (2) The user's case: `A` on the field name `map` (mid-symbol,
+        // col 5 → snap 4). A DIFFERENT symbol of the SAME line: a second
+        // record is created, the first is untouched.
+        s.set_point(1, 5, 5);
+        s.annotate();
+        assert_eq!(
+            s.note_prompt_input(),
+            "",
+            "A on another symbol of an annotated line must NOT prefill the line's first record (the user's report)"
+        );
+        s.note_prompt_char('f');
+        s.note_prompt_char('n');
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2, "two annotations on one line: {recs:?}");
+        let inner = recs.iter().find(|a| a.text == "inne").unwrap();
+        assert_eq!(inner.col, 17, "the first record still sits on `String`'s start, untouched");
+        assert_eq!(inner.line, 1);
+        let field = recs.iter().find(|a| a.text == "fn").unwrap();
+        assert_eq!(field.col, 4, "the second record sits on the field name's start");
+        // (3) `A` on `String` again edits the FIRST record — prefill is
+        // String's note, not the field's.
+        s.set_point(1, 20, 20);
+        s.annotate();
+        assert_eq!(
+            s.note_prompt_input(),
+            "inne",
+            "A on String prefills String's record, not the field's"
+        );
+        s.note_prompt_cancel();
+    }
+
+    /// `d` at point deletes ONLY the record at the point's cell: a `d` on
+    /// the annotated symbol removes just that record (its sibling on the
+    /// line survives); a `d` on a symbol of the line with no record of its
+    /// own is a message, and deletes nothing.
+    #[test]
+    fn annotation_d_at_point_deletes_only_the_record_at_point() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        for (col, note) in [(19usize, "inne"), (5usize, "fn")] {
+            s.set_point(1, col, col);
+            s.annotate();
+            for c in note.chars() {
+                s.note_prompt_char(c);
+            }
+            s.note_prompt_confirm();
+        }
+        assert_eq!(ann_records(&s).len(), 2);
+        // d on `String` (mid-symbol col 20 → snap 17): deletes only String's.
+        s.set_point(1, 20, 20);
+        s.annotate_delete();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 1, "the sibling record survives: {recs:?}");
+        assert_eq!(recs[0].text, "fn");
+        assert!(s.message.contains("deleted annotation: inne"), "{}", s.message);
+        // d on `u32` (mid-symbol col 26 → snap 25): no record at that cell
+        // and no line-tied record → message, nothing deleted.
+        s.set_point(1, 26, 26);
+        s.annotate_delete();
+        assert_eq!(s.message, "no annotation at point");
+        assert_eq!(ann_records(&s).len(), 1);
+    }
+
+    /// Empty RET at point deletes ONLY the record at the point's cell
+    /// (the one being edited); empty RET at a fresh point cancels and
+    /// deletes nothing.
+    #[test]
+    fn annotation_empty_ret_at_point_deletes_only_the_record_at_point() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        for (col, note) in [(19usize, "inne"), (5usize, "fn")] {
+            s.set_point(1, col, col);
+            s.annotate();
+            for c in note.chars() {
+                s.note_prompt_char(c);
+            }
+            s.note_prompt_confirm();
+        }
+        assert_eq!(ann_records(&s).len(), 2);
+        // Pre-fill the field's note at `map`, clear it, RET → deletes only
+        // the field's record.
+        s.set_point(1, 5, 5);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "fn", "the field's record pre-fills for edit");
+        s.note_prompt_backspace();
+        s.note_prompt_backspace();
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 1, "only the record at point is deleted: {recs:?}");
+        assert_eq!(recs[0].text, "inne", "the sibling record survives");
+        // Fresh point (`u32`), empty RET → cancel, nothing deleted.
+        s.set_point(1, 26, 26);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "", "a fresh point has no prefill");
+        s.note_prompt_confirm();
+        assert_eq!(s.message, "note cancelled");
+        assert_eq!(ann_records(&s).len(), 1);
+    }
+
+    /// The line-tied rule (the chosen decision): a point that captured no
+    /// symbol (EOL, whitespace, a comment) has no symbol to key on, so the
+    /// line's LINE-TIED record (no syntax anchor) keeps the line as its
+    /// effective key — annotating elsewhere on such a line edits it. A
+    /// line with only SYMBOL-tied records gets no fallback: a line-tied
+    /// point creates a NEW record.
+    #[test]
+    fn annotation_line_tied_point_edits_the_line_tied_record_only() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        // A symbol-tied record on `String` (col 17).
+        s.set_point(1, 19, 19);
+        s.annotate();
+        s.note_prompt_char('i');
+        s.note_prompt_char('n');
+        s.note_prompt_confirm();
+        // A line-tied point (EOL, col 30) with only symbol records on the
+        // line: NO fallback → a new record is created (line-tied, raw col).
+        let eol = "    map: HashMap<String, u32>,".chars().count();
+        s.set_point(1, eol, eol);
+        s.annotate();
+        assert_eq!(
+            s.note_prompt_input(),
+            "",
+            "a line-tied point does not prefill a symbol-tied record"
+        );
+        s.note_prompt_char('e');
+        s.note_prompt_char('n');
+        s.note_prompt_char('d');
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2);
+        let end = recs.iter().find(|a| a.text == "end").unwrap();
+        assert!(end.syntax.is_none(), "the EOL record is line-tied (no symbol captured)");
+        assert_eq!(end.col, eol, "a non-symbol point keeps the raw cursor column");
+        // Now annotating ANOTHERWHERE on the same line, still at a
+        // no-symbol point (the space at col 8), EDITs the line-tied record
+        // (prefill = its note) and does not touch the symbol record nor
+        // create a third.
+        s.set_point(1, 8, 8);
+        s.annotate();
+        assert_eq!(
+            s.note_prompt_input(),
+            "end",
+            "the line's line-tied record pre-fills at any other no-symbol point on the line"
+        );
+        s.note_prompt_char('2');
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2, "the line-tied record was EDITED, not duplicated: {recs:?}");
+        let end = recs.iter().find(|a| a.text == "end2").unwrap();
+        assert!(end.syntax.is_none());
+        assert_eq!(end.col, eol, "the edit keeps the line-tied record's stored col");
+        let inner = recs.iter().find(|a| a.text == "in").unwrap();
+        assert_eq!(inner.col, 17, "the symbol record is untouched");
+    }
+
+    /// Ambiguity in the line-tied fallback: two line-tied records on one
+    /// line (two different raw cols) make "the line's record" a guess —
+    /// the fallback resolves to NO match, so `A` creates (never a wrong
+    /// tie, the whole feature's rule).
+    #[test]
+    fn annotation_line_tied_fallback_never_guesses_between_two_records() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        for (col, text) in [(30usize, "e1"), (8usize, "e2")] {
+            s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+                syntax: None,
+                path: "src/percell.rs".to_string(),
+                line: 1,
+                col,
+                anchor: "    map: HashMap<String, u32>,".to_string(),
+                text: text.to_string(),
+                orphaned: false,
+            }));
+        }
+        s.sync_notes_from_doc();
+        // A third no-symbol point (the space at col 24): two line-tied
+        // candidates → no prefill, a third record is created.
+        s.set_point(1, 24, 24);
+        s.annotate();
+        assert_eq!(s.note_prompt_input(), "", "two line-tied records: the fallback must not guess");
+        s.note_prompt_char('e');
+        s.note_prompt_char('3');
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 3, "creation, not a guess: {recs:?}");
+        assert!(recs.iter().any(|a| a.text == "e3" && a.col == 24));
+    }
+
+    /// Migration decision (stated, pinned): records written before the
+    /// marker-cell work may carry the RAW cursor col (mid-token) rather
+    /// than the symbol's start. Pointing at that symbol now CREATES a
+    /// second record instead of editing the legacy one — safe and
+    /// deliberate: the legacy record stays visible and deletable, and no
+    /// stored annotation is silently rewritten.
+    #[test]
+    fn annotation_legacy_raw_col_record_is_left_alone_by_the_symbol_point() {
+        let mut s = store_with_project();
+        open_ann_file(
+            &mut s,
+            "src/percell.rs",
+            "struct Config {\n    map: HashMap<String, u32>,\n}\n",
+        );
+        // Legacy shape: the record was made with the cursor mid-`map`
+        // (raw col 5), pre-marker-cell — its col is NOT the symbol's start.
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/percell.rs".to_string(),
+            line: 1,
+            col: 5,
+            anchor: "    map: HashMap<String, u32>,".to_string(),
+            text: "legacy".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_point(1, 5, 5);
+        s.annotate();
+        assert_eq!(
+            s.note_prompt_input(),
+            "",
+            "the legacy mid-token record does not address the symbol's cell (4)"
+        );
+        s.note_prompt_char('n');
+        s.note_prompt_char('e');
+        s.note_prompt_confirm();
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2, "creation alongside the legacy record: {recs:?}");
+        assert!(
+            recs.iter().any(|a| a.text == "legacy" && a.col == 5),
+            "the legacy record stays exactly as stored (visible + deletable)"
+        );
+        assert!(recs.iter().any(|a| a.text == "ne" && a.col == 4));
+    }
+
+    /// Two records on one line (made through the real `A` path) survive a
+    /// save/load round-trip through `.redline-notes.md`: both stay on disk,
+    /// and a SECOND store on the same project reloads both, at their own
+    /// cols, with the re-anchor pass having moved nothing.
+    #[test]
+    fn annotation_two_records_on_one_line_round_trip_through_notes_file() {
+        let content = "struct Config {\n    map: HashMap<String, u32>,\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/percell.rs", content);
+        for (col, note) in [(19usize, "inne"), (5usize, "fn")] {
+            s.set_point(1, col, col);
+            s.annotate();
+            for c in note.chars() {
+                s.note_prompt_char(c);
+            }
+            s.note_prompt_confirm();
+        }
+        assert_eq!(ann_records(&s).len(), 2);
+        // On disk: both records, with their own cols.
+        let root = s.project.as_ref().unwrap().root.clone();
+        let disk = std::fs::read_to_string(root.join(".redline-notes.md")).unwrap();
+        assert!(disk.contains("note: inne"), "{disk}");
+        assert!(disk.contains("note: fn"), "{disk}");
+        assert!(disk.contains("col: 17"), "String's record col: {disk}");
+        assert!(disk.contains("col: 4"), "the field record col: {disk}");
+        // A second store on the same project reloads BOTH records (the
+        // re-anchor pass runs on load and moves nothing — the symbols are
+        // where the records say).
+        let base = tempfile::tempdir().unwrap();
+        let mut s2 = AppStore::at(&root, base.path().to_path_buf());
+        open_ann_file(&mut s2, "src/percell.rs", content);
+        s2.ensure_notes_doc();
+        let recs = ann_records(&s2);
+        assert_eq!(recs.len(), 2, "both records survive the round trip: {recs:?}");
+        let inner = recs.iter().find(|a| a.text == "inne").unwrap();
+        assert_eq!(inner.col, 17, "re-anchored: still on `String`'s start");
+        assert!(!inner.orphaned);
+        let field = recs.iter().find(|a| a.text == "fn").unwrap();
+        assert_eq!(field.col, 4);
+        assert!(!field.orphaned);
     }
 
     // ── plan 007 issue 02: syntax-anchored annotations ───────────────────

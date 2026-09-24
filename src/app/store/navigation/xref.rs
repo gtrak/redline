@@ -604,6 +604,7 @@ impl AppStore {
                 detail: format!("[{}] {}", loc.symbol.kind.tag(), loc.file),
                 docs: String::new(),
                 category: "symbol".to_string(),
+                ann_col: None,
             })
             .collect();
         self.open_picker(PickerKind::Symbols, "Symbol: ", candidates);

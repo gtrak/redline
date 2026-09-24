@@ -60,6 +60,7 @@ pub(in crate::app::store) fn xref_location_candidate(d: &crate::nav::index::Loca
         detail: format!("{} {}:{}", tag, d.file, d.symbol.line + 1),
         docs: String::new(),
         category: "xref".to_string(),
+        ann_col: None,
     }
 }
 

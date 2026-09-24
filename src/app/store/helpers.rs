@@ -36,6 +36,7 @@ pub(super) fn file_candidate(rel: &str) -> PickerCandidate {
         detail: if label == rel { String::new() } else { rel.to_string() },
         docs: String::new(),
         category: "file".to_string(),
+        ann_col: None,
     }
 }
 

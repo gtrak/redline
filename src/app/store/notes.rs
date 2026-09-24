@@ -115,15 +115,62 @@ impl AppStore {
         self.buffer_annotation_path(&key)
     }
 
-    /// The index of the FIRST structured-section record anchored at the
-    /// current buffer's line `line`, or `None` when the line carries no
-    /// annotation.
-    fn record_index_for_line(&self, line: usize) -> Option<usize> {
+    /// The index of the record addressed by the point in the current
+    /// buffer (issue-annotation-per-symbol-creation): the record at the
+    /// point's CELL `(path, line, col)` — `line` is the point's line and
+    /// `col` the point's column AFTER the symbol-start snap (the
+    /// symbol's start column when the point captured a symbol, the raw
+    /// point column otherwise), so pointing anywhere inside a symbol
+    /// addresses that symbol's record. Replaces the old line-keyed
+    /// lookup ("the first record on the line"), which is what made `A`
+    /// edit an annotated line's first record regardless of where the
+    /// cursor was.
+    fn record_index_at_point(&self) -> Option<usize> {
+        let key = self.buffers.current()?.to_string();
+        let line = self.point_line();
+        let captured = self.capture_syntax_anchor(&key, line);
+        let col = captured
+            .as_ref()
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| self.point_col());
+        self.record_index_at(line, col, captured.is_some())
+    }
+
+    /// The index of the record at the cell `(path, line, col)` of the
+    /// current buffer — the per-symbol creation/deletion key
+    /// (issue-annotation-per-symbol-creation). `symbol_captured`
+    /// records whether the point landed on a symbol and gates the
+    /// line-tied fallback below:
+    /// - a SYMBOL point addresses EXACTLY the record at its cell — other
+    ///   records on the line never match, which is what lets `A` create
+    ///   a second annotation on an already-annotated line;
+    /// - a NO-SYMBOL point (EOL, whitespace, a comment) that misses its
+    ///   raw cell falls back to the line's record when EXACTLY ONE record
+    ///   on the line is itself line-tied (no syntax anchor) — a line-tied
+    ///   record has no symbol to key on, so it keeps the line as its
+    ///   effective key (the one case where "at point" cannot be exact).
+    ///   Several line-tied records on the line are ambiguous → no match
+    ///   (creation), never a guess. Two records can never collide on
+    ///   `(path, line, col)`: creation dedupes on the cell.
+    fn record_index_at(&self, line: usize, col: usize, symbol_captured: bool) -> Option<usize> {
         let rel = self.current_annotation_path()?;
-        self.notes_doc
+        let exact = self.notes_doc.entries.iter().position(|e| {
+            matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line && a.col == col)
+        });
+        if exact.is_some() || symbol_captured {
+            return exact;
+        }
+        let mut line_tied = self
+            .notes_doc
             .entries
             .iter()
-            .position(|e| matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line))
+            .enumerate()
+            .filter(|(_, e)| {
+                matches!(e, NotesEntry::Record(a)
+                    if a.path == rel && a.line == line && a.syntax.is_none())
+            });
+        let (idx, _) = line_tied.next()?;
+        (line_tied.next().is_none()).then_some(idx)
     }
 
     /// Re-anchor the annotations of the buffer at `key` against the
@@ -443,9 +490,14 @@ impl AppStore {
         }
     }
 
-    /// `A` (plan 005 issue 02): prompt for an annotation on the line at
-    /// point in the minibuffer. An existing record on the line pre-fills
-    /// the prompt (edit); RET commits (record written to
+    /// `A` (plan 005 issue 02, per-symbol by issue-annotation-per-symbol-
+    /// creation): prompt for an annotation AT POINT in the minibuffer. A
+    /// record at the point's cell (path + line + the point's col after
+    /// the symbol-start snap, with the line-tied fallback — see
+    /// `record_index_at`) pre-fills the prompt (edit); a point with no
+    /// record of its own commits a NEW record on RET — even when the
+    /// line already carries annotations (a symbol, not the line, is the
+    /// unit of annotation). RET commits (record written to
     /// `.redline-notes.md`, cue appears immediately), C-g/ESC cancels.
     pub fn annotate(&mut self) {
         if self.top_view() != ViewId::Buffer {
@@ -461,11 +513,13 @@ impl AppStore {
         }
         self.ensure_notes_doc();
         let line = self.point_line();
-        let prefill = self.notes_doc.entries.iter().find_map(|e| {
-            e.as_record()
-                .filter(|a| a.line == line && a.path == self.current_annotation_path().as_deref().unwrap_or(""))
-                .map(|a| a.text.clone())
-        });
+        // issue-annotation-per-symbol-creation: prefill from the record
+        // AT POINT, never from "the line's first record" — the old
+        // line-keyed prefill is the user-reported bug (`A` on a second
+        // symbol of an annotated line just edited the first one).
+        let prefill = self
+            .record_index_at_point()
+            .and_then(|i| self.notes_doc.entries[i].as_record().map(|a| a.text.clone()));
         self.note_prompt_line = line;
         self.note_prompt_input = prefill.unwrap_or_default();
         self.note_prompt_active = true;
@@ -503,9 +557,14 @@ impl AppStore {
         self.minibuffer_message("note cancelled");
     }
 
-    /// RET in the `A` prompt (plan 005 issue 02): commit the record.
-    /// Empty input on an existing record deletes it; empty input on a
-    /// fresh prompt cancels.
+    /// RET in the `A` prompt (plan 005 issue 02, per-symbol by
+    /// issue-annotation-per-symbol-creation): commit the record. The
+    /// prompt addresses the record at POINT (its cell — see
+    /// `record_index_at`): empty input deletes THAT record when there is
+    /// one, and cancels when the point addressed none; non-empty input
+    /// edits it in place, or creates a new record at the point's cell
+    /// when the point addressed none (even on a line that already
+    /// carries annotations).
     pub fn note_prompt_confirm(&mut self) {
         if !self.note_prompt_active {
             return;
@@ -514,15 +573,10 @@ impl AppStore {
         let text = self.note_prompt_input.trim().to_string();
         self.note_prompt_active = false;
         self.note_prompt_input.clear();
-        if text.is_empty() {
-            if self.record_index_for_line(line).is_some() {
-                self.delete_annotation_at(line);
-            } else {
+        let Some(key) = self.buffers.current().map(String::from) else {
+            if text.is_empty() {
                 self.minibuffer_message("note cancelled");
             }
-            return;
-        }
-        let Some(key) = self.buffers.current().map(String::from) else {
             return;
         };
         let Some(rel) = self.buffer_annotation_path(&key) else {
@@ -550,10 +604,18 @@ impl AppStore {
             .as_ref()
             .map(|(_, c)| *c)
             .unwrap_or_else(|| self.point_col());
-        let existing = self.notes_doc.entries.iter().position(|e| {
-            matches!(e, NotesEntry::Record(a) if a.path == rel && a.line == line)
-        });
-        match existing {
+        // issue-annotation-per-symbol-creation: the record addressed by
+        // the prompt is the one AT POINT (its cell + the line-tied
+        // fallback) — not "the first record on the line".
+        let at_point = self.record_index_at(line, col, captured.is_some());
+        if text.is_empty() {
+            match at_point {
+                Some(idx) => self.delete_annotation_at_index(idx),
+                None => self.minibuffer_message("note cancelled"),
+            }
+            return;
+        }
+        match at_point {
             Some(i) => {
                 // Edit: only the note text changes (the record's stored
                 // position stays — the re-anchor pass maintains it). A
@@ -686,10 +748,12 @@ impl AppStore {
         ))
     }
 
-    /// `d` in the buffer view (plan 005 issue 02): delete the annotation
-    /// on the line at point, echoing what was removed. A line with no
-    /// annotation gets a message (never a self-insert, never an unbound-key
-    /// echo).
+    /// `d` in the buffer view (plan 005 issue 02, per-symbol by
+    /// issue-annotation-per-symbol-creation): delete the annotation AT
+    /// POINT — the record at the point's cell (see `record_index_at`),
+    /// not the line's first record — echoing what was removed. A point
+    /// that addresses no annotation gets a message (never a
+    /// self-insert, never an unbound-key echo).
     pub fn annotate_delete(&mut self) {
         if self.top_view() != ViewId::Buffer {
             self.minibuffer_message("annotate-delete: not in the file view");
@@ -703,27 +767,20 @@ impl AppStore {
             return;
         }
         self.ensure_notes_doc();
-        let line = self.point_line();
-        match self.record_index_for_line(line) {
+        match self.record_index_at_point() {
             Some(idx) => self.delete_annotation_at_index(idx),
-            None => self.minibuffer_message("no annotation on this line"),
+            None => self.minibuffer_message("no annotation at point"),
         }
     }
 
-    /// Delete the record anchored at the current buffer's line `line` (the
-    /// empty-RET edit-path delete).
-    fn delete_annotation_at(&mut self, line: usize) {
-        match self.record_index_for_line(line) {
-            Some(idx) => self.delete_annotation_at_index(idx),
-            None => self.minibuffer_message("note cancelled"),
-        }
-    }
-
-    /// Delete the record at `(path, line)` (015-01's annotations picker
-    /// `d`): the picker holds the location itself, so no current buffer
-    /// line is involved. A record no longer present (deleted elsewhere
-    /// while the list was open) gets a message, not a panic.
-    pub(super) fn delete_annotation_at_path_line(&mut self, path: &str, line: usize) {
+    /// Delete the record at `(path, line, col)` (015-01's annotations
+    /// picker `d`): the picker holds the location itself, so no current
+    /// buffer line is involved. A record no longer present (deleted
+    /// elsewhere while the list was open) gets a message, not a panic.
+    /// The record is keyed on its own CELL — `col` disambiguates the
+    /// several records a line can host (the line-only key resolved the
+    /// FIRST record, so deleting the second row dropped the first).
+    pub(super) fn delete_annotation_at_path_line_col(&mut self, path: &str, line: usize, col: usize) {
         // Like `annotate_delete`: the disk/buffer notes state is the
         // source of truth, so load/re-parse before deleting (an external
         // edit while the picker was open must not be clobbered).
@@ -732,7 +789,7 @@ impl AppStore {
             .notes_doc
             .entries
             .iter()
-            .position(|e| matches!(e, NotesEntry::Record(a) if a.path == path && a.line == line));
+            .position(|e| matches!(e, NotesEntry::Record(a) if a.path == path && a.line == line && a.col == col));
         match idx {
             Some(idx) => self.delete_annotation_at_index(idx),
             None => self.minibuffer_message("annotation already deleted"),

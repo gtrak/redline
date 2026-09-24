@@ -16,6 +16,7 @@ impl AppStore {
                 detail: String::new(),
                 docs: c.docs.to_string(),
                 category: c.category.to_string(),
+                ann_col: None,
             })
             .collect()
     }
@@ -51,6 +52,7 @@ impl AppStore {
                     detail: if label == rel { String::new() } else { rel.clone() },
                     docs: String::new(),
                     category: "recent".to_string(),
+                    ann_col: None,
                 });
             }
         }
@@ -75,6 +77,7 @@ impl AppStore {
                 detail,
                 docs: String::new(),
                 category: "buffer".to_string(),
+                ann_col: None,
             }
         }).collect()
     }
@@ -97,6 +100,7 @@ impl AppStore {
                 detail: p.root.to_string_lossy().into_owned(),
                 docs: p.root.to_string_lossy().into_owned(),
                 category: "project".to_string(),
+                ann_col: None,
             })
             .collect()
     }
@@ -133,28 +137,13 @@ impl AppStore {
                         detail,
                         docs: String::new(),
                         category: "annotation".to_string(),
+                        ann_col: Some(a.col),
                     },
                 )
             })
             .collect();
         rows.sort_by(|(p1, l1, _), (p2, l2, _)| p1.cmp(p2).then(l1.cmp(l2)));
         rows.into_iter().map(|(_, _, c)| c).collect()
-    }
-
-    /// (jump-column-landings P2-1) The recorded column of the annotation at
-    /// `(path, line)` in the notes document — its `Annotation.col`, the
-    /// point's column at creation — or `0` when no such record is loaded.
-    /// The annotations picker offer encodes only "path:line", so the column
-    /// is looked up here rather than re-derived. Reads the notes document
-    /// directly (already loaded when the picker was populated).
-    fn annotation_col(&self, path: &str, line: usize) -> usize {
-        self.notes_doc
-            .entries
-            .iter()
-            .filter_map(|e| e.as_record())
-            .find(|a| a.path == path && a.line == line)
-            .map(|a| a.col)
-            .unwrap_or(0)
     }
 
     /// `C-c n a` (015-01): open the annotations picker — a temporary,
@@ -179,7 +168,7 @@ impl AppStore {
     /// the buffer view's `d` reached from the picker (the Stash list's
     /// `x` drop is the sibling precedent).
     pub(super) fn annotations_picker_delete(&mut self) {
-        let Some((detail, query)) = self
+        let Some((detail, ann_col, query)) = self
             .picker
             .as_ref()
             .and_then(|p| {
@@ -187,18 +176,24 @@ impl AppStore {
                     .then(|| {
                         p.filtered
                             .get(p.selected)
-                            .map(|(cand, _)| (cand.detail.clone(), p.query.clone()))
+                            .map(|(cand, _)| {
+                                (cand.detail.clone(), cand.ann_col, p.query.clone())
+                            })
                     })
                     .flatten()
             })
         else {
             return;
         };
-        // detail is "path:line" (1-based line number, as displayed).
+        // detail is "path:line" (1-based line number, as displayed);
+        // ann_col is the record's own cell column — the key that
+        // distinguishes the several records a line can host (the
+        // line-only key deleted the FIRST record, not the selected one).
         if let Some((path, line_str)) = detail.rsplit_once(':')
             && let Ok(line) = line_str.parse::<usize>()
+            && let Some(col) = ann_col
         {
-            self.delete_annotation_at_path_line(path, line - 1);
+            self.delete_annotation_at_path_line_col(path, line - 1, col);
             let candidates = self.annotations_candidates();
             self.set_picker_query(PickerKind::Annotations, query, candidates);
         }
@@ -241,6 +236,7 @@ impl AppStore {
                     String::new()
                 },
                 category: "branch".to_string(),
+                ann_col: None,
             })
             .collect()
     }
@@ -259,6 +255,7 @@ impl AppStore {
                 detail: s.subject,
                 docs: String::new(),
                 category: "stash".to_string(),
+                ann_col: None,
             })
             .collect()
     }
@@ -318,6 +315,7 @@ impl AppStore {
             detail: format!("[tooling] {name}"),
             docs: String::new(),
             category: "xref".to_string(),
+            ann_col: None,
         })
     }
 
@@ -362,6 +360,7 @@ impl AppStore {
                     detail: format!("{}:{}", l.file, l.impl_line + 1),
                     docs: String::new(),
                     category: "impls".to_string(),
+                    ann_col: None,
                 });
             }
         }
@@ -412,6 +411,7 @@ impl AppStore {
             detail: format!("[{}]", s.kind.tag()),
             docs: String::new(),
             category: "imenu".to_string(),
+            ann_col: None,
         }
     }
 
@@ -473,6 +473,7 @@ impl AppStore {
                 detail: format!("[{}] {}", loc.symbol.kind.tag(), loc.file),
                 docs: String::new(),
                 category: "symbol".to_string(),
+                ann_col: None,
             })
             .collect()
     }
@@ -846,6 +847,7 @@ impl AppStore {
                             c.name.clone(),
                             c.detail.clone(),
                             c.label.clone(),
+                            c.ann_col,
                         )
                     })
             });
@@ -855,7 +857,7 @@ impl AppStore {
         let tooling = self.xref_tooling_pending.clone();
         self.picker = None;
         self.xref_tooling_pending = None;
-        let Some((kind, name, detail, label)) = choice else {
+        let Some((kind, name, detail, label, ann_col)) = choice else {
             self.minibuffer_message("no candidate selected");
             return;
         };
@@ -987,17 +989,18 @@ impl AppStore {
                 // detail is "path:line" (1-based line number, as shown).
                 // (jump-column-landings P2-1) the annotation record DOES
                 // carry a column — `Annotation.col`, the point's column at
-                // creation, written to the notes file. The offer encodes
-                // only "path:line", so it is looked up in the notes
-                // document here (not re-derived) and the landing sits on
-                // that column, not the line start. A record absent from the
-                // loaded notes document degrades to col 0, and `set_point`
-                // clamps a stale column to the line's end (never OOB).
+                // creation, written to the notes file. It travels with the
+                // candidate row (`ann_col`), so the landing sits on the
+                // SELECTED record's column, not the line start and not the
+                // first record on the line (a line can host several). A row
+                // without a recorded column degrades to col 0, and
+                // `set_point` clamps a stale column to the line's end
+                // (never OOB).
                 if let Some((file, line_str)) = detail.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();
-                    let col = self.annotation_col(file, line - 1);
+                    let col = ann_col.unwrap_or(0);
                     self.open_path(file);
                     self.set_point(line - 1, col, col);
                     self.recenter_landing();
