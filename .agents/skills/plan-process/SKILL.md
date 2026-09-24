@@ -696,3 +696,32 @@ The brief already said "commit before you report", which is not enough: a lane r
 
   Redirect and print the status:
   `timeout 900 tools/gate.sh full > /tmp/gate.log 2>&1; echo "GATE_EXIT=$?"` — then grep the file.
+
+## A probe run against a stale artifact measures the artifact, not the change
+
+`cargo test` and `cargo clippy --all-targets` do **not** produce the application binary. A PTY probe
+that launches `target/debug/<bin>` therefore tests whatever was last built — which is how a fully
+correct, gated, landed feature was reported as `4/8 passed` (no OSC 52 escape emitted, pasted
+non-ASCII dropped) seconds after landing. Both "failures" were the pre-feature binary still on disk.
+
+**Before running any probe that launches a binary: `cargo build` first, in the same tree, and check the
+binary's mtime.** When a probe reports a cluster of failures that all look like the feature is absent,
+suspect the artifact before the code — especially when the same probe passed in the worktree the lane
+and the gate used (they had built; the landing checkout had not).
+
+Corollary: a probe that launches a binary should say which binary and be preceded by a build in its
+own instructions, so the precondition cannot be half-remembered.
+
+## Never pipe a battery or a probe to `tail` — including inside a long chain
+
+`cmd | tail -3` returns **`tail`'s** status, not the command's. This has now produced a false pass (a
+failing gate read as green) and a spurious FAIL (a passing gate read as red) in this project, and it
+happened again inside a long `&&`/`;` chain whose tail element was the probe — `PROBE_EXIT=0` while the
+probe had actually exited 1.
+
+The discipline must survive long chains, which is exactly where it gets dropped. Always:
+
+    cmd > /tmp/out.log 2>&1; echo "EXIT=$?"
+
+and read the log separately. If a status matters, it must come from `$?`/`${PIPESTATUS[0]}` on the
+command itself, never from the end of a pipeline.
