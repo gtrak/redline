@@ -178,6 +178,11 @@ impl GitRepo {
 
         let mut new_entry = existing;
         new_entry.id = new_oid;
+        // The index blob is reverse-applied content, not the workdir file; the
+        // workdir still carries the unstaged hunk. Zero the carried stat so git
+        // re-hashes and reports the surviving workdir delta (same lie as
+        // reset_index_entry_to_head).
+        Self::zero_index_entry_stat(&mut new_entry);
         index.add_frombuffer(&new_entry, &new_content)?;
         index.write()?;
         Ok(())
@@ -408,6 +413,24 @@ impl GitRepo {
         Ok(())
     }
 
+    /// Zero an index entry's stat cache (ctime/mtime/dev/ino/uid/gid/
+    /// file_size). Call this whenever an entry's blob is set to content that is
+    /// NOT the workdir file — HEAD's blob (reset/unstage) or a reverse-applied
+    /// index blob (unstage-hunk). Carrying the workdir stat (copied from a prior
+    /// `add_path`) makes `git status` see a matching stat, so git's
+    /// racy-timestamp re-hash never fires and a genuinely modified workdir file
+    /// is reported clean. `git reset` writes a zeroed stat for exactly this
+    /// reason (ctime 0:0, mtime 0:0, ino 0, size 0), forcing a re-hash.
+    fn zero_index_entry_stat(e: &mut git2::IndexEntry) {
+        e.ctime = git2::IndexTime::new(0, 0);
+        e.mtime = git2::IndexTime::new(0, 0);
+        e.dev = 0;
+        e.ino = 0;
+        e.uid = 0;
+        e.gid = 0;
+        e.file_size = 0;
+    }
+
     /// Reset an index entry to the version of `path` stored in HEAD.
     fn reset_index_entry_to_head(&self, path: &str) -> Result<(), GitError> {
         let head_tree = self.head_tree()?;
@@ -429,6 +452,10 @@ impl GitRepo {
         let mut new_entry = base;
         new_entry.id = oid;
         new_entry.mode = mode;
+        // The entry now names HEAD's blob, not the workdir file. Zero the stat
+        // cache (which `base` may carry from a prior `add_path`) so git must
+        // re-hash the workdir file and cannot be fooled into calling it clean.
+        Self::zero_index_entry_stat(&mut new_entry);
         index.add_frombuffer(&new_entry, &content)?;
         index.write()?;
         Ok(())

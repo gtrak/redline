@@ -32,6 +32,23 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Back-date `path`'s mtime/ctime 5 s into the past (GNU `touch`). This puts
+/// the workdir file's stat outside git's racy-timestamp window, so a stat
+/// cache that "matches" is trusted and the re-hash that would expose a lie is
+/// skipped. The reported stat-cache-lie reproduction forces exactly this.
+fn backdate(path: &Path) {
+    let out = std::process::Command::new("touch")
+        .args(["-d", "5 seconds ago"])
+        .arg(path)
+        .output()
+        .expect("run touch");
+    assert!(
+        out.status.success(),
+        "touch -d failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn init_repo(dir: &Path) -> GitRepo {
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["config", "user.name", "Test"]);
@@ -157,6 +174,78 @@ fn stage_file_then_unstage_matches_cli() {
         "after unstage, --cached must be empty"
     );
     assert!(git(root, &["diff"]).contains("+B"));
+}
+
+#[test]
+fn unstage_file_stat_cache_lie_loop() {
+    // Regression for issue-git-stat-cache-lie: `unstage_file` must not leave
+    // the workdir file's stat cache on an index entry that names HEAD's blob.
+    // If it does, `git status` sees a matching stat, git's racy-timestamp
+    // re-hash never fires, and a genuinely modified file is reported clean.
+    //
+    // This is a LOOP, on purpose. A single iteration passes even with the bug
+    // present, because the lie only surfaces when the workdir mtime is >= 2s
+    // old (git's racy window). `backdate` forces that, making every iteration
+    // a deterministic failure on the unfixed code (the reported reproduction:
+    // ~1/1200 naturally, 200/200 when forced).
+    const ITERS: u32 = 25;
+    for i in 1..=ITERS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        std::fs::write(root.join("a.txt"), "a\nb\nc\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+
+        // The change, on disk: HEAD is "a\nb\nc\n", workdir is "a\nB\nc\n".
+        std::fs::write(root.join("a.txt"), "a\nB\nc\n").unwrap();
+        // Force the mtime into the past so the racy re-hash that would mask
+        // the lie on a fresh mtime does not fire.
+        backdate(&root.join("a.txt"));
+
+        g.stage_file("a.txt").unwrap();
+        g.unstage_file("a.txt", None).unwrap();
+
+        // The workdir file is modified relative to HEAD. The CLI (the oracle)
+        // must report it as unstaged-modified; the wrapper must agree.
+        let porcelain = git(root, &["status", "--porcelain"]);
+        let cli_modified = porcelain
+            .lines()
+            .any(|l| l.starts_with(" M") && l.contains("a.txt"));
+        let st = g.status().unwrap();
+        let wrapper_modified = st
+            .files
+            .iter()
+            .any(|f| f.path == "a.txt" && f.unstaged == StatusKind::Modified);
+
+        assert!(
+            cli_modified && wrapper_modified,
+            "iteration {i}: an unstage left a modified file reading clean\
+             (stat-cache lie). CLI and wrapper must both report a.txt\
+             modified, but CLI_modified={cli_modified}\
+             wrapper_modified={wrapper_modified}\n\
+             porcelain={porcelain:?}\n\
+             workdir={:?}",
+            std::fs::read_to_string(root.join("a.txt")).unwrap()
+        );
+
+        // Reverse direction stays correct: `git diff --cached` (index vs HEAD)
+        // must be empty after an unstage — the index named HEAD's blob.
+        assert!(
+            git(root, &["diff", "--cached"]).trim().is_empty(),
+            "iteration {i}: --cached must be empty after unstage"
+        );
+
+        // Clean-shown-clean: restore the workdir to HEAD. The zeroed stat
+        // must NOT turn a now-matching file into a false "modified".
+        std::fs::write(root.join("a.txt"), "a\nb\nc\n").unwrap();
+        backdate(&root.join("a.txt"));
+        let clean_porcelain = git(root, &["status", "--porcelain"]);
+        assert!(
+            !clean_porcelain.lines().any(|l| l.contains("a.txt")),
+            "iteration {i}: a clean file is shown modified (false positive):\n{clean_porcelain}"
+        );
+    }
 }
 
 #[test]
