@@ -139,11 +139,36 @@ impl Key {
     }
 
     /// True if this key produces a printable character the picker can
-    /// append to its query: an unmodified ASCII 0x20..=0x7E char, or Space.
+    /// append to its query (and the editable buffers can self-insert):
+    /// an UNMODIFIED (no ctrl/alt) char outside the control classes.
+    ///
+    /// issue-clipboard-and-selection (part 3): the gate used to be
+    /// ASCII-only (`0x20..=0x7E`), which silently DROPPED every non-ASCII
+    /// character of a pasted string. Paste arrives as ordinary key
+    /// events — the app deliberately does NOT request bracketed paste
+    /// (`?2004h`): iocraft surfaces no `Paste` event, so enabling it
+    /// would turn a working paste into unhandled escape sequences (a
+    /// measured, deliberate non-change) — and so the self-insert gate
+    /// must accept printable UNICODE: combining marks (width 0) and wide
+    /// chars (中, 2 cells) are printable text; the display-cell math
+    /// (plan 004 05d) prices them at render time, nothing here assumes
+    /// width 1. What stays REJECTED is the control class — C0
+    /// (`0x00–0x1F`), DEL (`0x7F`), and C1 (`0x80–0x9F`): a control byte
+    /// must never reach a buffer, a query, or the engine as "text".
+    /// Widening is monotonic: every `char_value` consumer (notes/commit
+    /// self-insert, the picker filters, the search prompt, goto-line,
+    /// the branch name) just accepts MORE input; nothing that was
+    /// accepted before is rejected now.
     pub fn printable(self) -> bool {
+        if self.ctrl || self.alt {
+            return false;
+        }
         match self.code {
-            KeyCode::Char(c) => !self.ctrl && !self.alt && (0x20u32..=0x7Eu32).contains(&(c as u32)),
-            KeyCode::Space => !self.ctrl && !self.alt,
+            KeyCode::Char(c) => {
+                let n = c as u32;
+                !(0x00..=0x1F).contains(&n) && n != 0x7F && !(0x80..=0x9F).contains(&n)
+            }
+            KeyCode::Space => true,
             _ => false,
         }
     }
@@ -767,5 +792,37 @@ mod tests {
             Some(Lookup::Command("close-view")),
             "q in Buffer → close-view"
         );
+    }
+
+    /// issue-clipboard-and-selection (part 3): the self-insert gate
+    /// accepts printable UNICODE (a paste arrives as ordinary key events —
+    /// the app deliberately does not request bracketed paste, so the
+    /// gate is the paste's entry) and still rejects the control classes
+    /// (C0, DEL, C1) and modifier-carrying chars. Dropping any of the
+    /// control exclusions must redden this test.
+    #[test]
+    fn char_value_accepts_printable_unicode_and_rejects_control_classes() {
+        let k = |c: char| Key::new(KeyCode::Char(c));
+        // ASCII unchanged.
+        assert_eq!(k('a').char_value(), Some('a'), "ascii still inserts");
+        assert_eq!(k('~').char_value(), Some('~'), "ascii top still inserts");
+        // Multi-byte pastes: é and 中 are printable.
+        assert_eq!(k('\u{e9}').char_value(), Some('\u{e9}'), "é");
+        assert_eq!(k('\u{4e2d}').char_value(), Some('\u{4e2d}'), "中");
+        // Combining marks (width 0) and the zero-width joiner: printable
+        // text, priced by the display-cell math at render, not here.
+        assert_eq!(k('\u{301}').char_value(), Some('\u{301}'), "combining acute");
+        assert_eq!(k('\u{200d}').char_value(), Some('\u{200d}'), "ZWJ");
+        // The control classes stay rejected: C0, DEL, C1.
+        assert_eq!(k('\u{0}').char_value(), None, "NUL (C0)");
+        assert_eq!(k('\u{1}').char_value(), None, "SOH (C0)");
+        assert_eq!(k('\u{1f}').char_value(), None, "US (C0 top)");
+        assert_eq!(k('\u{7f}').char_value(), None, "DEL");
+        assert_eq!(k('\u{80}').char_value(), None, "C1 bottom");
+        assert_eq!(k('\u{9f}').char_value(), None, "C1 top");
+        // Modifiers still gate: ctrl+char / alt+char are never "text".
+        assert_eq!(Key::ctrl_char('a').char_value(), None, "ctrl+a");
+        assert_eq!(Key::ctrl_char('\u{e9}').char_value(), None, "ctrl+é");
+        assert_eq!(Key::alt_char('\u{e9}').char_value(), None, "alt+é");
     }
 }

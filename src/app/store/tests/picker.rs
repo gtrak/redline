@@ -785,3 +785,26 @@ use super::*;
         );
     }
 
+
+    /// issue-clipboard-and-selection part 3: the picker filter accepts a
+    /// pasted non-ASCII query char (the printable() widening is monotonic
+    /// — every text surface accepts MORE, the picker's nucleo query just
+    /// narrows on real text now).
+    #[test]
+    fn find_file_picker_accepts_a_pasted_nonascii_query_char() {
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/café.rs", "fn c() {}\n");
+        s.open_find_file();
+        for c in "café".chars() {
+            s.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        let names: Vec<String> =
+            s.picker_filtered().iter().map(|(c, _)| c.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["src/café.rs".to_string()],
+            "the pasted é must reach the filter (before the widening it was dropped, 'caf' would match more)"
+        );
+    }

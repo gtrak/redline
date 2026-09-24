@@ -932,7 +932,7 @@ impl CommandRegistry {
         ));
         self.register(Command::new(
             "copy-region",
-            "Copy the marked region to the kill ring (M-w)",
+            "Copy the marked region to the kill ring AND the terminal clipboard (OSC 52) (M-w)",
             "region",
             |store, _arg| store.copy_region(),
         ));

@@ -1211,3 +1211,31 @@ use super::*;
         assert_eq!(h.start, 7, "the symbol's byte start");
         assert_eq!(h.end, 13, "the symbol's byte end (exclusive)");
     }
+
+    /// issue-clipboard-and-selection part 3: a pasted non-ASCII char
+    /// reaches the i-search prompt through the input gate (monotonic
+    /// widening) and narrows the match count.
+    #[test]
+    fn isearch_accepts_a_pasted_nonascii_query_char() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "café line\nplain line\ncafé again\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.key_event(key("C-s"));
+        assert!(s.isearch_active());
+        s.key_event(crate::app::keymap::Key::new(
+            crate::app::keymap::KeyCode::Char('\u{e9}'),
+        ));
+        assert_eq!(
+            s.isearch_match_count(),
+            2,
+            "the pasted é must reach the query and match both lines"
+        );
+    }

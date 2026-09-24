@@ -1308,3 +1308,160 @@ use super::*;
             "the SELECTED match is the off-screen one: the visible range stays plain"
         );
     }
+
+    // ── issue-clipboard-and-selection part 2: left drag-select ───────────
+
+    /// The drag path: Down at row 2 (the unchanged click point-set) arms
+    /// the drag; DRAG to row 5 rebuilds the WHOLE-LINE region 2..=5 (mark
+    /// at the press line's start, point at the drag line's EOL); the
+    /// release PERSISTS the region (the emacs mark survives mouse-up) and
+    /// disarms the drag; M-w then copies exactly the highlighted lines —
+    /// kill ring AND the matching OSC 52.
+    #[test]
+    fn drag_press_drag_releases_and_mw_copies_the_highlighted_lines() {
+        let (mut s, _dir) = store_with_lines(10);
+        let mut rx = s.take_clipboard_rx().expect("clipboard rx");
+        // Down at row 2, col 3: the point-set (the existing click
+        // contract) + the drag arm.
+        s.mouse_click_position(2, 3);
+        assert_eq!((s.point_line(), s.point_col()), (2, 3), "the press sets the point");
+        s.mouse_drag_begin(2);
+        // DRAG to row 5: whole lines 2..=5, both ends inclusive.
+        s.mouse_drag_position(5);
+        assert_eq!(
+            s.region_line_range(),
+            Some((2, 5)),
+            "the region is the whole lines between press and drag"
+        );
+        assert_eq!((s.point_line(), s.point_col()), (5, 5), "point at line 5's EOL");
+        let bkey = s.buffers.current().unwrap().to_string();
+        let start = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(2).unwrap();
+        // The drag line's EOL: line 5's start + its 5 chars — the region
+        // ends BEFORE line 5's trailing newline (the standard EOL point).
+        let end = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(5).unwrap() + 5;
+        assert_eq!(
+            s.region_byte_range(),
+            Some((start, end)),
+            "mark = press line start; point = drag line EOL (before its newline)"
+        );
+        // Up: disarms the drag; the region PERSISTS — a late drag is inert.
+        s.mouse_drag_end();
+        s.mouse_drag_position(8);
+        assert_eq!(
+            s.region_line_range(),
+            Some((2, 5)),
+            "release persists the region; a post-release drag must not extend it"
+        );
+        // M-w: exactly the highlighted region, into BOTH sinks.
+        s.key_event(key("M-w"));
+        let region_text = "line2\nline3\nline4\nline5";
+        assert_eq!(s.kill_ring.top(), Some(region_text), "kill ring: the drag's region");
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some("\u{1b}]52;c;bGluZTIKbGluZTMKbGluZTQKbGluZTU=\u{7}".to_string()),
+            "OSC 52: the base64 of exactly the region's UTF-8"
+        );
+    }
+
+    /// An upward drag selects the same lines (the mark/point normalise via
+    /// the region byte range).
+    #[test]
+    fn drag_upward_selects_the_same_lines() {
+        let (mut s, _dir) = store_with_lines(10);
+        s.mouse_click_position(5, 0);
+        s.mouse_drag_begin(5);
+        s.mouse_drag_position(2);
+        assert_eq!(s.region_line_range(), Some((2, 5)), "upward drag: same line span");
+        s.mouse_drag_end();
+    }
+
+    /// The pinned click contract: Down + Up with no DRAG in between is a
+    /// plain point-set — no region (the drag arm alone creates nothing).
+    /// A plain click after a drag sets the point; the region is the LIVE
+    /// mark..point span (the mark stays where the drag put it, so the
+    /// region re-spans to the new point — standard emacs region
+    /// semantics, and the highlight always matches what M-w will copy).
+    #[test]
+    fn plain_left_click_sets_point_and_never_a_region() {
+        let (mut s, _dir) = store_with_lines(10);
+        s.mouse_click_position(4, 2);
+        s.mouse_drag_begin(4);
+        s.mouse_drag_end();
+        assert_eq!((s.point_line(), s.point_col()), (4, 2), "the click sets the point");
+        assert_eq!(s.region_byte_range(), None, "no mark → no region");
+        // A click after a drag: the point moves; the region is now the
+        // live mark..point span (mark on line 2's start, point on line 7).
+        s.mouse_click_position(2, 0);
+        s.mouse_drag_begin(2);
+        s.mouse_drag_position(3);
+        s.mouse_drag_end();
+        assert_eq!(s.region_line_range(), Some((2, 3)));
+        s.mouse_click_position(7, 1);
+        s.mouse_drag_begin(7);
+        s.mouse_drag_end();
+        assert_eq!((s.point_line(), s.point_col()), (7, 1), "the plain click sets the point");
+        assert_eq!(
+            s.region_line_range(),
+            Some((2, 7)),
+            "live mark..point region: the mark survived the click, the point moved"
+        );
+    }
+
+    /// Tree/picker drags must not create a region. The root hook's tree
+    /// branch disarms (mouse_drag_end + tree_click_row, never
+    /// mouse_drag_begin); a drag that arrives after that disarm is inert.
+    #[test]
+    fn drag_in_tree_does_not_create_region() {
+        let (mut s, _dir) = store_with_lines(10);
+        // A code press armed the drag, then a press in the tree (the hook's
+        // tree branch) disarmed it; the drag that follows creates nothing.
+        s.mouse_click_position(2, 0);
+        s.mouse_drag_begin(2);
+        s.mouse_drag_end();
+        s.mouse_drag_position(6);
+        assert_eq!(
+            s.region_byte_range(),
+            None,
+            "the tree press disarms; the later drag creates no region"
+        );
+        assert_eq!(s.point_line(), 2, "the point stays where the press put it");
+    }
+
+    /// With the picker open, a press must NOT arm the drag — a drag over
+    /// the picker's candidate rows must not build a code region behind the
+    /// overlay.
+    #[test]
+    fn drag_with_picker_open_does_not_arm() {
+        let (mut s, _dir) = store_with_lines(10);
+        s.mouse_click_position(2, 0);
+        s.open_find_file();
+        s.mouse_drag_begin(3);
+        s.mouse_drag_position(6);
+        s.mouse_drag_end();
+        assert_eq!(
+            s.region_byte_range(),
+            None,
+            "picker up: no arm, no region"
+        );
+        assert!(s.picker_open(), "the picker is still open (untouched)");
+    }
+
+    /// A view switch mid-drag disarms (the store guard in
+    /// mouse_drag_position): no region, and no re-arm after the switch.
+    #[test]
+    fn view_switch_mid_drag_disarms() {
+        let (mut s, _dir) = store_with_lines(10);
+        s.mouse_click_position(2, 0);
+        s.mouse_drag_begin(2);
+        s.push_view(ViewId::BufferList);
+        s.mouse_drag_position(6);
+        assert_eq!(
+            s.region_byte_range(),
+            None,
+            "a view switch mid-drag disarms"
+        );
+        assert_eq!(s.drag_line, None, "the armed state is cleared");
+        s.view_stack.pop();
+        s.mouse_drag_position(6);
+        assert_eq!(s.region_byte_range(), None, "back in the buffer: still unarmed");
+    }

@@ -172,10 +172,7 @@ impl AppStore {
         // row; the note rows sit ABOVE their code row — the map is
         // order-agnostic, annotations-render-fold). A click past the last
         // rendered row maps to the last CODE row in the slice.
-        let rows = self.file_view_rows();
-        let Some(target_line) = FileViewRow::line_for_row(&rows, row)
-            .or_else(|| rows.iter().rev().find(|r| !r.is_note).map(|r| r.line))
-        else {
+        let Some(target_line) = self.click_target_line(row) else {
             return;
         };
         // issue-annotations-symbol-precise: the indicator sits before the
@@ -205,6 +202,7 @@ impl AppStore {
         // marker cell is the indicator case above). A non-annotated line
         // maps the display column straight onto its full line (the old,
         // unchanged behavior).
+        let rows = self.file_view_rows();
         let target_row = rows.iter().find(|r| !r.is_note && r.line == target_line);
         let line_len = self.line_char_len(target_line);
         let key = self.buffers.current().map(String::from);
@@ -314,6 +312,116 @@ impl AppStore {
         };
         let p = self.file_point();
         self.set_point(target_line, char_col, p.goal_col);
+    }
+
+    /// The click/drag row → BUFFER line translation, shared by
+    /// `mouse_click_position` and the drag-select pair (issue-
+    /// clipboard-and-selection part 2): `row` is the 0-based row within the
+    /// visible file area (the root event arm subtracts the title line).
+    /// With note rows visible a rendered row is NOT `scroll_top + row`
+    /// buffer lines — translate through the rendered-row list (a note row
+    /// maps to its anchored code row; plan 005 issue 02). A row past the
+    /// last rendered row maps to the last CODE row in the slice. `None`
+    /// outside the file view (or when the slice has no code rows).
+    fn click_target_line(&mut self, row: usize) -> Option<usize> {
+        if self.top_view() != ViewId::Buffer {
+            return None;
+        }
+        let rows = self.file_view_rows();
+        FileViewRow::line_for_row(&rows, row)
+            .or_else(|| rows.iter().rev().find(|r| !r.is_note).map(|r| r.line))
+    }
+
+    /// Left-button press (drag-select, issue-clipboard-and-selection part
+    /// 2): records the press's landed buffer line so subsequent left DRAG
+    /// events can rebuild a region from it. The press's own point-set goes
+    /// through `mouse_click_position` (the unchanged click contract — a
+    /// plain click still sets the point and nothing else); this method only
+    /// arms the drag. It never arms outside the buffer view or with the
+    /// picker open — a press in the tree or picker disarms instead (drags
+    /// in the tree/picker must not create a region).
+    pub fn mouse_drag_begin(&mut self, row: usize) {
+        self.drag_line = if self.top_view() == ViewId::Buffer && self.picker.is_none() {
+            self.click_target_line(row)
+        } else {
+            None
+        };
+    }
+
+    /// Left-button drag (drag-select, issue-clipboard-and-selection part
+    /// 2): rebuild the region from the press line (the mark) to the drag
+    /// line (the point) — so the existing `region_lines` face paints
+    /// exactly the lines between them, and `M-w`/`C-w` act on exactly
+    /// those bytes (the newlines BETWEEN the lines are in, the drag line's
+    /// own trailing newline is out: the point sits at the drag line's EOL,
+    /// the standard emacs point position).
+    ///
+    /// Pinned behaviour:
+    /// - Line-granular on purpose: `region_lines` highlights whole lines,
+    ///   and the region is whole lines (between the press line's start and
+    ///   the drag line's EOL). The press/drag COLUMNS ARE available at the
+    ///   seam (the hook could pass them through) but are not used —
+    ///   char-precise selection is a stated refinement, and nothing here
+    ///   blocks it (the region is still mark+point bytes, so a later
+    ///   char-precise version only changes this method's line/col math).
+    /// - The mark keeps the press line's start; the point lands at the
+    ///   drag line's EOL (the window follows, so a drag past the edge
+    ///   scrolls, terminal-like).
+    /// - Upward drags select the same lines (mark/point normalise via
+    ///   `region_byte_range`).
+    ///   No-op unless armed by `mouse_drag_begin`; a view switch mid-drag
+    ///   disarms (the region from before the switch, if any, is untouched).
+    pub fn mouse_drag_position(&mut self, row: usize) {
+        let Some(press_line) = self.drag_line else {
+            return;
+        };
+        if self.top_view() != ViewId::Buffer {
+            self.drag_line = None;
+            return;
+        }
+        let Some(drag_line) = self.click_target_line(row) else {
+            return;
+        };
+        let key = self.buffers.current().map(String::from).unwrap_or_default();
+        let (mark_byte, hi_len) = {
+            let Some(buf) = self.buffers.get(&key) else {
+                return;
+            };
+            let lo = press_line.min(drag_line);
+            // Start of the press line (the mark end of the region).
+            let Some(mark_char) = buf.rope.try_line_to_char(lo).ok() else {
+                return;
+            };
+            let Some(mark_byte) = buf.rope.try_char_to_byte(mark_char).ok() else {
+                return;
+            };
+            // EOL of the drag line (the point end): its char length
+            // (set_point clamps again; an empty line is char 0).
+            let hi = press_line.max(drag_line);
+            let hi_len = buf
+                .line_text(hi)
+                .map(|t| t.chars().count())
+                .unwrap_or(0);
+            (mark_byte, hi_len)
+        };
+        let hi = press_line.max(drag_line);
+        if let Some(buf) = self.buffers.get_mut(&key) {
+            buf.mark = Some(mark_byte);
+        }
+        // A drag that places the point ends the self-insert run (the gate
+        // P2 rule, same as the press: point motion that ran).
+        self.self_insert_run = None;
+        let p = self.file_point();
+        self.set_point(hi, hi_len, p.goal_col);
+    }
+
+    /// Left-button release (drag-select, issue-clipboard-and-selection
+    /// part 2): disarms the drag tracking. The region itself (mark +
+    /// point) PERSISTS after release — an emacs mark survives mouse-up, so
+    /// `M-w` copies exactly what the drag highlighted. (A plain press in
+    /// the tree calls this too: it must not leave a stale drag armed.)
+    pub fn mouse_drag_end(&mut self) {
+        self.drag_line = None;
     }
 
     /// Scroll to the top (line 0).

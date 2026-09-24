@@ -94,8 +94,14 @@ impl Component for FileViewCanvas {
                 break;
             }
             // Paint the region background for rows whose BUFFER line is
-            // within the region (note rows inherit their anchored line).
-            if let Some((rl_start, rl_end)) = self.region_lines
+            // within the region. Note rows are EXCLUDED (P3-3): a note row
+            // is synthetic — it carries no buffer text, so highlighting it
+            // would promise text that `M-w` never copies (the gate called
+            // this "the one place where the highlight and the copy
+            // disagree"). The highlight means "this text will be copied",
+            // and only code rows carry copyable text.
+            if !r.is_note
+                && let Some((rl_start, rl_end)) = self.region_lines
                 && (rl_start..=rl_end).contains(&r.line)
             {
                 let bg = color(t.region.background);

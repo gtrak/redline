@@ -965,6 +965,96 @@ use super::*;
         assert_eq!(s.kill_ring.top(), Some(region_text.as_str()));
     }
 
+    // ── issue-clipboard-and-selection: M-w → OSC 52 + kill ring ──────────
+
+    /// A store with a file buffer whose lines carry multi-byte UTF-8
+    /// (é, 中) on two of the three lines — the payload shape where a
+    /// char/byte confusion produces DIFFERENT base64.
+    fn multibyte_file_store() -> (AppStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/mb.rs"),
+            "alpha\ncafé beta\n中 gamma\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/mb.rs");
+        (s, dir)
+    }
+
+    /// The M-w copy publishes the byte-exact OSC 52 escape for the region's
+    /// UTF-8 (a multi-byte payload, cross-checked against an independent
+    /// encoder) AND keeps the kill ring (the primary sink — C-y parity).
+    #[test]
+    fn copy_region_publishes_byte_exact_osc52_and_keeps_kill_ring() {
+        let (mut s, _dir) = multibyte_file_store();
+        let mut rx = s.take_clipboard_rx().expect("clipboard rx");
+        let bkey = s.buffers.current().unwrap().to_string();
+        // Region: line 1 start (byte 6 — é is 2 bytes) to line 2's EOL
+        // (byte 26 — the EOL is BEFORE the line's own trailing newline):
+        // "café beta\n中 gamma".
+        let start = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
+        assert_eq!(start, 6, "byte 6 = line 1 start (é is 2 bytes)");
+        let end = s.buffers.get(&bkey).unwrap().rope.len_bytes() - 1;
+        assert_eq!(end, 26, "line 2's EOL, before its trailing newline");
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(start);
+        }
+        s.set_point(2, 7, 7); // "中 gamma": 7 chars, EOL
+        s.key_event(key("M-w"));
+        // The kill ring is intact (C-y must still yank this).
+        assert_eq!(s.kill_ring.top(), Some("café beta\n中 gamma"));
+        // The second sink: the byte-exact escape for exactly those bytes.
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some("\u{1b}]52;c;Y2Fmw6kgYmV0YQrkuK0gZ2FtbWE=\u{7}".to_string()),
+        );
+        assert!(s.message.contains("copied to kill ring"));
+        assert!(!s.message.contains("cap"), "within the cap: no cap suffix");
+        assert!(rx.try_recv().is_err(), "exactly one escape per copy");
+    }
+
+    /// Past the 32 KiB OSC 52 cap: the escape is SKIPPED (never truncated —
+    /// a truncated clipboard copies silently wrong text), the kill ring
+    /// keeps the full text, and the message says where the text went.
+    #[test]
+    fn copy_region_past_osc52_cap_keeps_kill_ring_and_says_so() {
+        let (_dir, mut s) = notes_store();
+        let big = "a".repeat(crate::app::clipboard::OSC52_MAX_BYTES + 1);
+        // One long line in the notes buffer (the editable one).
+        for _ in 0..big.len() {
+            s.notes_insert_char('a');
+        }
+        let bkey = s.buffers.current().unwrap().to_string();
+        let mut rx = s.take_clipboard_rx().expect("clipboard rx");
+        // The seeded header is line 0 ("# Notes"); the a's are line 1:
+        // mark at its start, point at its EOL.
+        let line1_byte = s.buffers.get(&bkey).unwrap().rope.try_line_to_byte(1).unwrap();
+        if let Some(buf) = s.buffers.get_mut(&bkey) {
+            buf.mark = Some(line1_byte);
+        }
+        s.set_point(1, big.len(), big.len()); // EOL of the a-line
+        s.key_event(key("M-w"));
+        assert_eq!(
+            s.kill_ring.top(),
+            Some(big.as_str()),
+            "the kill ring gets the FULL text even past the cap ({} bytes)",
+            big.len()
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "past the cap: no escape is published"
+        );
+        assert!(
+            s.message.contains("kill ring only"),
+            "the message reports the cap skip: `{}`",
+            s.message
+        );
+    }
+
     #[test]
     fn kill_region_removes_text_in_editable_buffer() {
         let (mut s, _dir) = notes_store_with_lines(10);

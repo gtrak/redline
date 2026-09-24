@@ -1608,6 +1608,15 @@ impl AppStore {
 
     /// M-w: copy the region to the kill ring (no removal; works in both
     /// editable and read-only buffers). Keeps the mark active.
+    /// issue-clipboard-and-selection: ALSO publishes the region to the
+    /// terminal clipboard (OSC 52, the store's clipboard bus; Root's drain
+    /// writes it). The kill ring write above is the primary sink — `C-y`
+    /// still yanks it (emacs parity is not traded away); OSC 52 is the
+    /// second sink, the only one that reaches the clipboard over SSH.
+    /// Payloads past the 32 KiB cap (`clipboard::OSC52_MAX_BYTES`) skip
+    /// the escape (the kill ring keeps the full text) and the message says
+    /// so. The base64-in-the-escape is what keeps control bytes in the
+    /// region from corrupting terminal state.
     pub fn copy_region(&mut self) {
         let range = match self.region_byte_range() {
             Some(r) => r,
@@ -1627,12 +1636,30 @@ impl AppStore {
             let char_end = buf.rope.byte_to_char(range.1);
             buf.rope.slice(char_start..char_end).to_string()
         };
-        self.kill_ring.push(text);
+        self.kill_ring.push(text.clone());
+        // The OSC 52 sink: the escape is built here (the cap decision
+        // shapes the message); the drain in Root is a pure writer.
+        let clipboard_skip = match crate::app::clipboard::osc52_copy(&text) {
+            Some(escape) => {
+                let _ = self.clipboard_tx.send(escape);
+                false
+            }
+            None => true,
+        };
         // Reset yank-pop state.
         self.yank_pos = None;
         self.yank_len = None;
         self.yank_ring_index = None;
-        self.minibuffer_message(&format!("{} bytes copied to kill ring", range.1 - range.0));
+        let mut message = format!("{} bytes copied to kill ring", range.1 - range.0);
+        if clipboard_skip {
+            message.push_str(
+                &format!(
+                    " (past the {} KiB OSC 52 cap: kill ring only)",
+                    crate::app::clipboard::OSC52_MAX_BYTES / 1024
+                ),
+            );
+        }
+        self.minibuffer_message(&message);
     }
 
     /// C-y: yank the most recent kill ring entry. Plan 015 issue 04 makes the

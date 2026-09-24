@@ -41,8 +41,11 @@ pub(super) fn install_terminal_events(
         // all list views; click-to-position in the file view (Buffer);
         // click-to-select in the tree sidebar (plan 004 issue 05e: with the
         // tree visible, clicks in the tree's columns select a tree row and
-        // clicks in the code pane are shifted by TREE_WIDTH). Limitations:
-        // no drag-select, no click in pickers/menus, no click-to-select in
+        // clicks in the code pane are shifted by TREE_WIDTH);
+        // left drag-select in the file pane (issue-clipboard-and-selection:
+        // the app captures the mouse, so the terminal's own
+        // drag-to-select is unavailable — the drag is driven in-app).
+        // Limitations: no click in pickers/menus, no click-to-select in
         // list views (v1).
         if let TerminalEvent::FullscreenMouse(mouse) = &event {
             use iocraft::MouseEventKind;
@@ -66,17 +69,57 @@ pub(super) fn install_terminal_events(
                     // and is shifted by the tree width when it is visible
                     // (plan 004 issue 05e): a click inside the tree's
                     // columns selects the tree row under it and never moves
-                    // the code point.
+                    // the code point. issue-clipboard-and-selection: the
+                    // press ALSO arms drag-select (mouse_drag_begin) so a
+                    // subsequent left DRAG can grow a region from it — a
+                    // press in the tree disarms instead (a tree drag must
+                    // never create a code region).
                     let row = (mouse.row as usize).saturating_sub(1);
                     let mut store = event_store.lock().unwrap();
                     let (in_tree, pane_col) =
                         click_pane(store.tree_visible(), mouse.column as usize);
                     if in_tree {
+                        store.mouse_drag_end();
                         store.tree_click_row(mouse.row as usize);
                     } else {
                         store.mouse_click_position(row, pane_col);
+                        store.mouse_drag_begin(row);
                     }
                     tick.set(tick.get() + 1);
+                }
+                // issue-clipboard-and-selection (part 2): the left drag is
+                // the redline-owned selection. The terminal only offers its
+                // own drag-to-select when the app is NOT capturing the
+                // mouse — and this app IS capturing it (that is how the
+                // clicks above work), so the drag must be driven in-app:
+                // each DRAG event rebuilds the whole-line region from the
+                // press line (the mark) to the drag line (the point); the
+                // existing `region_lines` face paints it, and M-w / C-w act
+                // on exactly those lines. A press in the tree or with the
+                // picker open never armed, so a drag there is a no-op.
+                //
+                // Known limitation (P3-2, disclosed): a drag that STARTS in
+                // the file pane and WANDERS over the tree columns still
+                // grows the region — the Drag arm ignores the column (only
+                // the Down arm consults `click_pane` to route tree clicks).
+                // The region follows the rendered row under the pointer
+                // (via `click_target_line`), so a drag into the tree's
+                // columns maps to the same buffer row as the file pane at
+                // that terminal row. Benign: the region is still bounded
+                // by the buffer's lines, and the user can always re-drag
+                // or re-click to correct it. Not clamped: the tree's
+                // columns are narrow and the drag is a transient gesture.
+                MouseEventKind::Drag(iocraft::MouseButton::Left) => {
+                    let row = (mouse.row as usize).saturating_sub(1);
+                    event_store.lock().unwrap().mouse_drag_position(row);
+                    tick.set(tick.get() + 1);
+                }
+                // The release disarms the drag tracking; the region itself
+                // (mark + point) PERSISTS (the emacs mark survives
+                // mouse-up) so M-w copies exactly what the drag
+                // highlighted. No tick: nothing repaints on release.
+                MouseEventKind::Up(iocraft::MouseButton::Left) => {
+                    event_store.lock().unwrap().mouse_drag_end();
                 }
                 _ => {}
             }
@@ -295,6 +338,28 @@ pub(super) fn drive_jump_highlight(
             return; // already taken (e.g. by a test)
         };
         jump_animation_loop(anim_store, &mut rx, move || tick.set(tick.get() + 1)).await;
+    });
+}
+
+/// The OSC 52 clipboard drain (issue-clipboard-and-selection part 1):
+/// `copy_region` publishes the finished escape to the store's clipboard
+/// bus; this task writes it to stdout. The escape is self-contained and
+/// cursor-neutral (it ends in BEL and parks nothing), and each write is a
+/// single locked stdout operation. It cannot split one of iocraft's own
+/// frame writes (each iocraft frame is a single locked write); it may
+/// land *between* iocraft's frame writes, which is harmless — the escape
+/// is self-delimiting (OSC … BEL) and cursor-neutral, so a terminal that
+/// honours it applies it atomically and the next frame repaints the same
+/// cells. No tick on write: the copy already repainted (the message
+/// line), the escape itself changes nothing on screen.
+pub(super) fn drain_clipboard(hooks: &mut Hooks, store: Arc<Mutex<AppStore>>) {
+    hooks.use_future(async move {
+        let Some(mut rx) = store.lock().unwrap().take_clipboard_rx() else {
+            return; // already taken (e.g. by a test)
+        };
+        while let Some(escape) = rx.recv().await {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::style::Print(escape));
+        }
     });
 }
 

@@ -9,6 +9,7 @@
 
 pub mod command;
 pub mod config;
+pub mod clipboard;
 pub mod events;
 pub mod keymap;
 pub mod store;

@@ -2404,3 +2404,39 @@ use super::*;
         assert_eq!(a.line, 0, "the orphan keeps its last known line");
     }
 
+
+    // ── issue-clipboard-and-selection part 3: paste-as-keys ─────────────
+
+    /// Pasted multi-byte text: a terminal paste is ordinary key events
+    /// (the app deliberately does NOT request bracketed paste, so the
+    /// input gate is the paste's entry). This pins the byte-exact
+    /// self-insert of é / 中 / a combining mark through the FULL
+    /// `key_event` path — the gate (keymap `printable()`) used to drop
+    /// every non-ASCII char of a paste silently.
+    #[test]
+    fn pasted_multibyte_text_self_inserts_byte_exact() {
+        let (_dir, mut s) = notes_store();
+        let paste = "prob\u{e9}\u{4e2d}\u{65}\u{301}-1";
+        for c in paste.chars() {
+            s.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        let expected = format!("# Notes\n{paste}");
+        assert_eq!(
+            s.buffers.get(&key).unwrap().rope.to_string(),
+            expected,
+            "byte-exact paste through the input gate (the notes buffer seeds the document header first)"
+        );
+        // A control byte must not reach the buffer either (the gate's
+        // rejected half of the widening): SOH (C0) is not text.
+        s.key_event(crate::app::keymap::Key::new(
+            crate::app::keymap::KeyCode::Char('\u{1}'),
+        ));
+        assert_eq!(
+            s.buffers.get(&key).unwrap().rope.to_string(),
+            expected,
+            "a control byte must not reach the buffer"
+        );
+    }

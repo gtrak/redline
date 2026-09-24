@@ -1831,6 +1831,22 @@ pub struct AppStore {
     /// latest `set_at` wins).
     jump_wake_tx: mpsc::Sender<()>,
     jump_wake_rx: Option<mpsc::Receiver<()>>,
+    /// OSC 52 clipboard bus (issue-clipboard-and-selection): the store
+    /// keeps the sender for its lifetime; the receiver is handed to
+    /// Root's drain exactly once (the `search_rx` precedent). Carries the
+    /// FINISHED escape string — `copy_region` builds it (the cap decision
+    /// shapes its message), so the drain is a pure writer.
+    clipboard_tx: mpsc::UnboundedSender<String>,
+    clipboard_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Drag-select armed state (issue-clipboard-and-selection part 2): the
+    /// buffer line a left press landed on, armed by `mouse_drag_begin` (a
+    /// press in the file pane with the picker closed); each left DRAG event
+    /// rebuilds the whole-line region from this line to the drag line. The
+    /// region itself lives in `Buffer.mark`/point and PERSISTS after
+    /// release (an emacs mark survives mouse-up, so `M-w` copies what the
+    /// drag highlighted). Cleared by `mouse_drag_end` (the release), by a
+    /// press in the tree, or by a view switch mid-drag.
+    drag_line: Option<usize>,
     /// The current search job's results state (issue 06).
     search: SearchState,
     /// Generation counter for search jobs: bumped on every new search
@@ -2002,6 +2018,11 @@ impl AppStore {
         // coalesce into one wake (the latest `set_at` decides the fade).
         let (jump_wake_tx, jump_wake_rx) = mpsc::channel(1);
 
+        // OSC 52 clipboard bus (issue-clipboard-and-selection): the drain
+        // in Root takes the receiver exactly once (unbounded — a copy is
+        // one escape; nothing can accumulate behind the render loop).
+        let (clipboard_tx, clipboard_rx) = mpsc::unbounded_channel();
+
         Self {
             theme: Theme::default(),
             registry,
@@ -2064,6 +2085,9 @@ impl AppStore {
             jump_highlight: None,
             jump_wake_tx,
             jump_wake_rx: Some(jump_wake_rx),
+            clipboard_tx,
+            clipboard_rx: Some(clipboard_rx),
+            drag_line: None,
             search: SearchState::default(),
             search_generation: 0,
             search_prompt: None,
@@ -2134,6 +2158,14 @@ impl AppStore {
     /// path or after a test's take). Mirrors `search_rx()`.
     pub fn take_jump_wake_rx(&mut self) -> Option<mpsc::Receiver<()>> {
         self.jump_wake_rx.take()
+    }
+
+    /// OSC 52 clipboard (issue-clipboard-and-selection): take the escape
+    /// receiver out of the store (exactly once — Root's drain takes it;
+    /// a second take returns `None`, e.g. on the static render path or
+    /// after a test's take). Mirrors `take_jump_wake_rx`.
+    pub fn take_clipboard_rx(&mut self) -> Option<mpsc::UnboundedReceiver<String>> {
+        self.clipboard_rx.take()
     }
 
     pub fn top_view(&self) -> ViewId {
