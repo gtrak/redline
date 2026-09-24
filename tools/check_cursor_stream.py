@@ -835,7 +835,18 @@ def transient_menu_checks():
         print(f"  {'PASS' if ok else 'FAIL'}  {name:46s} {detail}")
 
     # 80 cols: two columns, gutter, ellipsis.
-    s = Session(None)
+    # issue-menu80-ellipsis: the menu is WINDOWED to the frame — the canvas
+    # draws its rows top-down and stops at the frame's bottom edge — so at
+    # the 24-row PTY matrix only the menu's TOP rows are visible (the
+    # submenus, then the first category's header), and which descriptions
+    # are on screen depends on the command count (the two redo bindings
+    # pushed the truncated [git] rows off the 24-row screen). The layout
+    # GUARANTEES the whole menu on a terminal tall enough for menu_height
+    # (rows+1) to fit the viewport, so use a 60-row terminal: the first
+    # category's leaf descriptions (longer than the 39-cell description
+    # cell) are then guaranteed visible. The windowing precondition below
+    # asserts that guarantee held — poll for the overlay, no extra sleeps.
+    s = Session(None, cols=COLS, rows=60)
     s.key("C-x g", 1.2)
     s.key("?", 0.2)
     menu_up = _wait_for_menu(s)
@@ -849,17 +860,53 @@ def transient_menu_checks():
     rec("menu@80: every row fits the width",
         all(len(r) <= COLS for r in rows),
         f"max row len={max(len(r) for r in rows)}")
-    # A DESCRIPTION that did not fit must carry the truncation ellipsis.
-    # NOTE: prefix rows render as "KEY …" (a literal ellipsis, present
-    # before this fix too), so "any '…' in rows" would pass on the OLD
-    # output — require the ellipsis to follow a "[KEY]" description
-    # marker, which only happens for a truncated description (05f
-    # review P2-1).
-    desc_truncated = [r for r in rows if "]" in r and "…" in r
-                      and r.index("…") > r.index("]")]
+    # Precondition (issue-menu80-ellipsis): the menu is NOT windowed. The
+    # menu canvas is `menu_rows().len() + 1` rows tall, and the two-column
+    # flow draws at most `menu_rows().len()` of them — so an un-clipped
+    # menu ALWAYS leaves a blank canvas row behind its last content row
+    # (the canvas's trailing padding, or the frame's blank space after
+    # it). A windowed menu fills the canvas edge-to-edge and its last
+    # content row butts against the minibuffer line — in that case the
+    # ellipsis assertion below could silently look away from the truncated
+    # rows, so fail loudly on the precondition instead.
+    status_idx = None
+    for i in range(len(rows) - 1, -1, -1):
+        if "*magit-status*" in rows[i]:
+            status_idx = i
+            break
+    # The menu region: title row down to the row BEFORE the minibuffer
+    # (the status line's own row sits at status_idx).
+    region = rows[:status_idx - 1] if status_idx is not None else rows
+    content = [i for i, r in enumerate(region) if r.strip()]
+    unclipped = (bool(content)
+                 and content[-1] + 1 < len(region)
+                 and region[content[-1] + 1].strip() == "")
+    rec("menu@80: the whole menu is on screen (no windowed tail)",
+        unclipped,
+        f"last content row={content[-1] if content else None} of "
+        f"{len(region)} region rows"
+        + ("" if unclipped else " (row after last content is not blank)"))
+    # A DESCRIPTION that did not fit the cell must carry the truncation
+    # ellipsis AT THE CELL'S END: two-column mode at 80 cols gives each
+    # cell a 39-cell text region (cell_w 40 minus the 1-cell gutter), and
+    # truncate_ellipsis fills that region exactly, the '…' in the region's
+    # last cell. A description that FITS ends before the cell's end (no
+    # ellipsis); prefix rows render as "KEY …" — a literal, short
+    # ellipsis that never fills a cell and never carries a "[KEY]" marker
+    # — so marker + cell-end '…' matches a truncated description and
+    # nothing else (05f review P2-1, re-geometric for menu80-ellipsis).
+    cell_w = COLS // 2 - 1
+    desc_truncated = []
+    for r in rows:
+        for start in (0, cell_w + 1):
+            cell = r[start:start + cell_w].rstrip()
+            if (cell.endswith("…") and re.match(r"\[[^\]]+\]", cell)
+                    and cell.index("…") > cell.index("]")):
+                desc_truncated.append(cell)
     rec("menu@80: long descriptions ellipsized (a DESCRIPTION, not a prefix row)",
         len(desc_truncated) >= 1,
-        f"description rows with '…': {len(desc_truncated)}")
+        f"truncated description cells: {len(desc_truncated)}"
+        + (f" (e.g. {desc_truncated[0]!r})" if desc_truncated else ""))
     s.kill()
 
     # ~30 cols: single-column fallback (w < 40).
