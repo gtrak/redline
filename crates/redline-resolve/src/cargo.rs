@@ -644,6 +644,7 @@ edition = "2021"
             from_file: PathBuf::from("src/main.rs"),
             scope: vec!["fakeserde".to_string(), "Deserialize".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let src = CargoProvider::new().resolve(&ctx).unwrap();
         assert_eq!(src.file, lib);
@@ -658,6 +659,7 @@ edition = "2021"
             from_file: PathBuf::from("src/main.rs"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         assert_eq!(CargoProvider::new().resolve(&ctx2).unwrap(), src);
     }
@@ -675,6 +677,7 @@ edition = "2021"
             from_file: PathBuf::from("src/main.rs"),
             scope: vec!["fakeserde".to_string(), "Deserialize".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let src = CargoProvider::new().resolve(&ctx).unwrap();
         assert_eq!(
@@ -696,6 +699,7 @@ edition = "2021"
             from_file: PathBuf::from("src/main.rs"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         let err = CargoProvider::new().resolve(&ctx).unwrap_err();
         assert!(
@@ -718,6 +722,7 @@ edition = "2021"
             from_file: PathBuf::from("src/main.rs"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         let err = CargoProvider::new().resolve(&ctx).unwrap_err();
         assert!(err.to_string().contains("needs scope info"), "err: {err}");

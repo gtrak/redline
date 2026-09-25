@@ -7,3 +7,4 @@ mod xref;
 mod imenu;
 mod imports;
 mod landings;
+mod receiver;

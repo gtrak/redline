@@ -27,6 +27,7 @@ fn ctx(root: &std::path::Path, symbol: &str) -> SymbolContext {
         from_file: PathBuf::from("src/lib.rs"),
         scope: Vec::new(),
         language: None,
+        confirm_fetch: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn ctx_with_scope(root: &std::path::Path, symbol: &str, scope: &[&str]) -> Symbo
         from_file: PathBuf::from("src/lib.rs"),
         scope: scope.iter().map(|s| s.to_string()).collect(),
         language: None,
+        confirm_fetch: None,
     }
 }
 

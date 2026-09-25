@@ -4,8 +4,10 @@
 //! Flow: parse the (package, item) from the symbol → locate the package
 //! directory (a workspace-local `file:`/`link:` path dependency, or
 //! `node_modules/<pkg>` found by walking up from the workspace root to honor
-//! monorepo layouts) → if absent, `npm install` (sanctioned fetch-on-demand,
-//! `--no-audit --no-fund`) and re-locate → resolve the entry point
+//! monorepo layouts) → if absent, `npm install` (behind the fetch-
+//! confirmation gate — the operator's y/n; refused or unconfirmed = a clean
+//! refusal error, never a silent install, `--no-audit --no-fund`) and
+//! re-locate → resolve the entry point
 //! (`exports` → `module` → `main`, with a TypeScript-source preference) →
 //! scan the package for a definition-shaped match of the item (best-effort
 //! line).
@@ -31,6 +33,14 @@
 //!
 //! Plain `node_modules` only — no yarn-PnP, no npm-workspaces resolution.
 //! Installs are always local (never `-g`/global).
+//!
+//! P3-7, gate (doc, disclosed limitation): a DOTTED symbol whose head is
+//! an import's LOCAL binding installs the HEAD, not the imported module —
+//! `import { df } from "p"; df.head` reaches `npm install df` (the
+//! provider's package↔member split takes `df` as the package; the import
+//! hint rewrites only BARE symbols, never a path-shaped one the app
+//! already expanded). The fetch-confirmation banner shows the honest
+//! command, so the operator sees `df` (not `p`) before the install.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +50,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext, ToolingProvider};
+use crate::{
+    confirm_or_refuse, run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource,
+    SymbolContext, ToolingProvider,
+};
 
 /// File extensions considered JavaScript/TypeScript sources. `d.ts`
 /// sits at the tail: Node has no `.d.ts` runtime convention (the
@@ -288,8 +301,11 @@ impl JsProvider {
                          refuses to install it"
                     );
                 }
-                // Fetch-on-demand (sanctioned operator directive): `npm install`
-                // in the nearest npm project root, then re-locate.
+                // Fetch-on-demand — behind the fetch-confirmation gate
+                // (issue-non-rust-receiver-resolution): the hook (the
+                // app's visible y/n prompt) decides; no hook or a decline
+                // is a refusal (never a silent install). `offline` stays
+                // the stronger, permanent refusal (never asks).
                 let install_root = find_project_root(&ws).ok_or_else(|| {
                     anyhow::anyhow!(
                         "no package.json found walking up from {}; not an npm project, \
@@ -297,6 +313,8 @@ impl JsProvider {
                         ws.display()
                     )
                 })?;
+                let command = format!("npm install {base_pkg} --no-audit --no-fund");
+                confirm_or_refuse(ctx, &command, &ctx.from_file)?;
                 self.npm_install(&install_root, &base_pkg)?;
                 locate_in_node_modules(&ws, &base_pkg).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -963,6 +981,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1004,6 +1023,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1072,6 +1092,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -1096,6 +1117,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().resolve(&ctx).unwrap_err();
         let msg = err.to_string();
@@ -1116,6 +1138,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
         assert!(err.to_string().contains("offline"), "msg: {err}");
@@ -1132,6 +1155,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         // Offline keeps this test network-free: the error is the offline
         // refusal, which still proves the walk-up + no-local-dep path.
@@ -1162,6 +1186,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["acme".to_string(), "doThing".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -1183,6 +1208,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().resolve(&ctx).unwrap_err();
         assert!(
@@ -1219,6 +1245,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["acme".to_string(), "doThing".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -1248,6 +1275,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["acme".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().resolve(&ctx).unwrap();
         assert!(src.external);
@@ -1284,6 +1312,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["ac".to_string(), "doThing".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err();
         assert!(err.to_string().contains("offline"), "err: {err}");
@@ -1328,6 +1357,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./legacy-util".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external, "workspace-local landing");
@@ -1361,6 +1391,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./legacy-util".to_string(), "legacyJoin".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1393,6 +1424,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./nope".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(err.contains("relative specifier `./nope`"), "err: {err}");
@@ -1416,6 +1448,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./styles.css".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1446,6 +1479,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./mod".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1468,6 +1502,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["../../out".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(err.contains("outside the workspace"), "err: {err}");
@@ -1487,6 +1522,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["/abs/legacy-util".to_string(), "legacyJoin".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(
@@ -1510,6 +1546,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: Vec::new(),
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(err.contains("file-ish name `styles.css`"), "err: {err}");
@@ -1553,6 +1590,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./mod".to_string(), "go".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1576,6 +1614,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./types".to_string(), "T".to_string()],
             language: Some("typescript".to_string()),
+            confirm_fetch: None,
         };
         let src = JsProvider::new().offline().resolve(&ctx).unwrap();
         assert!(!src.external);
@@ -1611,6 +1650,7 @@ mod tests {
             from_file: PathBuf::from("src/app.js"),
             scope: vec!["./link.js".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(err.contains("outside the workspace"), "err: {err}");
@@ -1637,6 +1677,7 @@ mod tests {
             from_file: PathBuf::from("index.js"),
             scope: vec!["somelib".to_string(), "json".to_string()],
             language: Some("javascript".to_string()),
+            confirm_fetch: None,
         };
         let err = JsProvider::new().offline().resolve(&ctx).unwrap_err().to_string();
         assert!(
@@ -1645,26 +1686,162 @@ mod tests {
         );
     }
 
+    /// Live: real `npm install` of `left-pad` from the registry. `#[ignore]`d
+    /// AND opt-in-gated (P1-2, gate): without `REDLINE_LIVE_INSTALL=1` the
+    /// hook is a REFUSAL — an accidental `-- --ignored` run proves the
+    /// gate (refusal, zero npm invocation) instead of installing; setting
+    /// the variable is the explicit operator sanction for the real
+    /// install.
     #[test]
-    #[ignore] // requires network (npm registry)
+    #[ignore] // requires network (npm registry) + explicit opt-in (REDLINE_LIVE_INSTALL=1)
     fn e2e_leftpad_live() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         fs::create_dir_all(ws).unwrap();
         fs::write(ws.join("package.json"), r#"{"name":"e2e","version":"1.0.0"}"#).unwrap();
 
+        // The fetch decision IS the opt-in: `false` (the default) makes
+        // the gate refuse the install (the refusal bails the provider —
+        // the gate runs BEFORE any npm spawn, so nothing touches the
+        // network either way).
+        let opted_in = std::env::var_os("REDLINE_LIVE_INSTALL").is_some();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |_req| opted_in);
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "left-pad.leftPad".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("index.js"),
             language: None,
+            confirm_fetch: Some(confirm),
         };
-        let src = JsProvider::new().resolve(&ctx).unwrap();
+        let outcome = JsProvider::new().resolve(&ctx);
+        if !opted_in {
+            let err = outcome.unwrap_err().to_string();
+            assert!(
+                err.contains("install refused"),
+                "without the explicit opt-in the gate REFUSES the install: {err}"
+            );
+            return;
+        }
+        let src = outcome.unwrap();
         assert!(src.external);
         assert!(src.file.exists());
         let stem = src.file.to_string_lossy().to_string();
         assert!(stem.contains("left-pad"), "file: {stem}");
         assert!(src.line.is_some(), "expected a definition line");
+    }
+
+    // ── issue-non-rust-receiver-resolution: the fetch-confirmation gate ─
+
+    /// A workspace whose `package.json` makes it an npm project, with a
+    /// STUB npm on PATH via `with_npm_bin` (it logs its argv — one line
+    /// per invocation — and exits 0, so the provider proceeds to the
+    /// honest re-locate miss). No real registry is ever touched.
+    fn ws_with_stub_npm() -> (tempfile::TempDir, std::path::PathBuf, JsProvider) {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("package.json"), r#"{"name":"ws"}"#).unwrap();
+        let log = tmp.path().join("npm-invocations.log");
+        let stub = tmp.path().join("npm-stub");
+        fs::write(
+            &stub,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log:?}\nexit 0\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (
+            tmp,
+            log,
+            JsProvider::new().with_npm_bin(stub.to_string_lossy().to_string()),
+        )
+    }
+
+    fn npm_invocations(log: &std::path::Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The P1's safety half (JS leg): a package missing from
+    /// `node_modules` does NOT install when the operator DECLINES —
+    /// the refusal bails the provider, the stub npm is never invoked.
+    #[test]
+    fn confirm_declined_refuses_npm_install() {
+        let (tmp, log, provider) = ws_with_stub_npm();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_req| false);
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "left-pad.leftPad".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("index.js"),
+            language: Some("javascript".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("declined at the fetch confirmation"),
+            "err: {err}"
+        );
+        assert!(
+            err.to_string().contains("npm install left-pad --no-audit --no-fund"),
+            "the exact command is in the refusal: {err}"
+        );
+        assert_eq!(npm_invocations(&log), Vec::<String>::new());
+    }
+
+    /// The safe default (JS leg): no hook → the provider refuses rather
+    /// than install silently.
+    #[test]
+    fn confirm_absent_refuses_npm_install() {
+        let (tmp, log, provider) = ws_with_stub_npm();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "left-pad.leftPad".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("index.js"),
+            language: Some("javascript".to_string()),
+            confirm_fetch: None,
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a fetch confirmation hook"),
+            "err: {err}"
+        );
+        assert_eq!(npm_invocations(&log), Vec::<String>::new());
+    }
+
+    /// The sanctioned leg (JS leg): the operator ACCEPTS — the stub npm
+    /// is invoked EXACTLY ONCE with the exact argv, and the provider
+    /// still bails honestly when the re-locate misses (the stub installs
+    /// nothing).
+    #[test]
+    fn confirm_accepted_runs_stub_npm_exactly_once() {
+        let (tmp, log, provider) = ws_with_stub_npm();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_req| true);
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "left-pad.leftPad".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("index.js"),
+            language: Some("javascript".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("still not found in node_modules after"),
+            "the install ran (then the honest re-locate miss): {err}"
+        );
+        assert_eq!(
+            npm_invocations(&log),
+            vec!["install left-pad --no-audit --no-fund".to_string()]
+        );
     }
 }

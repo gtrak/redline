@@ -24,9 +24,10 @@ use crate::app::store::ViewId;
 
 use geometry::cursor_cell;
 use hooks::{
-    drain_crate_index, drain_clipboard, drain_project_changes, drain_search,
-    drain_symbol_index, drain_tooling_resolve, drive_jump_highlight,
-    install_cursor_effect, install_terminal_events,
+    drain_crate_index, drain_clipboard, drain_fetch_confirm,
+    drain_project_changes, drain_search, drain_symbol_index,
+    drain_tooling_resolve, drive_jump_highlight, install_cursor_effect,
+    install_terminal_events,
 };
 use render::StaticRenderWidth;
 use snapshot::Snapshot;
@@ -82,6 +83,11 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     drain_project_changes(&mut hooks, store.clone(), tick);
     drain_symbol_index(&mut hooks, store.clone(), tick);
     drain_tooling_resolve(&mut hooks, store.clone(), tick);
+    // issue-non-rust-receiver-resolution: the fetch-on-demand confirmation
+    // asks (the tooling-resolver providers' `confirm_fetch` hooks) — the
+    // `y`/`n` banner arms here, before the search/clipboard drains (hook
+    // order is unconditional and stable).
+    drain_fetch_confirm(&mut hooks, store.clone(), tick);
     drain_crate_index(&mut hooks, store.clone(), tick);
     drain_search(&mut hooks, store.clone(), tick);
     drain_clipboard(&mut hooks, store.clone());

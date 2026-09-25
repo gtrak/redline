@@ -198,6 +198,7 @@ fn capture(probe: &Probe, probe_root: &Path, cache: &Path, provider: &GoProvider
         from_file: probe_root.join(&probe.from_file),
         scope: probe.scope.clone(),
         language: Some("go".to_string()),
+        confirm_fetch: None,
     };
     match provider.resolve(&ctx) {
         Ok(src) => {

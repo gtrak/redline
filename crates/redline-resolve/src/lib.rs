@@ -13,7 +13,7 @@
 pub mod providers;
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -122,7 +122,7 @@ pub trait ToolingProvider: Send + Sync {
 }
 
 /// What the app hands a provider on a workspace miss.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SymbolContext {
     /// Workspace (or open project) root.
     pub workspace_root: PathBuf,
@@ -152,6 +152,91 @@ pub struct SymbolContext {
     /// providers whose `languages()` contains it are attempted (the
     /// others are not probed and leave no trace entry).
     pub language: Option<String>,
+    /// The fetch-confirmation hook (issue-non-rust-receiver-resolution):
+    /// a provider MUST call it before running ANY network install
+    /// (`pip install` / `npm install` / `go mod download`) and MUST bail
+    /// with a refusal error when it returns `false`. When `None`, the
+    /// pip / npm / go providers never fetch — a safe default: their
+    /// installs are never silent. THE CARGO PROVIDER IS
+    /// THE NAMED EXCEPTION: its `cargo fetch` (registry population)
+    /// predates the gate and does not call the hook (the sanctioned
+    /// Rust-on-demand fetch, kept byte-for-byte so the PTY no-hint
+    /// pins stand). The app lane always supplies a hook for the gated
+    /// providers (a visible y/n prompt the operator answers); `None` in
+    /// this crate's own tests pins that a missing hook is a refusal, not
+    /// a fetch.
+    pub confirm_fetch: Option<std::sync::Arc<FetchConfirmFn>>,
+}
+
+impl std::fmt::Debug for SymbolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolContext")
+            .field("workspace_root", &self.workspace_root)
+            .field("symbol", &self.symbol)
+            .field("from_file", &self.from_file)
+            .field("scope", &self.scope)
+            .field("language", &self.language)
+            .field(
+                "confirm_fetch",
+                &self.confirm_fetch.as_ref().map(|_| "hook"),
+            )
+            .finish()
+    }
+}
+
+/// A fetch-on-demand request the provider is about to run (a network
+/// install, issue-non-rust-receiver-resolution): the EXACT install
+/// command (the provider's own argv, human-readable) and the file that
+/// implied it. Providers confirm through
+/// [`SymbolContext::confirm_fetch`] before executing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchRequest {
+    /// The install command line (e.g. `pip install df`,
+    /// `npm install left-pad --no-audit --no-fund`,
+    /// `go mod download github.com/x/y`). P3-7, gate (doc): this is the
+    /// CANONICAL display form the banner shows — the argv the provider
+    /// actually runs may differ in its interpreter (the Python provider
+    /// confirms `pip install <pkg>` but runs the workspace venv's `pip`
+    /// or the ambient `pip3`; the package + flags are the invariant
+    /// part). The operator approves the fetch, and the command shown is
+    /// the honest one.
+    pub command: String,
+    /// The file that implied the fetch (workspace-relative, the same
+    /// shape as [`SymbolContext::from_file`]).
+    pub from_file: PathBuf,
+}
+
+/// A provider's fetch-confirmation decision hook: `true` = the operator
+/// approved the shown command, `false` = declined / no operator (refuse).
+pub type FetchConfirmFn = dyn Fn(&FetchRequest) -> bool + Send + Sync;
+
+/// The fetch gate (issue-non-rust-receiver-resolution): the check a
+/// provider runs before executing a network install. `None` (no hook)
+/// and a declined hook both REFUSE — an install runs only after an
+/// explicit, visible confirmation, never as a silent side effect of a
+/// jump. The providers' `offline` flags are the stronger, permanent
+/// refusal: an offline provider never asks, never installs.
+pub(crate) fn confirm_or_refuse(
+    ctx: &SymbolContext,
+    command: &str,
+    from_file: &Path,
+) -> anyhow::Result<()> {
+    match &ctx.confirm_fetch {
+        Some(hook)
+            if hook(&FetchRequest {
+                command: command.to_string(),
+                from_file: from_file.to_path_buf(),
+            }) =>
+        {
+            Ok(())
+        }
+        Some(_) => anyhow::bail!(
+            "install refused: `{command}` was declined at the fetch confirmation (nothing was installed)"
+        ),
+        None => anyhow::bail!(
+            "install refused: `{command}` requires a fetch confirmation hook (confirm_fetch); a provider never installs without one"
+        ),
+    }
 }
 
 /// A bare symbol with a non-empty scope hint → the hint IS the full path
@@ -404,6 +489,7 @@ mod tests {
             from_file: PathBuf::from("src/lib.rs"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         }
     }
 

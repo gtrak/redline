@@ -21,9 +21,13 @@
 //!   shape is guaranteed to bail before any `npm` spawn (documented per
 //!   probe); no network needed;
 //! - `mode = "live"` — a real `npm install` in a per-run tempdir copy.
-//!   When `npm` or `node` is absent from PATH the live probes SKIP
-//!   LOUDLY (printed to stderr); the deterministic probes still run, and
-//!   the live goldens are simply not verified that run.
+//!   `#[ignore]`d with its accepting hook REMOVED (P1-2, gate): a run of
+//!   the live leg refuses every install and can never end green by
+//!   accident — re-verifying these goldens is a deliberate, reviewed act
+//!   (re-add a hook + run `-- --ignored golden_live_probes`). When
+//!   `npm` or `node` is absent from PATH an explicit run of the leg
+//!   SKIPs LOUDLY (printed to stderr); the deterministic probes always
+//!   run, and the live goldens are simply not verified that run.
 //!
 //! A deliberate provider/seam behavior change is a deliberate golden
 //! diff: re-bless with
@@ -230,7 +234,12 @@ fn copy_corpus(dst: &Path) {
 }
 
 /// Run one probe against its workspace and capture the outcome.
-fn capture(probe: &Probe, ws_root: &Path, provider: &JsProvider) -> Outcome {
+fn capture(
+    probe: &Probe,
+    ws_root: &Path,
+    provider: &JsProvider,
+    confirm: Option<std::sync::Arc<redline_resolve::FetchConfirmFn>>,
+) -> Outcome {
     let ws_canon = ws_root.canonicalize().unwrap();
     let ws_canon_str = ws_canon.to_string_lossy().into_owned();
     let ctx = SymbolContext {
@@ -239,6 +248,7 @@ fn capture(probe: &Probe, ws_root: &Path, provider: &JsProvider) -> Outcome {
         from_file: PathBuf::from(&probe.file),
         scope: probe.scope.clone(),
         language: probe.language.clone(),
+        confirm_fetch: confirm,
     };
     match provider.resolve(&ctx) {
         Ok(src) => {
@@ -412,10 +422,13 @@ fn check_golden(probe: &Probe, outcome: &Outcome, failures: &mut Vec<String>) {
 fn run_probes(probes: &[&Probe], failures: &mut Vec<String>) {
     for probe in probes {
         // A fresh workspace per probe: the deterministic modes never
-        // install anything, so the copies stay pristine.
+        // install anything, so the copies stay pristine. The fetch
+        // gate (issue-non-rust-receiver-resolution) gets NO hook here:
+        // a deterministic mode that reached an install would refuse —
+        // the goldens pin exactly that refusal.
         let ws_root = build_ws(&probe.ws);
         let provider = provider_for(&probe.mode);
-        let outcome = capture(probe, ws_root.path(), &provider);
+        let outcome = capture(probe, ws_root.path(), &provider, None);
         check_golden(probe, &outcome, failures);
         println!("probe `{}`: {}", probe.id, summarize(&outcome));
     }
@@ -463,8 +476,18 @@ fn golden_deterministic_probes() {
 
 /// The live legs: real `npm install` of the registry dependencies in one
 /// shared tempdir copy of the corpus (the last probe relies on that
-/// populated node_modules). Skipped LOUDLY when npm/node are absent.
+/// populated node_modules).
+///
+/// `#[ignore]`d (P1-2, gate): a real registry install — it runs ONLY on
+/// explicit opt-in (`cargo test -- --ignored golden_live_probes`), never
+/// in the default suite. The accepting `confirm_fetch` hook the lane
+/// supplied was REMOVED with it: with no hook an accidental un-ignored
+/// run REFUSES (the provider's gate bails with the refusal; the live
+/// goldens — which pin the accepted-install outcome — fail red, and no
+/// `npm install` is ever spawned). Verifying a live golden again
+/// deliberately requires re-adding a hook (an explicit, reviewed change).
 #[test]
+#[ignore] // real `npm install` from the registry (network) — explicit opt-in only
 fn golden_live_probes() {
     let probes = read_probes();
     let live: Vec<&Probe> = probes.iter().filter(|p| p.mode == "live").collect();
@@ -482,10 +505,14 @@ fn golden_live_probes() {
     // One shared corpus workspace: the first install populates
     // node_modules; the later probes reuse it.
     let shared = build_ws("corpus");
+    // NO accepting hook (P1-2): the fetch gate refuses every install
+    // here — a run of this leg installs nothing and fails against the
+    // accepted-install goldens (the refusal is the pinned safe default;
+    // re-adding a hook is the deliberate act that verifies the goldens).
     let mut failures = Vec::new();
     for probe in &live {
         let provider = provider_for(&probe.mode);
-        let outcome = capture(probe, shared.path(), &provider);
+        let outcome = capture(probe, shared.path(), &provider, None);
         check_golden(probe, &outcome, &mut failures);
         println!("probe `{}`: {}", probe.id, summarize(&outcome));
     }

@@ -61,6 +61,17 @@ impl AppStore {
             self.reload_confirm_key(key);
             return;
         }
+        // Fetch-on-demand confirm (issue-non-rust-receiver-resolution):
+        // `y` approves the EXACT command on screen (the provider's
+        // blocked hook unblocks and runs the install step), `n`/C-g/ESC
+        // decline it (the provider bails; the install never runs
+        // unconfirmed); every other key is swallowed (no "unbound key"
+        // echo mid-prompt — the provider stays blocked until an answer).
+        if self.fetch_confirm_active() {
+            self.self_insert_run = None;
+            self.fetch_confirm_key(key);
+            return;
+        }
         // Picker: printable chars extend the query, Backspace/C-h edit it,
         // RET / arrows / C-n / C-p drive it; other keys fall through.
         if self.picker.is_some() && self.picker_key_event(key) {

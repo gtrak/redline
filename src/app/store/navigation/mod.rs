@@ -607,8 +607,11 @@ impl AppStore {
             .grammar_registry
             .language_for(&buf.path.as_ref().map(|p| p.to_string_lossy()).unwrap_or_default());
         // A symbol must exist at the landing point (no-symbol landings set
-        // no highlight).
-        if AppStore::symbol_at_point(lang, text, entry.col).is_none() {
+        // no highlight). P2-5, gate: the extraction runs on the buffer's
+        // rope (the lane's `(0, text-as-source)` call passed the LANDING
+        // LINE as the whole source — the receiver gate now sees the real
+        // file, at the real line index).
+        if AppStore::symbol_at_point(lang, text, entry.line, entry.col, &buf.rope).is_none() {
             return;
         }
         let Some((start, end)) = symbol_extent_at(text, entry.col) else {

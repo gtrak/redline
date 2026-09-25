@@ -251,6 +251,9 @@ impl AppStore {
         // path re-bumps in `start_symbol_resolution`, which is fine (a
         // generation only needs to differ; the event carries its own).
         self.resolve_generation += 1;
+        // P3-4: the superseded request is no longer the current
+        // generation's — its in-flight status does not carry over.
+        self.resolve_in_flight = false;
 
         let line = self.point_line();
         let line_text = buf.line_text(line).unwrap_or_default();
@@ -258,9 +261,12 @@ impl AppStore {
         // column, plus the path token it belongs to (raw, for the
         // resolver). 011-06: language-aware — in a non-Rust buffer the
         // token is the whole dotted path when the point sits in the
-        // language's path container, else the bare extraction.
+        // language's path container, else the bare extraction. P2-5,
+        // gate: the extraction takes the buffer's ROPE (no whole-clone
+        // per M-. — the full source materializes only inside the
+        // receiver classification, lazily).
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
-        let at = Self::symbol_at_point(lang, &line_text, self.point_col());
+        let at = Self::symbol_at_point(lang, &line_text, line, self.point_col(), &buf.rope);
 
         // The candidate lookup below is pure over the index and the buffer
         // (no `&mut self` inside), so the `buf` borrow still ends before
@@ -533,12 +539,21 @@ impl AppStore {
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
         // The point's line text must be read (owned) BEFORE the crate-root
         // match below (its `crate_index_arc_for_path` takes `&mut self`;
-        // the `buf` borrow must not span it — the 006-03 borrow rule).
+        // the `buf` borrow must not span it — the 006-03 borrow rule). The
+        // SAME extraction as M-. runs here, too (P2-5, gate: the ROPE
+        // backs it — no whole-clone per M-x i).
         let line = self.point_line();
         let line_text: String = buf
             .line_text(line)
             .map(|c| c.into_owned())
             .unwrap_or_default();
+        let at = Self::symbol_at_point(
+            lang,
+            &line_text,
+            line,
+            self.point_col(),
+            &buf.rope,
+        );
         // The index source: the project index (project files) or the
         // owning crate's index (external buffers, 006-03); a non-external
         // buffer outside the root keeps the pre-006-03 refusal.
@@ -553,9 +568,7 @@ impl AppStore {
             }
         };
         // The trait at point: the SAME extraction as M-. (byte-for-byte).
-        let Some((ident, path_token)) =
-            Self::symbol_at_point(lang, &line_text, self.point_col())
-        else {
+        let Some((ident, path_token)) = at else {
             self.minibuffer_message("no symbol under point");
             return;
         };
@@ -838,6 +851,853 @@ impl AppStore {
         }
     }
 
+    /// (issue-non-rust-receiver-resolution) Is the HEAD segment of a
+    /// non-Rust dotted path a LOCAL VALUE at the point — a name the file
+    /// declares as a variable, never a module/package head? The M-. path
+    /// token must stay BARE for such receivers (`df.head` where
+    /// `df = read_data()` — the in-project index lookup is the honest
+    /// answer; a local variable is NOT a package and must never reach a
+    /// provider as one — that is the 011-06 P1's `pip install df`
+    /// shape). A name bound by an import (a module/package head) or a
+    /// name the file declares nowhere stays the 011-06 upgrade (the
+    /// fetch-confirmation gate guards the install itself).
+    ///
+    /// Only the fetch-capable languages classify (`python`,
+    /// `javascript`/`typescript`/`tsx`, `go`); every other language
+    /// returns `false` (byte-for-byte the 011-06 upgrade — their
+    /// resolvers have no install to confirm). Rust never reaches this
+    /// (its `.` access stays bare by the extraction itself).
+    ///
+    /// P2-5, gate: the full source is materialized here (the caller's
+    /// extraction runs on the point's line with a line-local offset, so
+    /// a bare M-. never pays for a whole-file parse) — and only for the
+    /// fetch-capable languages. The point's full-file byte offset comes
+    /// from the buffer's authoritative primitive (`point_byte_offset`
+    /// over the rope — CRLF-correct; the lane's re-derived `\n`-only
+    /// line-start arithmetic drifted one byte per preceding CRLF line,
+    /// P1-1, gate).
+    ///
+    /// The classification is bounded by design (never a guess, the
+    /// 007-03 discipline): a parse failure or a point outside the tree
+    /// returns `false` (the 011-06 behavior stands — the confirm gate
+    /// still guards). The three scope approximations below all lean to
+    /// the SAFE side (bare, never a fabricated package) — they are not
+    /// a blanket claim about the whole classifier (the P2-1…P2-4 gaps,
+    /// once unfixed, leaned the OTHER way): a binding visible in a
+    /// sibling block still counts (JS block scoping), comprehension /
+    /// generator targets are pruned from the enclosing function's scan
+    /// (Python 3 generator scope), and nested function bodies are pruned
+    /// from the enclosing scope's scan (their locals are not the
+    /// enclosing scope's).
+    pub(in crate::app::store) fn dotted_head_is_local_value(
+        lang: LanguageId,
+        rope: &Rope,
+        line: usize,
+        col: usize,
+        head: &str,
+    ) -> bool {
+        let Some(byte) = point_byte_offset(rope, line, col) else {
+            return false;
+        };
+        let source = rope.to_string();
+        match lang {
+            LanguageId::Python => Self::python_head_is_local_value(&source, byte, head),
+            LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+                Self::js_head_is_local_value(&source, byte, head, lang)
+            }
+            LanguageId::Go => Self::go_head_is_local_value(&source, byte, head),
+            // No fetching provider (and Rust's own pre-steps own its
+            // receivers): byte-for-byte the 011-06 whole-path upgrade.
+            _ => false,
+        }
+    }
+
+    /// One parse per classification (the 007-03 one-parse discipline).
+    fn parse_for(lang: LanguageId, source: &str) -> Option<tree_sitter::Tree> {
+        let language = redline_syntax::queries::language_for(lang)?;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        parser.parse(source.as_bytes(), None)
+    }
+
+    fn receiver_node_text<'a>(
+        node: Option<tree_sitter::Node<'a>>,
+        source: &'a [u8],
+    ) -> Option<&'a str> {
+        node.and_then(|n| n.utf8_text(source).ok())
+    }
+
+    /// Does the subtree carry a NAME CARRIER of exactly `name` (tuple /
+    /// pattern targets, parameter lists)? A coarse containment — a false
+    /// positive only ever keeps the token BARE (the safe side). P2-2,
+    /// gate: destructuring carriers count too — a `shorthand_property_
+    /// identifier_pattern` (`const { df } = x`) and a `property_identifier`
+    /// (a destructuring-pair's property name) carry names exactly like a
+    /// plain `identifier` does (documented safe-side approximation: a
+    /// pair's KEY name counts as a carrier even though only its VALUE
+    /// binds — it only ever keeps the token bare, never fabricates a
+    /// package).
+    fn subtree_contains_identifier(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "shorthand_property_identifier_pattern"
+                | "property_identifier"
+        ) && Self::receiver_node_text(Some(node), source) == Some(name)
+        {
+            return true;
+        }
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i)
+                && Self::subtree_contains_identifier(c, source, name)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Python: is `head` a local VALUE at `byte`? A name assigned in a
+    /// function is local to that function (Python's scoping rule), so
+    /// the enclosing function / class chain + the module level are
+    /// scanned (innermost first): an assignment / augmented target, a
+    /// `for` target, a `with … as` / `except … as` alias
+    /// (`as_pattern`), a walrus (`named_expression`) target, a lambda
+    /// parameter, a def / class NAME, or a function parameter of the
+    /// same name makes it a value. A comprehension's `for_in_clause`
+    /// target is local ONLY at points inside that comprehension (the
+    /// generator scope — pruned from the enclosing function's scan,
+    /// Python 3). An IMPORT binding is NOT a value (the module head
+    /// keeps the 011-06 upgrade). Wildcard imports bind unknown names —
+    /// not counted (the fetch-confirmation gate covers that residual).
+    fn python_head_is_local_value(source: &str, byte: usize, head: &str) -> bool {
+        let Some(tree) = Self::parse_for(LanguageId::Python, source) else {
+            return false;
+        };
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return false;
+        }
+        let bytes = source.as_bytes();
+        // Walk down to the innermost node containing `byte`, then up its
+        // ancestors (the scope chain).
+        let mut leaf = root;
+        loop {
+            let mut child = None;
+            for i in 0..leaf.child_count() {
+                if let Some(c) = leaf.child(i)
+                    && c.start_byte() <= byte
+                    && byte < c.end_byte()
+                {
+                    child = Some(c);
+                    break;
+                }
+            }
+            match child {
+                Some(c) => leaf = c,
+                None => break,
+            }
+        }
+        // P2-3: a comprehension the point sits in: its `for_in_clause`
+        // targets are local AT THE POINT (the generator scope), even
+        // though they are NOT the enclosing function's bindings.
+        {
+            let mut anc = leaf.parent();
+            while let Some(a) = anc {
+                if matches!(
+                    a.kind(),
+                    "list_comprehension"
+                        | "set_comprehension"
+                        | "dictionary_comprehension"
+                        | "generator_expression"
+                )
+                    && Self::py_comprehension_binds(a, bytes, head)
+                {
+                    return true;
+                }
+                anc = a.parent();
+            }
+        }
+        let mut anc = leaf.parent();
+        let mut scopes: Vec<tree_sitter::Node> = Vec::new();
+        while let Some(a) = anc {
+            // P2-3: a `lambda` is a scope too (its parameters bind at
+            // every point in its body).
+            if a.kind() == "function_definition"
+                || a.kind() == "class_definition"
+                || a.kind() == "lambda"
+            {
+                scopes.push(a);
+            }
+            anc = a.parent();
+        }
+        scopes.push(root);
+        let head = head.to_string();
+        for scope in &scopes {
+            let body = if scope.kind() == "module" {
+                *scope
+            } else {
+                scope.child_by_field_name("body").unwrap_or(*scope)
+            };
+            if Self::py_scope_binds_value(body, bytes, &head) {
+                return true;
+            }
+            // Parameters of an enclosing function (P2-3: lambda too) are
+            // local values at every point in it (`self`, `cls`, arguments).
+            if (scope.kind() == "function_definition" || scope.kind() == "lambda")
+                && scope
+                    .child_by_field_name("parameters")
+                    .is_some_and(|p| Self::subtree_contains_identifier(p, bytes, &head))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does a comprehension node's `for_in_clause` TARGETS bind `name`
+    /// (every clause of the comprehension — a nested `for` chain)?
+    fn py_comprehension_binds(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        (0..node.child_count())
+            .filter_map(|i| node.child(i))
+            .filter(|c| c.kind() == "for_in_clause")
+            .any(|c| {
+                c.child_by_field_name("left")
+                    .is_some_and(|left| Self::py_target_binds(left, source, name))
+            })
+    }
+
+    /// Does `node`'s subtree bind `name` as a VALUE at THIS scope level?
+    /// Nested function / class bodies are PRUNED (their locals belong to
+    /// their own scope), but a nested def / class NAME is a value visible
+    /// here. Comprehension `for_in_clause` TARGETS are pruned too (Python
+    /// 3 generator scope — not the enclosing scope's binding; a point
+    /// INSIDE the comprehension is handled by the caller's
+    /// comprehension-local check), while a walrus in the iterable / body
+    /// still binds the enclosing scope (the comprehension's non-target
+    /// children stay scanned). A lambda's body stays scanned (its walruses
+    /// bind the enclosing scope) but its parameters are not this scope's
+    /// (they are the lambda scope's — the scope-chain's parameter check
+    /// owns them). An attribute or subscript LHS (`df.x = …`, `df[0] = …`)
+    /// binds NOTHING (the object is referenced, not bound).
+    fn py_scope_binds_value(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        for c in (0..node.child_count()).filter_map(|i| node.child(i)) {
+            match c.kind() {
+                "function_definition" | "class_definition" => {
+                    if Self::receiver_node_text(c.child_by_field_name("name"), source) == Some(name) {
+                        return true;
+                    }
+                    continue; // prune the body (own scope)
+                }
+                // Comprehension generator scope — prune the targets, keep
+                // the rest (P2-3; the lane's `"comprehension"` kind never
+                // matched a real grammar node, so this prune was inert
+                // and the targets leaked).
+                "list_comprehension"
+                | "set_comprehension"
+                | "dictionary_comprehension"
+                | "generator_expression" => {
+                    for gc in (0..c.child_count()).filter_map(|i| c.child(i)) {
+                        if gc.kind() == "for_in_clause" {
+                            // The target: the comprehension's own scope.
+                            // The iterable: a walrus in it binds the
+                            // enclosing scope — keep scanning it.
+                            if let Some(right) = gc.child_by_field_name("right")
+                                && Self::py_scope_binds_value(right, source, name)
+                            {
+                                return true;
+                            }
+                        } else if Self::py_scope_binds_value(gc, source, name) {
+                            return true;
+                        }
+                    }
+                }
+                // P2-3: the `as` alias of a `with` item / `except`
+                // clause (`with open(…) as df` / `except E as df`) — a
+                // plain local value.
+                "as_pattern" => {
+                    if c
+                        .child_by_field_name("alias")
+                        .and_then(|a| Self::receiver_node_text(Some(a), source))
+                        .is_some_and(|t| t == name)
+                    {
+                        return true;
+                    }
+                }
+                // P2-3: a walrus target binds the ENCLOSING scope
+                // (Python's rule — the expression's position is
+                // irrelevant to the binding).
+                "named_expression" => {
+                    if c
+                        .child_by_field_name("name")
+                        .and_then(|n| Self::receiver_node_text(Some(n), source))
+                        .is_some_and(|t| t == name)
+                    {
+                        return true;
+                    }
+                }
+                "expression_statement" => {
+                    if let Some(op) = c.child(0)
+                        && matches!(op.kind(), "assignment" | "augmented_assignment")
+                        && op
+                            .child_by_field_name("left")
+                            .is_some_and(|left| Self::py_target_binds(left, source, name))
+                    {
+                        return true;
+                    }
+                }
+                "for_statement"
+                    if c
+                        .child_by_field_name("left")
+                        .is_some_and(|left| Self::py_target_binds(left, source, name)) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+            if Self::py_scope_binds_value(c, source, name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Is a Python assignment / for TARGET a plain binding of `name` (a
+    /// single identifier, or a tuple / pattern list carrying it)?
+    fn py_target_binds(target: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        match target.kind() {
+            "identifier" => Self::receiver_node_text(Some(target), source) == Some(name),
+            "pattern_list" | "tuple" => {
+                Self::subtree_contains_identifier(target, source, name)
+            }
+            // P2-3: the grammar's single-target wrapper (e.g. a
+            // comprehension `for_in_clause` left) — a plain identifier in
+            // pattern position.
+            "pattern" => Self::subtree_contains_identifier(target, source, name),
+            // attribute / subscript / star target: the object is
+            // referenced, not bound — never a local-value binding.
+            _ => false,
+        }
+    }
+
+    /// JS / TS: is `head` a local VALUE at `byte`? `this` / `super` never
+    /// are packages. A name bound by an import declaration or a CJS
+    /// `require(…)` initializer is a PACKAGE head (keeps the 011-06
+    /// upgrade — the provider resolves it, the gate guards the fetch);
+    /// every other declaration (const / let / var, function, class,
+    /// a parameter) makes it a local value. The scan is BOUNDED (the
+    /// 007-03 discipline): the program level + the enclosing function /
+    /// class / block bodies — a sibling-block binding counting here is a
+    /// safe-side approximation of block scoping (it only ever keeps the
+    /// token BARE, never fabricates a package).
+    fn js_head_is_local_value(source: &str, byte: usize, head: &str, lang: LanguageId) -> bool {
+        if head == "this" || head == "super" {
+            return true;
+        }
+        let Some(tree) = Self::parse_for(lang, source) else {
+            return false;
+        };
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return false;
+        }
+        let bytes = source.as_bytes();
+        // A top-level import / require binding is a PACKAGE head (never a
+        // local value): the 011-06 upgrade stands for it.
+        if Self::js_top_level_imports_bind(root, bytes, head) {
+            return false;
+        }
+        // The enclosing scope chain: statement blocks / class bodies up
+        // to the program root (innermost first); the program level
+        // always counts.
+        let mut leaf = root;
+        loop {
+            let mut child = None;
+            for i in 0..leaf.child_count() {
+                if let Some(c) = leaf.child(i)
+                    && c.start_byte() <= byte
+                    && byte < c.end_byte()
+                {
+                    child = Some(c);
+                    break;
+                }
+            }
+            match child {
+                Some(c) => leaf = c,
+                None => break,
+            }
+        }
+        let mut anc = leaf.parent();
+        // P2-1, gate: the FUNCTION FORMS the point sits in
+        // (`function_declaration` / `function` / `arrow_function` /
+        // `method_definition`) join the scope chain — their PARAMETERS
+        // bind at every point in the body (the lane's `function_
+        // declaration` arm pruned the `formal_parameters`, so a named
+        // function's params / rest param were never seen as local).
+        let mut scopes: Vec<tree_sitter::Node> = Vec::new();
+        while let Some(a) = anc {
+            if matches!(
+                a.kind(),
+                "statement_block"
+                    | "class_body"
+                    | "function_declaration"
+                    | "function"
+                    | "arrow_function"
+                    | "method_definition"
+            ) {
+                scopes.push(a);
+            }
+            anc = a.parent();
+        }
+        scopes.push(root);
+        let head = head.to_string();
+        for scope in &scopes {
+            if scope.kind() == "import_statement" {
+                continue;
+            }
+            // P2-1: a function form on the chain is the function the
+            // point sits in — its PARAMETERS are its bindings (scan the
+            // parameters field only; the body's own scope is the
+            // innermost block already on the chain).
+            if matches!(
+                scope.kind(),
+                "function_declaration" | "function" | "arrow_function" | "method_definition"
+            ) {
+                if Self::js_function_parameters_bind(*scope, bytes, &head) {
+                    return true;
+                }
+                continue;
+            }
+            if Self::js_scope_binds_value(*scope, bytes, &head) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// P2-1: do the function form's PARAMETERS bind `name`? The
+    /// `parameters` field (`formal_parameters`) plus the arrow's single
+    /// bare-parameter field (`df => …` — `parameter`, a lone identifier).
+    fn js_function_parameters_bind(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        if let Some(p) = node.child_by_field_name("parameters")
+            && Self::js_formal_parameters_bind(p, source, name)
+        {
+            return true;
+        }
+        if let Some(p) = node.child_by_field_name("parameter")
+            && p.kind() == "identifier"
+            && Self::receiver_node_text(Some(p), source) == Some(name)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// P2-1: does a `formal_parameters` list bind `name`? Every
+    /// parameter position: a bare `identifier` (JS 0.25 named function /
+    /// arrow params), a `formal_parameter` (`name` field), a TS
+    /// `required_parameter` / `optional_parameter` (`pattern` field), or
+    /// a pattern-shaped param (`rest_pattern` / `rest_parameter` /
+    /// `assignment_pattern` / `object_assignment_pattern` / … — the
+    /// subtree walk, P2-2's shorthand / property carriers included).
+    fn js_formal_parameters_bind(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        for c in (0..node.child_count()).filter_map(|i| node.child(i)) {
+            match c.kind() {
+                "identifier" => {
+                    if Self::receiver_node_text(Some(c), source) == Some(name) {
+                        return true;
+                    }
+                }
+                "formal_parameter" => {
+                    if let Some(nm) = c.child_by_field_name("name")
+                        && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                            || Self::subtree_contains_identifier(nm, source, name))
+                    {
+                        return true;
+                    }
+                }
+                "required_parameter" | "optional_parameter" => {
+                    if let Some(nm) = c.child_by_field_name("pattern")
+                        && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                            || Self::subtree_contains_identifier(nm, source, name))
+                    {
+                        return true;
+                    }
+                }
+                _ => {
+                    if Self::subtree_contains_identifier(c, source, name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Does a TOP-LEVEL import declaration (or CJS `require` initializer)
+    /// bind `name` — a package head, never a local value?
+    fn js_top_level_imports_bind(root: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        for c in (0..root.child_count()).filter_map(|i| root.child(i)) {
+            match c.kind() {
+                "import_statement" => {
+                    // `import X from "p"` / `import { A as B }` /
+                    // `import * as ns` / `import { A }`: any clause binding
+                    // whose LOCAL name is `name` (a named import's original
+                    // name counts too — `import { df } from "p"` binds a
+                    // package value head, the provider's documented
+                    // handling).
+                    if Self::js_clause_binds(c, source, name) {
+                        return true;
+                    }
+                }
+                "lexical_declaration" | "variable_declaration"
+                    if Self::js_declarators_are_require_bindings(c, source, name) =>
+                {
+                    // CJS: `const df = require("pkg")` / destructured
+                    // `const { df } = require("pkg")` — the module object
+                    // (or its exports) are package heads.
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Does an `import_clause` bind the local name `name`?
+    fn js_clause_binds(stmt: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        let Some(clause) = (0..stmt.child_count())
+            .filter_map(|k| stmt.child(k))
+            .find(|n| n.kind() == "import_clause")
+        else {
+            return false;
+        };
+        for c in (0..clause.child_count()).filter_map(|i| clause.child(i)) {
+            match c.kind() {
+                "identifier" => {
+                    // default import: `import df from "p"`
+                    if Self::receiver_node_text(Some(c), source) == Some(name) {
+                        return true;
+                    }
+                }
+                "named_imports" => {
+                    for j in 0..c.child_count() {
+                        if let Some(entry) = c.child(j)
+                            && entry.kind() == "import_specifier"
+                        {
+                            // The LOCAL name (the alias when present) is
+                            // the binding; the original counts too.
+                            let local = Self::receiver_node_text(
+                                entry
+                                    .child_by_field_name("alias")
+                                    .or_else(|| entry.child_by_field_name("name")),
+                                source,
+                            );
+                            let original = Self::receiver_node_text(
+                                entry.child_by_field_name("name"),
+                                source,
+                            );
+                            if local.is_some_and(|t| t == name)
+                                || original.is_some_and(|t| t == name)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                "namespace_import"
+                    if Self::clause_ns_ident(c)
+                        .is_some_and(|n| Self::receiver_node_text(Some(n), source) == Some(name)) =>
+                {
+                    // `import * as ns from "p"`
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// The namespace import's local identifier (`import * as ns`).
+    fn clause_ns_ident(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+        (0..node.child_count()).filter_map(|k| node.child(k)).find(|n| n.kind() == "identifier")
+    }
+
+    /// Does a (top-level) `const/let/var` declare `name` from a `require`
+    /// (the CJS import shape — a package head)?
+    fn js_declarators_are_require_bindings(
+        decl: tree_sitter::Node,
+        source: &[u8],
+        name: &str,
+    ) -> bool {
+        for d in (0..decl.child_count()).filter_map(|i| decl.child(i)) {
+            if d.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(value) = d.child_by_field_name("value") else {
+                continue;
+            };
+            let is_require = value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|f| {
+                        f.kind() == "identifier" && Self::receiver_node_text(Some(f), source) == Some("require")
+                    });
+            if !is_require {
+                continue;
+            }
+            if let Some(nm) = d.child_by_field_name("name")
+                && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                    || Self::subtree_contains_identifier(nm, source, name))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does `scope`'s subtree declare `name` as a LOCAL VALUE (a
+    /// non-import declaration)? Nested function / class bodies are
+    /// scanned too — a safe-side approximation of block scoping (it only
+    /// ever keeps the token BARE, never fabricates a package).
+    fn js_scope_binds_value(scope: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        for i in 0..scope.child_count() {
+            if let Some(c) = scope.child(i)
+                && Self::js_node_binds_local_value(c, source, name)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does this node (or its subtree) declare `name` as a local value?
+    fn js_node_binds_local_value(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        match node.kind() {
+            "lexical_declaration" | "variable_declaration" => {
+                for d in (0..node.child_count()).filter_map(|i| node.child(i)) {
+                    if d.kind() != "variable_declarator" {
+                        continue;
+                    }
+                    // A require initializer is a PACKAGE head (handled by
+                    // the import check) — not a local value.
+                    let is_require = d
+                        .child_by_field_name("value")
+                        .is_some_and(|v| v.kind() == "call_expression")
+                        && d
+                            .child_by_field_name("value")
+                            .and_then(|v| v.child_by_field_name("function"))
+                            .is_some_and(|f| {
+                                f.kind() == "identifier"
+                                    && Self::receiver_node_text(Some(f), source) == Some("require")
+                            });
+                    if is_require {
+                        continue;
+                    }
+                    if let Some(nm) = d.child_by_field_name("name")
+                        && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                            || Self::subtree_contains_identifier(nm, source, name))
+                    {
+                        return true;
+                    }
+                    // The initializer may itself carry BINDINGS: an arrow
+                    // function's parameter list (`const f = (df) => …`)
+                    // binds `df` in the enclosing scope (and a function
+                    // expression's params too). Recurse so those are seen;
+                    // nested `function`/`class` declarations early-return on
+                    // their own name, so their bodies stay pruned.
+                    if let Some(v) = d.child_by_field_name("value")
+                        && Self::js_node_binds_local_value(v, source, name)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            "function_declaration" | "class_declaration" => {
+                Self::receiver_node_text(node.child_by_field_name("name"), source) == Some(name)
+            }
+            // Parameters: a `formal_parameters` list binds every one of
+            // its params in the function body. The param nodes are
+            // shaped differently by position: a bare `identifier` (arrow
+            // `(df) =>`), a `formal_parameter` (named function, `name`
+            // field), a `rest_pattern` / `rest_parameter`, or an
+            // `assignment_pattern` / `object_pattern` / `array_pattern`
+            // (defaults / destructuring — carry the identifier).
+            "formal_parameters" => {
+                for c in (0..node.child_count()).filter_map(|i| node.child(i)) {
+                    match c.kind() {
+                        "identifier" => {
+                            if Self::receiver_node_text(Some(c), source) == Some(name) {
+                                return true;
+                            }
+                        }
+                        "formal_parameter" => {
+                            if let Some(nm) = c.child_by_field_name("name")
+                                && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                                    || Self::subtree_contains_identifier(nm, source, name))
+                            {
+                                return true;
+                            }
+                        }
+                        "rest_pattern" | "rest_parameter" | "assignment_pattern"
+                        | "object_pattern" | "array_pattern" | "pattern"
+                        if Self::subtree_contains_identifier(c, source, name) =>
+                        {
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+                false
+            }
+            // A lone parameter node reached directly (not via a list).
+            "formal_parameter" | "rest_parameter" | "assignment_pattern" => {
+                if let Some(nm) = node.child_by_field_name("name")
+                    && (Self::receiver_node_text(Some(nm), source) == Some(name)
+                        || Self::subtree_contains_identifier(nm, source, name))
+                {
+                    return true;
+                }
+                false
+            }
+            _ => {
+                for i in 0..node.child_count() {
+                    if let Some(c) = node.child(i)
+                        && Self::js_node_binds_local_value(c, source, name)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Go: is `head` a local VALUE at `byte`? A local variable (short var
+    /// declaration, var declaration, a range target, a function parameter)
+    /// is never a package. A name bound by an import (or a name the file
+    /// declares nowhere) stays the 011-06 upgrade — Go's `pkg.Fn` selector
+    /// is a package-qualified reference unless the receiver is a declared
+    /// value.
+    fn go_head_is_local_value(source: &str, byte: usize, head: &str) -> bool {
+        let Some(tree) = Self::parse_for(LanguageId::Go, source) else {
+            return false;
+        };
+        let root = tree.root_node();
+        if !(root.start_byte() <= byte && byte < root.end_byte()) {
+            return false;
+        }
+        let bytes = source.as_bytes();
+        // The innermost node (to start the ancestor walk).
+        let mut leaf = root;
+        loop {
+            let mut child = None;
+            for i in 0..leaf.child_count() {
+                if let Some(c) = leaf.child(i)
+                    && c.start_byte() <= byte
+                    && byte < c.end_byte()
+                {
+                    child = Some(c);
+                    break;
+                }
+            }
+            match child {
+                Some(c) => leaf = c,
+                None => break,
+            }
+        }
+        let mut anc = leaf.parent();
+        // The enclosing function chain: named functions AND closures
+        // (a closure's parameters bind at every point in its body, and
+        // its short-var locals bind in its own body — both read from
+        // this ancestor, never from the outer walk's pruned view).
+        // P2-4, gate: the grammar's kind is `func_literal` (tree-sitter-
+        // go 0.25 node-types), not `function_literal` — the lane's kind
+        // never matched, so a closure's params/locals were never local
+        // AND the closure prune below never fired.
+        let mut funcs: Vec<tree_sitter::Node> = Vec::new();
+        while let Some(a) = anc {
+            if a.kind() == "function_declaration" || a.kind() == "func_literal" {
+                funcs.push(a);
+            }
+            anc = a.parent();
+        }
+        let head = head.to_string();
+        for f in funcs.iter().rev() {
+            // Parameters first (they bind at every point in the body).
+            if f
+                .child_by_field_name("parameters")
+                .is_some_and(|p| Self::go_subtree_binds(p, bytes, &head))
+            {
+                return true;
+            }
+            if f
+                .child_by_field_name("body")
+                .is_some_and(|b| Self::go_subtree_binds(b, bytes, &head))
+            {
+                return true;
+            }
+        }
+        Self::go_subtree_binds(root, bytes, &head)
+    }
+
+    /// Does `node`'s subtree declare `name` as a local Go VALUE (short var,
+    /// var declaration, a range target)? Function literals (closures) are
+    /// PRUNED — their locals are their own scope.
+    fn go_subtree_binds(node: tree_sitter::Node, source: &[u8], name: &str) -> bool {
+        if node.kind() == "func_literal" {
+            return false; // closure scope — prune (P2-4: the real grammar kind)
+        }
+        match node.kind() {
+            // Go parameters: a single name or a composite one
+            // (`(a, b int)` — repeated `name` fields). Only the NAME
+            // fields count (the type — a plain identifier like `int`
+            // — must not match).
+            "parameter_declaration" | "variadic_parameter_declaration" => {
+                (0..node.child_count() as u32)
+                    .filter_map(|i| node.child(i as usize).map(|c| (i, c)))
+                    .filter(|(i, c)| {
+                        c.kind() == "identifier"
+                            && node.field_name_for_child(*i) == Some("name")
+                    })
+                    .any(|(_, c)| Self::receiver_node_text(Some(c), source) == Some(name))
+            }
+            "short_var_declaration" => node
+                .child_by_field_name("left")
+                .is_some_and(|l| Self::go_identifier_list_binds(Some(l), source, name)),
+            "range_clause" => {
+                // `for k, v := range …` / `for i := range …`
+                node.child_by_field_name("left")
+                    .is_some_and(|l| Self::go_identifier_list_binds(Some(l), source, name))
+            }
+            "var_spec" => Self::go_identifier_list_binds(node.child_by_field_name("name"), source, name),
+            _ => {
+                for i in 0..node.child_count() {
+                    if let Some(c) = node.child(i)
+                        && Self::go_subtree_binds(c, source, name)
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Does an `expression_list` / identifier LHS carry exactly `name`
+    /// (a `k, v := …` target, a `var x, y …` declaration)?
+    fn go_identifier_list_binds(node: Option<tree_sitter::Node>, source: &[u8], name: &str) -> bool {
+        let Some(n) = node else { return false };
+        match n.kind() {
+            "identifier" => Self::receiver_node_text(Some(n), source) == Some(name),
+            "expression_list" => (0..n.child_count())
+                .filter_map(|i| n.child(i))
+                .any(|c| c.kind() == "identifier" && Self::receiver_node_text(Some(c), source) == Some(name)),
+            _ => false,
+        }
+    }
+
     /// (M., selection rule 4) Start the tooling-resolver fall-through OFF the
     /// input path (plan 006 issue 02): `spawn_blocking` + `ResolveBus`,
     /// mirroring the symbol-indexer pattern (`start_indexing`). `cargo
@@ -860,6 +1720,12 @@ impl AppStore {
         };
         let root = project.root.clone();
         let symbol_owned = symbol.to_string();
+        // issue-non-rust-receiver-resolution: a pending fetch prompt
+        // belongs to the request this one SUPERSEDES — decline it (the
+        // superseded provider's blocked hook unblocks and bails; its
+        // event is discarded by the generation mismatch). The new
+        // request's own ask (if any) re-arms the prompt fresh.
+        self.decline_stale_fetch_confirm();
         self.resolve_generation += 1;
         let generation = self.resolve_generation;
         // (jump-ambiguity) the async origin: capture the jump origin NOW,
@@ -880,6 +1746,11 @@ impl AppStore {
             self.minibuffer_message(&format!("no provider resolution for `{symbol}` (no background runtime)"));
             return;
         }
+        // P3-4, gate: the request is live from here until its event is
+        // applied (the fetch-ask liveness gate — a stale event may clear
+        // the `resolving` INDICATOR while this request is still running,
+        // so the indicator is not the liveness signal).
+        self.resolve_in_flight = true;
         let bus = self.resolve_bus.clone();
         let from = std::path::PathBuf::from(from_file);
         // 007-03: the scope hint (use-declaration path for a bare symbol,
@@ -889,6 +1760,19 @@ impl AppStore {
         // whose `languages()` contain it are attempted; `None` for an
         // unknown extension keeps the pre-dispatch in-order walk).
         let language = self.resolution_language(from_file);
+        // issue-non-rust-receiver-resolution: the fetch-confirmation
+        // hook (the providers' `confirm_fetch`): a blocked ask travels
+        // the store's fetch-confirm bus — the UI drain arms the `y`/`n`
+        // banner (the EXACT command on screen), the keypress routes the
+        // reply. With NO receiver for the bus (headless tests, the
+        // static render path — the channel is closed), the ask cannot
+        // be DELIVERED at all: the send fails, the hook returns `false`
+        // immediately, and the provider's gate refuses — no install
+        // ever runs unconfirmed (nothing actively declines; the failed
+        // delivery IS the signal). The cargo provider's `cargo fetch`
+        // is the one pre-gate exception (it never calls the hook —
+        // named in the crate docs, lib.rs).
+        let confirm_tx = self.fetch_confirm_tx.clone();
         tokio::task::spawn_blocking(move || {
             // The provider chain. 011-01 registers the non-Rust providers
             // and dispatches on the context language: a Python buffer can
@@ -907,6 +1791,28 @@ impl AppStore {
                 from_file: from,
                 scope,
                 language,
+                confirm_fetch: Some(
+                    std::sync::Arc::new(move |req: &redline_resolve::FetchRequest| {
+                        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                        let delivered = confirm_tx.send(crate::app::store::FetchConfirmAsk {
+                            generation,
+                            command: req.command.clone(),
+                            from_file: req.from_file.to_string_lossy().into_owned(),
+                            reply: reply_tx,
+                        })
+                        .is_ok();
+                        // No receiver (closed channel — headless / static
+                        // render path): the ask is undeliverable — return
+                        // `false` at once (the provider's gate refuses;
+                        // nothing actively declines, the failed delivery
+                        // is the signal). Otherwise block on the
+                        // operator's `y`/`n` (or the supersede's decline).
+                        delivered && reply_rx.recv().unwrap_or(false)
+                    })
+                        as std::sync::Arc<
+                            dyn Fn(&redline_resolve::FetchRequest) -> bool + Send + Sync,
+                        >,
+                ),
             };
             let (source, error) = match chain.resolve_traced(&ctx) {
                 Ok(outcome) => (Some(outcome.source), None),
@@ -933,11 +1839,18 @@ impl AppStore {
             // stick until the next action. Clearing it here is always
             // safe: a still-in-flight current-generation event lands its
             // picker when it arrives (its generation still matches) — at
-            // worst the indicator hides a few moments early.
+            // worst the indicator hides a few moments early. The
+            // `resolve_in_flight` liveness flag is NOT cleared here
+            // (P3-4, gate): this event says nothing about the CURRENT
+            // request — clearing it here would make the current
+            // generation's fetch ask decline without a banner.
             self.resolving = None;
             return;
         }
         self.resolving = None;
+        // P3-4, gate: the current request is done (its event was
+        // applied) — its provider will no longer ask.
+        self.resolve_in_flight = false;
         match (&event.source, &event.error) {
             (Some(source), _) => {
                 // jump-ambiguity: the hit joins the Xref picker (marked
@@ -951,6 +1864,98 @@ impl AppStore {
                 ));
             }
             _ => {}
+        }
+    }
+
+    /// issue-non-rust-receiver-resolution: the fetch-on-demand
+    /// confirmation. Take the drain's receiver out of the store (exactly
+    /// once — Root's `use_future` drain takes it; a second take returns
+    /// `None`, e.g. on the static render path or after a test's take).
+    /// Mirrors `search_rx()`.
+    pub fn fetch_confirm_rx(&mut self) -> Option<mpsc::UnboundedReceiver<crate::app::store::FetchConfirmAsk>> {
+        self.fetch_confirm_rx.take()
+    }
+
+    /// issue-non-rust-receiver-resolution: a fetch-confirmation ask
+    /// arrived from the in-flight resolve's provider (the drain applied
+    /// it). Only an ask for the request STILL LIVE (its generation
+    /// matches `resolve_generation` AND that generation's request is
+    /// still in flight — `resolve_in_flight`, P3-4, gate: the cleared
+    /// `resolving` indicator is NOT the liveness signal, a stale event
+    /// may have hidden it while the request runs — and no prompt is
+    /// already up) gets the banner and the `y`/`n` key routing; a stale
+    /// ask (the request was superseded mid-ask, or the resolve already
+    /// finished without a fetch) is declined immediately — that
+    /// unblocks the superseded provider's blocked hook (its event is
+    /// then discarded by the generation mismatch; the install never
+    /// runs unconfirmed).
+    pub fn apply_fetch_prompt(&mut self, ask: crate::app::store::FetchConfirmAsk) {
+        let live = ask.generation == self.resolve_generation && self.resolve_in_flight;
+        if live && self.fetch_confirm.is_none() {
+            self.fetch_confirm = Some(ask);
+            let a = self.fetch_confirm.as_ref().unwrap();
+            self.minibuffer_message(&format!(
+                "fetch on demand: {} (from {}) (y/n)?",
+                a.command, a.from_file
+            ));
+        } else {
+            let _ = ask.reply.send(false);
+        }
+    }
+
+    /// Whether a fetch-confirmation prompt is awaiting a `y`/`n`
+    /// (issue-non-rust-receiver-resolution).
+    pub fn fetch_confirm_active(&self) -> bool {
+        self.fetch_confirm.is_some()
+    }
+
+    /// The fetch-confirmation state machine (issue-
+    /// non-rust-receiver-resolution; same shape as the reload / quit /
+    /// toggle-read-only confirms): `y` approves the EXACT command on
+    /// screen (the provider's hook unblocks and runs the install step);
+    /// `n`, C-g and ESC decline it (the provider bails with a refusal
+    /// error naming the command that was NOT run). Every other key is
+    /// swallowed (the provider stays blocked on the prompt until an
+    /// answer — no install ever runs unconfirmed).
+    pub fn fetch_confirm_key(&mut self, key: Key) {
+        if key == Key::ctrl_char('g') || key.code == KeyCode::Escape {
+            self.fetch_confirm_decline();
+            return;
+        }
+        let Some(c) = key.char_value() else { return };
+        match c {
+            'y' => self.fetch_confirm_accept(),
+            'n' => self.fetch_confirm_decline(),
+            _ => {}
+        }
+    }
+
+    /// The confirm's `y`: approve — the provider's blocked hook returns
+    /// `true` and runs the install step (the resolve event then reports
+    /// the outcome on the input path as usual).
+    fn fetch_confirm_accept(&mut self) {
+        let Some(ask) = self.fetch_confirm.take() else { return };
+        self.minibuffer_message(&format!("fetching ({}): {}", ask.generation, ask.command));
+        let _ = ask.reply.send(true);
+    }
+
+    /// The confirm's `n` / C-g / ESC: decline — the provider bails with
+    /// the refusal error (the install never runs).
+    fn fetch_confirm_decline(&mut self) {
+        let Some(ask) = self.fetch_confirm.take() else { return };
+        self.minibuffer_message(&format!("fetch declined: {}", ask.command));
+        let _ = ask.reply.send(false);
+    }
+
+    /// issue-non-rust-receiver-resolution: a superseded fetch prompt
+    /// (the in-flight request changed while the operator had not yet
+    /// answered) is DECLINED — the superseded provider's blocked hook
+    /// unblocks and bails; the new request's own ask (if any) re-arms
+    /// the prompt fresh. Called from the supersede points (`start_
+    /// symbol_resolution` bumps the generation).
+    pub fn decline_stale_fetch_confirm(&mut self) {
+        if let Some(ask) = self.fetch_confirm.take() {
+            let _ = ask.reply.send(false);
         }
     }
 

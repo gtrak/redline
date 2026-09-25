@@ -18,6 +18,9 @@ impl AppStore {
         // request); the fall-through path re-bumps in
         // `start_symbol_resolution`.
         self.resolve_generation += 1;
+        // P3-4: the superseded request is no longer the current
+        // generation's — its in-flight status does not carry over.
+        self.resolve_in_flight = false;
         let line = self.point_line();
         let line_text = self
             .buffers
@@ -28,7 +31,15 @@ impl AppStore {
         // path — external buffers are non-Rust in practice, but the
         // behavior is uniform by construction).
         let lang = self.grammar_registry.language_for(&path.to_string_lossy());
-        let at = Self::symbol_at_point(lang, &line_text, self.point_col());
+        // issue-non-rust-receiver-resolution: the receiver
+        // classification reads the FULL file (lazily — the point's line
+        // index within it), so the extraction takes the buffer's ROPE;
+        // only a fetch-capable language's genuine dotted press ever
+        // materializes it (P2-5, gate: no whole-clone per M-.).
+        let at = match self.buffers.get(key) {
+            Some(buf) => Self::symbol_at_point(lang, &line_text, line, self.point_col(), &buf.rope),
+            None => None,
+        };
         let Some((root, outcome, jump_name)) =
             self.crate_xref_outcome(key, path, line, lang, at.as_ref())
         else {
@@ -262,16 +273,34 @@ impl AppStore {
     /// buffer, when the point sits inside the language's dotted path
     /// container, the path token becomes the WHOLE dotted path
     /// (`json.dumps`, `ns.member`, `pkg.Fn`) so the providers' already-
-    /// unit-tested dotted handling is reachable from M-.: ONE parse
-    /// (`redline_syntax::node::node_at` — 011-03's whole-path machinery, 007-01's
-    /// one-parse discipline). When `node_at` returns `None` (no tree / a
-    /// shape it does not cover / the identifier is not a full
-    /// dot-delimited segment of the container, e.g. a computed member
-    /// `a[b]`) the exact current bare extraction stands — never guess.
+    /// unit-tested dotted handling is reachable from M-.. When `node_at`
+    /// returns `None` (no tree / a shape it does not cover / the identifier
+    /// is not a full dot-delimited segment of the container, e.g. a
+    /// computed member `a[b]`) the exact current bare extraction stands —
+    /// never guess.
+    ///
+    /// issue-non-rust-receiver-resolution: for the languages whose
+    /// providers fetch (`python` / `javascript` / `typescript` / `tsx` /
+    /// `go`), the WHOLE-PATH upgrade additionally requires that the path's
+    /// HEAD is NOT a local value at the point — a receiver the file
+    /// declares as a variable (`df` from `df = read_data()`, `this` in
+    /// JS/TS, `x` from `x := …` in Go) must stay BARE (the in-project
+    /// lookup is the honest answer); only a module/package head (an import
+    /// binding, or a name the file declares nowhere) upgrades. The
+    /// classification walks the FULL file (materialized LAZILY inside
+    /// `dotted_head_is_local_value`, P2-5, gate) with the language's own
+    /// scope machinery — the same shape as Rust's receiver pre-steps,
+    /// which resolve `x.<member>` through the binding before anything
+    /// else. Languages without a fetching provider (C, Cpp, Java, C#,
+    /// Toml, Ruby, …) keep the byte-for-byte 011-06 upgrade (their
+    /// resolvers have no install to confirm). Rust is untouched in every
+    /// arm (byte-for-byte).
     pub(in crate::app::store) fn symbol_at_point(
         lang: LanguageId,
         text: &str,
+        line: usize,
         col: usize,
+        rope: &Rope,
     ) -> Option<(String, String)> {
         let chars: Vec<char> = text.chars().collect();
         if col > chars.len() {
@@ -368,10 +397,20 @@ impl AppStore {
         };
         // 011-06: non-Rust — upgrade the path token to the whole dotted
         // path when the point sits inside the language's path container.
-        // `node_at` takes a byte offset: the identifier run's last char
-        // (always in-range — the run is non-empty here). Any miss keeps
-        // the bare extraction byte-for-byte (the `::` scan above is the
-        // Rust shape; `.` never extends it).
+        // The container check runs on the POINT'S LINE with a LINE-LOCAL
+        // byte offset (the 011-06 base shape — CRLF-correct by
+        // construction: the line text never carries its terminator, and
+        // no full-source offset is involved here). P2-5, gate: the lane
+        // parsed the WHOLE file per M-. (462 ms on a 688 KB / 40k-line
+        // file vs 0.027 ms for the line) — the full source is now
+        // materialized ONLY inside `dotted_head_is_local_value` (a
+        // fetch-capable language on a genuine dotted press). Any miss
+        // keeps the bare extraction byte-for-byte (the `::` scan above
+        // is the Rust shape; `.` never extends it).
+        // issue-non-rust-receiver-resolution: for the fetch-capable
+        // languages the upgrade is additionally gated on the HEAD not
+        // being a local value (a variable, never a package — see
+        // `dotted_head_is_local_value`).
         let path_token = if lang != LanguageId::Rust
             && let Some(byte) = text.char_indices().nth(end - 1).map(|(b, _)| b)
             && let Some(info) = redline_syntax::node::node_at(lang, text, byte)
@@ -391,6 +430,13 @@ impl AppStore {
                 .text
                 .split('.')
                 .all(|seg| !seg.is_empty() && seg.chars().all(is_ident))
+            && !Self::dotted_head_is_local_value(
+                lang,
+                rope,
+                line,
+                end - 1,
+                info.text.split('.').next().unwrap_or(""),
+            )
         {
             info.text
         } else {

@@ -284,6 +284,7 @@ fn python_golden_corpus() {
             from_file: probe.from_file.clone().into(),
             scope: probe.scope.clone(),
             language: Some("python".to_string()),
+            confirm_fetch: None,
         };
         match provider.resolve(&ctx) {
             Ok(src) => {

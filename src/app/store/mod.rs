@@ -89,6 +89,28 @@ pub struct ResolveEvent {
     pub error: Option<String>,
 }
 
+/// issue-non-rust-receiver-resolution: one fetch-on-demand CONFIRMATION
+/// ask, published by the tooling-resolver provider's `confirm_fetch`
+/// hook just before it would run an install step (`pip install`,
+/// `npm install`, `go mod download`). The provider's hook BLOCKS on the
+/// one-shot reply until the operator's `y`/`n` keypress (or the ask's
+/// request is superseded — the store declines it then, unblocking the
+/// hook; its event is discarded by the generation mismatch).
+pub struct FetchConfirmAsk {
+    /// The in-flight resolve generation the ask belongs to (the store
+    /// only shows the banner for the request still on screen).
+    pub generation: usize,
+    /// The exact command the operator would be approving (the banner
+    /// shows it — `y` never approves something unseen).
+    pub command: String,
+    /// The file that implied the fetch (workspace-relative — the banner
+    /// shows it: `y` never approves something whose origin is unseen).
+    pub from_file: String,
+    /// The one-shot reply the provider's hook is blocked on (`true` =
+    /// approved, `false` = declined / superseded).
+    pub reply: std::sync::mpsc::Sender<bool>,
+}
+
 /// The resolve-result bus (plan 006 issue 02): a `watch` channel over
 /// [`ResolveEvent`]. The store owns the sender; the UI's drain task in
 /// `Root` subscribes and applies each event to the store.
@@ -1813,6 +1835,19 @@ pub struct AppStore {
     /// longer matches (superseded request or project switch), so it can
     /// never hang on a stale job.
     resolving: Option<(String, usize)>,
+    /// Whether the request of the current `resolve_generation` is still
+    /// IN FLIGHT (spawned by `start_symbol_resolution`; cleared when
+    /// that generation's event is applied or the generation is bumped
+    /// away from it). P3-4, gate: `resolving` is display state — a
+    /// stale event may clear it while the current request is still
+    /// in flight (006-02b item 3: the stale send can win the watch
+    /// slot and lose the current event). The fetch-ask liveness gate
+    /// (`apply_fetch_prompt`) keys on THIS, not on the indicator: a
+    /// current-generation ask gets the banner exactly while its
+    /// request is live (a dead request's ask — no runtime, event
+    /// already applied — still declines: the banner never arms for a
+    /// request that cannot still ask).
+    resolve_in_flight: bool,
     /// The buffer keys opened via the external-landing path
     /// (`open_external_path`: registry / tooling sources, plan 006 issue
     /// 02) — the buffers the ownership guard (006-02b item 1) refuses to
@@ -1948,6 +1983,21 @@ pub struct AppStore {
     /// `n`/C-g/ESC keep them and the changed-on-disk marker. Holds the
     /// buffer key to confirm.
     reload_confirm: Option<String>,
+    // ── issue-non-rust-receiver-resolution: fetch-on-demand confirm ──
+    /// The fetch-confirmation bus (issue-non-rust-receiver-resolution):
+    /// the store keeps the sender for its lifetime — the resolve
+    /// providers' `confirm_fetch` hooks send one
+    /// [`FetchConfirmAsk`] per install step they are about to run and
+    /// block on its reply; the receiver is handed to Root's
+    /// `use_future` drain exactly once (the `search_rx` / `clipboard_rx`
+    /// precedent; a test takes it instead).
+    fetch_confirm_tx: mpsc::UnboundedSender<FetchConfirmAsk>,
+    fetch_confirm_rx: Option<mpsc::UnboundedReceiver<FetchConfirmAsk>>,
+    /// The fetch-confirmation prompt on screen (when one is awaiting a
+    /// `y`/`n`): the exact command + its in-flight resolve generation.
+    /// Every key routes to `fetch_confirm_key` while it is up (the
+    /// provider's hook stays blocked until the answer).
+    fetch_confirm: Option<FetchConfirmAsk>,
     // ── plan 005 issue 02: inline annotations ──────────────────────────
     /// The parsed `.redline-notes.md` document (plan 005 issue 02): free
     /// text outside the structured annotation section is preserved
@@ -2051,6 +2101,12 @@ impl AppStore {
         let (search_bus, search_rx) = SearchBus::new();
         let search_rx = Some(search_rx);
 
+        // Fetch-confirmation bus (issue-non-rust-receiver-resolution):
+        // same store-owned-sender shape — the resolve providers' confirm
+        // hooks send their asks here; Root's drain takes the receiver
+        // exactly once (a test takes it instead).
+        let (fetch_confirm_tx, fetch_confirm_rx) = mpsc::unbounded_channel();
+
         // jump-highlight: the landing-highlight wake channel (the store
         // keeps the sender; the Root hook's animation driver takes the
         // receiver exactly once). Capacity 1: rapid jump bursts
@@ -2113,6 +2169,7 @@ impl AppStore {
             resolve_bus: ResolveBus::new(),
             resolve_generation: 0,
             resolving: None,
+            resolve_in_flight: false,
             external_buffers: std::collections::HashSet::new(),
             external_indexes: Vec::new(),
             crate_index_bus: CrateIndexBus::new(),
@@ -2120,6 +2177,9 @@ impl AppStore {
             xref_crate_root: None,
             search_bus,
             search_rx,
+            fetch_confirm_tx,
+            fetch_confirm_rx: Some(fetch_confirm_rx),
+            fetch_confirm: None,
             index_rx: None,
             jump_highlight: None,
             jump_wake_tx,

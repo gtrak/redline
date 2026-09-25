@@ -372,6 +372,7 @@ impl AppStore {
                 // A resolve job in flight belonged to the pre-checkout tree:
                 // its event is discarded (mirrors the index bump).
                 self.resolve_generation += 1;
+                self.resolve_in_flight = false; // P3-4: that request is dead
                 self.start_indexing();
                 if self.log.is_some() {
                     self.refresh_log_page();

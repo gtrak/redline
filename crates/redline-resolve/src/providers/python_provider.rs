@@ -6,7 +6,9 @@
 //! `importlib.util.find_spec` via a timed subprocess to locate the module file
 //! (walking up the dotted chain on failure; a src/-layout re-probe when the
 //! CWD probe misses) → if not found and not stdlib,
-//! `pip install` (sanctioned) and re-locate → a content scan finds the line
+//! `pip install` (behind the fetch-confirmation gate — the operator's
+//! y/n; refused or unconfirmed = a clean refusal error, never a silent
+//! install) and re-locate → a content scan finds the line
 //! for the item's definition.
 //!
 //! Interpreter preference: `.venv/bin/python` → `venv/bin/python` → `python3`
@@ -23,14 +25,18 @@
 //! - `is_stdlib`: `python3 -c "import sys; print('true' if X in
 //!   sys.stdlib_module_names else 'false')"`, timeout 10 s.
 //! - `pip install`: `pip3 install <pkg>` (or the venv's `pip`), timeout 120 s.
+//!   P3-7, gate (doc): the CONFIRMED command is the canonical display form
+//!   `pip install <pkg>` (what the banner shows) — the argv actually run
+//!   may use the venv's `pip` or the ambient `pip3`; the package + flags
+//!   are the invariant part.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use crate::{
-    run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext,
-    ToolingProvider,
+    confirm_or_refuse, run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource,
+    SymbolContext, ToolingProvider,
 };
 
 /// Timeout for the `find_spec` subprocess (should be fast).
@@ -163,9 +169,10 @@ impl PythonProvider {
         let item = segments.last().unwrap();
         let module_chain = segments[..segments.len() - 1].join(".");
 
-        // Locate the module file (find_spec → pip install if needed).
+        // Locate the module file (find_spec → pip install if needed,
+        // behind the confirmation gate).
         let file =
-            provider.locate_module_file(workspace_root, &ctx.from_file, &module_chain)?;
+            provider.locate_module_file(ctx, workspace_root, &ctx.from_file, &module_chain)?;
 
         // Find the item's definition line in the resolved file.
         let line = find_item_line(&file, item).ok_or_else(|| {
@@ -196,9 +203,11 @@ impl PythonProvider {
         })
     }
 
-    /// Locate the module file via `find_spec`, with fallback to `pip install`.
+    /// Locate the module file via `find_spec`, with fallback to `pip install`
+    /// (gated on the operator's confirmation — issue-non-rust-receiver).
     fn locate_module_file(
         &self,
+        ctx: &SymbolContext,
         workspace_root: &Path,
         from_file: &Path,
         module_chain: &str,
@@ -227,7 +236,11 @@ impl PythonProvider {
             );
         }
 
-        // Not stdlib: try `pip install` (sanctioned fetch-on-demand).
+        // Not stdlib: try `pip install` — behind the fetch-confirmation
+        // gate (issue-non-rust-receiver-resolution): the hook (the app's
+        // visible y/n prompt) decides; no hook or a decline is a refusal
+        // (the provider never installs silently). `offline` stays the
+        // stronger, permanent refusal (never asks, never installs).
         if self.offline {
             anyhow::bail!(
                 "module `{module_chain}` not found and offline mode refuses to pip install"
@@ -235,6 +248,11 @@ impl PythonProvider {
         }
 
         let top_pkg = module_chain.split('.').next().unwrap();
+        // P3-7, gate (doc): canonical display form for the banner — the
+        // argv `run_pip_install` actually runs may be the venv's `pip` or
+        // the ambient `pip3`.
+        let command = format!("pip install {top_pkg}");
+        confirm_or_refuse(ctx, &command, from_file)?;
         self.run_pip_install(workspace_root, top_pkg)?;
 
         // Re-locate after install.
@@ -626,6 +644,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("__init__.py"));
@@ -645,6 +664,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         // The file should exist and be in the stdlib (external).
@@ -668,6 +688,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert!(result.file.exists());
@@ -693,6 +714,7 @@ mod tests {
             from_file: PathBuf::from("main.py"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -724,6 +746,7 @@ mod tests {
             from_file: PathBuf::from("main.py"),
             scope: vec!["mypkg".to_string(), "hello".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("__init__.py"));
@@ -744,6 +767,7 @@ mod tests {
             from_file: PathBuf::from("main.py"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -762,6 +786,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -780,6 +805,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -822,6 +848,7 @@ mod tests {
             from_file: PathBuf::from("main.py"),
             scope: vec!["gears".to_string(), "engine".to_string(), "torque".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("engine.py"));
@@ -851,6 +878,7 @@ mod tests {
                 from_file: PathBuf::from("main.py"),
                 scope,
                 language: None,
+                confirm_fetch: None,
             };
             let err = provider.resolve(&ctx).unwrap_err();
             assert!(
@@ -888,6 +916,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("src/main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert_eq!(result.file, pkg_dir.join("__init__.py"));
@@ -912,6 +941,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("src/main.py"),
             language: None,
+            confirm_fetch: None,
         };
         let err = provider.resolve(&ctx).unwrap_err();
         assert!(
@@ -982,6 +1012,7 @@ mod tests {
             scope: Vec::new(),
             from_file: PathBuf::from("pr\x01oj/src/main.py"),
             language: None,
+            confirm_fetch: None,
         };
         // Graceful miss: the re-probe is skipped and the miss flows to
         // the stdlib check + offline refusal (no SyntaxError hard-error
@@ -1011,13 +1042,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let provider = PythonProvider::new();
         // `requests.get` — a real third-party module, very likely installed.
-        // If not installed, the test skips gracefully (found-or-skipped).
+        // If not installed, the test skips gracefully (found-or-skipped):
+        // with no confirm hook the provider REFUSES the install
+        // (issue-non-rust-receiver-resolution) — it never silently
+        // touches the network here.
         let ctx = SymbolContext {
             workspace_root: tmp.path().to_path_buf(),
             symbol: "requests.get".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.py"),
             language: None,
+            confirm_fetch: None,
         };
         match provider.resolve(&ctx) {
             Ok(src) => {
@@ -1029,5 +1064,131 @@ mod tests {
                 eprintln!("E2E: requests.get not resolved (skipped): {e}");
             }
         }
+    }
+
+    // ── issue-non-rust-receiver-resolution: the fetch-confirmation gate ─
+
+    /// Build a workspace with a STUB `.venv/bin/pip` that logs its argv
+    /// (one line per invocation) and exits 0 (the exit-0 choice: the
+    /// provider then re-locates and reports the honest "still not
+    /// found" — the log line is the proof the install step ran at all).
+    /// No `.venv/bin/python` is created: the interpreter stays the real
+    /// `python3` on PATH (find_spec / is_stdlib are local, no network).
+    fn ws_with_stub_pip() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = tmp.path().join("pip-invocations.log");
+        let stub = bin.join("pip");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log:?}\nexit 0\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (tmp, log)
+    }
+
+    fn pip_invocations(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Discriminating (the P1's safety half): a genuinely unresolvable
+    /// module head does NOT install when the operator DECLINES the
+    /// fetch — the refusal bails the provider and the stub pip is never
+    /// invoked.
+    #[test]
+    fn confirm_declined_refuses_install() {
+        let (tmp, log) = ws_with_stub_pip();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_req| false);
+        let provider = PythonProvider::new();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "nonexistent_pkg_xyz.module_func".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.py"),
+            language: Some("python".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("declined at the fetch confirmation"),
+            "err: {err}"
+        );
+        assert!(
+            err.to_string().contains("pip install nonexistent_pkg_xyz"),
+            "the prompt's exact command is in the refusal: {err}"
+        );
+        assert_eq!(pip_invocations(&log), Vec::<String>::new(), "decline: zero pip invocations");
+    }
+
+    /// The safe default: NO hook at all — the provider refuses the
+    /// install rather than running it silently (a provider never
+    /// installs without a confirmation; the offline flag's permanent
+    /// refusal is unchanged on top).
+    #[test]
+    fn confirm_absent_refuses_install() {
+        let (tmp, log) = ws_with_stub_pip();
+        let provider = PythonProvider::new();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "nonexistent_pkg_xyz.module_func".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.py"),
+            language: Some("python".to_string()),
+            confirm_fetch: None,
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a fetch confirmation hook"),
+            "err: {err}"
+        );
+        assert_eq!(pip_invocations(&log), Vec::<String>::new(), "no hook: zero pip invocations");
+    }
+
+    /// The sanctioned leg: the operator ACCEPTS (the hook is the
+    /// app's visible y/n prompt) — the stub pip is invoked EXACTLY ONCE
+    /// with the exact argv (`install nonexistent_pkg_xyz`), and the
+    /// provider still bails honestly when the re-locate misses (the
+    /// stub installs nothing).
+    #[test]
+    fn confirm_accepted_runs_stub_pip_exactly_once() {
+        let (tmp, log) = ws_with_stub_pip();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_probe = seen.clone();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |req: &crate::FetchRequest| {
+                seen_probe.lock().unwrap().push(req.command.clone());
+                true
+            });
+        let provider = PythonProvider::new();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "nonexistent_pkg_xyz.module_func".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.py"),
+            language: Some("python".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("still not found after `pip install nonexistent_pkg_xyz`"),
+            "the install ran (then the honest re-locate miss): {err}"
+        );
+        // The hook saw exactly ONE request, with the exact command and
+        // the file that implied it.
+        assert_eq!(seen.lock().unwrap().as_slice(), &["pip install nonexistent_pkg_xyz"]);
+        // The stub pip ran EXACTLY ONCE with the exact argv.
+        assert_eq!(pip_invocations(&log), vec!["install nonexistent_pkg_xyz".to_string()]);
     }
 }

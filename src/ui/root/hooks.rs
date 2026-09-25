@@ -250,6 +250,29 @@ pub(super) fn drain_crate_index(
     });
 }
 
+/// The `use_future` drain of the fetch-confirm bus (issue-
+/// non-rust-receiver-resolution): the tooling-resolver providers'
+/// fetch-on-demand asks (`pip install` / `npm install` / `go mod
+/// download`) arrive here — the store arms the `y`/`n` banner (the EXACT
+/// command on screen) and the keypress routes the reply; this drain is a
+/// pure applier (the `search_rx` / `clipboard_rx` precedent: the store
+/// owns the bus, the UI applies events and re-renders).
+pub(super) fn drain_fetch_confirm(
+    hooks: &mut Hooks,
+    confirm_store: Arc<Mutex<AppStore>>,
+    mut tick: State<u64>,
+) {
+    hooks.use_future(async move {
+        let Some(mut rx) = confirm_store.lock().unwrap().fetch_confirm_rx() else {
+            return; // already taken (e.g. by a test)
+        };
+        while let Some(ask) = rx.recv().await {
+            confirm_store.lock().unwrap().apply_fetch_prompt(ask);
+            tick.set(tick.get() + 1);
+        }
+    });
+}
+
 /// The `use_future` drain of the search bus (issue 06).
 pub(super) fn drain_search(
     hooks: &mut Hooks,

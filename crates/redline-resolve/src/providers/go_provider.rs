@@ -17,6 +17,13 @@
 //!   provider's bare-symbol rule.
 //! - Non-local `replace` directives (module → module) fall through to the
 //!   original module path; only local-path replaces are fully honored.
+//!
+//! **Fetch-on-demand is gated** (issue-non-rust-receiver-resolution):
+//! `go mod download` runs only after the operator confirms the exact
+//! command at the fetch-confirmation hook
+//! ([`SymbolContext::confirm_fetch`]); a decline or a missing hook is a
+//! clean refusal error (never a silent install). The `offline` flag stays
+//! the stronger, permanent refusal (never asks, never fetches).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,8 +31,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::{
-    run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource, SymbolContext,
-    ToolingProvider,
+    confirm_or_refuse, run_with_timeout, scope_qualified, scope_qualified_alias, ResolvedSource,
+    SymbolContext, ToolingProvider,
 };
 
 /// Timeout for `go env` (fast local call).
@@ -246,6 +253,13 @@ impl GoProvider {
                     module_dir.display()
                 );
             }
+            // Fetch-on-demand — behind the fetch-confirmation gate
+            // (issue-non-rust-receiver-resolution): the hook (the app's
+            // visible y/n prompt) decides; no hook or a decline is a
+            // refusal (never a silent install). `offline` stays the
+            // stronger, permanent refusal (never asks).
+            let command = format!("go mod download {module_path}");
+            confirm_or_refuse(ctx, &command, &ctx.from_file)?;
             self.run_mod_download(workspace_root, &module_path)?;
             if !module_dir.exists() {
                 anyhow::bail!(
@@ -1176,6 +1190,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1222,6 +1237,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1262,6 +1278,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1285,6 +1302,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1307,6 +1325,7 @@ exclude (
             from_file: PathBuf::from("main.go"),
             scope: Vec::new(),
             language: None,
+            confirm_fetch: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1352,6 +1371,7 @@ exclude (
             from_file: PathBuf::from("main.go"),
             scope: vec!["errors".to_string(), "New".to_string()],
             language: None,
+            confirm_fetch: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1374,6 +1394,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1410,6 +1431,7 @@ exclude (
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: None,
         };
 
         let err = provider.resolve(&ctx).unwrap_err();
@@ -1473,6 +1495,7 @@ exclude (
             from_file: PathBuf::from("main.go"),
             scope: vec!["errors".to_string(), "Wrap".to_string()],
             language: None,
+            confirm_fetch: None,
         };
 
         let result = provider.resolve(&ctx).unwrap();
@@ -1504,6 +1527,7 @@ exclude (
             from_file: PathBuf::from("main.go"),
             scope: vec!["errors".to_string(), "Wrap".to_string()],
             language: None,
+            confirm_fetch: None,
         };
         let result = provider.resolve(&ctx).unwrap();
         assert!(result.external);
@@ -1523,6 +1547,7 @@ exclude (
                 from_file: PathBuf::from("main.go"),
                 scope,
                 language: None,
+                confirm_fetch: None,
             };
             let err = provider.resolve(&ctx).unwrap_err();
             assert!(
@@ -1592,8 +1617,16 @@ exclude (
 
     /// Live: requires the `go` binary and network access. Full E2E: resolve
     /// `errors.New` from `github.com/pkg/errors` through the module cache.
+    /// P1-2, gate: the lane's `confirm_fetch: None` left this leg silently
+    /// rotted — on a COLD module cache the provider's fetch gate now
+    /// refuses the `go mod download` and the leg fails. Fixed (kept, not
+    /// deleted): the hook is the explicit opt-in (`REDLINE_LIVE_INSTALL=1`
+    /// — a real registry download); without it the hook refuses and, when
+    /// the module is not cached yet, the leg SKIPs LOUDLY instead of
+    /// failing (a warm cache needs no fetch at all — the refusal hook
+    /// stands by and is never called, proving the leg installs nothing).
     #[test]
-    #[ignore] // requires go toolchain + network
+    #[ignore] // requires go toolchain + network (cold cache: explicit opt-in REDLINE_LIVE_INSTALL=1)
     fn live_resolve_external_e2e() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
@@ -1614,17 +1647,174 @@ exclude (
         .unwrap();
 
         let provider = GoProvider::new();
+        // Loud skip when the toolchain is absent (the leg is
+        // `#[ignore]`d; an explicit run without `go` on PATH cannot
+        // resolve the module cache — never a silent pass/fail).
+        let cache = match provider.resolve_mod_cache() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP (loud): no usable go toolchain ({e}) — the live leg needs `go` on PATH");
+                return;
+            }
+        };
+        let module_dir = cache
+            .join(case_encode("github.com/pkg/errors"))
+            .join("@v0.9.1");
+        // Opt-in: a cold cache needs a real `go mod download` — the
+        // explicit operator sanction (the hook's yes). Without it, a
+        // cold cache is a loud skip (no fetch without the opt-in); a
+        // warm cache resolves with the refusal hook standing by (it is
+        // never called — no fetch is needed).
+        let opted_in = std::env::var_os("REDLINE_LIVE_INSTALL").is_some();
+        if !module_dir.exists() && !opted_in {
+            eprintln!(
+                "SKIP (loud): module github.com/pkg/errors@v0.9.1 is not in the cache \
+                 ({}) and REDLINE_LIVE_INSTALL is not set — the real download is \
+                 the explicit opt-in; re-run with REDLINE_LIVE_INSTALL=1 to fetch it",
+                module_dir.display()
+            );
+            return;
+        }
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(move |_req| opted_in);
         let ctx = SymbolContext {
             workspace_root: ws.to_path_buf(),
             symbol: "errors.New".to_string(),
             scope: Vec::new(),
             from_file: PathBuf::from("main.go"),
             language: None,
+            confirm_fetch: Some(confirm),
         };
 
         let result = provider.resolve(&ctx).unwrap();
         assert!(result.external);
         assert_eq!(result.file.file_name().unwrap(), "errors.go");
         assert!(result.line.is_some());
+    }
+
+    // ── issue-non-rust-receiver-resolution: the fetch-confirmation gate ─
+
+    /// A workspace that WILL reach the fetch leg: a go.mod requiring
+    /// `github.com/pkg/errors`, an empty module cache dir (via
+    /// `with_mod_cache`, so no `go env` call), and a STUB go binary on
+    /// `with_go_bin` that logs its argv (one line per invocation) and
+    /// exits 0 (the provider then re-checks the cache dir and reports
+    /// the honest "still missing" — the log line proves the fetch step
+    /// ran at all). No real toolchain, no network.
+    fn ws_with_stub_go() -> (tempfile::TempDir, std::path::PathBuf, GoProvider) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::write(
+            ws.join("go.mod"),
+            "module github.com/myorg/app\ngo 1.21\n\nrequire github.com/pkg/errors v0.9.1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("go.sum"),
+            "github.com/pkg/errors v0.9.1 h1:abc=\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("main.go"), "package main\nfunc main() {}\n").unwrap();
+        let log = tmp.path().join("go-invocations.log");
+        let stub = tmp.path().join("go-stub");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log:?}\nexit 0\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let provider = GoProvider::new()
+            .with_mod_cache(ws.join("gomodcache"))
+            .with_go_bin(stub.to_string_lossy().to_string());
+        (tmp, log, provider)
+    }
+
+    fn go_invocations(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The P1's safety half (Go leg): a missing module cache dir does NOT
+    /// fetch when the operator DECLINES — the refusal bails the provider,
+    /// the stub go is never invoked.
+    #[test]
+    fn confirm_declined_refuses_go_mod_download() {
+        let (tmp, log, provider) = ws_with_stub_go();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_req| false);
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "errors.New".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.go"),
+            language: Some("go".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("declined at the fetch confirmation"),
+            "err: {err}"
+        );
+        assert!(
+            err.to_string().contains("go mod download github.com/pkg/errors"),
+            "the exact command is in the refusal: {err}"
+        );
+        assert_eq!(go_invocations(&log), Vec::<String>::new());
+    }
+
+    /// The safe default (Go leg): no hook → the provider refuses rather
+    /// than fetch silently.
+    #[test]
+    fn confirm_absent_refuses_go_mod_download() {
+        let (tmp, log, provider) = ws_with_stub_go();
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "errors.New".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.go"),
+            language: Some("go".to_string()),
+            confirm_fetch: None,
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a fetch confirmation hook"),
+            "err: {err}"
+        );
+        assert_eq!(go_invocations(&log), Vec::<String>::new());
+    }
+
+    /// The sanctioned leg (Go leg): the operator ACCEPTS — the stub go
+    /// is invoked EXACTLY ONCE with the exact argv, and the provider
+    /// still bails honestly when the cache dir is still missing (the
+    /// stub fetches nothing).
+    #[test]
+    fn confirm_accepted_runs_stub_go_exactly_once() {
+        let (tmp, log, provider) = ws_with_stub_go();
+        let confirm: std::sync::Arc<dyn Fn(&crate::FetchRequest) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_req| true);
+        let ctx = SymbolContext {
+            workspace_root: tmp.path().to_path_buf(),
+            symbol: "errors.New".to_string(),
+            scope: Vec::new(),
+            from_file: PathBuf::from("main.go"),
+            language: Some("go".to_string()),
+            confirm_fetch: Some(confirm),
+        };
+        let err = provider.resolve(&ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("still missing after `go mod download`"),
+            "the fetch ran (then the honest re-check miss): {err}"
+        );
+        assert_eq!(
+            go_invocations(&log),
+            vec!["mod download github.com/pkg/errors".to_string()]
+        );
     }
 }

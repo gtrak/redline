@@ -209,9 +209,12 @@ use crate::git::log::LogEntry;
     }
 
     /// The point-line token extractor: identifier run at the column + the
-    /// path token around it (011-06: language-aware path token).
+    /// path token around it (011-06: language-aware path token). P2-5,
+    /// gate: the extraction is rope-backed (line 0 of a one-line rope ==
+    /// the byte-for-byte single-line shape the lane pinned).
     fn satp(lang: LanguageId, text: &str, col: usize) -> Option<(String, String)> {
-        AppStore::symbol_at_point(lang, text, col)
+        let rope = ropey::Rope::from(text);
+        AppStore::symbol_at_point(lang, text, 0, col, &rope)
     }
 
     /// 006-03 fixture: a project store (one project file) plus an

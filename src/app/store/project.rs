@@ -193,6 +193,7 @@ impl AppStore {
         // A resolve job in flight belonged to the previous project: bump the
         // generation so its event is discarded (mirrors the index bump above).
         self.resolve_generation += 1;
+        self.resolve_in_flight = false; // P3-4: that request is dead
         // Invalidate any in-flight search job (its root was the previous
         // project): bump the generation so its events are discarded, and
         // stop it. Results belong to the old project.
