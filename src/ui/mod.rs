@@ -37,6 +37,14 @@ pub(crate) fn color(c: theme::Color) -> Color {
         TC::Cyan => Color::Cyan,
         TC::Grey => Color::Grey,
         TC::White => Color::White,
+        // issue-current-line-highlight: the truecolor shade maps 1:1 to
+        // iocraft's `Color::Rgb` (the SGR `48;2;r;g;b` escape — no palette
+        // fallback exists for a few-percent tint).
+        TC::Rgb(r, g, b) => Color::Rgb {
+            r,
+            g,
+            b,
+        },
     }
 }
 

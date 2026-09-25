@@ -105,6 +105,11 @@ SHARED_SUITES=(
   check_cursor_stream.py
   ux_sweep.py
   probe_notes_dump.py
+  probe_current_line_tint.py # issue-current-line-highlight: the point row
+                        # carries the tint background per cell (0f0f0f),
+                        # the neighbours the view background (000000), the
+                        # tint follows the point on C-n, and the region
+                        # face wins over the tint on the region's rows
   drive_syntax_notes.py
   drive_symbol_precise.py # symbol-precise annotation anchoring: the indicator
                         # sits before the annotated SYMBOL (the record's

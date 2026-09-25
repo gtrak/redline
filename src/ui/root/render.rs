@@ -62,6 +62,7 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
                 changed_on_disk: snap.file_view_changed_on_disk,
                 buffer_editable: snap.file_view_current_buffer_editable,
                 region_lines: snap.region_lines,
+                point_line: snap.file_view_point_line,
                 notes_folded: snap.file_view_notes_folded,
             )
         }

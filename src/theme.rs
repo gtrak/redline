@@ -25,6 +25,11 @@ pub enum Color {
     Cyan,
     Grey,
     White,
+    /// A truecolor (24-bit) RGB value (issue-current-line-highlight): the
+    /// 16-color palette cannot express the current-line tint's low-contrast
+    /// shade (a few percent off the view background — the palette's nearest
+    /// steps are ~25%+). Emitted as the SGR `48;2;r;g;b` truecolor escape.
+    Rgb(u8, u8, u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +77,15 @@ pub struct Theme {
     /// The region face (mark/region highlighting; plan 004 issue 03).
     /// High-contrast background distinct from the cursor/status-line blue.
     pub region: Face,
+    /// The current-line face (issue-current-line-highlight): a SUBTLE
+    /// background tint on the display row carrying the point. A BACKDROP —
+    /// it is painted before the region face and the match/jump bands, so it
+    /// loses to every existing highlight per cell. The background is a
+    /// truecolor value a few percent off the view background (deliberately
+    /// NOT a palette step — "not too blatant"); it is config-derived like
+    /// every other face (theme-derived, set once at startup), so the shade
+    /// is tunable without a rebuild.
+    pub current_line: Face,
     /// The search-match faces (issue match-highlight): the dim face for
     /// ALL matches of the active query (`lazy-highlight`'s analogue) and
     /// the prominent face for the match the cursor is on (`isearch`'s
@@ -122,6 +136,8 @@ impl Theme {
             log_commit: Face::new(Color::White, Color::Black, false),
             blame: Face::new(Color::DarkGrey, Color::Black, false),
             region: Face::new(Color::White, Color::DarkGrey, false),
+            // 15/255 ≈ 5.9% above the view background (0,0,0) per channel.
+            current_line: Face::new(Color::White, Color::Rgb(15, 15, 15), false),
             search_match: Face::new(Color::Grey, Color::Black, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
             jump_highlight: Face::new(Color::Black, Color::Yellow, true),
@@ -153,6 +169,9 @@ impl Theme {
             log_commit: Face::new(fg, bg, false),
             blame: Face::new(Color::DarkGrey, bg, false),
             region: Face::new(Color::Black, Color::Grey, false),
+            // 15/255 ≈ 5.9% below the view background (255,255,255) per
+            // channel (the dark theme's lift, mirrored).
+            current_line: Face::new(fg, Color::Rgb(240, 240, 240), false),
             search_match: Face::new(Color::DarkGrey, bg, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
             jump_highlight: Face::new(Color::Black, Color::Yellow, true),
@@ -370,6 +389,57 @@ mod tests {
             assert!(
                 !t.search_match.bold,
                 "{name}: the all-match face stays unbolded (the dim one)"
+            );
+        }
+    }
+
+    /// issue-current-line-highlight: the current-line tint exists in both
+    /// themes and is a LOW-CONTRAST shade: a background DISTINCT from the
+    /// view background (it must be visible) but within a few percent of it
+    /// per channel ("not too blatant" — a palette step like DarkGrey would
+    /// read as a selected row). The shade is the theme's to own: the value
+    /// lives in the face, and the file view's tint test changes it to prove
+    /// the rendering follows the theme rather than a hard-coded constant.
+    #[test]
+    fn current_line_face_is_a_low_contrast_tint() {
+        let themes = [("dark", Theme::dark("d")), ("light", Theme::light("l"))];
+        for (name, t) in themes {
+            let tint = t.current_line.background;
+            let rgb = match tint {
+                Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
+                other => panic!(
+                    "{name}: the current-line tint must be a truecolor shade (the 16-color palette cannot express a few-percent delta), found {other:?}"
+                ),
+            };
+            // The view background's nominal RGB (Black -> (0,0,0), White ->
+            // (255,255,255) — the same nominal values the truecolor
+            // interpolation paths in src/ui/mod.rs use).
+            let base = match t.view.background {
+                Color::Black => (0i32, 0, 0),
+                Color::White => (255, 255, 255),
+                other => panic!("{name}: the view background is expected to be plain, found {other:?}"),
+            };
+            assert_ne!(
+                tint, t.view.background,
+                "{name}: the tint must differ from the view background or it is invisible"
+            );
+            let rgb: [i32; 3] = rgb.into();
+            let base: [i32; 3] = base.into();
+            for (i, (r, b)) in rgb.iter().zip(base).enumerate() {
+                let delta = (r - b).abs();
+                assert!(
+                    (1..=15).contains(&delta),
+                    "{name}: channel {i} delta {delta} is outside the few-percent low-contrast band (1..=15 of 255): tint={tint:?} view_bg={:?}",
+                    t.view.background
+                );
+            }
+            assert_eq!(
+                t.current_line.foreground, t.view.foreground,
+                "{name}: the tint is a backdrop only — the text keeps the view's foreground"
+            );
+            assert!(
+                !t.current_line.bold,
+                "{name}: the tint must not be bold (nothing about the point's row is more prominent)"
             );
         }
     }

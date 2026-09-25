@@ -29,6 +29,11 @@ struct FileViewCanvasProps {
     /// line indices, or `None` when no mark is set. The store computes this
     /// from the byte range using the rope (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
+    /// issue-current-line-highlight: the BUFFER line index the point is on
+    /// (the row that receives the current-line tint; plumbed like
+    /// `region_lines` — the store owns the point, this only carries it). A
+    /// line not present in `rows` tints nothing (the point off-screen).
+    pub point_line: usize,
     /// annotations-fold-visual: the note blocks are folded away (`C-c a h`
     /// toggles them). The annotated-line margin arrow carries this state —
     /// ▸ (folded) instead of ▾ (shown) — so the fact that an annotation
@@ -43,6 +48,7 @@ struct FileViewCanvas {
     total_rows: usize,
     top_line: usize,
     region_lines: Option<(usize, usize)>,
+    point_line: usize,
     notes_folded: bool,
 }
 
@@ -53,6 +59,7 @@ impl FileViewCanvas {
             total_rows: props.total_rows,
             top_line: props.top_line,
             region_lines: props.region_lines,
+            point_line: props.point_line,
             notes_folded: props.notes_folded,
         }
     }
@@ -92,6 +99,22 @@ impl Component for FileViewCanvas {
         for (row, r) in self.rows.iter().enumerate() {
             if row >= h {
                 break;
+            }
+            // issue-current-line-highlight: the current-line TINT — a subtle
+            // backdrop on the row carrying the point. Painted FIRST (before
+            // the region face and before `draw_line`'s match/jump bands,
+            // which overwrite it per cell), so it is the LOWEST precedence:
+            // jump band > match band > region face > tint > view background.
+            // Code rows only — a synthetic note row never carries the tint
+            // (the same P3-3 rule as the region: the face belongs to rows
+            // that carry buffer text). A point line absent from `rows`
+            // tints nothing (the point off-screen). When the notes are
+            // folded no note rows are emitted at all, so the tint simply
+            // lands on the annotated code row — it is the row that carries
+            // the buffer text either way.
+            if !r.is_note && r.line == self.point_line {
+                let bg = color(t.current_line.background);
+                canvas.set_background_color(0, row as isize, w, 1, bg);
             }
             // Paint the region background for rows whose BUFFER line is
             // within the region. Note rows are EXCLUDED (P3-3): a note row
@@ -665,6 +688,10 @@ pub struct FileViewProps {
     /// The region's line range (start_line, end_line inclusive) in buffer
     /// line indices, or `None` when no mark is set (plan 004 issue 03).
     pub region_lines: Option<(usize, usize)>,
+    /// issue-current-line-highlight: the buffer line the point is on (the
+    /// canvas's current-line tint; the store's file-view point, the same
+    /// value that drives the hardware cursor's row).
+    pub point_line: usize,
     /// annotations-fold-visual: the note blocks are folded away (the
     /// annotated-line margin arrow switches to its folded ▸ state, the
     /// tree-line's up/out arms disappear, and no note rows are emitted).
@@ -715,6 +742,7 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                     total_rows: props.total_rows,
                     top_line: props.top_line,
                     region_lines: props.region_lines,
+                    point_line: props.point_line,
                     notes_folded: props.notes_folded,
                 )
             }
@@ -2428,6 +2456,7 @@ mod tests {
                     total_rows: 2usize,
                     top_line: 0usize,
                     region_lines: None,
+                    point_line: 99usize, // outside the rows: this test's frame is tint-free
                     notes_folded: false,
                 )
             }
@@ -2769,6 +2798,405 @@ mod tests {
         assert!(
             code_idx >= 2 && lines[code_idx - 1].contains("note b") && lines[code_idx - 2].contains("note a"),
             "record order: a then b, directly above:\n{frame}"
+        );
+    }
+
+    // ── issue-current-line-highlight: the point-row tint (backdrop) ──────
+    // The tint is a BACKDROP: painted before the region face and the
+    // match/jump bands, so it loses to every existing highlight per cell
+    // (jump band > match band > region face > tint > view background). Each
+    // precedence row is a distinct observable pinned below, per CELL
+    // (canvas background_color), not by a screenshot.
+    //
+    // Every test here reads the process-global theme (`theme::current()`) to
+    // compute its expectations, and ONE of them (`current_line_face_is_read_from_the_theme_not_hard_coded`)
+    // swaps that global. The lock serializes the module's tint tests so a
+    // swap can never land between another test's theme read and its render.
+    static TINT_TEST_LOCK: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
+    /// Hold the tint-test lock for the duration of one test (see the
+    /// module note above; the guard must stay alive until the test ends).
+    fn tint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TINT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A plain (non-annotated, non-note) code row at buffer line `line`.
+    fn tint_code_row(line: usize, text: &str) -> FileViewRow {
+        FileViewRow {
+            line,
+            is_note: false,
+            annotated: false,
+            anchors: Vec::new(),
+            code_start: 0,
+            indent_chars: 0,
+            insertions: Vec::new(),
+            text: text.to_string(),
+            spans: Vec::new(),
+            matches: Vec::new(),
+            highlight: None,
+            note_slots: Vec::new(),
+        }
+    }
+
+    /// Render a `FileViewCanvas` directly at a pinned 80x`height` (the same
+    /// fixed-frame seam `note_packing_neighbour_guard_truncates_at_the_next_slot`
+    /// uses), so the assertions read the canvas's per-cell backgrounds.
+    fn render_tint_canvas(
+        rows: Vec<FileViewRow>,
+        point_line: usize,
+        region_lines: Option<(usize, usize)>,
+        notes_folded: bool,
+        height: u32,
+    ) -> iocraft::Canvas {
+        use iocraft::prelude::*;
+        let total_rows = rows.len();
+        let mut app = element! {
+            View(flex_direction: FlexDirection::Column, width: 80, height: height) {
+                FileViewCanvas(
+                    rows: rows.clone(),
+                    total_rows,
+                    top_line: 0usize,
+                    region_lines,
+                    point_line,
+                    notes_folded,
+                )
+            }
+        };
+        app.render(Some(80))
+    }
+
+    /// Every cell of canvas row `y` carries exactly `expected` (or None
+    /// when the row must keep the view's normal background).
+    fn assert_full_row_bg(canvas: &iocraft::Canvas, y: usize, expected: Option<iocraft::Color>) {
+        for x in 0..80 {
+            let cell = canvas.cell(x, y).unwrap();
+            assert_eq!(
+                cell.background_color,
+                expected,
+                "row {y} cell {x} has the wrong background: {:?} (expected {:?})",
+                cell.background_color,
+                expected
+            );
+        }
+    }
+
+    /// The point's row is tinted (the whole display row, per cell) and the
+    /// rows immediately above and below keep the view's normal background
+    /// (no explicit cell background).
+    #[test]
+    fn current_line_tint_pays_the_point_row_and_not_the_neighbours() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        assert_ne!(
+            tint,
+            color(t.view.background),
+            "the tint must differ from the view background or it is invisible"
+        );
+        let rows: Vec<FileViewRow> = (0..=4)
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .collect();
+        let canvas = render_tint_canvas(rows, 2, None, false, 5);
+        assert_full_row_bg(&canvas, 2, Some(tint));
+        // The rows immediately above and below the point carry the view's
+        // normal background — not the tint (the subtlety, asserted per cell
+        // across the whole row, not by a screenshot).
+        assert_full_row_bg(&canvas, 1, None);
+        assert_full_row_bg(&canvas, 3, None);
+        // …and so does every other row in the window.
+        assert_full_row_bg(&canvas, 0, None);
+        assert_full_row_bg(&canvas, 4, None);
+    }
+
+    /// Precedence row 1: a REGION span on the point's line wins over the
+    /// tint (the user made that selection deliberately; it is more
+    /// salient). The region face also covers the region's OTHER rows, which
+    /// the tint must not touch.
+    #[test]
+    fn current_line_tint_loses_to_the_region_face() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let region_bg = color(t.region.background);
+        assert_ne!(region_bg, tint, "the faces must be distinct or the pin is vacuous");
+        let rows: Vec<FileViewRow> = (0..=4)
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .collect();
+        // Region over buffer lines 2..=3; the point is on line 2.
+        let canvas = render_tint_canvas(rows, 2, Some((2, 3)), false, 5);
+        // The point's row: the region face everywhere — the tint lost.
+        assert_full_row_bg(&canvas, 2, Some(region_bg));
+        // The region's other row: the region face, NOT the tint (no leak).
+        assert_full_row_bg(&canvas, 3, Some(region_bg));
+        // Outside the region, off the point: the view's normal background.
+        assert_full_row_bg(&canvas, 1, None);
+        assert_full_row_bg(&canvas, 4, None);
+    }
+
+    /// Precedence row 2: a search match on the point's line — the SELECTED
+    /// match's band (the match face with a background) wins over the tint
+    /// on its cells; outside the band the tint stays (it is the backdrop).
+    #[test]
+    fn current_line_tint_loses_to_the_selected_match_band() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let band = color(t.search_match_current.background);
+        assert_ne!(band, tint, "the faces must be distinct or the pin is vacuous");
+        let mut row = tint_code_row(1, "aaaa bbbb");
+        row.matches = vec![LineMatch { start: 0, end: 4, selected: true }];
+        let rows = vec![tint_code_row(0, "line 0"), row, tint_code_row(2, "line 2")];
+        let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        // The band's cells: the match face's background, not the tint.
+        for x in 0..4 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(band),
+                "cell {x} (under the selected match) must carry the match band, not the tint"
+            );
+        }
+        // The rest of the point's row keeps the tint (backdrop).
+        for x in 4..80 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(tint),
+                "cell {x} (past the match band) keeps the tint"
+            );
+        }
+        assert_full_row_bg(&canvas, 0, None);
+        assert_full_row_bg(&canvas, 2, None);
+    }
+
+    /// Precedence row 2 (the dim side): a NON-selected match paints no band
+    /// (its face is foreground-only, as before), so on the point's row the
+    /// match face's foreground sits ON the tint's backdrop — the tint never
+    /// displaces an existing face, it only backs it.
+    #[test]
+    fn current_line_tint_stays_under_a_plain_match_face() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let mut row = tint_code_row(1, "aaaa bbbb");
+        row.matches = vec![LineMatch { start: 0, end: 4, selected: false }];
+        let rows = vec![row];
+        let canvas = render_tint_canvas(rows, 1, None, false, 1);
+        // The plain match paints no band: its cells keep the tint's
+        // background while carrying the match face's foreground (the single
+        // rendered row is display row 0).
+        for x in 0..4 {
+            let cell = canvas.cell(x, 0).unwrap();
+            assert_eq!(
+                cell.background_color,
+                Some(tint),
+                "cell {x}: a plain match has no band — the tint stays its backdrop"
+            );
+            assert_eq!(
+                cell.text_style().and_then(|s| s.color),
+                Some(color(t.search_match.foreground)),
+                "cell {x}: the plain match's foreground still wins the face"
+            );
+        }
+    }
+
+    /// Precedence row 3: a jump landing on the point's line — the jump band
+    /// (already the highest precedence) wins over the tint on its cells;
+    /// the rest of the row keeps the tint. (The row carries a syntax span
+    /// so the line takes `draw_line`'s segment path — where the match and
+    /// jump overlays run; a span-less line's early plain-text return never
+    /// applied the jump band, before or after the tint.) The expected band
+    /// is computed with the same `jump_band_bg` the renderer uses
+    /// (truecolor fade when the terminal advertises it, the palette face
+    /// otherwise), so the pin holds in both environments.
+    #[test]
+    fn current_line_tint_loses_to_the_jump_band() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let band = crate::ui::jump_band_bg(&t, 1.0);
+        assert_ne!(band, tint, "the faces must be distinct or the pin is vacuous");
+        let mut row = tint_code_row(1, "fn alpha() {");
+        row.spans = vec![redline_syntax::highlight::LineSpan {
+            start: 0,
+            end: 12,
+            face: Some(0),
+        }];
+        row.highlight = Some((3, 8, 1.0));
+        let rows = vec![tint_code_row(0, "line 0"), row, tint_code_row(2, "line 2")];
+        let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        // The landing's cells: the jump band, not the tint.
+        for x in 3..8 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(band),
+                "cell {x} (under the landing) must carry the jump band, not the tint"
+            );
+        }
+        // The rest of the point's row keeps the tint.
+        for x in 0..3 {
+            assert_eq!(canvas.cell(x, 1).unwrap().background_color, Some(tint), "cell {x}");
+        }
+        for x in 8..80 {
+            assert_eq!(canvas.cell(x, 1).unwrap().background_color, Some(tint), "cell {x}");
+        }
+        assert_full_row_bg(&canvas, 0, None);
+        assert_full_row_bg(&canvas, 2, None);
+    }
+
+    /// Precedence row 4: a synthetic NOTE row never carries the tint (the
+    /// region's P3-3 rule — the face belongs to rows that carry buffer
+    /// text). The note above the point's code line stays on the view's
+    /// normal background; the code line is tinted.
+    #[test]
+    fn current_line_tint_skips_synthetic_note_rows() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let note = FileViewRow {
+            line: 2,
+            is_note: true,
+            annotated: false,
+            anchors: vec![0],
+            code_start: 0,
+            indent_chars: 0,
+            insertions: Vec::new(),
+            text: String::new(),
+            spans: Vec::new(),
+            matches: Vec::new(),
+            highlight: None,
+            note_slots: Vec::new(),
+        };
+        let rows = vec![note, tint_code_row(2, "line 2"), tint_code_row(3, "line 3")];
+        let canvas = render_tint_canvas(rows, 2, None, false, 3);
+        // The note row (display row 0, buffer line 2 — the point's line)
+        // is synthetic: no tint.
+        assert_full_row_bg(&canvas, 0, None);
+        // The code row carrying the point's line: the tint.
+        assert_full_row_bg(&canvas, 1, Some(tint));
+        // The next buffer line: nothing.
+        assert_full_row_bg(&canvas, 2, None);
+    }
+
+    /// Precedence row 5: the point OFF-SCREEN tints nothing — a point line
+    /// absent from the rendered rows leaves every row on the view's normal
+    /// background.
+    #[test]
+    fn current_line_off_screen_tints_nothing() {
+        let _lock = tint_test_lock();
+        // Rows for buffer lines 0, 1, 3, 4 — the point's line (2) is not in
+        // the window.
+        let rows: Vec<FileViewRow> = [0usize, 1, 3, 4]
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .to_vec();
+        let canvas = render_tint_canvas(rows, 2, None, false, 4);
+        for y in 0..4 {
+            assert_full_row_bg(&canvas, y, None);
+        }
+    }
+
+    /// The compound case: the point's line that is BOTH in the region and a
+    /// selected match — the match band wins on its cells, the region face
+    /// fills the rest of the row, and the tint loses everywhere (it is the
+    /// backdrop under BOTH).
+    #[test]
+    fn current_line_tint_loses_where_the_point_row_is_region_and_match() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let region_bg = color(t.region.background);
+        let band = color(t.search_match_current.background);
+        assert_ne!(band, region_bg, "the faces must be distinct or the pin is vacuous");
+        let mut row = tint_code_row(1, "aaaa bbbb");
+        row.matches = vec![LineMatch { start: 0, end: 4, selected: true }];
+        let rows = vec![tint_code_row(0, "line 0"), row];
+        let canvas = render_tint_canvas(rows, 1, Some((1, 1)), false, 2);
+        // Match cells: the band. Rest of the row: the region face.
+        for x in 0..4 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(band),
+                "cell {x}: the match band wins on its own cells"
+            );
+        }
+        for x in 4..80 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(region_bg),
+                "cell {x}: the region face fills the row past the band"
+            );
+        }
+        assert_full_row_bg(&canvas, 0, None);
+    }
+
+    /// The folded case: a folded annotation emits NO note rows, so the
+    /// point's row is the annotated code row itself — the tint lands there
+    /// (the tint belongs to rows carrying buffer text; the fold hides the
+    /// notes, not the code).
+    #[test]
+    fn current_line_tint_lands_on_the_code_row_when_notes_are_folded() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let tint = color(t.current_line.background);
+        let mut row = tint_code_row(1, "    let x = 1;");
+        row.annotated = true;
+        row.anchors = vec![0];
+        row.code_start = 1; // the column-0 indicator shape
+        let canvas = render_tint_canvas(vec![row], 1, None, true, 1);
+        // The (single) row is the annotated code row: the whole row is the
+        // tint, and the folded ▸ indicator still renders.
+        assert_full_row_bg(&canvas, 0, Some(tint));
+        assert_eq!(canvas.cell(0, 0).unwrap().text(), Some("\u{25b8}"));
+    }
+
+    /// The face is CONFIG-DERIVED, not a hard-coded constant: changing the
+    /// theme's `current_line` value changes the rendering. The swap uses a
+    /// theme identical to the dark default in every OTHER face (only
+    /// `current_line` differs), so concurrent tests reading the global
+    /// theme see their expected values unchanged; the guard restores it on
+    /// drop even on a failing assertion.
+    #[test]
+    fn current_line_face_is_read_from_the_theme_not_hard_coded() {
+        let _lock = tint_test_lock();
+        struct ThemeGuard(theme::Theme);
+        impl Drop for ThemeGuard {
+            fn drop(&mut self) {
+                theme::set_current(self.0.clone());
+            }
+        }
+        let previous = theme::current();
+        let _guard = ThemeGuard(previous.clone());
+        let mut custom = previous.clone();
+        custom.current_line = theme::Face::new(
+            previous.view.foreground,
+            theme::Color::Rgb(99, 33, 7),
+            false,
+        );
+        theme::set_current(custom);
+
+        let rows: Vec<FileViewRow> = (0..=2)
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .collect();
+        let canvas = render_tint_canvas(rows.clone(), 1, None, false, 3);
+        // The point's row carries the CHANGED themed value — a hard-coded
+        // paint (the default 15,15,15) would redden this per cell.
+        for x in 0..80 {
+            assert_eq!(
+                canvas.cell(x, 1).unwrap().background_color,
+                Some(iocraft::Color::Rgb {
+                    r: 99,
+                    g: 33,
+                    b: 7
+                }),
+                "cell {x}: the tint must follow the theme's current_line value"
+            );
+        }
+        assert_full_row_bg(&canvas, 0, None);
+        assert_full_row_bg(&canvas, 2, None);
+        drop(_guard);
+        // And the restored theme renders the original shade again.
+        let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        assert_eq!(
+            canvas.cell(0, 1).unwrap().background_color,
+            Some(color(previous.current_line.background)),
+            "after restore the original themed shade renders again"
         );
     }
 }
