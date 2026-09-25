@@ -104,6 +104,7 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
             CommitEditorView(
                 title: snap.commit_editor_title.clone(),
                 rows: snap.commit_editor_rows.clone(),
+                current_line: snap.commit_editor_cursor_line,
             )
         }
         .into()),

@@ -8,7 +8,7 @@ use iocraft::prelude::*;
 use crate::model::sections::MagitRow;
 use crate::theme;
 use crate::ui::diff_view::row_face;
-use crate::ui::{bar_bg, face_bg, face_color, face_weight};
+use crate::ui::{bar_bg, current_line_bg, face_bg, face_color, face_weight};
 
 #[derive(Default, Props)]
 pub struct MagitRowsViewProps {
@@ -23,6 +23,15 @@ pub struct MagitRowsViewProps {
     pub top_row: usize,
     /// The total number of rows in the full list (drives the scroll indicator).
     pub total_rows: usize,
+    /// issue-current-line-highlight (follow-up): the row index (within
+    /// `rows`) that carries the current cursor/point. When set, the row
+    /// receives the current-line tint as its backdrop (painted BEFORE the
+    /// selected-row bar; if the row is also `selected`, the bar wins — the
+    /// tint is invisible under it). The commit editor passes this (writing
+    /// a commit message is where a current-line highlight matters most);
+    /// the list views (log, blame, status, commit-diff) do NOT — their
+    /// cursor row already has the prominent selected-item face.
+    pub current_line: Option<usize>,
 }
 
 #[cfg(test)]
@@ -127,9 +136,22 @@ pub fn MagitRowsView(
                     // drawn on a per-row View (no invert), so the highlight is
                     // an explicit white-on-blue bar independent of the theme's
                     // view background. Unselected rows keep the view background.
+                    // issue-current-line-highlight (follow-up): the current-line
+                    // tint is the BACKDROP — painted as the row's background
+                    // when the row is NOT selected (the selected bar wins, the
+                    // tint is invisible under it). This makes the commit
+                    // editor's cursor row visible even on comment lines where
+                    // the selected face's background equals the view background.
                     props.rows.iter().enumerate().map(|(i, row)| {
                         let face = row_face(row.role, row.selected, &t);
-                        let bg = if row.selected { bar_bg(face) } else { face_bg(t.view) };
+                        let is_current = props.current_line.is_some_and(|cl| cl == i);
+                        let bg = if row.selected {
+                            bar_bg(face)
+                        } else if is_current {
+                            current_line_bg(&t)
+                        } else {
+                            face_bg(t.view)
+                        };
                         element! {
                             View(key: i.to_string(), background_color: bg) {
                                 Text(

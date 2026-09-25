@@ -106,10 +106,13 @@ SHARED_SUITES=(
   ux_sweep.py
   probe_notes_dump.py
   probe_current_line_tint.py # issue-current-line-highlight: the point row
-                        # carries the tint background per cell (0f0f0f),
+                        # carries the tint background per cell (232323),
                         # the neighbours the view background (000000), the
                         # tint follows the point on C-n, and the region
                         # face wins over the tint on the region's rows
+  probe_current_line_tint_16.py # issue-current-line-highlight (follow-up):
+                        # the 16-colour fallback (DarkGrey 48;5;8 -> 7f7f7f)
+                        # when COLORTERM is not truecolor
   drive_syntax_notes.py
   drive_symbol_precise.py # symbol-precise annotation anchoring: the indicator
                         # sits before the annotated SYMBOL (the record's

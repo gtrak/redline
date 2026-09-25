@@ -171,3 +171,26 @@ pub(crate) fn jump_band_bg(t: &theme::Theme, intensity: f32) -> Color {
     }
     face_bg(t.jump_highlight)
 }
+
+/// issue-current-line-highlight: the current-line tint's background color,
+/// with a truecolor capability check. Under `COLORTERM=truecolor` the face's
+/// exact RGB is emitted (SGR `48;2;r;g;b`). Without truecolor the 16-color
+/// palette's smallest step above black is DarkGrey (SGR `48;5;8`, ~50%) and
+/// the smallest step below white is Grey (SGR `48;5;7`, ~75%) — necessarily
+/// more visible than the truecolor tint, but the ONLY options that are
+/// "visibly distinct from the view background" without being a full selected-row
+/// face. The choice is honest: the palette cannot express a 13.7% delta, so
+/// it expresses a 50% delta (the minimum visible step).
+pub(crate) fn current_line_bg(t: &theme::Theme) -> Color {
+    if truecolor_enabled() {
+        return color(t.current_line.background);
+    }
+    // Palette fallback: the closest palette step that is visibly distinct
+    // from the view background. The 16-color palette has no step between
+    // black and DarkGrey (or white and Grey), so these ARE the fallbacks.
+    match t.view.background {
+        theme::Color::Black => Color::DarkGrey, // SGR 48;5;8
+        theme::Color::White => Color::Grey,     // SGR 48;5;7
+        _ => Color::DarkGrey,                   // safe default
+    }
+}

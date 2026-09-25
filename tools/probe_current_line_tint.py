@@ -5,8 +5,7 @@ unit tests pin at the canvas level.
 
 Legs (one App, the shared fixture under the shared PTY flock):
   1. the point's row carries the tint background on EVERY cell (the dark
-     theme's truecolor shade 48;2;15;15;15 -> pyte `0f0f0f`, independent of
-     COLORTERM — it is an explicit RGB face value, not a palette step), and
+     theme's truecolor shade 48;2;35;35;35 -> pyte `232323`), and
      the rows immediately above and below carry the view's normal
      background (Black -> pyte `000000`).
   2. moving the point down one line (C-n) moves the tint with it: the new
@@ -14,6 +13,10 @@ Legs (one App, the shared fixture under the shared PTY flock):
   3. a region (C-@ mark at the start of line 3, point back on line 2) — the
      region face WINS over the tint on the region's rows (region bg
      `5f5f5f` in the 16-color path), asserted per cell.
+
+The probe sets COLORTERM=truecolor to exercise the truecolor path (the
+SGR 48;2;35;35;35 escape). A separate probe (probe_current_line_tint_16.py)
+exercises the 16-colour fallback (SGR 48;5;8 -> pyte `7f7f7f`).
 
 The probe prints the literal frame (text rows + a per-row background
 signature) at the end of leg 1 — the artifact the report embeds.
@@ -38,7 +41,7 @@ LEG_LINES = [
     "echo row five",
     "foxtrot row six",
 ]
-TINT = "0f0f0f"    # the dark theme's current_line face, 48;2;15;15;15
+TINT = "232323"    # the dark theme's current_line face, 48;2;35;35;35
 VIEW_BG = "000000"  # the dark theme's view background (Black)
 
 CHECKS = []
@@ -76,17 +79,19 @@ def dump_frame(app, label):
         print(f"  [{r:2d}] {text}")
         print(f"       bg: {sig}")
         sigs[r] = sig
-    print("  (bg legend: 000000 = view background, 0f0f0f = current-line "
-          "tint, 5c5cff/0000ff = status line, 7f7f7f = region face)")
+    print("  (bg legend: 000000 = view background, 232323 = current-line "
+          "tint (48;2;35;35;35), 5c5cff/0000ff = status line, 7f7f7f = region face)")
 
 
 def main():
     print(f"REPO={REPO}")
+    # Force truecolor via the App's colorterm parameter (the pyte_driver
+    # explicitly pops COLORTERM unless colorterm="truecolor" is passed).
     reset()
     with open(os.path.join(REPO, LEG_RS), "w", encoding="utf-8") as f:
         f.write("\n".join(LEG_LINES) + "\n")
 
-    app = pyte_driver.App(REPO, rows=ROWS, cols=COLS)
+    app = pyte_driver.App(REPO, rows=ROWS, cols=COLS, colorterm="truecolor")
     try:
         app.key("C-x C-f")
         app.wait(0.8)

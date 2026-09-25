@@ -10,7 +10,7 @@ use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 use crate::app::store::{FileViewRow, LineMatch};
 use crate::model::text_width::{char_display_width, display_width};
 use crate::theme;
-use crate::ui::{color, text_style};
+use crate::ui::{color, current_line_bg, text_style};
 
 #[derive(Default, Props)]
 struct FileViewCanvasProps {
@@ -113,7 +113,7 @@ impl Component for FileViewCanvas {
             // lands on the annotated code row — it is the row that carries
             // the buffer text either way.
             if !r.is_note && r.line == self.point_line {
-                let bg = color(t.current_line.background);
+                let bg = current_line_bg(&t);
                 canvas.set_background_color(0, row as isize, w, 1, bg);
             }
             // Paint the region background for rows whose BUFFER line is
@@ -2887,7 +2887,7 @@ mod tests {
     fn current_line_tint_pays_the_point_row_and_not_the_neighbours() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         assert_ne!(
             tint,
             color(t.view.background),
@@ -2916,7 +2916,7 @@ mod tests {
     fn current_line_tint_loses_to_the_region_face() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let region_bg = color(t.region.background);
         assert_ne!(region_bg, tint, "the faces must be distinct or the pin is vacuous");
         let rows: Vec<FileViewRow> = (0..=4)
@@ -2940,7 +2940,7 @@ mod tests {
     fn current_line_tint_loses_to_the_selected_match_band() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let band = color(t.search_match_current.background);
         assert_ne!(band, tint, "the faces must be distinct or the pin is vacuous");
         let mut row = tint_code_row(1, "aaaa bbbb");
@@ -2975,7 +2975,7 @@ mod tests {
     fn current_line_tint_stays_under_a_plain_match_face() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let mut row = tint_code_row(1, "aaaa bbbb");
         row.matches = vec![LineMatch { start: 0, end: 4, selected: false }];
         let rows = vec![row];
@@ -3011,7 +3011,7 @@ mod tests {
     fn current_line_tint_loses_to_the_jump_band() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let band = crate::ui::jump_band_bg(&t, 1.0);
         assert_ne!(band, tint, "the faces must be distinct or the pin is vacuous");
         let mut row = tint_code_row(1, "fn alpha() {");
@@ -3050,7 +3050,7 @@ mod tests {
     fn current_line_tint_skips_synthetic_note_rows() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let note = FileViewRow {
             line: 2,
             is_note: true,
@@ -3134,7 +3134,7 @@ mod tests {
     fn current_line_tint_lands_on_the_code_row_when_notes_are_folded() {
         let _lock = tint_test_lock();
         let t = theme::current();
-        let tint = color(t.current_line.background);
+        let tint = current_line_bg(&t);
         let mut row = tint_code_row(1, "    let x = 1;");
         row.annotated = true;
         row.anchors = vec![0];
@@ -3169,6 +3169,7 @@ mod tests {
             theme::Color::Rgb(99, 33, 7),
             false,
         );
+        let custom_clone = custom.clone();
         theme::set_current(custom);
 
         let rows: Vec<FileViewRow> = (0..=2)
@@ -3176,15 +3177,15 @@ mod tests {
             .collect();
         let canvas = render_tint_canvas(rows.clone(), 1, None, false, 3);
         // The point's row carries the CHANGED themed value — a hard-coded
-        // paint (the default 15,15,15) would redden this per cell.
+        // paint (the default Rgb(35,35,35)) would redden this per cell.
+        // The expected value comes from `current_line_bg` (the same function
+        // the render uses), so the test is meaningful under both truecolor
+        // and 16-color environments.
+        let expected_tint = current_line_bg(&custom_clone);
         for x in 0..80 {
             assert_eq!(
                 canvas.cell(x, 1).unwrap().background_color,
-                Some(iocraft::Color::Rgb {
-                    r: 99,
-                    g: 33,
-                    b: 7
-                }),
+                Some(expected_tint),
                 "cell {x}: the tint must follow the theme's current_line value"
             );
         }
@@ -3193,10 +3194,114 @@ mod tests {
         drop(_guard);
         // And the restored theme renders the original shade again.
         let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        let restored_tint = current_line_bg(&previous);
         assert_eq!(
             canvas.cell(0, 1).unwrap().background_color,
-            Some(color(previous.current_line.background)),
+            Some(restored_tint),
             "after restore the original themed shade renders again"
         );
+    }
+
+    // ── issue-current-line-highlight (follow-up): truecolor SGR + 16-colour fallback ──
+
+    /// Verify the exact SGR bytes emitted for the tint under truecolor:
+    /// the cell carries `Color::Rgb{r:35, g:35, b:35}`, which iocraft
+    /// encodes as SGR `48;2;35;35;35` (the 24-bit truecolor background).
+    /// This is the exact byte sequence that reaches the terminal.
+    #[test]
+    fn current_line_tint_emits_truecolor_sgr_under_colorterm() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        // The test environment has COLORTERM=truecolor (verified at
+        // gate time). If this assertion fails, the env changed.
+        assert!(
+            crate::ui::truecolor_enabled(),
+            "test requires COLORTERM=truecolor (set it: export COLORTERM=truecolor)"
+        );
+        let tint = current_line_bg(&t);
+        // The exact SGR bytes for this Color value (from iocraft's SgrColor
+        // Display impl): `48;2;35;35;35`.
+        assert_eq!(
+            tint,
+            iocraft::Color::Rgb { r: 35, g: 35, b: 35 },
+            "truecolor: the tint must be the theme's exact RGB (SGR 48;2;35;35;35)"
+        );
+        // The canvas cell carries this value (the render path's output).
+        let rows: Vec<FileViewRow> = (0..=2)
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .collect();
+        let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        assert_eq!(
+            canvas.cell(0, 1).unwrap().background_color,
+            Some(iocraft::Color::Rgb { r: 35, g: 35, b: 35 }),
+            "canvas cell: the SGR 48;2;35;35;35 background is painted"
+        );
+    }
+
+    /// Verify the 16-colour fallback SGR bytes: when COLORTERM is NOT
+    /// truecolor/24bit, the tint falls back to `Color::DarkGrey`, which
+    /// iocraft encodes as SGR `48;5;8` (the 16-colour palette's DarkGrey
+    /// index). Mutation: if `current_line_bg` always returns the Rgb value
+    /// (ignoring the capability check), this test reddens.
+    #[test]
+    fn current_line_tint_falls_back_to_palette_sgr_without_truecolor() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        // Save and remove COLORTERM to force the no-truecolor path.
+        let prev_colorterm = std::env::var("COLORTERM").ok();
+        unsafe { std::env::remove_var("COLORTERM"); }
+        // Now truecolor is disabled: the palette fallback must be used.
+        assert!(!crate::ui::truecolor_enabled(), "precondition: truecolor off");
+        let tint = current_line_bg(&t);
+        // The exact SGR bytes for the fallback: `48;5;8` (DarkGrey).
+        // The 16-colour palette's smallest step above Black. Necessarily
+        // more visible (~50%) than the truecolor tint (~14%) — the honest
+        // consequence of a 16-colour palette.
+        assert_eq!(
+            tint,
+            iocraft::Color::DarkGrey,
+            "16-colour: the tint must fall back to DarkGrey (SGR 48;5;8)"
+        );
+        // The canvas cell carries the fallback value.
+        let rows: Vec<FileViewRow> = (0..=2)
+            .map(|i| tint_code_row(i, &format!("line {i}")))
+            .collect();
+        let canvas = render_tint_canvas(rows, 1, None, false, 3);
+        assert_eq!(
+            canvas.cell(0, 1).unwrap().background_color,
+            Some(iocraft::Color::DarkGrey),
+            "canvas cell: the 16-colour fallback (SGR 48;5;8) is painted"
+        );
+        // Restore COLORTERM (or its absence).
+        match prev_colorterm {
+            Some(v) => unsafe { std::env::set_var("COLORTERM", v); },
+            None => unsafe { std::env::remove_var("COLORTERM"); },
+        }
+    }
+
+    /// Mutation pin: the FALLBACK must not emit truecolor when the terminal
+    /// does not support it. If `current_line_bg` is broken to always return
+    /// the Rgb value (ignoring `truecolor_enabled()`), the canvas cell would
+    /// carry `Rgb{r:35, g:35, b:35}` instead of `DarkGrey`, and this test
+    /// reddens.
+    #[test]
+    fn current_line_tint_fallback_does_not_emit_truecolor_in_16colour_env() {
+        let _lock = tint_test_lock();
+        let t = theme::current();
+        let prev_colorterm = std::env::var("COLORTERM").ok();
+        unsafe { std::env::set_var("COLORTERM", ""); }
+        assert!(!crate::ui::truecolor_enabled(), "precondition: truecolor off");
+        let tint = current_line_bg(&t);
+        // The fallback must NOT be the Rgb value (the mutation: emit truecolor
+        // in a 16-colour environment).
+        assert_ne!(
+            tint,
+            iocraft::Color::Rgb { r: 35, g: 35, b: 35 },
+            "MUTATION: the 16-colour fallback must NOT emit the truecolor Rgb value"
+        );
+        match prev_colorterm {
+            Some(v) => unsafe { std::env::set_var("COLORTERM", v); },
+            None => unsafe { std::env::remove_var("COLORTERM"); },
+        }
     }
 }

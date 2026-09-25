@@ -328,6 +328,15 @@ impl AppStore {
             .collect()
     }
 
+    /// issue-current-line-highlight (follow-up): the commit editor's cursor
+    /// line index (within the row list; same index since rows are 1:1 with
+    /// lines). `None` when the editor is closed.
+    pub fn commit_editor_cursor_line(&self) -> Option<usize> {
+        self.commit_editor.as_ref().map(|ed| {
+            ed.rope.char_to_line(ed.cursor.min(ed.rope.len_chars()))
+        })
+    }
+
     /// `y` in the magit-status context: the local-branch picker (RET checks
     /// out the selected branch).
     pub fn open_branch_picker(&mut self) {

@@ -136,8 +136,8 @@ impl Theme {
             log_commit: Face::new(Color::White, Color::Black, false),
             blame: Face::new(Color::DarkGrey, Color::Black, false),
             region: Face::new(Color::White, Color::DarkGrey, false),
-            // 15/255 ≈ 5.9% above the view background (0,0,0) per channel.
-            current_line: Face::new(Color::White, Color::Rgb(15, 15, 15), false),
+            // 35/255 ≈ 13.7% above the view background (0,0,0) per channel.
+            current_line: Face::new(Color::White, Color::Rgb(35, 35, 35), false),
             search_match: Face::new(Color::Grey, Color::Black, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
             jump_highlight: Face::new(Color::Black, Color::Yellow, true),
@@ -169,9 +169,9 @@ impl Theme {
             log_commit: Face::new(fg, bg, false),
             blame: Face::new(Color::DarkGrey, bg, false),
             region: Face::new(Color::Black, Color::Grey, false),
-            // 15/255 ≈ 5.9% below the view background (255,255,255) per
+            // 35/255 ≈ 13.7% below the view background (255,255,255) per
             // channel (the dark theme's lift, mirrored).
-            current_line: Face::new(fg, Color::Rgb(240, 240, 240), false),
+            current_line: Face::new(fg, Color::Rgb(220, 220, 220), false),
             search_match: Face::new(Color::DarkGrey, bg, false),
             search_match_current: Face::new(Color::White, Color::Blue, true),
             jump_highlight: Face::new(Color::Black, Color::Yellow, true),
@@ -428,8 +428,8 @@ mod tests {
             for (i, (r, b)) in rgb.iter().zip(base).enumerate() {
                 let delta = (r - b).abs();
                 assert!(
-                    (1..=15).contains(&delta),
-                    "{name}: channel {i} delta {delta} is outside the few-percent low-contrast band (1..=15 of 255): tint={tint:?} view_bg={:?}",
+                    (10..=50).contains(&delta),
+                    "{name}: channel {i} delta {delta} is outside the low-contrast band (10..=50 of 255): tint={tint:?} view_bg={:?}",
                     t.view.background
                 );
             }

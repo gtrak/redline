@@ -49,6 +49,7 @@ pub(super) struct Snapshot {
     pub(super) commit_diff_total_rows: usize,
     pub(super) commit_editor_title: String,
     pub(super) commit_editor_rows: Vec<MagitRow>,
+    pub(super) commit_editor_cursor_line: Option<usize>,
     pub(super) dirty: Option<DirtyCounts>,
     // File view (issue 03).
     /// The pre-computed rendered rows: code rows + the virtual annotation
@@ -203,6 +204,7 @@ pub(super) fn build(
         commit_diff_total_rows,
         commit_editor_title: s.commit_editor_title(),
         commit_editor_rows: s.commit_editor_rows(),
+        commit_editor_cursor_line: s.commit_editor_cursor_line(),
         dirty: s.dirty_counts(),
         file_view_rows,
         file_view_total_rows: s.file_view_total_rows(),

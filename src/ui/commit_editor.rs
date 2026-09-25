@@ -12,6 +12,14 @@ use crate::ui::rows_view::MagitRowsView;
 pub struct CommitEditorViewProps {
     pub title: String,
     pub rows: Vec<MagitRow>,
+    /// issue-current-line-highlight (follow-up): the cursor row's index
+    /// within `rows` (the row that receives the current-line tint; the
+    /// commit editor is where writing a commit message is precisely where
+    /// a current-line highlight matters most). The selected face (blue bar)
+    /// still wins on the cursor row when it's a Text line; the tint shows
+    /// through on Comment lines where the selected face's background equals
+    /// the view background (the `←` marker was the only indicator before).
+    pub current_line: Option<usize>,
 }
 
 /// The commit editor. Edits and the commit/abort bindings are driven by the
@@ -26,6 +34,7 @@ pub fn CommitEditorView(
             title: props.title.clone(),
             rows: props.rows.clone(),
             help: "type message · C-c C-c commit · C-c C-k abort · ESC/C-g abort".to_string(),
+            current_line: props.current_line,
         )
     }
 }
