@@ -10,7 +10,7 @@ use super::*;
         assert!(s.quit, "unmodified buffers must quit immediately");
         assert!(!s.quit_prompt_active());
         assert!(
-            !s.message.contains("Save this buffer"),
+            !s.message.contains("(y, n, !, C-g)"),
             "no prompt must be rendered: {:?}",
             s.message
         );
@@ -29,7 +29,9 @@ use super::*;
         s.key_event(key("C-c"));
         assert!(!s.quit, "the prompt must hold the quit");
         assert!(s.quit_prompt_active());
-        let expected = format!("Save this buffer: {}? (y, n, !, C-g)", notes_path.display());
+        // The keys LEAD the message (the clip-proof order — see
+        // quit_prompt_keys_lead_so_long_paths_cannot_clip_them).
+        let expected = format!("(y, n, !, C-g) Save {}?", notes_path.display());
         assert_eq!(s.message, expected, "prompt text mismatch");
         assert_eq!(s.quit_prompt_buffer().unwrap(), notes_path.display().to_string());
 
@@ -161,7 +163,7 @@ use super::*;
         // `y` fails: the error is reported, the SAME buffer is re-offered,
         // and the prompt decision line is redisplayed alongside the error.
         let prompt = format!(
-            "Save this buffer: {}? (y, n, !, C-g)",
+            "(y, n, !, C-g) Save {}?",
             notes_path.display()
         );
         s.key_event(key("y"));
@@ -194,6 +196,85 @@ use super::*;
             s.message
         );
         // Re-prompted buffer still answered by the state machine: `n` quits.
+        s.key_event(key("n"));
+        assert!(s.quit);
+    }
+
+    /// issue-quit-prompt-keys-invisible: the decision keys must survive the
+    /// minibuffer's right-edge clip at a gate-shaped root. The fixture path
+    /// is deep enough (like `/tmp/fxNNNNNN/redline_pyte_repo/.redline-notes.md`)
+    /// that the OLD message (`Save this buffer: {path}? (y, n, !, C-g)`) put
+    /// the key list past column 79 — the row holds 79 chars after the
+    /// leading space, the minibuffer is `NoWrap` + overflow-hidden, and the
+    /// keys were simply off-screen while the prompt stayed armed. The pin
+    /// simulates the clip (take the first 79 chars) and requires the keys
+    /// AND the full buffer path to survive it; the keys lead the message, so
+    /// only the path tail (recognisable) may ever truncate.
+    #[test]
+    fn quit_prompt_keys_lead_so_long_paths_cannot_clip_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut s) = notes_store();
+        // Gate-shaped path: 18 + 17 = 35 extra chars beyond the ~15-char
+        // tempdir root → path ≈ 50, which made the old message 84 chars
+        // (keys starting at col 50, `C-g)` ending at col 84 > 79).
+        let notes = dir
+            .path()
+            .join("redline_pyte_repo")
+            .join(".redline-notes.md");
+        std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
+        std::fs::write(&notes, "seed\n").unwrap();
+        let mtime = std::fs::metadata(&notes)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let key_ = s
+            .buffers
+            .insert_rope(Some(notes.clone()), Rope::from_str("seed\n"), mtime, true);
+        s.mark_locally_modified(&key_);
+        // Make the write fail so the error variant is reachable too.
+        std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        s.key_event(key("C-x"));
+        s.key_event(key("C-c"));
+        assert!(s.quit_prompt_active());
+        let name = notes.display().to_string();
+        // 1) The keys lead the message (the clip-proof order).
+        assert_eq!(
+            s.message, format!("(y, n, !, C-g) Save {name}?"),
+            "the prompt must be keys-first: {:?}",
+            s.message
+        );
+        // 2) The on-screen guarantee: clip the row at 79 cols (the 80-col
+        //    PTY's one leading space) — keys AND the full path survive.
+        let clipped: String = s.message.chars().take(79).collect();
+        assert!(
+            clipped.contains("(y, n, !, C-g)"),
+            "the keys must be visible after the 79-col clip: {clipped:?}"
+        );
+        assert!(
+            clipped.contains(&name),
+            "the full path must be visible after the 79-col clip: {clipped:?}"
+        );
+
+        // 3) The error variant keeps the same guarantee: keys lead, error
+        //    trails (context before decision, never after).
+        s.key_event(key("y"));
+        assert!(!s.quit, "a failed save must not quit");
+        assert!(
+            s.quit_prompt_active(),
+            "the prompt must stay up after a failed save"
+        );
+        assert!(
+            s.message.starts_with(&format!("(y, n, !, C-g) Save {name}? — save failed")),
+            "error variant: keys lead, error trails: {:?}",
+            s.message
+        );
+        let clipped: String = s.message.chars().take(79).collect();
+        assert!(
+            clipped.contains("(y, n, !, C-g)") && clipped.contains(&name),
+            "keys + path must be visible after the 79-col clip: {clipped:?}"
+        );
+        // The state machine itself is untouched by the reordering: `n` quits.
         s.key_event(key("n"));
         assert!(s.quit);
     }

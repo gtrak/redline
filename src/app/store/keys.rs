@@ -670,27 +670,44 @@ impl AppStore {
     }
 
     /// Render the prompt for the head of the snapshot in the minibuffer row.
+    ///
+    /// Layout rule (plan-017 F2's clip discipline, applied to the keys —
+    /// issue-quit-prompt-keys-invisible): the **decision keys lead** the
+    /// message. The minibuffer is one `NoWrap` + overflow-hidden row (79
+    /// cols after the leading space at the 80-col PTY), so whatever trails
+    /// can be clipped at long project paths — and the part the user must
+    /// act on (the `y` / `n` / `!` / `C-g` choice) must never be the part
+    /// that gets clipped. The old order (`Save this buffer: {path}? (keys)`)
+    /// put the path AHEAD of the keys, so at any prompt over 79 cols the
+    /// keys were exactly the clipped tail: the prompt was armed and
+    /// functional while a human could not see what to press. Keys-first,
+    /// plus the shortened question, makes the head a fixed 21 chars, so
+    /// the buffer path — what the user is deciding ABOUT — stays fully
+    /// visible at every gate/pool-shaped root, and at extreme lengths the
+    /// truncation eats the path tail (recognisable) before it can ever
+    /// reach the keys (which the user cannot guess).
     fn quit_prompt_show(&mut self) {
         let Some(name) = self.quit_prompt_buffer() else {
             return;
         };
         self.minibuffer_message(&format!(
-            "Save this buffer: {name}? (y, n, !, C-g)"
+            "(y, n, !, C-g) Save {name}?"
         ));
     }
 
     /// Re-render the prompt AFTER a failed save left an error message in
     /// the minibuffer: compose the prompt with the error so the decision
     /// line stays visible alongside it (plan 004 issue 05d, carried 004-04
-    /// review P2). The prompt comes FIRST: the composed line wraps at the
-    /// pane width, leaving the error (e.g. `save failed: ...`) on its own
-    /// continuation row. A no-op when the prompt is not active.
+    /// review P2). The keys still lead, and the error TRAILS: the error
+    /// text is context (why the last `y` did not advance), not the
+    /// decision — the clip eats the error tail first, then the path tail,
+    /// and never the keys. A no-op when the prompt is not active.
     fn quit_prompt_show_with_error(&mut self) {
         let Some(name) = self.quit_prompt_buffer() else {
             return;
         };
         self.minibuffer_message(&format!(
-            "Save this buffer: {name}? (y, n, !, C-g) — {}",
+            "(y, n, !, C-g) Save {name}? — {}",
             self.message
         ));
     }

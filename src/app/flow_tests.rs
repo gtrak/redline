@@ -1507,7 +1507,11 @@ fn unit_flow_quit_prompt_none() {
     s.key_event(key("C-c"));
     assert!(s.quit, "unmodified buffers must quit immediately");
     assert!(!s.quit_prompt_active(), "no save prompt with zero modified buffers");
-    assert!(!s.message.contains("Save this buffer"), "msg={:?}", s.message);
+    assert!(
+        !s.message.contains("(y, n, !, C-g)"),
+        "msg={:?}",
+        s.message
+    );
 }
 
 /// quit-prompt-y: modified notes + `C-x C-c` → the prompt names the path
@@ -1529,7 +1533,8 @@ fn unit_flow_quit_prompt_y() {
         "prompt names the modified buffer's path"
     );
     // The prompt is on screen at width 80 (the PTY's flat-text check: a
-    // wrap must not defeat it).
+    // wrap must not defeat it). The keys lead the message, so they are the
+    // left edge and survive the row clip (issue-quit-prompt-keys-invisible).
     let mut s2 = notes_store(repo.path());
     s2.key_event(key("Q"));
     s2.key_event(key("Y"));
@@ -1538,8 +1543,7 @@ fn unit_flow_quit_prompt_y() {
     let frame = render80(s2);
     let f = flat(&frame);
     assert!(
-        f.contains("Save this buffer:") && f.contains(".redline-notes.md")
-            && f.contains("(y, n, !, C-g)"),
+        f.contains("(y, n, !, C-g)") && f.contains(".redline-notes.md"),
         "prompt on screen at width 80:\n{frame}"
     );
     // Back on the first store: `y` saves and quits.

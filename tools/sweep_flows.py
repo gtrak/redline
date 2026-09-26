@@ -63,8 +63,10 @@ NOTES_PATH = os.path.join(REPO, ".redline-notes.md")
 # leg's dedicated file). Tall enough that a half-page scroll is observable.
 ACC_PATH = os.path.join(REPO, "src", "acc_edit.rs")
 # The save/quit-confirm prompt markers (asserted on by quit-prompt-y —
-# the on-terminal width-80 wrap check lives with this leg).
-PROMPT_HEAD = "Save this buffer:"
+# the on-terminal width-80 clip check lives with this leg).
+# issue-quit-prompt-keys-invisible (7f0090a): the keys now LEAD the
+# message ("(y, n, !, C-g) Save <path>?"), so the head IS the key list.
+PROMPT_HEAD = "(y, n, !, C-g)"
 PROMPT_KEYS = "(y, n, !, C-g)"
 
 RESULTS = []
@@ -381,25 +383,25 @@ def flow_quit_prompt_y():
     """Modified notes + `C-x C-c` → prompt names the path; `y` writes the
     file (contents asserted on disk) and the process ends with exit 0.
 
-    issue-sweep-quit-prompt-flake: the prompt is a SINGLE clipped row, not a
-    wrapping one (NoWrap + overflow-hidden, plan-017 F2). The full prompt is
-    "Save this buffer: <path>? (y, n, !, C-g)" — with the gate's fixture
-    root (/tmp/fx<pid>/...) the path pushes it past the 80-col right edge and
-    the key list is CLIPPED: it is simply not on the screen (measured:
-    row22 = ' Save this buffer: /tmp/fx607194/…/.redline-notes.md? (y, n, !, ').
-    The old assertion (flat_text + PROMPT_KEYS) assumed the wrap-era layout
-    and failed 100% of gate-full runs from ba70fa8 onward — the prompt was
-    armed and fully functional (y saved + exit 0 + on-disk write) while the
-    assertion read "prompt not rendered". Now the gate asserts what the
-    layout PROMISES: the left edge (head + buffer path) is always visible;
-    the key list is asserted only when the prompt fits the row
-    (prompt_len <= COLS-1, which holds at the shared /tmp root and the
-    pool lanes). The state machine itself (prompt armed → y → save → exit 0
-    → on-disk bytes) is asserted unconditionally below.
+    issue-sweep-quit-prompt-flake → issue-quit-prompt-keys-invisible:
+    the prompt is a SINGLE clipped row (NoWrap + overflow-hidden,
+    plan-017 F2). The flake fix made the key-list assertion CONDITIONAL
+    (only when the legacy-shape prompt_len <= COLS-1) because the legacy
+    order "Save this buffer: <path>? (y, n, !, C-g)" put the path ahead
+    of the keys, so any root whose prompt exceeded 79 cols clipped the
+    key list off-screen (measured: row22 ended at `...? (y, n, !, `).
+    The PRODUCT fix (7f0090a) re-ordered the message — the decision keys
+    now LEAD: "(y, n, !, C-g) Save <path>?" — left-anchored, so the
+    clip can never reach them at ANY fixture-root length, and the full
+    path stays visible at every gate/pool-shaped root. That makes the
+    conditional branch dead, so the assertion is strengthened to its
+    strongest form: the key list is asserted UNCONDITIONALLY. The
+    legacy-shape length is kept as evidence only (prompt-len=): a root
+    whose LEGACY prompt exceeded 79 cols now proves the new order works
+    where the old one clipped.
     """
     notes = os.path.join(REPO, ".redline-notes.md")
-    prompt_len = len("Save this buffer: %s? %s" % (notes, PROMPT_KEYS))
-    keys_visible = prompt_len <= COLS - 1
+    legacy_prompt_len = len("Save this buffer: %s? %s" % (notes, PROMPT_KEYS))
     try:
         app = App(REPO, rows=ROWS, cols=COLS)
         app.key("C-x n")
@@ -411,13 +413,13 @@ def flow_quit_prompt_y():
         # Positive gate (loop-02): the prompt must render before the
         # path/keys asserts — a quit that hasn't painted yet is not a
         # verdict (and exit-0 below independently gates it: a pending
-        # prompt blocks the exit). Only the visible part of the prompt is
-        # asserted (see the clip contract above).
+        # prompt blocks the exit). The keys lead the message, so both
+        # the key list and the buffer path are asserted unconditionally
+        # at every root length.
         prompted = wait_for(
             app, lambda: (PROMPT_HEAD in flat_text(app)
                           and ".redline-notes.md" in flat_text(app)
-                          and (PROMPT_KEYS in flat_text(app)
-                               if keys_visible else True)), 4.0)
+                          and PROMPT_KEYS in flat_text(app)), 4.0)
         alive = reap(app) is None
         app.key("y", settle=2.0)
         status = wait_exit(app)
@@ -428,7 +430,7 @@ def flow_quit_prompt_y():
                f"notes-open={notes_open} prompt-rendered-with-path={prompted} "
                f"alive-during-prompt={alive} exit-0-after-y={status == 0} "
                f"file-contains-edit={('QY' in on_disk)} "
-               f"prompt-len={prompt_len} keys-clipped={not keys_visible} "
+               f"legacy-shape-prompt-len={legacy_prompt_len} "
                f"(status={status})")
     finally:
         try:

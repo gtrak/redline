@@ -10,9 +10,14 @@ Usage:  PROBE_ROOT=<root> python3 tools/probe_quit_prompt.py [label]
 
 The fixture root controls the prompt's path length:
   path = <root>/redline_pyte_repo/.redline-notes.md
-  prompt = "Save this buffer: <path>? (y, n, !, C-g)"
+  prompt = "(y, n, !, C-g) Save <path>?"
+(issue-quit-prompt-keys-invisible, 7f0090a: the keys LEAD the message,
+so the key list is left-anchored and can never be the clipped tail; the
+legacy order "Save this buffer: <path>? (y, n, !, C-g)" clipped the keys
+at any root whose prompt exceeded 79 cols.)
 The minibuffer is NoWrap + overflow-hidden, so a prompt longer than the
-row is clipped at the right edge. Default root is a PRIVATE /tmp/qprobe<pid>
+row is clipped at the right edge — after the path, never the keys.
+Default root is a PRIVATE /tmp/qprobe<pid>
 seed from the /tmp baseline (the probe never mutates the shared baseline);
 pass PROBE_ROOT=/tmp/fx<NNNNN> to reproduce a gate-shaped root. Bounded by
 construction: one App, one exit; no loops.
@@ -34,7 +39,7 @@ from fixture import repo, reset as _reset_fixture
 
 REPO = repo("redline_pyte_repo")
 ROWS, COLS = 24, 80
-PROMPT_HEAD = "Save this buffer:"
+PROMPT_HEAD = "(y, n, !, C-g)"
 PROMPT_KEYS = "(y, n, !, C-g)"
 
 
@@ -67,7 +72,7 @@ def main():
         # Dump the minibuffer row (ROWS-2) and its neighbours raw, plus the
         # probe's own computation of what SHOULD be there.
         path = notes
-        prompt = "Save this buffer: %s? (y, n, !, C-g)" % path
+        prompt = "(y, n, !, C-g) Save %s?" % path
         print("=== %s ===" % label)
         print("fixture_root=%s" % os.environ.get("REDLINE_FIXTURE_ROOT", "/tmp"))
         print("path_len=%d prompt_len=%d (row holds %d chars after the leading space)"
