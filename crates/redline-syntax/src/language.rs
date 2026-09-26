@@ -60,6 +60,103 @@ pub enum FlatDefineGate {
     Clojure,
 }
 
+/// Per-language WORD CONSTITUENTS (issue-language-aware-symbols): the set
+/// of chars that form one symbol/word for the word motions (M-f/M-b),
+/// symbol extraction (M-? / M-.), the ripgrep word-boundary search sink,
+/// and the kill-word walks. The historical crate-wide rule
+/// (`alphanumeric || _`) is the `Default` row — it was never a language
+/// fact, and the reported bug (a Clojure `jwks/fetch-issuer-info` split
+/// into three tokens by the global rule) is fixed by reading each
+/// language's own symbol alphabet from its pinned grammar instead of
+/// assuming one for all.
+///
+/// The audit table — every language this registry highlights, its
+/// symbol-constituent rule, the pinned-grammar evidence, and whether the
+/// historical rule was already correct:
+///
+/// | Language        | Rule     | Grammar/reader evidence (pinned probe: `tests/probe_langsym.rs`)                          | Historical rule |
+/// |-----------------|----------|--------------------------------------------------------------------------------------------|-----------------|
+/// | Rust            | Default  | identifiers are alnum/`_` leaves; a lifetime `'a` is a separate `lifetime` node, a char literal separate — alnum+`_` is already right | unchanged |
+/// | Python          | Default  | identifier = alnum/`_` (a leading digit is illegal but no char-set rule can express it)    | unchanged |
+/// | Go              | Default  | identifier = alnum/`_`                                                                      | unchanged |
+/// | C / Cpp         | Default  | identifier = alnum/`_` (`-` is arithmetic — stays a boundary)                               | unchanged |
+/// | Java / CSharp   | Default  | identifier = alnum/`_`                                                                      | unchanged |
+/// | Bash            | Default  | a `$` is a variable-marker prefix, not an identifier char (probe: `$var` is a `variable_name` node AFTER the `$`) | unchanged |
+/// | Json / Yaml /   | Default  | keys are data (string / plain scalar), not navigable symbols — the historical rule is the  | unchanged |
+/// | Markdown / Plain|          | honest plain-text behavior                                                                  |                 |
+/// | JavaScript /    | Dollar   | probe: tree-sitter-javascript 0.25.0 parses `$foo`, `bar$`, `$bar` each as ONE `identifier` | `$foo` WAS split |
+/// | TypeScript / TSX|          | node (`$` IS an identifier char; the historical rule rejected it)                          | by the rule |
+/// | Ruby            | Suffix   | probe: tree-sitter-ruby 0.23.1 parses `empty?` / `save!` as ONE `identifier` node; the      | `empty?` WAS split |
+/// |                 |          | ternary `?` in `1 ? 2 : 3` stays its own `?` node (whitespace-separated), so `-`/`?`/`!`    | by the rule |
+/// |                 |          | arithmetic still split by whitespace                                                        |                 |
+/// | Scheme          | Lisp     | probe: tree-sitter-scheme 0.24.7 parses `fetch-issuer-info`, `a/b`, `c.d`, `:e` each as ONE  | `bar-baz` WAS split |
+/// |                 |          | `symbol` node (the quote `'` is a separate `quote` node, so it stays non-word)              | by the rule |
+/// | Clojure         | Lisp     | probe: tree-sitter-clojure 0.1.0 parses `jwks/fetch-issuer-info` as ONE `sym_lit` (children  | the reported bug: |
+/// |                 |          | `sym_ns` + `/` + `sym_name`), `::jwks/local` as ONE `kwd_lit` (children `::` + `kwd_ns` +    | three tokens |
+/// |                 |          | `kwd_name`), and a bare hyphenated `helper-x` as ONE `sym_name` leaf. The symbol alphabet   |                 |
+/// |                 |          | is the Clojure/Scheme reader's `[a-zA-Z0-9*+!?:_.-/]` — letters, digits, `* + ! - _ ' ? < > |                 |
+/// |                 |          | =`, `.` (the Scheme probe shows the `.` inside one `symbol`), `/` (namespace separator), and |                 |
+/// |                 |          | `:` (keyword marker / auto-resolve `::`). The quote `'` is a SEPARATE form in both (probe:   |                 |
+/// |                 |          | `quoting_lit` / `quote` hold their own `'` leaf) — it stays a boundary, not a constituent.   |                 |
+/// | Toml            | BareKey  | probe: tree-sitter-toml-ng 0.7.0 parses the bare keys `a-b` and `key-x` each as ONE          | `key-x` WAS split |
+/// |                 |          | `bare_key` node — `-` is a bare-key constituent in the TOML spec (not an operator)           | by the rule |
+///
+/// The CRUX both directions: `-` REMAINS a boundary in every language where
+/// it is an operator (Rust / Go / JS / C / Cpp / Java / C# / Ruby / Python /
+/// Bash / Markdown / JSON / YAML / Plain) — arithmetic like `a-b` must keep
+/// splitting. Only the grammars that prove `-` inside a name (Scheme /
+/// Clojure / TOML) absorb it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordRule {
+    /// Alphanumeric + `_` (the historical crate-wide rule; already correct
+    /// for Rust, Python, Go, C, Cpp, Java, C#, Bash, and the data/plain rows).
+    Default,
+    /// Alphanumeric + `_`, plus `$` (JavaScript / TypeScript / TSX — a
+    /// valid identifier char the historical rule rejected: `$foo` split
+    /// into `$` and `foo`).
+    Dollar,
+    /// Alphanumeric + `_`, plus the `?` `!` method-name suffixes (Ruby
+    /// `empty?` / `save!` — one `identifier` node in the pinned grammar;
+    /// the ternary `?` stays a separate whitespace-separated node, so
+    /// `a ? b : c` still splits on whitespace).
+    Suffix,
+    /// Alphanumeric + `_`, plus the Lisp reader's symbol alphabet
+    /// `* + ! - ? < > = . / :` (Scheme / Clojure — probe:
+    /// `jwks/fetch-issuer-info` and `fetch-issuer-info` each parse as ONE
+    /// grammar node; the quote `'` is a separate form, see the audit
+    /// table).
+    Lisp,
+    /// Alphanumeric + `_`, plus `-` (TOML bare keys — probe: `a-b`
+    /// parses as one `bare_key`).
+    BareKey,
+}
+
+impl WordRule {
+    /// Whether `c` is a word constituent under this rule.
+    pub fn contains(self, c: char) -> bool {
+        if c.is_alphanumeric() || c == '_' {
+            return true;
+        }
+        match self {
+            WordRule::Default => false,
+            WordRule::Dollar => c == '$',
+            WordRule::Suffix => matches!(c, '?' | '!'),
+            WordRule::Lisp => matches!(c, '*' | '+' | '!' | '-' | '?' | '<' | '>' | '=' | '.' | '/' | ':'),
+            WordRule::BareKey => c == '-',
+        }
+    }
+}
+
+/// The per-language word-constituent test: `is_word_char(Clojure, '-')`
+/// is `true`, `is_word_char(Rust, '-')` is `false`. Every consumer that
+/// holds a buffer (word motion, symbol extraction, the ripgrep
+/// word-boundary sink, kill-word) consults this with the buffer's
+/// `LanguageId` — the historical global rule survives only as
+/// `WordRule::Default` (the Plain / no-language fallback).
+pub fn is_word_char(lang: LanguageId, c: char) -> bool {
+    spec(lang).word_rule.contains(c)
+}
+
 /// One row per language — the single source of truth for everything that
 /// is DATA about a language (not algorithm).
 pub struct LanguageSpec {
@@ -98,6 +195,10 @@ pub struct LanguageSpec {
     /// Scheme/Clojure: definition candidates gate on the head symbol's
     /// text (`queries::flat_define_kind`); `None` elsewhere.
     pub flat_define: Option<FlatDefineGate>,
+    /// Per-language word constituents (issue-language-aware-symbols) —
+    /// see the [`WordRule`] audit table. Every consumer that holds a
+    /// buffer consults this row instead of assuming the global rule.
+    pub word_rule: WordRule,
     /// Reuse-policy flag: true for the 10 languages whose single-layer
     /// reuse pipeline is byte-identical to the full `Highlighter`
     /// (empty locals query + no injected-language layer). Policy, not
@@ -134,6 +235,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         // local-binding tables run on the same tree.
         rust_tables_query: Some(RUST_TABLES_QUERY),
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // Probed against the pinned tree-sitter-rust NODE_TYPES: the six
         // identifier-ish kinds; `::` path segments handled by
@@ -169,6 +271,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(TYPESCRIPT_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Dollar,
         supports_reuse: false,
         // Probed against the pinned tree-sitter-typescript NODE_TYPES
         // (used for both the TS and TSX grammars).
@@ -197,6 +300,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(TYPESCRIPT_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Dollar,
         supports_reuse: false,
         identifier_kinds: &[
             "identifier",
@@ -218,6 +322,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(JAVASCRIPT_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Dollar,
         supports_reuse: false,
         // Probed against the pinned tree-sitter-javascript NODE_TYPES:
         // `property_identifier` is JS's name-leaf kind;
@@ -237,6 +342,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(PYTHON_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         identifier_kinds: &["identifier", "attribute"],
     },
@@ -252,6 +358,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(GO_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         identifier_kinds: &[
             "identifier",
@@ -274,6 +381,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(C_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // Probed against the pinned tree-sitter-c NODE_TYPES:
         // `identifier` (values), `field_identifier` (struct members),
@@ -308,6 +416,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(CPP_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // The C set plus `namespace_identifier` (a `ns::` scope name)
         // and `qualified_identifier` (the whole `A::x` / `ns::A::x`
@@ -335,6 +444,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(TOML_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::BareKey,
         supports_reuse: true,
         // Probed against the pinned tree-sitter-toml-ng NODE_TYPES:
         // `bare_key` / `quoted_key` (the key leaves), `dotted_key` (the
@@ -354,6 +464,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: None,
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // `string` — but ONLY in a `pair`'s `key` field (position-gated
         // by `node::in_identifier_position`); a value `string` is data.
@@ -372,6 +483,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: None,
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // No identifier-ish kind: Yaml is intentionally unadopted for
         // node-at (its "key" shapes are too loose); M-. degrades.
@@ -389,6 +501,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(BASH_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // Probed against the pinned tree-sitter-bash NODE_TYPES: there
         // is no `identifier` kind — `command_name` for command names
@@ -414,6 +527,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(MARKDOWN_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: true,
         // No identifier-ish kind (probed against the pinned
         // tree-sitter-md 0.5.1 block grammar): a heading's title is an
@@ -435,6 +549,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(JAVA_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         // Rides the Highlighter path deliberately (new-languages lane).
         supports_reuse: false,
         // Probed against the pinned tree-sitter-java 0.23.5 NODE_TYPES:
@@ -466,6 +581,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(C_SHARP_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         // Rides the Highlighter path deliberately.
         supports_reuse: false,
         // Probed against the pinned tree-sitter-c-sharp 0.23.5
@@ -492,6 +608,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(RUBY_QUERY),
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Suffix,
         // Local-variable tracking lives in the tree-sitter Highlighter.
         supports_reuse: false,
         // Probed against the pinned tree-sitter-ruby 0.23.1 NODE_TYPES:
@@ -525,6 +642,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         // The flat S-expression grammar: definitions gate on the head
         // symbol's text (`queries::flat_define_kind`).
         flat_define: Some(FlatDefineGate::Scheme),
+        word_rule: WordRule::Lisp,
         // Rides the Highlighter path deliberately.
         supports_reuse: false,
         // Probed against the pinned tree-sitter-scheme 0.24.7
@@ -553,6 +671,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: Some(CLOJURE_QUERY),
         rust_tables_query: None,
         flat_define: Some(FlatDefineGate::Clojure),
+        word_rule: WordRule::Lisp,
         // Rides the Highlighter path deliberately.
         supports_reuse: false,
         // Probed against the pinned tree-sitter-clojure 0.1.0
@@ -578,6 +697,7 @@ pub static LANGUAGES: [LanguageSpec; 19] = [
         definition_query: None,
         rust_tables_query: None,
         flat_define: None,
+        word_rule: WordRule::Default,
         supports_reuse: false,
         identifier_kinds: &[],
     },
@@ -660,6 +780,84 @@ pub const CLOJURE_HIGHLIGHTS: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// issue-language-aware-symbols: the per-language word-constituent
+    /// rule, pinned BOTH directions per changed language — the new
+    /// constituents are one unit, AND the operators that should split
+    /// still split. Mutating any row reddens its entry here.
+    #[test]
+    fn word_rule_is_per_language() {
+        use LanguageId as L;
+        // ── Clojure (the reported bug) ─────────────────────────────────
+        // `jwks/fetch-issuer-info` is ONE word: every char in the run is a
+        // word char (the reader's symbol alphabet [a-zA-Z0-9*+!?:_.-/]).
+        for c in "jwks/fetch-issuer-info".chars() {
+            assert!(is_word_char(L::Clojure, c), "clojure: `{c}` is a word char");
+        }
+        for c in [':', '.', '*', '+', '!', '<', '>', '=', '?', '-'].iter().copied() {
+            assert!(is_word_char(L::Clojure, c), "clojure: `{c}` is a word char");
+        }
+        // The boundary chars stay boundaries: whitespace + the list
+        // delimiters.
+        // The quote form is a SEPARATE grammar node (probe: `quoting_lit`
+        // holds its own `'` leaf before the bare `sym_lit`) — a boundary.
+        for c in [' ', '(', ')', '[', ']', '{', '}', '\'', '\n'].iter().copied() {
+            assert!(!is_word_char(L::Clojure, c), "clojure: `{c}` is NOT a word char");
+        }
+        // Scheme: the same reader family (probe: `fetch-issuer-info`,
+        // `a/b`, `c.d`, `:e` each parse as ONE `symbol` node); the spec
+        // row shares the full lisp alphabet with Clojure.
+        for c in [ '-', '/', '.', ':', '*', '+', '!', '?', '<', '>', '=' ].iter().copied() {
+            assert!(is_word_char(L::Scheme, c), "scheme: `{c}` is a word char");
+        }
+        // The list delimiters stay boundaries in Scheme too.
+        // The quote form is a SEPARATE grammar node in Scheme too (probe: the
+        // `quote` node holds its own `'` leaf before the bare `symbol`) — a
+        // boundary, as in Clojure.
+        for c in [' ', '(', ')', '[', ']', '{', '}', ';', '\'', '\n'].iter().copied() {
+            assert!(!is_word_char(L::Scheme, c), "scheme: `{c}` is NOT a word char");
+        }
+        // ── JavaScript / TypeScript / TSX ───────────────────────────────
+        // `$` IS an identifier char (probe: `$foo`, `bar$`, `$bar` are
+        // single `identifier` nodes) and…
+        for lang in [L::JavaScript, L::TypeScript, L::Tsx].iter().copied() {
+            assert!(is_word_char(lang, '$'), "js: `$` is a word char");
+            // … `-` STAYS a boundary (`a-b` is subtraction, probe: the
+            // grammar parses it as two identifiers around a `-`).
+            assert!(!is_word_char(lang, '-'), "js: `-` is NOT a word char");
+        }
+        // ── Ruby ────────────────────────────────────────────────────────
+        // `empty?` / `save!` are one `identifier` node (probe); the
+        // ternary `?` is a separate whitespace-separated node, and `-`
+        // arithmetic keeps splitting.
+        assert!(is_word_char(L::Ruby, '?'), "ruby: `?` is a word char");
+        assert!(is_word_char(L::Ruby, '!'), "ruby: `!` is a word char");
+        assert!(!is_word_char(L::Ruby, '-'), "ruby: `-` is NOT a word char");
+        // ── Rust / Go / C / Cpp / Java / C# / Python / Bash ────────────
+        // `-` REMAINS the boundary where it is an operator (arithmetic
+        // `a-b` must not become one symbol) — the crux of "language
+        // aware". Rust additionally: a lifetime tick is NOT a word char
+        // (probe: `'a` is a separate `lifetime` node, not an identifier).
+        for lang in [L::Rust, L::Go, L::C, L::Cpp, L::Java, L::CSharp, L::Python, L::Bash]
+            .iter().copied()
+        {
+            assert!(!is_word_char(lang, '-'), "{lang:?}: `-` is NOT a word char");
+            assert!(!is_word_char(lang, '$'), "{lang:?}: `$` is NOT a word char");
+            assert!(!is_word_char(lang, '?'), "{lang:?}: `?` is NOT a word char");
+            assert!(is_word_char(lang, '_'), "{lang:?}: `_` is a word char");
+        }
+        assert!(!is_word_char(L::Rust, '\''), "rust: `'` is NOT a word char");
+        // ── TOML ────────────────────────────────────────────────────────
+        // Bare keys carry `-` (probe: `a-b`, `key-x` are single
+        // `bare_key` nodes); it is not an operator there.
+        assert!(is_word_char(L::Toml, '-'), "toml: `-` is a word char");
+        assert!(!is_word_char(L::Toml, '$'), "toml: `$` is NOT a word char");
+        // ── Data / plain rows: the historical rule ─────────────────────
+        for lang in [L::Json, L::Yaml, L::Markdown, L::Plain].iter().copied() {
+            assert!(!is_word_char(lang, '-'), "{lang:?}: `-` is NOT a word char");
+            assert!(is_word_char(lang, 'x'), "{lang:?}: `x` is a word char");
+        }
+    }
 
     /// The sync test: the table must agree with itself and with the
     /// extension resolver, and the reuse/local policy must agree with the

@@ -306,8 +306,9 @@ impl AppStore {
         if col > chars.len() {
             return None;
         }
-        // C15: word-constituent is the crate-wide Unicode rule.
-        let is_ident = is_word_char;
+        // issue-language-aware-symbols: word-constituent is the PER-LANGUAGE
+        // rule (`redline_syntax::language` table) for this buffer's language.
+        let is_ident = |c: char| is_word_char(lang, c);
         // 006-02b item 4: a cursor parked on the SECOND colon of a `::`
         // separator (the point's own char and its predecessor are both
         // `:`) sits at the very end of the preceding path segment — treat
@@ -376,6 +377,33 @@ impl AppStore {
             }
         }
         let path_token: String = chars[pstart..pend].iter().collect();
+        // issue-language-aware-symbols (Part 1 + 2 seam): the lisp family's
+        // symbol run already carries the whole qualified symbol (the
+        // `WordRule::Lisp` alphabet makes `/`, `-`, `.` constituents — no
+        // `::`/`.` extension above can split it), and the keyword marker is
+        // SPELLING, not name: strip the leading `:` (and the auto-resolving
+        // `::`), and the identifier is the LAST `/` segment (the var) —
+        // `::jwks/local` → `local`, `jwks/fetch-issuer-info` →
+        // `fetch-issuer-info`. The path token keeps the WHOLE stripped run
+        // (`jwks/fetch-issuer-info`) so the namespace alias stays visible to
+        // the M-. Clojure pre-step (Part 2). A bare symbol (no `/`) keeps
+        // identifier == path token; a `:`/`::` marker with no name keeps the
+        // raw run (never an empty name).
+        let (identifier, path_token) = if matches!(
+            lang,
+            LanguageId::Clojure | LanguageId::Scheme
+        ) {
+            let raw: String = chars[start..end].iter().collect();
+            let stripped = raw.trim_start_matches(':');
+            if stripped.is_empty() {
+                (raw.clone(), raw)
+            } else {
+                let ident = stripped.rsplit('/').next().unwrap_or(stripped).to_string();
+                (ident, stripped.to_string())
+            }
+        } else {
+            (identifier, path_token)
+        };
         // 010-01: the Rust self-receiver — when the identifier run is the
         // member of `self.` (the run is preceded by `.self`, exactly), the
         // path token carries the receiver (`self.bar`), so the M-.
@@ -426,10 +454,23 @@ impl AppStore {
             // "a?"` / `pip install "foo()"` shell-out in online projects).
             // Only a genuine path upgrades; these fall back to the
             // byte-for-byte bare extraction.
+            // issue-language-aware-symbols: the segment check uses the
+            // language's word rule MINUS Ruby's method-name suffixes
+            // (`?` / `!`) — a suffix-carrying segment (`x.empty?`) marks a
+            // receiver CALL, not a path: the bare-`empty?` extraction
+            // stands (the pre-change behavior). TOML's `-` (a bare-key
+            // constituent) and the JS/TS `$` (a name char) stay segments.
             && info
                 .text
                 .split('.')
-                .all(|seg| !seg.is_empty() && seg.chars().all(is_ident))
+                .all(|seg| {
+                    !seg.is_empty()
+                    && seg.chars().all(|c| {
+                        is_ident(c)
+                            && !(matches!(lang, LanguageId::Ruby)
+                                && matches!(c, '?' | '!'))
+                    })
+                })
             && !Self::dotted_head_is_local_value(
                 lang,
                 rope,

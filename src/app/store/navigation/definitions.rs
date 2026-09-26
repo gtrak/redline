@@ -33,6 +33,11 @@ enum XrefMdotOutcome {
     /// No symbol under the point and no enclosing symbol: the "no symbol
     /// under point" report.
     NoSymbol,
+    /// issue-language-aware-symbols (Part 2): a Clojure namespace alias
+    /// (`alias/var`) that the current file's top-level `ns` form does not
+    /// declare — flagged, NEVER guessed (a wrong jump is worse than no
+    /// jump).
+    UnresolvableAlias(String),
     /// A guard message ("no buffer", "no file…", …) was already
     /// reported; the caller returns.
     Guarded,
@@ -161,6 +166,11 @@ impl AppStore {
                     self.xref_open_ambiguous_picker(lookup_name, defs);
                 }
             }
+            XrefMdotOutcome::UnresolvableAlias(alias) => {
+                // issue-language-aware-symbols (Part 2): flagged, never
+                // guessed (a wrong jump is worse than no jump).
+                self.minibuffer_message(&format!("cannot resolve namespace alias `{alias}`"))
+            }
             XrefMdotOutcome::Resolver(token, rel) => {
                 self.start_symbol_resolution(&token, &rel, None)
             }
@@ -184,6 +194,9 @@ impl AppStore {
         match self.xref_mdot_candidates() {
             XrefMdotOutcome::Candidates { lookup_name, defs, .. } => {
                 self.xref_open_ambiguous_picker(lookup_name, defs);
+            }
+            XrefMdotOutcome::UnresolvableAlias(alias) => {
+                self.minibuffer_message(&format!("cannot resolve namespace alias `{alias}`"))
             }
             XrefMdotOutcome::Resolver(token, rel) => {
                 self.start_symbol_resolution(&token, &rel, None)
@@ -271,9 +284,9 @@ impl AppStore {
         // The candidate lookup below is pure over the index and the buffer
         // (no `&mut self` inside), so the `buf` borrow still ends before
         // the later `&mut self` work — the 006-03 rule above.
-        let defs = at
+        let defs = match at
             .as_ref()
-            .and_then(|(ident, path_token)| {
+            .map(|(ident, path_token)| {
                 Self::xref_symbol_at_point_candidates(
                     &self.index,
                     lang,
@@ -287,8 +300,13 @@ impl AppStore {
                     ident,
                     path_token,
                 )
-            })
-            .unwrap_or_default();
+            }) {
+            // issue-language-aware-symbols (Part 2): a flagged
+            // unresolvable Clojure alias never jumps (no guess, no
+            // fallback — the alias is the whole signal).
+            Some(Err(alias)) => return XrefMdotOutcome::UnresolvableAlias(alias),
+            other => other.and_then(|r| r.unwrap_or_default()).unwrap_or_default(),
+        };
 
         if !defs.is_empty() {
             // (2) Symbol-at-point with definitions: first candidate after the
@@ -341,11 +359,14 @@ impl AppStore {
     }
 
     /// (M-., phase (1)) The definition candidates for the symbol AT THE
-    /// POINT: the 010-01 Rust self-receiver pre-step, then the 010-03
-    /// local-binding pre-step, then the name-keyed index lookup
+    /// POINT: the 010-01 Rust self-receiver pre-step, the 010-03
+    /// local-binding pre-step, the issue-language-aware-symbols Part 2
+    /// Clojure namespace-alias pre-step, then the name-keyed index lookup
     /// (`xref_definition_candidates`). Pure over the index and the buffer
     /// (no `&mut self`, so the caller's `buf` borrow never spans a
-    /// `&mut self` call — the 006-03 rule).
+    /// `&mut self` call — the 006-03 rule). `Err(alias)` — the flagged
+    /// unresolvable Clojure namespace alias (the caller reports it and
+    /// never jumps).
     fn xref_symbol_at_point_candidates(
         index: &SymbolIndex,
         lang: LanguageId,
@@ -353,7 +374,7 @@ impl AppStore {
         rel: &str,
         ident: &str,
         path_token: &str,
-    ) -> Option<Vec<crate::nav::index::Location>> {
+    ) -> Result<Option<Vec<crate::nav::index::Location>>, String> {
         // 010-01 (plan 010 Shape A, rung 1): the Rust self-receiver
         // pre-step — `self.<member>` resolves via the LEXICALLY
         // ENCLOSING impl's type (field → the struct's field line,
@@ -368,7 +389,7 @@ impl AppStore {
             if let Some(byte) = point_byte_offset(point.rope, point.line, point.col) {
                 let cands = Self::self_receiver_candidates(index, rel, &source, byte, member);
                 if !cands.is_empty() {
-                    return Some(cands);
+                    return Ok(Some(cands));
                 }
             }
         }
@@ -396,11 +417,70 @@ impl AppStore {
                     ident,
                 );
                 if !cands.is_empty() {
-                    return Some(cands);
+                    return Ok(Some(cands));
                 }
             }
         }
-        Self::xref_definition_candidates(index, ident, path_token, rel)
+        // issue-language-aware-symbols (Part 2): the Clojure
+        // namespace-alias pre-step. `alias/var` (and the keyword
+        // `::alias/var` — the marker is already stripped by the
+        // extraction) is a reference to the VAR `var` in the NAMESPACE
+        // `alias` stands for: either an `:as` alias THIS file's top-level
+        // `ns` form declares, or a FULL namespace name (a dotted `alias`
+        // — an alias can never contain a `.`). The jump targets the var,
+        // NARROWED to the files the namespace convention places it in
+        // (dots → `/`, hyphens → `_`, the three source extensions — the
+        // real-layout convention, `redline_syntax::clojure`). A DOTLESS
+        // alias the ns form does not declare is flagged, never guessed.
+        if lang == LanguageId::Clojure
+            && let Some((alias, var)) = path_token.rsplit_once('/')
+            && !var.is_empty()
+        {
+            let ns_name: Option<String> = if alias.contains('.') {
+                // A full namespace reference — identity (no declaration
+                // needed).
+                Some(alias.to_string())
+            } else {
+                // The alias must be declared by THIS file's ns form (the
+                // full source materializes here — the pre-step's own
+                // parse, the same lazy shape as the receiver
+                // classifications above).
+                let source = point.rope.to_string();
+                redline_syntax::clojure::ns_aliases(&source)
+                    .and_then(|aliases| {
+                        aliases
+                            .into_iter()
+                            .find(|(a, _)| a == alias)
+                            .map(|(_, ns)| ns)
+                    })
+            };
+            match ns_name {
+                Some(ns) => {
+                    let tails = redline_syntax::clojure::namespace_file_tails(&ns);
+                    if let Some(all) = Self::xref_definition_candidates(index, var, path_token, rel) {
+                        let narrowed: Vec<crate::nav::index::Location> = all
+                            .iter()
+                            .filter(|loc| tails.iter().any(|t| loc.file.ends_with(t)))
+                            .cloned()
+                            .collect();
+                        // The convention file(s) carry the indexed var: the
+                        // narrowed set (ordering — same-file-first — is
+                        // preserved). The convention file has no indexed
+                        // `var`: degrade to the BARE name-keyed lookup (the
+                        // Part-1 superset — never a fabricated target, never
+                        // an empty answer where the name is indexed).
+                        return Ok(Some(if narrowed.is_empty() { all } else { narrowed }));
+                    }
+                    return Ok(None);
+                }
+                None => {
+                    // No ns form, or the alias is not declared: FLAG — a
+                    // wrong jump is worse than no jump.
+                    return Err(alias.to_string());
+                }
+            }
+        }
+        Ok(Self::xref_definition_candidates(index, ident, path_token, rel))
     }
 
     /// (M-., phase (3)) The enclosing-symbol fallback: the enclosing
@@ -807,8 +887,10 @@ impl AppStore {
         if col > chars.len() {
             return None;
         }
-        // C15: word-constituent is the crate-wide Unicode rule.
-        let is_ident = is_word_char;
+        // The caller gates this scan to Rust (`lang == LanguageId::Rust`);
+        // the Rust row is the unchanged `WordRule::Default`, so the
+        // extraction is byte-for-byte today's.
+        let is_ident = |c: char| is_word_char(LanguageId::Rust, c);
         let start = if col < chars.len() && is_ident(chars[col]) {
             let mut i = col;
             while i > 0 && is_ident(chars[i - 1]) {

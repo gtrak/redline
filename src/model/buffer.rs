@@ -57,24 +57,32 @@ pub enum BufferMode {
 /// plain text (graceful degradation, never a hang).
 pub const BIG_FILE_THRESHOLD: usize = 10 * 1024 * 1024; // 10 MiB
 
-/// Word-constituent for word motion and symbol extraction (C15, the
-/// single word-char rule of the redline crate): a Unicode alphanumeric
-/// or `_`. This is a fixed rule, NOT the emacs syntax table: emacs
-/// decides word-ness per buffer from its syntax table (where e.g. `?`
-/// and `!` can be word-constituents and whitespace, symbol, and word
-/// categories are distinct). Redline treats every other character —
-/// punctuation AND whitespace — as one "non-word" class; newlines are
-/// non-word.
+/// Word-constituent for word motion and symbol extraction —
+/// PER-LANGUAGE (issue-language-aware-symbols): the rule table lives in
+/// `redline_syntax::language` (each language row's `word_rule` — the
+/// single source of truth, derived from the pinned grammar/reader), and
+/// this function is the crate-side entry every consumer routes through
+/// with its buffer's language. `LanguageId::Plain` (a scratch buffer, or
+/// an unregistered extension) is the historical crate-wide rule
+/// (Unicode alphanumeric or `_`), so a language without a row keeps the
+/// old behavior byte-for-byte.
+///
+/// This is a fixed rule, NOT the emacs syntax table: emacs decides
+/// word-ness per buffer from its syntax table (where e.g. `?` and `!` can
+/// be word-constituents and whitespace, symbol, and word categories are
+/// distinct). Redline treats every other character — punctuation AND
+/// whitespace — as one "non-word" class; newlines are non-word.
 ///
 /// This is the crate-wide definition: word motion
 /// (`app::store::file_view`), M-? symbol extraction
 /// (`search::references::symbol_under_point`), the ripgrep word-boundary
 /// sink (`search::rg::is_word_boundary`), and identifier scanning in
 /// `app::store::navigation` all use it. The `redline-resolve` crate has
-/// no dependency on `redline` and duplicates this rule (see its
-/// `is_ident_char` in `crates/redline-resolve/src/cargo.rs`).
-pub(crate) fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+/// no dependency on `redline` and duplicates the Rust-only rule (see its
+/// `is_ident_char` in `crates/redline-resolve/src/cargo.rs`; that lane is
+/// Rust-scoped and the Rust row is the unchanged `WordRule::Default`).
+pub(crate) fn is_word_char(lang: redline_syntax::registry::LanguageId, c: char) -> bool {
+    redline_syntax::language::is_word_char(lang, c)
 }
 
 /// One recorded text edit, kept as the INVERSE needed to undo it

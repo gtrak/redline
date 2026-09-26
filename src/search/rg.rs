@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch};
+use redline_syntax::registry::LanguageId;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use tokio::sync::mpsc;
@@ -316,6 +317,7 @@ fn run(cfg: SearchConfig, bus: SearchBus, generation: usize, root: PathBuf) {
                 .and_then(|f| std::fs::read_to_string(path).ok().and_then(|text| f(path, &text)));
 
             let mut sink = StreamSink {
+                lang: redline_syntax::registry::resolve_language(&file),
                 file,
                 tx: tx.clone(),
                 gen_id,
@@ -493,6 +495,10 @@ pub(crate) struct StreamSink {
     /// compute the in-line column and to run the token-class check).
     pub(crate) literal: Option<String>,
     pub(crate) word: bool,
+    /// The file's language (issue-language-aware-symbols): drives the
+    /// per-language word rule in `is_word_boundary` below. Extension-
+    /// mapped (`resolve_language`) — the sink thread holds no registry.
+    pub(crate) lang: LanguageId,
     /// Absolute byte ranges whose hits are dropped (token-class filter);
     /// `None` = no filtering.
     pub(crate) ranges: Option<Vec<Range<usize>>>,
@@ -536,7 +542,7 @@ impl Sink for StreamSink {
             let mut from = 0;
             while let Some(rel) = line[from..].find(literal) {
                 let idx = from + rel;
-                if !self.word || is_word_boundary(&line, idx, literal.len()) {
+                if !self.word || is_word_boundary(&line, idx, literal.len(), self.lang) {
                     let abs = mat.absolute_byte_offset() as usize + idx;
                     let in_token_range = self
                         .ranges
@@ -585,14 +591,33 @@ impl Sink for StreamSink {
 /// grep-regex `word()` verified: `mytarget` and `target2` are rejected,
 /// `target` and `-target-` are kept). Used by the streaming sink to
 /// compute the in-line column for fixed-string searches.
-fn is_word_boundary(line: &str, idx: usize, len: usize) -> bool {
-    // C15: word-constituency is the crate-wide Unicode rule
-    // (`crate::model::buffer::is_word_char`), not ASCII-only — a non-ASCII
-    // identifier (e.g. `café`) must not be truncated by an ASCII boundary.
+///
+/// issue-language-aware-symbols: the word-constituency is the PER-LANGUAGE
+/// rule (`lang` is the file's language), and the lisp family adds one
+/// asymmetry — a `/` on the LEFT of the match IS a boundary: a qualified
+/// use `jwks/fetch-issuer-info` carries a reference to the var
+/// `fetch-issuer-info`, so searching the var must hit the qualified use
+/// (the probe measured: these hits exist today under the global rule,
+/// where `/` is a non-word char, and must survive the lisp rule, where `/`
+/// is a word char). A `/` on the RIGHT is NOT a boundary (`local` must not
+/// match inside `local/xyz` — the match is the namespace part of a longer
+/// symbol).
+fn is_word_boundary(line: &str, idx: usize, len: usize, lang: LanguageId) -> bool {
+    // Word-constituency is the per-language rule (`crate::model::buffer`
+    // delegates to the `redline_syntax::language` table), not ASCII-only —
+    // a non-ASCII identifier (e.g. `café`) must not be truncated by an
+    // ASCII boundary.
     use crate::model::buffer::is_word_char;
     let prev = line[..idx].chars().next_back();
     let next = line.get(idx + len..).and_then(|rest| rest.chars().next());
-    !prev.is_some_and(is_word_char) && !next.is_some_and(is_word_char)
+    let lisp = matches!(lang, LanguageId::Clojure | LanguageId::Scheme);
+    let prev_ok = match (lisp, prev) {
+        // The lisp namespace separator on the left: boundary (a qualified
+        // use references the var).
+        (true, Some('/')) => true,
+        _ => !prev.is_some_and(|c| is_word_char(lang, c)),
+    };
+    prev_ok && !next.is_some_and(|c| is_word_char(lang, c))
 }
 
 #[cfg(test)]
@@ -978,23 +1003,110 @@ mod tests {
         drop(bus);
     }
 
-    /// C15: the sink's word-boundary rule is the crate-wide Unicode rule
-    /// (`model::buffer::is_word_char`), not ASCII-only — `é` and CJK
-    /// characters are word constituents, so they block a boundary.
+    /// issue-language-aware-symbols: the sink's word-boundary rule is
+    /// PER-LANGUAGE (`model::buffer::is_word_char` delegates to the
+    /// `redline_syntax::language` table) — `é` and CJK characters are word
+    /// constituents under the default rule, so they block a boundary.
     #[test]
     fn sink_word_boundary_is_unicode_aware() {
         // Full `café` at line edges: boundary.
-        assert!(is_word_boundary("café", 0, 4), "line edges around café");
+        assert!(is_word_boundary("café", 0, 4, LanguageId::Plain), "line edges around café");
         // `caf` inside `café`: the following `é` is a WORD char → NOT a
         // boundary (the old ASCII rule would have let it through).
-        assert!(!is_word_boundary("café", 0, 3), "`é` after `caf` blocks the boundary");
+        assert!(!is_word_boundary("café", 0, 3, LanguageId::Plain), "`é` after `caf` blocks the boundary");
         // `é` at the tail of `café`: the preceding `f` is a word char.
-        assert!(!is_word_boundary("café", 3, 1), "`f` before `é` blocks the boundary");
+        assert!(!is_word_boundary("café", 3, 1, LanguageId::Plain), "`f` before `é` blocks the boundary");
         // A genuine separator still gives a boundary.
-        assert!(is_word_boundary("caf é", 0, 3), "space after `caf` is a boundary");
+        assert!(is_word_boundary("caf é", 0, 3, LanguageId::Plain), "space after `caf` is a boundary");
         // CJK: the same rule (Lo chars are alphanumeric).
-        assert!(!is_word_boundary("漢字", 0, 3), "CJK `字` after `漢` blocks the boundary");
-        assert!(is_word_boundary("漢 字", 0, 3), "space after CJK char is a boundary");
+        assert!(!is_word_boundary("漢字", 0, 3, LanguageId::Plain), "CJK `字` after `漢` blocks the boundary");
+        assert!(is_word_boundary("漢 字", 0, 3, LanguageId::Plain), "space after CJK char is a boundary");
+    }
+
+    /// issue-language-aware-symbols: the per-language word rule in the
+    /// sink — pinned BOTH directions per changed language (the new
+    /// constituents are one word; the operators that must split still
+    /// split), and the lisp left-`/` boundary (a qualified use references
+    /// the var) vs the right-`/` asymmetry.
+    #[test]
+    fn sink_word_boundary_is_per_language() {
+        // ── Clojure / Scheme (the reported bug) ─────────────────────────
+        for lang in [LanguageId::Clojure, LanguageId::Scheme].iter().copied() {
+            // `jwks/fetch-issuer-info`: a search for the var must hit the
+            // qualified use — the LEFT `/` is the namespace separator,
+            // a boundary (probe: the hit exists under the old global rule
+            // and must survive the lisp word rule, where `/` is a word
+            // char).
+            assert!(
+                is_word_boundary("jwks/fetch-issuer-info)", 5, 17, lang),
+                "lisp: left `/` is a boundary for the var search"
+            );
+            // …but a search for the NAMESPACE part must NOT hit (the right
+            // `/` continues the qualified symbol — one word).
+            assert!(
+                !is_word_boundary("jwks/fetch-issuer-info)", 0, 4, lang),
+                "lisp: right `/` blocks the alias search"
+            );
+            // Hyphens are lisp word chars: `fetch-issuer` inside
+            // `fetch-issuer-info` is not a whole-symbol hit.
+            assert!(
+                !is_word_boundary("(fetch-issuer-info)", 1, 12, lang),
+                "lisp: `-` continues the symbol (right side)"
+            );
+            // The keyword marker: `::jwks/local` — a search for `local`
+            // hits (the left `/`); `:x`-style markers are word chars, so a
+            // search for `x` inside `:x` does NOT hit.
+            assert!(is_word_boundary("::jwks/local)", 7, 5, lang), "lisp: `::jwks/local` — var search hits");
+            assert!(!is_word_boundary(":x)", 1, 1, lang), "lisp: `:` before `x` blocks the search");
+            // List delimiters still split: `(fetch-issuer-info` — a search
+            // for `fetch-issuer-info` starting after `(` is a boundary on
+            // the left (space/paren are non-word under every rule).
+            assert!(is_word_boundary("(fetch-issuer-info)", 1, 17, lang), "lisp: `(` is a boundary");
+        }
+        // ── JavaScript / TypeScript / TSX: `$` is a word char ───────────
+        for lang in [LanguageId::JavaScript, LanguageId::TypeScript, LanguageId::Tsx].iter().copied() {
+            // `$foo` is one word: a search for `foo` inside `$foo` must NOT
+            // hit (the old global rule let it through — the same class of
+            // bug as the Clojure hyphen).
+            assert!(!is_word_boundary("$foo", 1, 3, lang), "js: `$` before `foo` blocks the search");
+            assert!(!is_word_boundary("bar$", 0, 3, lang), "js: `$` after `bar` blocks the search");
+            // A genuine separator still splits.
+            assert!(is_word_boundary("const $foo = 1;", 6, 4, lang), "js: `$foo` at real boundaries hits");
+            // `-` STAYS a boundary (arithmetic): `a-b` is two words.
+            assert!(is_word_boundary("a-b", 0, 1, lang), "js: `-` after `a` is a boundary");
+        }
+        // ── Ruby: `?` / `!` method-name suffixes ────────────────────────
+        assert!(is_word_boundary("x.empty?", 2, 6, LanguageId::Ruby), "ruby: `empty?` at the `.` boundary hits");
+        assert!(!is_word_boundary("x.empty?", 2, 5, LanguageId::Ruby), "ruby: `?` after `empty` blocks the search");
+        assert!(!is_word_boundary("x.save!", 2, 4, LanguageId::Ruby), "ruby: `!` after `save` blocks the search");
+        // The ternary `?` (whitespace-separated) still splits.
+        assert!(is_word_boundary("a ? b : c", 2, 1, LanguageId::Ruby), "ruby: the ternary `?` at its boundaries hits");
+        // ── TOML: bare keys may contain `-` ─────────────────────────────
+        assert!(is_word_boundary("key-x = 1", 0, 5, LanguageId::Toml), "toml: `key-x` at real boundaries hits");
+        assert!(!is_word_boundary("key-x = 1", 0, 3, LanguageId::Toml), "toml: `-` after `key` blocks the search");
+        // ── The UNCHANGED languages stay byte-for-byte ──────────────────
+        // Rust / Python / Go / C / Cpp / Java / C# / Bash: `-` must REMAIN
+        // a boundary (arithmetic / range operators) — the point of a
+        // per-language rule. `a` in `a-b`: line edge on the left, the
+        // non-word `-` on the right → boundary; the SAME line under the
+        // Clojure rule is ONE word (no boundary on either half).
+        for lang in [
+            LanguageId::Rust,
+            LanguageId::Python,
+            LanguageId::Go,
+            LanguageId::C,
+            LanguageId::Cpp,
+            LanguageId::Java,
+            LanguageId::CSharp,
+            LanguageId::Bash,
+        ]
+        .iter().copied()
+        {
+            assert!(is_word_boundary("a-b", 0, 1, lang), "`-` after `a` is a boundary ({lang:?})");
+            assert!(is_word_boundary("a-b", 2, 1, lang), "`-` before `b` is a boundary ({lang:?})");
+            // A word char on either side still blocks (rule unchanged).
+            assert!(!is_word_boundary("ab", 0, 1, lang), "`b` after `a` blocks the boundary ({lang:?})");
+        }
     }
 
     /// C15, end-to-end: a word search for the ASCII prefix `caf` must NOT

@@ -749,7 +749,15 @@ impl AppStore {
         let line_text = buf.line_text(line).unwrap_or_default().to_string();
         let index = &self.index;
         let known = move |id: &str| !index.definitions_of(id).is_empty();
-        let Some(symbol) = references::symbol_under_point(&line_text, col, known) else {
+        // issue-language-aware-symbols: the buffer's language drives the
+        // word-constituent rule (a Clojure `jwks/fetch-issuer-info` is ONE
+        // run, and the referenced symbol is its last `/` segment — the var,
+        // so M-? matches both the bare and the qualified uses via the
+        // sink's left-`/` boundary).
+        let lang = self
+            .grammar_registry
+            .language_for(&buf.path.as_ref().unwrap().to_string_lossy());
+        let Some(symbol) = references::symbol_under_point(lang, &line_text, col, known) else {
             self.minibuffer_message("no symbol under point");
             return;
         };

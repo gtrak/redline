@@ -29,6 +29,21 @@ pub fn references_filter(path: &Path, text: &str) -> Option<Vec<Range<usize>>> {
     Some(comment_string_ranges(lang, text))
 }
 
+/// issue-language-aware-symbols: the lisp family's referenced symbol for
+/// an identifier run — the LAST `/` segment (the var), with the keyword
+/// marker (`:` / `::`) stripped. `jwks/fetch-issuer-info` →
+/// `fetch-issuer-info`, `::jwks/local` → `local`, `fetch-issuer-info` →
+/// `fetch-issuer-info`, `:foo` → `foo`. Non-lisp languages pass the run
+/// through verbatim (the same split `symbol_at_point` makes).
+fn lisp_var_segment(lang: LanguageId, run: &str) -> &str {
+    if matches!(lang, LanguageId::Clojure | LanguageId::Scheme) {
+        let seg = run.rsplit('/').next().unwrap_or(run);
+        seg.trim_start_matches(':')
+    } else {
+        run
+    }
+}
+
 /// The `SearchConfig` for a references search of `symbol` rooted at
 /// `root`: fixed-string + word-boundary + case-sensitive identifiers.
 pub fn references_config(root: std::path::PathBuf, symbol: String) -> SearchConfig {
@@ -53,7 +68,9 @@ pub fn spawn_references(cfg: SearchConfig, bus: &SearchBus, generation: usize) {
 }
 
 /// Extract the "symbol under point" from a line of text at byte column
-/// `col`. Identifier candidates (alphanumeric/underscore runs) are
+/// `col` under `lang`'s word rule. Identifier candidates (the per-language
+/// word-constituent runs — issue-language-aware-symbols: a Clojure
+/// `jwks/fetch-issuer-info` is ONE run) are
 /// ranked: (1) the identifier the point is on wins outright (e.g. point
 /// on `bar` in `use foo::bar;` searches `bar`, not the earlier `foo`);
 /// (2) otherwise, among identifiers at or before the point, a known
@@ -61,12 +78,24 @@ pub fn spawn_references(cfg: SearchConfig, bus: &SearchBus, generation: usize) {
 /// (3) otherwise (point before the first identifier) the old fallback:
 /// the first identifier the symbol index knows about, else the first
 /// identifier on the line. `None` when the line has no identifier.
-pub fn symbol_under_point(line: &str, col: usize, is_known: impl Fn(&str) -> bool) -> Option<&str> {
-    // Identifier byte ranges (start, end, text).
+///
+/// The returned symbol is the LISP family's last-`/` segment (keyword
+/// marker stripped) when the language is Clojure / Scheme — searching the
+/// var name (the sink's left-`/` boundary keeps the qualified-use hits);
+/// every other language returns the run verbatim.
+pub fn symbol_under_point(
+    lang: LanguageId,
+    line: &str,
+    col: usize,
+    is_known: impl Fn(&str) -> bool,
+) -> Option<&str> {
+    // Identifier byte ranges (start, end, text) — the per-language word
+    // rule (issue-language-aware-symbols): e.g. a Clojure
+    // `jwks/fetch-issuer-info` run is ONE identifier here.
     let mut ids: Vec<(usize, usize, &str)> = Vec::new();
     let mut start = 0;
     for (i, c) in line.char_indices() {
-        if !crate::model::buffer::is_word_char(c) {
+        if !crate::model::buffer::is_word_char(lang, c) {
             if start < i {
                 ids.push((start, i, &line[start..i]));
             }
@@ -79,24 +108,29 @@ pub fn symbol_under_point(line: &str, col: usize, is_known: impl Fn(&str) -> boo
     if ids.is_empty() {
         return None;
     }
+    // issue-language-aware-symbols: the lisp family's run may be a
+    // qualified symbol (`jwks/fetch-issuer-info`) or keyword
+    // (`::jwks/local`): the referenced symbol is the LAST `/` segment
+    // (the keyword marker stripped) — a bare var name, the same split the
+    // M-. extraction makes (`lisp_var_segment`).
     // (1) The point is on an identifier (inclusive bounds: a point
     // right after an identifier counts as being on it).
     if let Some((_, _, id)) = ids.iter().find(|t| t.0 <= col && col <= t.1) {
-        return Some(id);
+        return Some(lisp_var_segment(lang, id));
     }
     // (2) At or before the point: known first, else nearest to the left.
     let at_or_before: Vec<&(usize, usize, &str)> = ids.iter().filter(|&&(s, _, _)| s <= col).collect();
-    if let Some((_, _, id)) = at_or_before.iter().rev().find(|&&(_, _, id)| is_known(id)) {
-        return Some(id);
+    if let Some((_, _, id)) = at_or_before.iter().rev().find(|&&(_, _, id)| is_known(lisp_var_segment(lang, id))) {
+        return Some(lisp_var_segment(lang, id));
     }
     if let Some((_, _, id)) = at_or_before.last() {
-        return Some(id);
+        return Some(lisp_var_segment(lang, id));
     }
     // (3) Point before the first identifier: first known, else first.
     ids.iter()
-        .find(|&&(_, _, id)| is_known(id))
+        .find(|&&(_, _, id)| is_known(lisp_var_segment(lang, id)))
         .or_else(|| ids.first())
-        .map(|&(_, _, id)| id)
+        .map(|&(_, _, id)| lisp_var_segment(lang, id))
 }
 
 #[cfg(test)]
@@ -112,11 +146,11 @@ mod tests {
     #[test]
     fn symbol_under_point_multibyte_identifier() {
         // "fn café()" — the identifier spans bytes 3..8 (`café`).
-        assert_eq!(symbol_under_point("fn café()", 5, |_| false), Some("café"));
-        assert_eq!(symbol_under_point("fn café()", 4, |_| false), Some("café"));
+        assert_eq!(symbol_under_point(LanguageId::Rust, "fn café()", 5, |_| false), Some("café"));
+        assert_eq!(symbol_under_point(LanguageId::Rust, "fn café()", 4, |_| false), Some("café"));
         // CJK identifier: extracted whole (the `(` separator keeps it a
         // single identifier).
-        assert_eq!(symbol_under_point("(漢字)", 4, |_| false), Some("漢字"));
+        assert_eq!(symbol_under_point(LanguageId::Rust, "(漢字)", 4, |_| false), Some("漢字"));
     }
 
     /// Build a project with `src/main.rs` holding the same identifier in
@@ -238,33 +272,73 @@ mod tests {
         // `use foo::bar;`: point on `bar` (byte 10) searches `bar`, even
         // though `foo` is the known identifier (the review's example).
         assert_eq!(
-            symbol_under_point("use foo::bar;", 10, |id| id == "foo"),
+            symbol_under_point(LanguageId::Rust, "use foo::bar;", 10, |id| id == "foo"),
             Some("bar")
         );
         // Point on `target`: the identifier under the point.
         assert_eq!(
-            symbol_under_point("fn main() { target(); }", 13, |id| id == "target"),
+            symbol_under_point(LanguageId::Rust, "fn main() { target(); }", 13, |id| id == "target"),
             Some("target")
         );
         // Point at col 0 on the first identifier (`let` spans 0..3).
-        assert_eq!(symbol_under_point("let x = 1;", 0, |_| false), Some("let"));
+        assert_eq!(symbol_under_point(LanguageId::Rust, "let x = 1;", 0, |_| false), Some("let"));
         // Point on a separator, before a known identifier: the nearest
         // identifier left of the point (`main` ends before the gap at 11).
         assert_eq!(
-            symbol_under_point("fn main() { target(); }", 11, |id| id == "target"),
+            symbol_under_point(LanguageId::Rust, "fn main() { target(); }", 11, |id| id == "target"),
             Some("main")
         );
         // Point before the first identifier (leading space): first known
         // on the line wins, else the first identifier.
         assert_eq!(
-            symbol_under_point("  fn main() { target(); }", 0, |id| id == "target"),
+            symbol_under_point(LanguageId::Rust, "  fn main() { target(); }", 0, |id| id == "target"),
             Some("target")
         );
         assert_eq!(
-            symbol_under_point("  fn main();", 0, |_| false),
+            symbol_under_point(LanguageId::Rust, "  fn main();", 0, |_| false),
             Some("fn")
         );
         // Empty line: none.
-        assert_eq!(symbol_under_point("   ", 0, |_| true), None);
+        assert_eq!(symbol_under_point(LanguageId::Rust, "   ", 0, |_| true), None);
+    }
+
+    /// issue-language-aware-symbols: the word rule is per-language (+ the
+    /// lisp referenced-symbol split) — pinned BOTH directions per changed
+    /// language.
+    #[test]
+    fn symbol_under_point_is_per_language() {
+        // Clojure: the qualified run is ONE identifier; the referenced
+        // symbol is the VAR (last `/` segment) — so M-? searches the var
+        // name (and the sink's left-`/` boundary keeps the qualified-use
+        // hits).
+        assert_eq!(
+            symbol_under_point(LanguageId::Clojure, "(jwks/fetch-issuer-info)", 10, |_| false),
+            Some("fetch-issuer-info")
+        );
+        // The keyword auto-resolve form: the marker is stripped.
+        assert_eq!(
+            symbol_under_point(LanguageId::Clojure, "(::jwks/local)", 6, |_| false),
+            Some("local")
+        );
+        // A bare var: unchanged (the run IS the symbol).
+        assert_eq!(
+            symbol_under_point(LanguageId::Clojure, "(fetch-issuer-info)", 5, |_| false),
+            Some("fetch-issuer-info")
+        );
+        // A bare keyword (`:x`): the marker is stripped.
+        assert_eq!(
+            symbol_under_point(LanguageId::Clojure, "(:x)", 1, |_| false),
+            Some("x")
+        );
+        // Scheme: the same reader family.
+        assert_eq!(
+            symbol_under_point(LanguageId::Scheme, "(fetch-issuer-info)", 5, |_| false),
+            Some("fetch-issuer-info")
+        );
+        // Rust is UNCHANGED: `::` still splits into separate identifiers.
+        assert_eq!(
+            symbol_under_point(LanguageId::Rust, "use foo::bar;", 10, |_| false),
+            Some("bar")
+        );
     }
 }

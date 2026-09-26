@@ -127,7 +127,14 @@ impl AppStore {
             .rsplit([':', '.'])
             .find(|seg| !seg.is_empty())
             .unwrap_or(symbol);
-        let col = AppStore::first_word_column(&line_text, item).unwrap_or(0);
+        // issue-language-aware-symbols: the landing file's word rule (the
+        // current buffer is the file just opened above).
+        let lang = self
+            .buffers
+            .current()
+            .map(|k| self.buffer_language(k))
+            .unwrap_or(LanguageId::Plain);
+        let col = AppStore::first_word_column(lang, &line_text, item).unwrap_or(0);
         self.set_point(line, col, col);
         self.recenter_landing();
         self.ensure_highlight();
@@ -166,7 +173,7 @@ impl AppStore {
     /// the line's end (an unterminated construct) — PROVIDED no earlier
     /// occurrence sits outside the mask, in which case that earlier one is
     /// returned instead.
-    pub(in crate::app::store) fn first_word_column(line_text: &str, item: &str) -> Option<usize> {
+    pub(in crate::app::store) fn first_word_column(lang: LanguageId, line_text: &str, item: &str) -> Option<usize> {
         if item.is_empty() {
             return None;
         }
@@ -181,9 +188,12 @@ impl AppStore {
             if chars[i..i + n] != target[..] {
                 continue;
             }
-            let before_ok = i == 0 || !is_word_char(chars[i - 1]);
+            // issue-language-aware-symbols: the whole-word check uses the
+            // language's own word rule (a landing in a lisp file must not
+            // treat the symbol's `-`/`/` as word breaks).
+            let before_ok = i == 0 || !is_word_char(lang, chars[i - 1]);
             let j = i + n;
-            let after_ok = j >= chars.len() || !is_word_char(chars[j]);
+            let after_ok = j >= chars.len() || !is_word_char(lang, chars[j]);
             // Every char of the name must sit outside a comment/string region
             // (the name is a contiguous word, so its start decides, but a
             // full-range check is the belt-and-braces form).
@@ -614,7 +624,7 @@ impl AppStore {
         if AppStore::symbol_at_point(lang, text, entry.line, entry.col, &buf.rope).is_none() {
             return;
         }
-        let Some((start, end)) = symbol_extent_at(text, entry.col) else {
+        let Some((start, end)) = symbol_extent_at(text, entry.col, lang) else {
             return;
         };
         self.jump_highlight = Some(LandingHighlight {
@@ -649,20 +659,22 @@ impl AppStore {
 /// punctuation / no-run points. The char indices are converted to BYTE
 /// offsets (the span layer's domain) explicitly — the char→byte
 /// translation the whole recurring bug class demands.
-pub(in crate::app::store) fn symbol_extent_at(text: &str, col: usize) -> Option<(usize, usize)> {
+pub(in crate::app::store) fn symbol_extent_at(text: &str, col: usize, lang: LanguageId) -> Option<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
     if col > chars.len() {
         return None;
     }
-    let start = if col < chars.len() && is_word_char(chars[col]) {
+    // issue-language-aware-symbols: the per-language word rule.
+    let is_word = |c: char| is_word_char(lang, c);
+    let start = if col < chars.len() && is_word(chars[col]) {
         let mut i = col;
-        while i > 0 && is_word_char(chars[i - 1]) {
+        while i > 0 && is_word(chars[i - 1]) {
             i -= 1;
         }
         i
-    } else if col > 0 && is_word_char(chars[col - 1]) {
+    } else if col > 0 && is_word(chars[col - 1]) {
         let mut i = col - 1;
-        while i > 0 && is_word_char(chars[i - 1]) {
+        while i > 0 && is_word(chars[i - 1]) {
             i -= 1;
         }
         i
@@ -670,7 +682,7 @@ pub(in crate::app::store) fn symbol_extent_at(text: &str, col: usize) -> Option<
         return None;
     };
     let mut end = start;
-    while end < chars.len() && is_word_char(chars[end]) {
+    while end < chars.len() && is_word(chars[end]) {
         end += 1;
     }
     if end <= start {

@@ -267,30 +267,30 @@ fn tooling_landing_degrades_to_col0_when_token_absent() {
 fn first_word_column_whole_word_multibyte_and_absent() {
     // The name's column.
     assert_eq!(
-        AppStore::first_word_column("pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn spawn() {}", "spawn"),
         Some(7)
     );
     // Whole-word only: `run` inside `running` is NOT a match.
     assert_eq!(
-        AppStore::first_word_column("pub fn running() {}", "run"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn running() {}", "run"),
         None,
         "a leading word-char disqualifies"
     );
     // A trailing word-char also disqualifies (`respawn`).
-    assert_eq!(AppStore::first_word_column("respawn()", "spawn"), None);
+    assert_eq!(AppStore::first_word_column(LanguageId::Rust, "respawn()", "spawn"), None);
     // Multibyte prefix: `café spawn` — `spawn` at CHAR 5, not byte 6.
     assert_eq!(
-        AppStore::first_word_column("café spawn()", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "café spawn()", "spawn"),
         Some(5),
         "a char column, not a byte offset"
     );
     // Absent entirely.
     assert_eq!(
-        AppStore::first_word_column("pub fn spawn() {}", "target"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn spawn() {}", "target"),
         None
     );
     // Empty item: no match (never a spurious col 0 hit).
-    assert_eq!(AppStore::first_word_column("spawn()", ""), None);
+    assert_eq!(AppStore::first_word_column(LanguageId::Rust, "spawn()", ""), None);
 }
 
 /// goto-line (M-g g) is a BARE-LINE landing: it carries a line number with
@@ -382,26 +382,26 @@ fn first_word_column_skips_leading_comment_and_string_mention() {
     // Leading block comment: the first `spawn` (col 3) is inside `/* … */`;
     // the definition's `spawn` (col 19) is the landing.
     assert_eq!(
-        AppStore::first_word_column("/* spawn */ pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* spawn */ pub fn spawn() {}", "spawn"),
         Some(19),
         "the leading block-comment mention is skipped"
     );
     // Leading string literal: the first `spawn` (col 9) is inside `\"…\"`;
     // the definition's `spawn` (col 20) is the landing.
     assert_eq!(
-        AppStore::first_word_column("let s = \"spawn\"; fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let s = \"spawn\"; fn spawn() {}", "spawn"),
         Some(20),
         "the leading string mention is skipped"
     );
     // Name only inside a comment → no live occurrence → None (honest col 0).
     assert_eq!(
-        AppStore::first_word_column("/* spawn */", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* spawn */", "spawn"),
         None,
         "a name only inside a comment is not a landing"
     );
     // Name only inside a string → None.
     assert_eq!(
-        AppStore::first_word_column("let s = \"spawn\";", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let s = \"spawn\";", "spawn"),
         None,
         "a name only inside a string is not a landing"
     );
@@ -409,7 +409,7 @@ fn first_word_column_skips_leading_comment_and_string_mention() {
     // (guards against masking `#` as a line comment, which would wrongly
     // swallow `#[doc = \"…\"] pub fn spawn()`).
     assert_eq!(
-        AppStore::first_word_column("#[doc = \"x\"] pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "#[doc = \"x\"] pub fn spawn() {}", "spawn"),
         Some(20),
         "`#[…]` is an attribute, not a comment"
     );
@@ -466,7 +466,7 @@ fn first_word_column_masks_raw_string_mention() {
     // The raw string `r#"say \"spawn\" now"#` mentions `spawn`; the live def
     // is later. Lands on the def (col 33), not the mention (col 16).
     assert_eq!(
-        AppStore::first_word_column(
+        AppStore::first_word_column(LanguageId::Rust, 
             "let s = r#\"say \"spawn\" now\"#; fn spawn() {}",
             "spawn"
         ),
@@ -475,7 +475,7 @@ fn first_word_column_masks_raw_string_mention() {
     );
     // A raw string with TWO hash marks (`r##…##`).
     assert_eq!(
-        AppStore::first_word_column(
+        AppStore::first_word_column(LanguageId::Rust, 
             "let s = r##\"spawn\"##; fn spawn() {}",
             "spawn"
         ),
@@ -484,7 +484,7 @@ fn first_word_column_masks_raw_string_mention() {
     );
     // Mention-only (no live definition) → `None`, never a column inside the string.
     assert_eq!(
-        AppStore::first_word_column("let s = r#\"spawn\"#;", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let s = r#\"spawn\"#;", "spawn"),
         None,
         "a name only inside a raw string is not a landing"
     );
@@ -499,14 +499,14 @@ fn first_word_column_masks_block_comment_continuation() {
     // The `   spawn */` prefix is a continuation of a prior-line `/* …`; the
     // live def is later. Lands on the def (col 19), not the mention (col 3).
     assert_eq!(
-        AppStore::first_word_column("   spawn */ pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "   spawn */ pub fn spawn() {}", "spawn"),
         Some(19),
         "the continuation-run mention (col 3) is skipped; the live def is col 19"
     );
     // A genuine `/*` opener on this line still wins (not a continuation):
     // both comments are masked, the live def (col 23) is returned.
     assert_eq!(
-        AppStore::first_word_column("/* x */ /* spawn */ fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* x */ /* spawn */ fn spawn() {}", "spawn"),
         Some(23),
         "a real `/*` on the line is not treated as a continuation"
     );
@@ -520,13 +520,13 @@ fn first_word_column_masks_block_comment_continuation() {
 fn first_word_column_continuation_proxy_respects_strings_and_line_comments() {
     // A2: a trailing `//` comment contains `*/`. The def at col 3 is live.
     assert_eq!(
-        AppStore::first_word_column("fn spawn() {} // closes */ block", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "fn spawn() {} // closes */ block", "spawn"),
         Some(3),
         "a `*/` inside a `//` comment must not mask the live def (A2)"
     );
     // A3: a later string contains `*/`. The def at col 7 is live.
     assert_eq!(
-        AppStore::first_word_column("pub fn spawn() {} let s = \"*/\";", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn spawn() {} let s = \"*/\";", "spawn"),
         Some(7),
         "a `*/` inside a string must not mask the live def (A3)"
     );
@@ -540,7 +540,7 @@ fn first_word_column_continuation_proxy_respects_strings_and_line_comments() {
 #[test]
 fn first_word_column_masks_nested_block_comment() {
     assert_eq!(
-        AppStore::first_word_column("/* /* x */ spawn */ pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* /* x */ spawn */ pub fn spawn() {}", "spawn"),
         Some(27),
         "the nested comment masks its inner mention; the live def (col 27) lands"
     );
@@ -552,7 +552,7 @@ fn first_word_column_masks_nested_block_comment() {
 #[test]
 fn first_word_column_backtick_string_takes_backslash_escape() {
     assert_eq!(
-        AppStore::first_word_column("let s = `a\\`spawn\\`b`; fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let s = `a\\`spawn\\`b`; fn spawn() {}", "spawn"),
         Some(26),
         "the backslash-escaped backtick string masks its inner mention"
     );
@@ -565,7 +565,7 @@ fn first_word_column_backtick_string_takes_backslash_escape() {
 fn first_word_column_lifetimes_are_not_string_openers() {
     // `&'static str` before the def: lands on the def (col 30), not col 0.
     assert_eq!(
-        AppStore::first_word_column(
+        AppStore::first_word_column(LanguageId::Rust, 
             "let v: &'static str = \"x\"; fn spawn() {}",
             "spawn"
         ),
@@ -574,7 +574,7 @@ fn first_word_column_lifetimes_are_not_string_openers() {
     );
     // A short lifetime `'a` before the def: lands on the def (col 25).
     assert_eq!(
-        AppStore::first_word_column("let v: &'a str = \"x\"; fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let v: &'a str = \"x\"; fn spawn() {}", "spawn"),
         Some(25),
         "the `'a` tick must not open a string"
     );
@@ -582,7 +582,7 @@ fn first_word_column_lifetimes_are_not_string_openers() {
     // over-mask the definition (the fix must not treat a char literal as a
     // lifetime tick either). Lands on the def (col 16).
     assert_eq!(
-        AppStore::first_word_column("let c = 'x'; fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "let c = 'x'; fn spawn() {}", "spawn"),
         Some(16),
         "`'x'` is a char literal (masked); the live def at col 16 is untouched"
     );

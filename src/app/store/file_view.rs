@@ -1565,6 +1565,10 @@ impl AppStore {
         if total == 0 {
             return;
         }
+        // issue-language-aware-symbols: the buffer's PER-LANGUAGE word rule
+        // (a scratch buffer — `Plain` — keeps the historical rule).
+        let lang = self.buffers.current().map(|k| self.buffer_language(k)).unwrap_or(LanguageId::Plain);
+        let is_word = |c: char| is_word_char(lang, c);
         let mut line = p.line;
         let mut col = p.col;
         let mut moved = false;
@@ -1573,7 +1577,7 @@ impl AppStore {
             let len = chars.len();
             // Skip the non-word run (punctuation/whitespace) up to the
             // next word's first char.
-            while col < len && !is_word_char(chars[col]) {
+            while col < len && !is_word(chars[col]) {
                 col += 1;
                 moved = true;
             }
@@ -1581,7 +1585,7 @@ impl AppStore {
                 // Landed on the next word's first char: advance to the
                 // word's END (emacs forward-word lands at the end, not the
                 // first char). A word run cannot span a line.
-                while col < len && is_word_char(chars[col]) {
+                while col < len && is_word(chars[col]) {
                     col += 1;
                     moved = true;
                 }
@@ -1615,11 +1619,15 @@ impl AppStore {
         if total == 0 || (p.line == 0 && p.col == 0) {
             return;
         }
-        if p.col > 0 && is_word_char(self.line_chars(p.line)[p.col - 1]) {
+        // issue-language-aware-symbols: the buffer's PER-LANGUAGE word rule
+        // (a scratch buffer — `Plain` — keeps the historical rule).
+        let lang = self.buffers.current().map(|k| self.buffer_language(k)).unwrap_or(LanguageId::Plain);
+        let is_word = |c: char| is_word_char(lang, c);
+        if p.col > 0 && is_word(self.line_chars(p.line)[p.col - 1]) {
             // Preceded by a word: retreat to its first char.
             let chars = self.line_chars(p.line);
             let mut col = p.col;
-            while col > 0 && is_word_char(chars[col - 1]) {
+            while col > 0 && is_word(chars[col - 1]) {
                 col -= 1;
             }
             self.set_point(p.line, col, col);
@@ -1633,14 +1641,14 @@ impl AppStore {
         loop {
             if col > 0 {
                 let chars = self.line_chars(line);
-                while col > 0 && !is_word_char(chars[col - 1]) {
+                while col > 0 && !is_word(chars[col - 1]) {
                     col -= 1;
                 }
                 if col > 0 {
                     // Landed just past a word's last char: retreat to the
                     // word's FIRST char (emacs backward-word lands at the
                     // start, not the end).
-                    while col > 0 && is_word_char(chars[col - 1]) {
+                    while col > 0 && is_word(chars[col - 1]) {
                         col -= 1;
                     }
                     self.set_point(line, col, col);

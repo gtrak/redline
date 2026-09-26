@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::search::rg::{SearchEvent, StreamSink};
+use crate::search::rg::{StreamSink, SearchEvent};
+use redline_syntax::registry::LanguageId;
 
 /// Spawn a per-buffer occur search on a worker thread; events flow to
 /// `bus`. `display_name` is the buffer's results-view group label
@@ -51,7 +52,8 @@ pub fn spawn_occur(
                 gen_id,
                 cancel: cancel.clone(),
                 literal: None, // a regex pattern: the column is undeterminable
-                word: false,
+                word: false, // occur is `word: false` — `is_word_boundary` never runs on this sink, so the language is the (unused) `Plain`
+                lang: LanguageId::Plain,
                 ranges: None,  // occur has no token-class filtering
                 hits: 0,
             };

@@ -2005,43 +2005,203 @@ use super::*;
 fn tooling_refinement_lands_on_the_name_for_live_definition_lines() {
     // Live definition lines: the name's CHAR column (multibyte-aware).
     assert_eq!(
-        AppStore::first_word_column("pub fn spawn<F>(f: F) {};", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn spawn<F>(f: F) {};", "spawn"),
         Some(7),
         "plain fn line: the name at char col 7"
     );
     assert_eq!(
-        AppStore::first_word_column("pub struct Error { msg: String }", "Error"),
+        AppStore::first_word_column(LanguageId::Rust, "pub struct Error { msg: String }", "Error"),
         Some(11)
     );
     // A comment mention BEFORE the live name is skipped (P2-3): the
     // landing sits on the live definition's name, not the mention.
     assert_eq!(
-        AppStore::first_word_column("/* spawn */ pub fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* spawn */ pub fn spawn() {}", "spawn"),
         Some(19),
         "the comment occurrence (col 3) is masked; the live name is col 19"
     );
     assert_eq!(
-        AppStore::first_word_column("const N: &str = \"spawn\"; fn spawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "const N: &str = \"spawn\"; fn spawn() {}", "spawn"),
         Some(28),
         "the string occurrence (col 17) is masked; the live name is col 28"
     );
     // Multibyte prefix: a CHAR column, not a byte offset (a byte reading
     // of the same line puts `greet` at 20; the char column is 16).
     assert_eq!(
-        AppStore::first_word_column("pub /* 中文 */ fn greet() {}", "greet"),
+        AppStore::first_word_column(LanguageId::Rust, "pub /* 中文 */ fn greet() {}", "greet"),
         Some(16),
         "char col 16; a byte-column reading would give 20"
     );
     // The honest degradations (col 0 at the call site — never an invented
     // column, never a wrong symbol):
     assert_eq!(
-        AppStore::first_word_column("/* fn spawn */", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "/* fn spawn */", "spawn"),
         None,
         "every occurrence comment-masked -> None -> col 0 (dead code)"
     );
     assert_eq!(
-        AppStore::first_word_column("pub fn respawn() {}", "spawn"),
+        AppStore::first_word_column(LanguageId::Rust, "pub fn respawn() {}", "spawn"),
         None,
         "a substring inside a longer identifier never matches"
     );
 }
+
+    // ── issue-language-aware-symbols ──────────────────────────────────
+
+    /// Part 1: the M-. symbol-at-point extraction is per-language — the
+    /// reported case (`jwks/fetch-issuer-info` is ONE symbol, not three),
+    /// the keyword auto-resolve form, and the unchanged operators in the
+    /// unchanged languages.
+    #[test]
+    fn xref_symbol_at_point_is_per_language() {
+        // Clojure (the reported bug): the whole qualified symbol is one
+        // run — the identifier is the VAR (last `/` segment), the path
+        // token keeps the alias (the Part 2 pre-step's input).
+        assert_eq!(
+            satp(LanguageId::Clojure, "(jwks/fetch-issuer-info :x)", 12),
+            Some((
+                "fetch-issuer-info".to_string(),
+                "jwks/fetch-issuer-info".to_string()
+            ))
+        );
+        // A bare symbol: no split (identifier == path token).
+        assert_eq!(
+            satp(LanguageId::Clojure, "(fetch-issuer-info)", 5),
+            Some((
+                "fetch-issuer-info".to_string(),
+                "fetch-issuer-info".to_string()
+            ))
+        );
+        // The keyword auto-resolve form `::jwks/local`: the marker is
+        // spelling, the var is the last segment.
+        assert_eq!(
+            satp(LanguageId::Clojure, "(::jwks/local)", 8),
+            Some(("local".to_string(), "jwks/local".to_string()))
+        );
+        // Scheme: the same reader family.
+        assert_eq!(
+            satp(LanguageId::Scheme, "(fetch-issuer-info)", 5),
+            Some((
+                "fetch-issuer-info".to_string(),
+                "fetch-issuer-info".to_string()
+            ))
+        );
+        // JS/TS/TSX: `$` is a constituent (the global rule split `$foo`).
+        for lang in [LanguageId::JavaScript, LanguageId::TypeScript, LanguageId::Tsx] {
+            assert_eq!(
+                satp(lang, "const $foo = 1;", 8),
+                Some(("$foo".to_string(), "$foo".to_string())),
+                "dollar identifier in {lang:?}"
+            );
+        }
+        // Ruby: the `?` / `!` method-name suffixes.
+        assert_eq!(
+            satp(LanguageId::Ruby, "x.empty?", 4),
+            Some(("empty?".to_string(), "empty?".to_string()))
+        );
+        assert_eq!(
+            satp(LanguageId::Ruby, "x.save!", 4),
+            Some(("save!".to_string(), "save!".to_string()))
+        );
+        // Rust is UNCHANGED: `-` is an operator (a byte-for-byte pin).
+        assert_eq!(
+            satp(LanguageId::Rust, "let x = a - b;", 8),
+            Some(("a".to_string(), "a".to_string()))
+        );
+    }
+
+    /// Part 2: M-. on `jwks/fetch-issuer-info` — the `ns` form's
+    /// `:require [some.ns :as jwks]` alias names the NAMESPACE, the
+    /// namespace convention places it in `some/ns.clj`, and the jump
+    /// lands on the VAR's definition there (cross-file unique → the
+    /// picker, best preselected, RET lands).
+    #[test]
+    fn xref_clojure_namespace_alias_jumps_to_var() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/app/core.clj",
+                "(ns app.core\n  (:require [some.ns :as jwks]))\n\n(defn run []\n  (jwks/fetch-issuer-info)\n  (::jwks/local)\n  (some.ns/other)\n)\n",
+            ),
+            (
+                "src/some/ns.clj",
+                "(ns some.ns)\n\n(defn fetch-issuer-info [] :ok)\n(defn local [] :ok)\n(defn other [] :ok)\n",
+            ),
+        ]);
+        s.open_path("src/app/core.clj");
+        // Line 4: "  (jwks/fetch-issuer-info)" — point inside the var.
+        s.set_point(4, 12, 12);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the alias narrows to the var's one definition: {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/some/ns.clj:3"),
+            "the convention file's defn is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/some/ns.clj", "landed in the namespace's file");
+        assert_eq!(s.point_line(), 2, "on the var's defn line");
+
+        // The keyword auto-resolve form `::jwks/local`: the same alias
+        // path (the reader's `:`/`::` marker, same namespace).
+        s.open_path("src/app/core.clj");
+        s.set_point(5, 11, 11);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "keyword form: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/some/ns.clj:4"),
+            "`local`'s defn (line 3, 1-based 4): {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.point_line(), 3, "the keyword form lands on `local`");
+
+        // A FULL namespace name (`some.ns/var`) — no declaration needed:
+        // the dotted alias is the namespace itself (identity).
+        s.open_path("src/app/core.clj");
+        s.set_point(6, 12, 12);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "full-namespace form: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/some/ns.clj:5"),
+            "`other`'s defn (line 4, 1-based 5): {:?}",
+            s.picker_filtered()[0].0.name
+        );
+    }
+
+    /// Part 2: the FLAG — a dotless alias the file's `ns` form does not
+    /// declare is never guessed (a wrong jump is worse than no jump):
+    /// no picker, no jump, the honest message.
+    #[test]
+    fn xref_clojure_unresolvable_alias_is_flagged() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/app/core.clj",
+                "(ns app.core\n  (:require [some.ns :as jwks]))\n\n(defn bad []\n  (unk/whatever)\n)\n",
+            ),
+            ("src/some/ns.clj", "(ns some.ns)\n\n(defn whatever [] :ok)\n"),
+        ]);
+        s.open_path("src/app/core.clj");
+        // Line 4: "  (unk/whatever)" — `unk` is NOT declared in the ns
+        // form (and `whatever` IS indexed in another namespace — the
+        // tempting wrong target the guess would jump to).
+        s.set_point(4, 8, 8);
+        s.xref_find_definitions();
+        assert!(
+            !s.picker_open(),
+            "no jump, no picker (msg: {})",
+            s.message
+        );
+        assert_eq!(s.view_name_display(), "src/app/core.clj", "the view did not move");
+        assert!(
+            s.message.contains("cannot resolve namespace alias `unk`"),
+            "the flagged alias is named: `{}`",
+            s.message
+        );
+    }

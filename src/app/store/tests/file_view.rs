@@ -1590,13 +1590,57 @@ use super::*;
         assert_eq!((s.point_line(), s.point_col()), (0, 0), "M-b returns to the word start");
         // The M-? path: a point on the word (col 2, on `f`) extracts the
         // same full multibyte identifier the word motion just covered.
-        let symbol = crate::search::references::symbol_under_point("café", 2, |_| false)
+        let symbol = crate::search::references::symbol_under_point(LanguageId::Rust, "café", 2, |_| false)
             .expect("line has an identifier");
         assert_eq!(symbol, "café", "references extraction agrees with word motion");
         // CJK identifier: the same agreement holds for a CJK word.
-        let symbol = crate::search::references::symbol_under_point("漢字", 1, |_| false)
+        let symbol = crate::search::references::symbol_under_point(LanguageId::Rust, "漢字", 1, |_| false)
             .expect("line has an identifier");
         assert_eq!(symbol, "漢字");
+    }
+
+    /// issue-language-aware-symbols: word motion (M-f/M-b) uses the
+    /// buffer's PER-LANGUAGE word rule — a symbol that jumps as one unit
+    /// moves as one unit, and the operators that split in the unchanged
+    /// languages still split.
+    #[test]
+    fn word_motion_is_per_language() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/app.clj"), "(jwks/fetch-issuer-info)\n").unwrap();
+        std::fs::write(dir.path().join("src/mod.js"), "const $foo = 1;\n").unwrap();
+        std::fs::write(dir.path().join("src/op.rs"), "let x = a - b;\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+
+        // Clojure (the reported bug): the qualified symbol is ONE word —
+        // M-f lands past the whole `jwks/fetch-issuer-info` run (col 22),
+        // M-b back to its start (col 1).
+        s.open_path("src/app.clj");
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 23), "M-f: the qualified symbol is one word");
+        s.point_word_backward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 1), "M-b: back to the symbol start");
+
+        // JS: `$foo` is ONE word (the historical rule split it at `$`).
+        s.open_path("src/mod.js");
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 5), "M-f: past `const`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 10), "M-f: `$foo` is one word");
+
+        // Rust is UNCHANGED: `-` stays a boundary — `a` is its own word.
+        s.open_path("src/op.rs");
+        s.set_point(0, 0, 0);
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 3), "M-f: past `let`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 5), "M-f: past `x`");
+        s.point_word_forward();
+        assert_eq!((s.point_line(), s.point_col()), (0, 9), "M-f: past `a` — `-` still splits");
     }
 
 

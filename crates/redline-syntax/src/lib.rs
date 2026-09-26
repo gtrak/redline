@@ -2,6 +2,7 @@
 //! Plain Rust — zero iocraft/tokio (plan layering rule).
 
 pub mod cache;
+pub mod clojure;
 pub mod highlight;
 pub mod language;
 pub mod node;

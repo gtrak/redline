@@ -90,6 +90,22 @@ impl AppStore {
             .unwrap_or(false)
     }
 
+    /// issue-language-aware-symbols: the language of buffer `key`, for the
+    /// per-language word rule — from the buffer's path via the grammar
+    /// registry. `LanguageId::Plain` for a scratch buffer (no path) or a
+    /// missing buffer (the historical crate-wide rule, byte-for-byte).
+    pub(in crate::app::store) fn buffer_language(&self, key: &str) -> LanguageId {
+        match self
+            .buffers
+            .get(key)
+            .and_then(|b| b.path.clone())
+            .map(|p| p.to_string_lossy().into_owned())
+        {
+            Some(path) => self.grammar_registry.language_for(&path),
+            None => LanguageId::Plain,
+        }
+    }
+
     /// Insert `text` at the HONEST point (plan 015 issue 03, accurate-mode
     /// self-insert): lands at the point's byte (char-converted) and advances
     /// the point past the inserted text. Returns `false` when there is no
@@ -370,20 +386,23 @@ impl AppStore {
             .get(&key)
             .map(|b| b.rope.byte_to_char(point_byte))
             .unwrap_or(0);
-        // Char-level walk (is_word_char is the crate-wide word rule). First
+        // Char-level walk (issue-language-aware-symbols: the PER-LANGUAGE
+        // word rule for this buffer). First
         // the whitespace/punctuation immediately before the point, then the
         // word before it.
+        let lang = self.buffer_language(&key);
+        let is_word = |c: char| is_word_char(lang, c);
         let chars: Vec<char> = {
             let buf = self.buffers.get(&key).unwrap();
             buf.rope.slice(0..point_char).chars().collect()
         };
         let mut i = point_char;
         // Skip non-word chars backward.
-        while i > 0 && !is_word_char(chars[i - 1]) {
+        while i > 0 && !is_word(chars[i - 1]) {
             i -= 1;
         }
         // Skip the word backward.
-        while i > 0 && is_word_char(chars[i - 1]) {
+        while i > 0 && is_word(chars[i - 1]) {
             i -= 1;
         }
         if i == point_char {
@@ -460,7 +479,8 @@ impl AppStore {
             // Buffer end: nothing to kill forward.
             return;
         }
-        // Char-level walk (is_word_char is the crate-wide word rule),
+        // Char-level walk (issue-language-aware-symbols: the PER-LANGUAGE
+        // word rule for this buffer),
         // matching emacs `forward-word` as used by `kill-word 1`: word char
         // at the point → skip that word only (the trailing non-word is NOT
         // consumed); non-word at the point → skip the non-word run, then the
@@ -468,20 +488,22 @@ impl AppStore {
         // the remainder is non-empty and either opens a word run or a
         // non-word run). The buffer-end no-op is handled by the
         // `point_char >= total_chars` guard above.
+        let lang = self.buffer_language(&key);
+        let is_word = |c: char| is_word_char(lang, c);
         let chars: Vec<char> = {
             let buf = self.buffers.get(&key).unwrap();
             buf.rope.slice(point_char..total_chars).chars().collect()
         };
         let mut j = 0;
-        if is_word_char(chars[0]) {
-            while j < chars.len() && is_word_char(chars[j]) {
+        if is_word(chars[0]) {
+            while j < chars.len() && is_word(chars[j]) {
                 j += 1;
             }
         } else {
-            while j < chars.len() && !is_word_char(chars[j]) {
+            while j < chars.len() && !is_word(chars[j]) {
                 j += 1;
             }
-            while j < chars.len() && is_word_char(chars[j]) {
+            while j < chars.len() && is_word(chars[j]) {
                 j += 1;
             }
         }
