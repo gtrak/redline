@@ -12,4 +12,5 @@ pub mod language;
 pub mod node;
 pub mod queries;
 pub mod registry;
+pub mod ruby;
 pub mod tokens;

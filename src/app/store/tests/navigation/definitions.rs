@@ -2331,6 +2331,169 @@ use super::*;
         );
     }
 
+    // — plan-017 issue 06: Ruby `require_relative` (the conventions
+    // mechanism) ——————————————————————————
+    //
+    // The import forms are method CALLS (a `call` whose `method` field is
+    // the `identifier` `require_relative`, no `receiver` field). The
+    // reference is a CONSTANT whose defining file is the required one; the
+    // convention yields the file's require_relative targets (relative to
+    // the requiring file's own directory) and the pre-step narrows the
+    // index's name-keyed candidates to them. `require` / `autoload` are
+    // LOAD-PATH (`$LOAD_PATH`, unknown) and flag, never a guess.
+
+    /// plan-017 issue 06 (Ruby, direction: the landing). The file's
+    /// `require_relative "thing"` (a BARE `call`, no `receiver` field) places
+    /// the constant `Thing` by the `__dir__` convention in `lib/thing.rb`
+    /// (the requiring file `lib/app.rb`'s own directory + the name + `.rb`);
+    /// the index's name-keyed candidates (TWO same-named `thing.rb` files
+    /// both define `Thing`) NARROW to the required file — the jump lands on
+    /// the right file, not the decoy. The narrowing is the requiring-file-
+    /// relative PATH, not the base name (both files are `thing.rb` — a
+    /// base-name-only tail would offer both rows; the mutation pin).
+    #[test]
+    fn xref_ruby_require_relative_narrows_to_required_file_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "lib/app.rb",
+                "require_relative \"thing\"\n\ndef run\n  x = Thing\nend\n",
+            ),
+            ("lib/thing.rb", "class Thing\nend\n"),
+            ("elsewhere/thing.rb", "class Thing\nend\n"),
+        ]);
+        s.open_path("lib/app.rb");
+        // Line 3 (0-based): "  x = Thing" — `Thing` at col 6.
+        s.set_point(3, 6, 6);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the require_relative narrows to the required file (the same-named decoy is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("lib/thing.rb:1"),
+            "the required file's class is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "lib/thing.rb", "landed in the required file");
+        assert_eq!(s.point_line(), 0, "on the class's definition line");
+    }
+
+    /// plan-017 issue 06 (Ruby, direction: the LOAD-PATH flag). The
+    /// `require "thing"` goes through `$LOAD_PATH` — which redline cannot
+    /// know. The tree even carries a plausible-looking stranger `thing.rb`
+    /// that defines `Thing` (the name-keyed superset would offer it) — the
+    /// convention must NOT land there: the constant is the named UNRESOLVED
+    /// flag, never a same-named-file guess.
+    #[test]
+    fn xref_ruby_load_path_require_is_flagged_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "main.rb",
+                "require \"thing\"\n\ndef run\n  x = Thing\nend\n",
+            ),
+            ("thing.rb", "class Thing\nend\n"),
+        ]);
+        s.open_path("main.rb");
+        // Line 3 (0-based): "  x = Thing" — `Thing` at col 6.
+        s.set_point(3, 6, 6);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.rb", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Thing`"),
+            "the LOAD-PATH require is flagged, not the same-named workspace file: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 06 (Ruby, direction: the autoload flag). `autoload
+    /// :Thing, "thing"` is a deferred LOAD-PATH load — unknowable here; the
+    /// constant is FLAGGED (the plausible same-named `thing.rb` stays out).
+    #[test]
+    fn xref_ruby_autoload_is_flagged_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "main.rb",
+                "autoload :Thing, \"thing\"\n\ndef run\n  x = Thing\nend\n",
+            ),
+            ("thing.rb", "class Thing\nend\n"),
+        ]);
+        s.open_path("main.rb");
+        // Line 3 (0-based): "  x = Thing" — `Thing` at col 6.
+        s.set_point(3, 6, 6);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.rb", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Thing`"),
+            "the autoload is flagged, not the same-named workspace file: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 06 (Ruby, direction: the absent relative path flag).
+    /// `require_relative "missing"` places `Missing` in `lib/missing.rb` — a
+    /// file the tree does not hold (and a same-named `elsewhere/missing.rb`
+    /// is a plausible-looking stranger). The require_relative mapping is HARD:
+    /// a candidate in another, un-required file is a different symbol — the
+    /// constant is the named UNRESOLVED flag, never a jump to the stranger.
+    #[test]
+    fn xref_ruby_require_relative_absent_from_tree_is_flagged() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "lib/app.rb",
+                "require_relative \"missing\"\n\ndef run\n  x = Missing\nend\n",
+            ),
+            ("elsewhere/missing.rb", "class Missing\nend\n"),
+        ]);
+        s.open_path("lib/app.rb");
+        // Line 3 (0-based): "  x = Missing" — `Missing` at col 6.
+        s.set_point(3, 6, 6);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "lib/app.rb", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Missing`"),
+            "the absent require_relative target is flagged (the same-named file elsewhere is a DIFFERENT file): `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 06 (Ruby, the same-file non-regression): a constant
+    /// DEFINED IN THIS FILE (a `class Thing` the outline indexes) is a
+    /// same-file reference, not a cross-file require — even though the file
+    /// also has a `require_relative` whose target file does not define the
+    /// constant. The convention stays silent (the local-constant exclusion),
+    /// and the bare name-keyed lookup lands on the same-file class — never a
+    /// flag, never a narrowing to the required (unrelated) file.
+    #[test]
+    fn xref_ruby_same_file_constant_keeps_the_bare_lookup() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "lib/app.rb",
+                "require_relative \"helper\"\nclass Thing\n  def run\n    x = Thing\n  end\nend\n",
+            ),
+            ("lib/helper.rb", "class Helper\nend\n"),
+        ]);
+        s.open_path("lib/app.rb");
+        // Line 3 (0-based): "    x = Thing" — `Thing` at col 8.
+        s.set_point(3, 8, 8);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file unique: silent jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "lib/app.rb", "stayed in the same file");
+        assert_eq!(
+            s.point_line(),
+            1,
+            "on the same-file `class Thing` line, not flagged: {}",
+            s.message
+        );
+    }
+
     /// newlang-paths (e2e pin, C#): M-. on `o.P` in a C# buffer — the
     /// C# outline indexes properties (queries.rs): the whole path `o.P`
     /// has no indexed symbol, but the fall-through to the last segment

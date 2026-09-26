@@ -37,13 +37,23 @@
 //!   OUTSIDE it is a third-party dependency — FLAGGED (the `Err` arm),
 //!   never a guess (the same rule as the C/C++ angle include). Cross-
 //!   module / download resolution stays on the Go tooling provider
-//!   (toolchain-gated — audit F4).
+//!   (toolchain-gated — audit F4);
+//! - Ruby (plan-017 issue 06): the DETERMINISTIC `require_relative "x"` →
+//!   `x.rb` relative to the requiring file's own directory
+//!   (`ruby::reference_convention_name` / `convention_tails` —
+//!   ruby-lang.org `Module#require_relative` / `__dir__` semantics). The
+//!   reference is a CONSTANT whose defining file is the required one —
+//!   the convention yields the file's require_relative targets as tails
+//!   and the app narrows the index's name-keyed candidates to them. The
+//!   LOAD-PATH forms — bare `require "x"` and `autoload :C, "x"` — go
+//!   through `$LOAD_PATH`, which redline cannot know: they are never a
+//!   tail and their constant is the `Err` (FLAGGED, never a guess — the
+//!   same rule as the C/C++ angle include and the Go third-party import).
 //!
 //! Not wired (the audit's flag rows — a table row would be a guess):
 //! C# (no directory convention), Scheme (library layout
-//! implementation-defined), Ruby bare `require` ($LOAD_PATH), C++
-//! semantic forms. Their M-. stays on the name-keyed index / the named
-//! unresolved flag.
+//! implementation-defined), C++ semantic forms. Their M-. stays on the
+//! name-keyed index / the named unresolved flag.
 
 use crate::registry::LanguageId;
 use std::path::Path;
@@ -95,6 +105,14 @@ pub fn convention_name_for_reference(
         LanguageId::Go => {
             crate::go::reference_convention_name(source, ident, path_token, project_root, rel)
         }
+        // Ruby: the reference is a CONSTANT whose defining file is the
+        // required one. The convention yields the file's DETERMINISTIC
+        // require_relative targets (relative to the requiring file's own
+        // directory — `rel`); the LOAD-PATH `require` / `autoload` forms
+        // are the `Err` arm (FLAGGED — `$LOAD_PATH` is unknown, never a
+        // guess). `project_root` is not needed (the target is fully
+        // determined by `rel` + the required name).
+        LanguageId::Ruby => crate::ruby::reference_convention_name(source, ident, path_token, rel),
         // No convention row yet: the bare name-keyed lookup stands.
         _ => Ok(None),
     }
@@ -117,6 +135,11 @@ pub fn convention_file_tails(lang: LanguageId, name: &str) -> Option<Vec<String>
         // a path segment — `convention_file_matches` is the Go row's
         // match, the others' is `ends_with`).
         LanguageId::Go => Some(crate::go::local_dir_tails(name)),
+        // Ruby: one tail per require_relative target, the full
+        // project-relative path (a file tail — `ends_with`, the
+        // pre-step's always-behavior; the directory join keeps a
+        // same-named file in another directory out).
+        LanguageId::Ruby => Some(crate::ruby::convention_tails(name)),
         _ => None,
     }
 }
@@ -400,15 +423,10 @@ mod tests {
         // The unwired rows (the audit's flag rows): they decline — the
         // bare name-keyed lookup stands byte-for-byte (Java-without-an
         // import is covered above; Java is wired, just not for THIS
-        // reference).
-        for lang in [
-            LanguageId::Rust,
-            LanguageId::Python,
-            LanguageId::Scheme,
-            LanguageId::Ruby,
-            LanguageId::CSharp,
-        ]
-        .into_iter()
+        // reference). Ruby is NOT in this list — it is wired (issue 06)
+        // and pinned below.
+        for lang in [LanguageId::Rust, LanguageId::Python, LanguageId::Scheme, LanguageId::CSharp]
+            .into_iter()
         {
             assert_eq!(
                 cnr(lang, "x", "tokio", "tokio::spawn"),
@@ -416,6 +434,42 @@ mod tests {
                 "{lang:?} has no convention row"
             );
         }
+        // Ruby (plan-017 issue 06): the dispatch reaches the ruby module.
+        // A BARE constant in a require_relative file yields the target
+        // carrier (relative to the requiring file's own directory — the
+        // four-argument shim's `rel` is `f.go`, a top-level file, so the
+        // target is `c.rb` at the root). The LOAD-PATH `require` flags,
+        // and a lowercase (method / local) reference stays bare.
+        assert_eq!(
+            cnr(
+                LanguageId::Ruby,
+                "require_relative 'c'\n\ndef run\n  Thing\nend\n",
+                "Thing",
+                "Thing"
+            ),
+            Ok(Some("c.rb".to_string())),
+            "a bare require_relative target is the carrier (relative to the file's directory)"
+        );
+        assert_eq!(
+            cnr(
+                LanguageId::Ruby,
+                "require 'thing'\n\ndef run\n  Thing\nend\n",
+                "Thing",
+                "Thing"
+            ),
+            Err("Thing".to_string()),
+            "a LOAD-PATH require is flagged, never a guess"
+        );
+        assert_eq!(
+            cnr(
+                LanguageId::Ruby,
+                "require 'a/b'\n\ndef run\n  x.empty?\nend\n",
+                "empty?",
+                "empty?"
+            ),
+            Ok(None),
+            "a lowercase `?`-suffixed method reference keeps the bare lookup"
+        );
         // The tails table mirrors the dispatch.
         assert_eq!(
             convention_file_tails(LanguageId::Clojure, "some.ns"),
@@ -437,6 +491,16 @@ mod tests {
         // Go: the module-relative directory, tail-matched with its
         // trailing `/`.
         assert_eq!(convention_file_tails(LanguageId::Go, "sub"), Some(vec!["sub/".to_string()]));
+        // Ruby: one tail per require_relative target (the full
+        // project-relative path, newline-split from the carrier).
+        assert_eq!(
+            convention_file_tails(LanguageId::Ruby, "lib/thing.rb"),
+            Some(vec!["lib/thing.rb".to_string()])
+        );
+        assert_eq!(
+            convention_file_tails(LanguageId::Ruby, "lib/one.rb\nlib/two.rb"),
+            Some(vec!["lib/one.rb".to_string(), "lib/two.rb".to_string()])
+        );
         // The match predicate per row: the file-tail rows are `ends_with`
         // (byte-for-byte the pre-step's always-behavior); Go's directory
         // tail is containment (the package's files sit INSIDE the
@@ -466,6 +530,19 @@ mod tests {
             "engine/sub2/thing.go"
         ),
         "the trailing / keeps a sibling-prefix directory out");
+        // Ruby: a file tail — `ends_with`, and the directory join keeps a
+        // same-named file in another directory out (the decoy).
+        assert!(convention_file_matches(
+            LanguageId::Ruby,
+            "lib/thing.rb",
+            "lib/thing.rb"
+        ));
+        assert!(!convention_file_matches(
+            LanguageId::Ruby,
+            "lib/thing.rb",
+            "elsewhere/thing.rb"
+        ),
+        "a same-named file in another directory does not carry the tail");
         assert_eq!(convention_file_tails(LanguageId::Rust, "std"), None);
     }
 }
