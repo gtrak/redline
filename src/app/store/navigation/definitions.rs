@@ -38,9 +38,32 @@ enum XrefMdotOutcome {
     /// declare — flagged, NEVER guessed (a wrong jump is worse than no
     /// jump).
     UnresolvableAlias(String),
+    /// plan-017 B5: the point sits on a token OTHER than the enclosing
+    /// symbol's own name, the workspace index has no definition for it,
+    /// and no tooling provider handles the buffer's language — the name
+    /// is reported UNRESOLVED (the named flag, the way annotations
+    /// report `orphaned`): never a jump, and never the enclosing
+    /// symbol's picker (a plausible-looking lie about where the
+    /// definition is — the C header-declared call in `main` used to
+    /// open a picker on `main`).
+    Unresolved(String),
     /// A guard message ("no buffer", "no file…", …) was already
     /// reported; the caller returns.
     Guarded,
+}
+
+/// plan-017: the conventions pre-step's flags (the flagged NAME, with
+/// the per-language semantics): the Clojure alias the file's `ns` form
+/// does not declare, and the Java reference the import / qualified-
+/// class convention places in a file the index does not hold. Both are
+/// FLAGGED, never guessed (a wrong jump is worse than no jump).
+enum XrefConventionFlag {
+    /// issue-language-aware-symbols (Part 2): a Clojure namespace
+    /// alias the file's top-level `ns` form does not declare.
+    UnresolvableAlias(String),
+    /// plan-017 issue 03: a Java reference the convention places in a
+    /// file the index does not hold.
+    Unresolved(String),
 }
 
 /// (jump-ambiguity) The Xref picker row for one definition location:
@@ -135,9 +158,26 @@ impl AppStore {
     ///    ordered same-file-first, then (file, line, name). Exactly one → jump
     ///    directly (same-file OR cross-file); several → the Xref picker so the
     ///    user chooses.
-    /// 3. No symbol-at-point with a definition → the enclosing-symbol fallback
-    ///    (unchanged): the enclosing symbol's definitions take over, and a
-    ///    workspace hit on THAT never triggers the resolver (no resolver spam).
+    /// 3. No symbol-at-point with a definition → the enclosing-symbol
+    ///    fallback (plan-017 B5: column-precise — it fires only when
+    ///    the point is on the enclosing symbol's OWN NAME, or when the
+    ///    point carries no token at all — the by-line "jump to the
+    ///    enclosing function" behavior on a point with no name under
+    ///    it). On a DIFFERENT token a fallback picker would answer a
+    ///    question nobody asked: the enclosing symbol's definitions
+    ///    take over only when the point sits on that symbol's name
+    ///    (the picker is legitimate and preselected, exactly as
+    ///    before); a workspace hit on THAT never triggers the resolver
+    ///    (no resolver spam).
+    ///    B5, second direction: on a different, unresolvable token the
+    ///    fallback must NOT fire — when no tooling provider handles the
+    ///    buffer's language the name is reported as a named `unresolved`
+    ///    flag (like the annotations' `orphaned`) instead of the
+    ///    enclosing function; when a provider DOES handle the language,
+    ///    the (4) tooling-resolver seam gets the point's own token
+    ///    (tooling stays authoritative over the guess — a Rust
+    ///    `tokio::spawn` inside `main` resolves through the cargo
+    ///    provider instead of misrouting to `main`'s picker).
     /// 4. Still nothing (and the point sits on a symbol) → tooling-resolver
     ///    fall-through (plan 006): `SymbolContext { workspace_root,
     ///    symbol: <path-shaped token>, from_file }` runs OFF the input path
@@ -171,6 +211,11 @@ impl AppStore {
                 // guessed (a wrong jump is worse than no jump).
                 self.minibuffer_message(&format!("cannot resolve namespace alias `{alias}`"))
             }
+            XrefMdotOutcome::Unresolved(name) => {
+                // plan-017 B5: the named unresolved flag — never a
+                // jump, never the enclosing symbol's picker.
+                self.minibuffer_message(&format!("unresolved: `{name}`"))
+            }
             XrefMdotOutcome::Resolver(token, rel) => {
                 self.start_symbol_resolution(&token, &rel, None)
             }
@@ -197,6 +242,11 @@ impl AppStore {
             }
             XrefMdotOutcome::UnresolvableAlias(alias) => {
                 self.minibuffer_message(&format!("cannot resolve namespace alias `{alias}`"))
+            }
+            XrefMdotOutcome::Unresolved(name) => {
+                // plan-017 B5: the named unresolved flag — the forced
+                // list shares the lookup, so the flag stands.
+                self.minibuffer_message(&format!("unresolved: `{name}`"))
             }
             XrefMdotOutcome::Resolver(token, rel) => {
                 self.start_symbol_resolution(&token, &rel, None)
@@ -301,10 +351,15 @@ impl AppStore {
                     path_token,
                 )
             }) {
-            // issue-language-aware-symbols (Part 2): a flagged
-            // unresolvable Clojure alias never jumps (no guess, no
-            // fallback — the alias is the whole signal).
-            Some(Err(alias)) => return XrefMdotOutcome::UnresolvableAlias(alias),
+            // plan-017: a flagged convention miss never jumps (no
+            // guess, no enclosing fallback — the flagged name is the
+            // whole signal).
+            Some(Err(flag)) => return match flag {
+                XrefConventionFlag::UnresolvableAlias(alias) => {
+                    XrefMdotOutcome::UnresolvableAlias(alias)
+                }
+                XrefConventionFlag::Unresolved(name) => XrefMdotOutcome::Unresolved(name),
+            },
             other => other.and_then(|r| r.unwrap_or_default()).unwrap_or_default(),
         };
 
@@ -320,53 +375,168 @@ impl AppStore {
             };
         }
 
-        // (3) Enclosing-symbol fallback (unchanged: by line, not by the
-        // point's column). Same-file-first order so the picker's
-        // preselected row (index 0) is the best guess — the fallback's
-        // defs come out of `definitions_of` unsorted.
-        match self.xref_enclosing_symbol_fallback(&rel, line) {
-            Some((name, mut defs)) if !defs.is_empty() => {
-                defs.sort_by(|a, b| {
-                    (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
-                        (a.file.as_str(), a.symbol.line, &a.symbol.name)
-                            .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
-                    })
-                });
-                XrefMdotOutcome::Candidates {
-                    lookup_name: name,
-                    defs,
-                    rel,
-                    from_enclosing: true,
+        // (3) Enclosing-symbol fallback (plan-017 B5: column-precise).
+        // Same-file-first order so the picker's preselected row (index 0)
+        // is the best guess — the fallback's defs come out of
+        // `definitions_of` unsorted.
+        let enclosing = self.xref_enclosing_symbol(&rel, line);
+        // The B5 gate: the fallback answers "where is the enclosing
+        // symbol defined?" — it fires only when the point is on the
+        // enclosing symbol's OWN NAME (the legitimate enclosing case —
+        // the picker is legitimate and preselected, exactly as today),
+        // or when the point carries no token at all (a blank / comment
+        // point is not "on a different name" — the by-line jump-to-
+        // enclosing-function behavior stands, byte-for-byte). A point on
+        // a DIFFERENT token never gets the enclosing symbol offered: a
+        // picker on `main` for a question about `thing_x` is a
+        // plausible-looking lie about where the definition is.
+        let gate_allows = match (&at, enclosing.as_ref()) {
+            (Some(_), Some(sym)) => Self::point_on_symbol_name(
+                &line_text,
+                self.point_col(),
+                lang,
+                point_byte_offset(&buf.rope, line, 0),
+                line,
+                sym,
+            ),
+            _ => true,
+        };
+        if let Some(sym) = enclosing {
+            if !gate_allows {
+                // (B5, second direction) a different, unresolvable
+                // token: the fallback must not fire. Tooling stays
+                // authoritative when it can actually answer (a provider
+                // handles the buffer's language — or the language is
+                // unknown and the chain keeps its in-order walk);
+                // otherwise the name is reported as the named
+                // UNRESOLVED flag — never the enclosing symbol's
+                // picker, never a guess.
+                let language = self.resolution_language(&rel);
+                match (at, language) {
+                    (Some((ident, _)), Some(lang_name))
+                        if !self.tooling_handles_language(&lang_name) =>
+                    {
+                        XrefMdotOutcome::Unresolved(ident)
+                    }
+                    (Some((_, token)), _) => XrefMdotOutcome::Resolver(token, rel),
+                    (None, _) => {
+                        unreachable!("gate_allows=false requires a token at the point")
+                    }
+                }
+            } else {
+                let mut defs = self.index.definitions_of(&sym.name);
+                if !defs.is_empty() {
+                    // Same-file-first order so the picker's preselected
+                    // row (index 0) is the best guess — the fallback's
+                    // defs come out of `definitions_of` unsorted. A
+                    // workspace hit on THAT never triggers the resolver
+                    // (no resolver spam).
+                    defs.sort_by(|a, b| {
+                        (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                            (a.file.as_str(), a.symbol.line, &a.symbol.name)
+                                .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+                        })
+                    });
+                    XrefMdotOutcome::Candidates {
+                        lookup_name: defs[0].symbol.name.clone(),
+                        defs,
+                        rel,
+                        from_enclosing: true,
+                    }
+                } else if at.is_some() {
+                    // The enclosing name has no indexed definition: the
+                    // point's own token goes to the resolver
+                    // (unchanged).
+                    XrefMdotOutcome::Resolver(at.unwrap().1, rel)
+                } else {
+                    // The enclosing name with no indexed definition
+                    // keeps its "no definition for X" report.
+                    XrefMdotOutcome::NoDefinition(sym.name.clone())
                 }
             }
-            other => {
-                // (4) Nothing the workspace knows about under/near the
-                // point: fall through to the tooling resolver when the
-                // point sits on a symbol (the point's own path-shaped
-                // token — not the enclosing name — is what the resolver
-                // gets); the enclosing name with no indexed definition
-                // keeps its "no definition for X" report; neither, "no
-                // symbol under point".
-                if let Some((_, token)) = at {
-                    XrefMdotOutcome::Resolver(token, rel)
-                } else if let Some((name, _)) = other {
-                    XrefMdotOutcome::NoDefinition(name)
-                } else {
-                    XrefMdotOutcome::NoSymbol
-                }
+        } else {
+            // (4) Nothing the workspace knows about under/near the
+            // point: fall through to the tooling resolver when the
+            // point sits on a symbol (the point's own path-shaped
+            // token — not the enclosing name — is what the resolver
+            // gets); neither, "no symbol under point".
+            match at {
+                Some((_, token)) => XrefMdotOutcome::Resolver(token, rel),
+                None => XrefMdotOutcome::NoSymbol,
             }
         }
     }
 
+    /// (M-., phase (3)) The enclosing symbol at `line` in `rel`'s
+    /// outline (owned — the plan-017 B5 gate compares the point's own
+    /// symbol extent with this symbol's NAME extent, `start_byte` ..
+    /// `start_byte + name.len()`). `None` when the file has no symbol
+    /// at `line` — the caller takes the (4) tooling-resolver seam.
+    fn xref_enclosing_symbol(
+        &self,
+        rel: &str,
+        line: usize,
+    ) -> Option<crate::nav::index::Symbol> {
+        let outline = self.index.outline(rel);
+        crate::nav::index::enclosing_symbol(outline, line).cloned()
+    }
+
+    /// (plan-017 B5, the column-precise gate) Whether the point's own
+    /// symbol extent (the per-language word run at the point, via
+    /// `symbol_extent_at` — a `-` is inside a symbol in Clojure and
+    /// outside it in Rust) overlaps the enclosing symbol's NAME extent.
+    /// The name extent is the index-recorded `start_byte` (the
+    /// definition's name-node start, an absolute file byte offset) plus
+    /// the name's byte length; the point's run is converted to the same
+    /// absolute-byte space against `line_base` (the point line's first
+    /// byte, from the caller's buffer). The name's own line is the
+    /// index-recorded `line` field. `false` when the name sits on
+    /// another line or the extent cannot be derived (`line_base` is
+    /// `None` — a stale index after an external edit): a different-name
+    /// press on a stale index flags, never guesses.
+    pub(in crate::app::store) fn point_on_symbol_name(
+        line_text: &str,
+        col: usize,
+        lang: LanguageId,
+        line_base: Option<usize>,
+        line: usize,
+        sym: &crate::nav::index::Symbol,
+    ) -> bool {
+        let Some((run_start, run_end)) = symbol_extent_at(line_text, col, lang) else {
+            return false;
+        };
+        let Some(line_base) = line_base else {
+            return false;
+        };
+        // The name's own line: a name on another line can never be the
+        // point's token.
+        if sym.line != line {
+            return false;
+        }
+        // The name's extent in the point line's byte coordinates: the
+        // absolute `start_byte` minus the line's base; the name is the
+        // run's recorded text (its `len` is its byte length).
+        let name_start = sym.start_byte.saturating_sub(line_base);
+        let name_end = name_start + sym.name.len();
+        // Overlap — the two runs are maximal word runs under the same
+        // per-language word rule, so any overlap means they are the
+        // same symbol (a `respawn` run and a `spawn` name are disjoint
+        // by construction).
+        let (run_start, run_end) = (line_base + run_start, line_base + run_end);
+        run_start < name_end && name_start < run_end
+    }
+
     /// (M-., phase (1)) The definition candidates for the symbol AT THE
     /// POINT: the 010-01 Rust self-receiver pre-step, the 010-03
-    /// local-binding pre-step, the issue-language-aware-symbols Part 2
-    /// Clojure namespace-alias pre-step, then the name-keyed index lookup
-    /// (`xref_definition_candidates`). Pure over the index and the buffer
-    /// (no `&mut self`, so the caller's `buf` borrow never spans a
-    /// `&mut self` call — the 006-03 rule). `Err(alias)` — the flagged
-    /// unresolvable Clojure namespace alias (the caller reports it and
-    /// never jumps).
+    /// local-binding pre-step, the plan-017 CONVENTIONS pre-step (the
+    /// shared path — Clojure's namespace alias and Java's import/
+    /// qualified-class conventions, the table + query in
+    /// `redline_syntax::conventions`), then the name-keyed index lookup
+    /// (`xref_definition_candidates`). Pure over the index and the
+    /// buffer (no `&mut self`, so the caller's `buf` borrow never spans
+    /// a `&mut self` call — the 006-03 rule). `Err` — the flagged,
+    /// never-guessed convention miss (the caller reports it and never
+    /// jumps).
     fn xref_symbol_at_point_candidates(
         index: &SymbolIndex,
         lang: LanguageId,
@@ -374,7 +544,7 @@ impl AppStore {
         rel: &str,
         ident: &str,
         path_token: &str,
-    ) -> Result<Option<Vec<crate::nav::index::Location>>, String> {
+    ) -> Result<Option<Vec<crate::nav::index::Location>>, XrefConventionFlag> {
         // 010-01 (plan 010 Shape A, rung 1): the Rust self-receiver
         // pre-step — `self.<member>` resolves via the LEXICALLY
         // ENCLOSING impl's type (field → the struct's field line,
@@ -421,83 +591,120 @@ impl AppStore {
                 }
             }
         }
-        // issue-language-aware-symbols (Part 2): the Clojure
-        // namespace-alias pre-step. `alias/var` (and the keyword
-        // `::alias/var` — the marker is already stripped by the
-        // extraction) is a reference to the VAR `var` in the NAMESPACE
-        // `alias` stands for: either an `:as` alias THIS file's top-level
-        // `ns` form declares, or a FULL namespace name (a dotted `alias`
-        // — an alias can never contain a `.`). The jump targets the var,
-        // NARROWED to the files the namespace convention places it in
-        // (dots → `/`, hyphens → `_`, the three source extensions — the
-        // real-layout convention, `redline_syntax::clojure`). A DOTLESS
-        // alias the ns form does not declare is flagged, never guessed.
-        if lang == LanguageId::Clojure
-            && let Some((alias, var)) = path_token.rsplit_once('/')
-            && !var.is_empty()
-        {
-            let ns_name: Option<String> = if alias.contains('.') {
-                // A full namespace reference — identity (no declaration
-                // needed).
-                Some(alias.to_string())
-            } else {
-                // The alias must be declared by THIS file's ns form (the
-                // full source materializes here — the pre-step's own
-                // parse, the same lazy shape as the receiver
-                // classifications above).
-                let source = point.rope.to_string();
-                redline_syntax::clojure::ns_aliases(&source)
-                    .and_then(|aliases| {
-                        aliases
-                            .into_iter()
-                            .find(|(a, _)| a == alias)
-                            .map(|(_, ns)| ns)
-                    })
-            };
-            match ns_name {
-                Some(ns) => {
-                    let tails = redline_syntax::clojure::namespace_file_tails(&ns);
-                    if let Some(all) = Self::xref_definition_candidates(index, var, path_token, rel) {
+        // plan-017 (the conventions mechanism — the SHARED path): the
+        // per-language import/alias conventions live in
+        // `redline_syntax::conventions` (the table: name → path tails;
+        // the query: the file's import/alias forms — a new language is
+        // a row + a query there, not a branch here). This call site
+        // composes with the index: convention name → tails → NARROW
+        // the index's existing name-keyed candidates to the files the
+        // convention places the definition in (the Clojure Part-2 shape,
+        // generalized; never a second resolver engine).
+        if matches!(lang, LanguageId::Clojure | LanguageId::Java) {
+            // The full source materializes here — the pre-step's own
+            // parse (the same lazy shape as the receiver
+            // classifications above: only a convention-bearing
+            // language's press ever pays it).
+            let source = point.rope.to_string();
+            match redline_syntax::conventions::convention_name_for_reference(
+                lang, &source, ident, path_token,
+            ) {
+                Ok(Some(conv_name)) => {
+                    let tails = redline_syntax::conventions::convention_file_tails(
+                        lang, &conv_name,
+                    )
+                    .expect("the convention name and the tails come from the same table row");
+                    if let Some(all) = Self::xref_definition_candidates(index, ident, path_token, rel) {
                         let narrowed: Vec<crate::nav::index::Location> = all
                             .iter()
                             .filter(|loc| tails.iter().any(|t| loc.file.ends_with(t)))
                             .cloned()
                             .collect();
-                        // The convention file(s) carry the indexed var: the
-                        // narrowed set (ordering — same-file-first — is
-                        // preserved). The convention file has no indexed
-                        // `var`: degrade to the BARE name-keyed lookup (the
-                        // Part-1 superset — never a fabricated target, never
-                        // an empty answer where the name is indexed).
-                        return Ok(Some(if narrowed.is_empty() { all } else { narrowed }));
+                        if !narrowed.is_empty() {
+                            // The convention file(s) carry the indexed
+                            // name: the narrowed set (the same-file-first
+                            // ordering is preserved — the filter over
+                            // the already-ordered set).
+                            return Ok(Some(narrowed));
+                        }
+                        // The convention places the name in a file the
+                        // index does not hold. Per-language CONVENTION
+                        // SEMANTICS: Java's JLS mapping is HARD — an
+                        // imported `a.b.C` is THAT class, and a
+                        // candidate in another package is a DIFFERENT
+                        // type (offering the superset would be the
+                        // plausible-looking lie the B5 decision forbids):
+                        // FLAGGED. Clojure's namespace layout is SOFT
+                        // (project-local source roots, non-standard
+                        // directories): the empty intersection degrades
+                        // to the BARE name-keyed superset (the Part-2
+                        // behavior — never an empty answer where the
+                        // name is indexed).
+                        return match lang {
+                            LanguageId::Java => {
+                                Err(XrefConventionFlag::Unresolved(ident.to_string()))
+                            }
+                            _ => Ok(Some(all)),
+                        };
                     }
-                    return Ok(None);
+                    // `ident` has no indexed definition at all. Java:
+                    // the import / qualified-class reference is
+                    // FLAGGED (the convention placed it in a file the
+                    // tree does not hold). Clojure: today's outcome
+                    // stands (the bare name-keyed miss — the B5 flag /
+                    // the resolver seam — byte-for-byte Part-2).
+                    return match lang {
+                        LanguageId::Java => {
+                            Err(XrefConventionFlag::Unresolved(ident.to_string()))
+                        }
+                        _ => Ok(None),
+                    };
                 }
-                None => {
-                    // No ns form, or the alias is not declared: FLAG — a
-                    // wrong jump is worse than no jump.
-                    return Err(alias.to_string());
+                Ok(None) => {
+                    // No convention applies (the file declares nothing
+                    // for this reference, or it is a bare name): the
+                    // name-keyed lookup below stands, byte-for-byte.
+                }
+                Err(flagged) => {
+                    // A namespaced reference the file does not declare
+                    // (the Clojure dotless alias): FLAGGED — a wrong
+                    // jump is worse than no jump.
+                    return Err(XrefConventionFlag::UnresolvableAlias(flagged));
                 }
             }
         }
         Ok(Self::xref_definition_candidates(index, ident, path_token, rel))
     }
 
-    /// (M-., phase (3)) The enclosing-symbol fallback: the enclosing
-    /// symbol's definitions take over, and a workspace hit on THAT never
-    /// triggers the resolver (no resolver spam). `None` when the file has
-    /// no symbol at `line` — the caller takes the (4) tooling-resolver
-    /// seam.
-    fn xref_enclosing_symbol_fallback(
-        &self,
-        rel: &str,
-        line: usize,
-    ) -> Option<(String, Vec<crate::nav::index::Location>)> {
-        let outline = self.index.outline(rel);
-        let sym = crate::nav::index::enclosing_symbol(outline, line)?;
-        let lookup_name = sym.name.clone();
-        let defs = self.index.definitions_of(&lookup_name);
-        Some((lookup_name, defs))
+    /// The tooling-resolver chain, built exactly as `start_symbol_resolution`
+    /// builds it (the registration order — the providers' `languages()`
+    /// dispatch makes order only a tie-breaker). One site, two callers:
+    /// the (4) tooling-resolver fall-through and the plan-017 B5
+    /// "no provider can answer" check (the named unresolved flag for a
+    /// different, unresolvable token) — the check must read the SAME
+    /// dispatch table the fall-through walks, so the two cannot drift
+    /// apart.
+    fn resolution_providers(&self) -> Vec<Box<dyn redline_resolve::ToolingProvider>> {
+        vec![
+            Box::new(CargoProvider::new()),
+            Box::new(JsProvider::new()),
+            Box::new(PythonProvider::new()),
+            Box::new(GoProvider::new()),
+        ]
+    }
+
+    /// (plan-017 B5) Whether ANY tooling provider handles `lang_name`
+    /// (the `SymbolContext.language` dispatch — lowercase name match
+    /// against the providers' `languages()`, the same rule
+    /// `Resolver::resolve_traced` applies). The B5 gate uses it: a
+    /// different, unresolvable token goes to the named `unresolved`
+    /// flag ONLY when no provider can answer — when one can, the (4)
+    /// tooling-resolver seam stays authoritative (tooling over the
+    /// guess, the plan's layer order).
+    fn tooling_handles_language(&self, lang_name: &str) -> bool {
+        self.resolution_providers()
+            .iter()
+            .any(|p| p.languages().contains(&lang_name))
     }
 
     /// (M-., dispatch) The single-definition jump (the
@@ -1855,18 +2062,20 @@ impl AppStore {
         // is the one pre-gate exception (it never calls the hook —
         // named in the crate docs, lib.rs).
         let confirm_tx = self.fetch_confirm_tx.clone();
+        // The provider set (before the spawn — the closure owns it).
+        let resolution_providers = self.resolution_providers();
         tokio::task::spawn_blocking(move || {
             // The provider chain. 011-01 registers the non-Rust providers
             // and dispatches on the context language: a Python buffer can
             // never reach the cargo provider (and vice versa), so the
             // registration order among languages is only a tie-breaker.
             // `None` language (unknown extension) still walks the whole
-            // chain, in this order.
-            let mut chain = Resolver::new();
-            chain.add(CargoProvider::new());
-            chain.add(JsProvider::new());
-            chain.add(PythonProvider::new());
-            chain.add(GoProvider::new());
+            // chain, in this order. The provider set itself is the
+            // app-side single site (`resolution_providers`) — the plan-
+            // 017 B5 "no provider can answer" check reads the same list
+            // the fall-through walks.
+            let chain =
+                Resolver::with_providers(resolution_providers);
             let ctx = SymbolContext {
                 workspace_root: root,
                 symbol: symbol_owned.clone(),

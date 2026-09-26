@@ -5,12 +5,13 @@ impl AppStore {
     /// M-. inside an EXTERNAL (registry / tooling) buffer (plan 006
     /// issue 03): the SAME selection rule as the project path (symbol at
     /// point + `::`-path token, same-file-first candidate ordering,
-    /// dedup, enclosing-symbol fallback) run against the OWNING crate's
-    /// index (keyed against its source_root); a crate miss keeps the
-    /// resolver fall-through (unchanged semantics — `SymbolContext` still
-    /// carries the ORIGIN project's workspace_root, so following a type
-    /// into ANOTHER dependency resolves through the origin project's
-    /// metadata; the landing in that crate registers its index per
+    /// dedup, the plan-017 B5 column-precise enclosing-symbol fallback)
+    /// run against the OWNING crate's index (keyed against its
+    /// source_root); a crate miss keeps the resolver fall-through
+    /// (unchanged semantics — `SymbolContext` still carries the ORIGIN
+    /// project's workspace_root, so following a type into ANOTHER
+    /// dependency resolves through the origin project's metadata; the
+    /// landing in that crate registers its index per
     /// `open_resolved_source`, and the LRU cap governs).
     pub(super) fn xref_in_external_buffer(&mut self, key: &str, path: &Path) {
         // Supersede any in-flight tooling resolve (006-02b item 2: a hit
@@ -213,42 +214,77 @@ impl AppStore {
                 ExternalXrefOutcome::Picker { lookup, defs }
             }
         } else {
-            // (3) Enclosing-symbol fallback (unchanged: by line, not by
-            // the point's column). Same-file-first order so the picker's
-            // preselected row (index 0) is the best guess — the fallback's
-            // defs come out of `definitions_of` unsorted.
+            // (3) Enclosing-symbol fallback (plan-017 B5: column-precise —
+            // the SAME gate as the project path: the by-line guess fires
+            // only when the point is on the enclosing symbol's OWN NAME,
+            // or when the point carries no token at all; a point on a
+            // DIFFERENT token never gets the enclosing symbol offered —
+            // a plausible-looking lie about where the definition is).
+            // External buffers are tooling landings (provider languages
+            // in practice), so a suppressed fallback keeps the (4)
+            // resolver fall-through with the point's own token (unchanged
+            // semantics).
             let outline = idx.outline(&rel).to_vec();
-            match crate::nav::index::enclosing_symbol(&outline, line) {
-                Some(sym) => {
-                    let lookup = sym.name.clone();
-                    let mut defs = idx.definitions_of(&lookup);
-                    defs.sort_by(|a, b| {
-                        (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
-                            (a.file.as_str(), a.symbol.line, &a.symbol.name)
-                                .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
-                        })
-                    });
-                    if defs.is_empty() {
-                        // (4) The point's own (path-shaped) token is what
-                        // the resolver gets — not the enclosing name.
-                        match at {
-                            Some((_, token)) => {
-                                ExternalXrefOutcome::Resolver(token.clone())
-                            }
-                            None => ExternalXrefOutcome::NoDefinition(lookup),
-                        }
-                    } else {
-                        // (jump-ambiguity) the enclosing fallback is a
-                        // by-LINE guess: it is NEVER a silent jump —
-                        // even the same-file unique case goes to the
-                        // picker, best preselected.
-                        ExternalXrefOutcome::Picker { lookup, defs }
-                    }
+            let sym = crate::nav::index::enclosing_symbol(&outline, line);
+            let gate_allows = match (&at, sym) {
+                (Some(_), Some(sym)) => {
+                    let line_text = self
+                        .buffers
+                        .get(key)
+                        .and_then(|b| b.line_text(line))
+                        .map(|t| t.into_owned())
+                        .unwrap_or_default();
+                    let base = self
+                        .buffers
+                        .get(key)
+                        .and_then(|b| point_byte_offset(&b.rope, line, 0));
+                    AppStore::point_on_symbol_name(
+                        &line_text,
+                        self.point_col(),
+                        lang,
+                        base,
+                        line,
+                        sym,
+                    )
                 }
-                None => match at {
+                _ => true,
+            };
+            if let Some(sym) = sym && gate_allows {
+                // Same-file-first order so the picker's preselected row
+                // (index 0) is the best guess — the fallback's defs come
+                // out of `definitions_of` unsorted.
+                let lookup = sym.name.clone();
+                let mut defs = idx.definitions_of(&lookup);
+                defs.sort_by(|a, b| {
+                    (a.file != rel).cmp(&(b.file != rel)).then_with(|| {
+                        (a.file.as_str(), a.symbol.line, &a.symbol.name)
+                            .cmp(&(b.file.as_str(), b.symbol.line, &b.symbol.name))
+                    })
+                });
+                if defs.is_empty() {
+                    // (4) The point's own (path-shaped) token is what
+                    // the resolver gets — not the enclosing name.
+                    match at {
+                        Some((_, token)) => {
+                            ExternalXrefOutcome::Resolver(token.clone())
+                        }
+                        None => ExternalXrefOutcome::NoDefinition(lookup),
+                    }
+                } else {
+                    // (jump-ambiguity) the enclosing fallback is a
+                    // by-LINE guess: it is NEVER a silent jump —
+                    // even the same-file unique case goes to the
+                    // picker, best preselected.
+                    ExternalXrefOutcome::Picker { lookup, defs }
+                }
+            } else {
+                match at {
                     Some((_, token)) => ExternalXrefOutcome::Resolver(token.clone()),
-                    None => ExternalXrefOutcome::NoSymbol,
-                },
+                    None => match sym {
+                        Some(sym) => ExternalXrefOutcome::NoDefinition(sym.name.clone()),
+                        None => ExternalXrefOutcome::NoSymbol,
+                    },
+                }
             }
         };
         Some((root, outcome, jump_name))

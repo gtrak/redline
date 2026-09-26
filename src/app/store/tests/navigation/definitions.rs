@@ -851,8 +851,14 @@ use super::*;
 
     /// 010-01 (pin): honest degradation — `self.a` inside a GENERIC impl
     /// (`impl<T> Foo<T>`) never resolves through the tables: the self type
-    /// is not a plain identifier, so the exact pre-010-01 behavior stands
-    /// (bare `a` → no index hit → the enclosing symbol takes over).
+    /// is not a plain identifier, so the exact pre-010-01 extraction stands
+    /// (the bare `a` lookup). plan-017 B5 reshaped the miss: the bare
+    /// `a` has no indexed definition, the point is on a token OTHER than
+    /// the enclosing `f`'s own name, and Rust HAS a tooling provider —
+    /// the (4) tooling-resolver seam gets the point's own token
+    /// (pre-B5: the by-line enclosing guess opened a picker on `f`).
+    /// Plain (no runtime) unit test: the spawn is skipped and the miss
+    /// is reported synchronously — never a jump, never a picker.
     #[test]
     fn xref_self_in_generic_impl_degrades_to_today() {
         let (mut s, _dir) = store_with_index(&[(
@@ -864,32 +870,26 @@ use super::*;
         // col 31.
         s.set_point(2, 31, 31);
         s.xref_find_definitions();
-        // (jump-ambiguity) the enclosing-symbol fallback is a by-LINE
-        // guess → the picker (best preselected), never a silent jump.
-        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
-        // The enclosing-symbol fallback lands on `f` itself (its only
-        // indexed definition) — today's target, through the picker: RET
-        // accepts the top guess.
+        // B5: no enclosing picker (the pre-B5 shape); the point's own
+        // token went to the tooling seam.
+        assert!(!s.picker_open(), "no enclosing picker (msg: {})", s.message);
         assert!(
-            s.picker_filtered()[0].0.name.starts_with("src/lib.rs:3"),
-            "enclosing `f` (line 2, 1-based 3) is preselected: {:?}",
-            s.picker_filtered()[0].0.name
-        );
-        s.run_selected();
-        assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(
-            s.point_line(),
-            2,
-            "enclosing `f` took over (msg: {})",
+            s.message.contains("no provider resolution for `self.a`"),
+            "the self token went to the resolver, not to the enclosing `f`: `{}`",
             s.message
         );
+        assert_eq!(s.resolve_generation, 2, "xref supersede bump + start bump");
+        assert_eq!(s.point_line(), 2, "no jump happened (msg: {})", s.message);
     }
 
-    /// 010-01 (pin): `self.a` with NO enclosing impl (top-level / outside
-    /// every impl block) degrades to the exact pre-010-01 behavior — and a
-    /// non-Rust buffer is never touched by the pre-step at all.
-    /// (jump-ambiguity) the enclosing fallback is by line → the picker,
-    /// RET accepts the top guess.
+    /// 010-01 (pin): `self` with NO member after it (the token is `self`,
+    /// not `self.<member>`) — the self pre-step never fires; `self` has no
+    /// indexed definition. plan-017 B5 reshaped the miss: the point is on
+    /// a token OTHER than the enclosing `free`'s own name, and Rust HAS a
+    /// tooling provider — the (4) tooling-resolver seam gets the token
+    /// (pre-B5: the by-line enclosing guess took over through the
+    /// picker). Plain (no runtime) unit test: the spawn is skipped and
+    /// the miss is reported synchronously — never a jump, never a picker.
     #[test]
     fn xref_self_without_enclosing_impl_degrades_to_today() {
         let (mut s, _dir) = store_with_index(&[(
@@ -897,16 +897,20 @@ use super::*;
             "pub struct Foo { pub a: i32 }\nfn free() { let _ = self; }\n",
         )]);
         s.open_path("src/lib.rs");
-        // Line 1: "fn free() { let _ = self; }" — no member after `self`
-        // (the token is `self`, not `self.<member>`): the pre-step never
-        // fires; `self` has no definition → the enclosing `free` takes
-        // over (today's behavior) through the picker.
+        // Line 1: "fn free() { let _ = self; }" — `self` at col 24: the
+        // pre-step never fires (no member after `self`).
         s.set_point(1, 24, 24);
         s.xref_find_definitions();
-        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
-        s.run_selected();
-        assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(s.point_line(), 1, "enclosing `free` (msg: {})", s.message);
+        // B5: no enclosing picker (the pre-B5 shape); the `self` token
+        // went to the tooling seam.
+        assert!(!s.picker_open(), "no enclosing picker (msg: {})", s.message);
+        assert!(
+            s.message.contains("no provider resolution for `self`"),
+            "the token went to the resolver, not to the enclosing `free`: `{}`",
+            s.message
+        );
+        assert_eq!(s.resolve_generation, 2, "xref supersede bump + start bump");
+        assert_eq!(s.point_line(), 1, "no jump happened (msg: {})", s.message);
     }
 
     // ── 010-03: M-. local-binding resolution (Shape A rung 3) ───────
@@ -1213,9 +1217,15 @@ use super::*;
     /// the middle segment `b` happens to be a local binding with a
     /// written type (`D`) that ALSO has a field `c` — must NOT be
     /// misattributed to `b`: the middle segment is a field access, never
-    /// a local binding, so today's bare `c` behavior stands (no jump to
-    /// `D`'s `c` — the wrong struct — the enclosing `main` takes over
-    /// instead).
+    /// a local binding, so the bare `c` extraction stands (no jump to
+    /// `D`'s `c` — the wrong struct). plan-017 B5 reshaped the miss:
+    /// `c` has no indexed definition, the point is on a token OTHER
+    /// than the enclosing `main`'s own name, and Rust HAS a tooling
+    /// provider — so the (4) tooling-resolver seam gets the point's own
+    /// token (tooling stays authoritative over the by-line enclosing
+    /// guess, which used to open a picker on `main`). Plain (no
+    /// runtime) unit test: the spawn is skipped and the miss is
+    /// reported synchronously — still NEVER a jump to `D`'s `c`.
     #[test]
     fn xref_local_binding_dot_chained_receiver_stays_bare() {
         let (mut s, _dir) = store_with_index(&[(
@@ -1227,17 +1237,16 @@ use super::*;
         // jumped to `D`'s `c` (line 1) through the misattributed `b`.
         s.set_point(6, 16, 16);
         s.xref_find_definitions();
-        // (jump-ambiguity) the enclosing fallback is a by-LINE guess →
-        // the picker; RET lands on the enclosing `main` — NOT `D`'s `c`.
-        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
-        s.run_selected();
-        assert_eq!(s.view_name_display(), "src/lib.rs");
-        assert_eq!(
-            s.point_line(),
-            3,
-            "the bare `c` degraded to the enclosing `main` — NOT `D`'s `c` (msg: {})",
+        // B5: no enclosing picker (the pre-B5 shape), the resolver
+        // fall-through with the point's own token instead.
+        assert!(!s.picker_open(), "no enclosing picker (msg: {})", s.message);
+        assert!(
+            s.message.contains("no provider resolution for `c`"),
+            "the bare `c` went to the tooling seam, not to `D`'s `c`: `{}`",
             s.message
         );
+        assert_eq!(s.resolve_generation, 2, "xref supersede bump + start bump");
+        assert_eq!(s.point_line(), 6, "no jump happened (msg: {})", s.message);
     }
 
     // ── plan 006 issue 02: tooling-resolver fall-through ─────────────────────────
@@ -1648,37 +1657,322 @@ use super::*;
         );
     }
 
-    /// 010-rung4-and-paths (item 2, app level): M-. on `p.x` in a C
-    /// buffer lands via the index fall-through with the whole path — the
-    /// project index has no C field symbols (the C query indexes
-    /// functions / structs / macros only), so the lookup degrades to the
-    /// enclosing symbol and jumps there, exactly as M-. does today;
-    /// nothing new is guessed.
+    /// plan-017 B5 (C direction: the flagged name, not a picker). M-. on
+    /// `p.x` in a C buffer — the project index has no C field symbols
+    /// (the C query indexes functions / structs / macros only), so the
+    /// bare `x` (and the whole path `p.x`) has no indexed definition;
+    /// the point sits on a token OTHER than the enclosing `use_it`'s
+    /// own name, and C has no tooling provider — the name is reported
+    /// as the named UNRESOLVED flag, never the enclosing function's
+    /// picker (the pre-B5 shape: a by-line picker on `use_it` for a
+    /// question about `x` — a plausible-looking lie about where the
+    /// definition is). Both directions: the legitimate enclosing case
+    /// stays pinned by `xref_b5_point_on_enclosing_name_keeps_the_picker`
+    /// below.
     #[test]
-    fn xref_c_field_access_lands_via_index_fall_through() {
+    fn xref_c_field_access_is_unresolved_not_misrouted() {
         let (mut s, _dir) = store_with_index(&[("c/main.c", "struct Point { int x; };\nint use_it(struct Point p) {\n    return p.x;\n}\n")]);
         s.open_path("c/main.c");
         // Line 2: "    return p.x;" — `x` at col 13.
         s.set_point(2, 13, 13);
         s.xref_find_definitions();
-        // The whole path `p.x` (and the bare `x`) has no indexed
-        // definition — the enclosing-symbol fall-through lands on
-        // `use_it` (line 1), through the picker (jump-ambiguity: a
-        // by-LINE guess is never a silent jump).
-        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
-        s.run_selected();
-        assert_eq!(s.view_name_display(), "c/main.c");
-        assert_eq!(s.point_line(), 1, "the enclosing function (msg: {})", s.message);
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "c/main.c", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `x`"),
+            "the flagged name is the one at the point, not the enclosing function: `{}`",
+            s.message
+        );
     }
 
-    /// newlang-paths (e2e pin, Java): M-. on `A.c` in a Java buffer — the
-    /// whole path `A.c` (and the bare `c`) has NO indexed definition: the
-    /// Java outline indexes classes / methods only (fields are
-    /// deliberately out — queries.rs), so the index fall-through lands on
-    /// the enclosing method `f`, exactly like the C pin above; nothing
-    /// new is guessed.
+    /// plan-017 B5 (the audit's L5a case, end-to-end both directions).
+    /// A C function called inside `main`, declared in a header this
+    /// project cannot resolve: M-. on the call used to open the
+    /// enclosing-fallback picker on `main` — the wrong jump. Now the
+    /// point sits on a token OTHER than `main`'s own name and C has no
+    /// tooling provider, so the name is the named UNRESOLVED flag: no
+    /// picker, no jump.
+    ///
+    /// MUTATION PIN (the brief's B5 mutation): making the fallback fire
+    /// again on a different name — i.e. deleting the gate so
+    /// `gate_allows` is always `true` in `xref_mdot_candidates` (or
+    /// `point_on_symbol_name` always returning `true`) — re-opens the
+    /// `main` picker here and reddens this test (and
+    /// `xref_c_field_access_is_unresolved_not_misrouted` above). The
+    /// legitimate direction stays pinned by
+    /// `xref_b5_point_on_enclosing_name_keeps_the_picker` below, which
+    /// reddens instead if the gate is inverted to never allow.
     #[test]
-    fn xref_java_field_access_lands_via_index_fall_through() {
+    fn xref_b5_c_call_in_main_is_unresolved_not_a_picker() {
+        let (mut s, _dir) = store_with_index(&[(
+            "c/imp.c",
+            "#include <sub/thing.h>\nint main(void) {\n    return thing_x(1);\n}\n",
+        )]);
+        s.open_path("c/imp.c");
+        // Line 2: "    return thing_x(1);" — `thing_x` starts at col 11.
+        s.set_point(2, 15, 15);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "c/imp.c", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `thing_x`"),
+            "the flagged name is the one asked about, not `main`: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 B5 (the kept direction): the fallback stands when the
+    /// point is on the enclosing symbol's OWN NAME — the answer is
+    /// legitimate and preselected, exactly as today. M-. on `main`'s
+    /// own name is the same-file unique case (silent jump to the
+    /// definition); the forced list (`M->`) shows the picker with
+    /// `main` preselected. A point carrying no token at all (the by-line
+    /// jump-to-enclosing-function behavior) stays pinned by
+    /// `xref_no_symbol_under_point_falls_back_to_enclosing`.
+    #[test]
+    fn xref_b5_point_on_enclosing_name_keeps_the_picker() {
+        let (mut s, _dir) = store_with_index(&[(
+            "c/imp.c",
+            "#include <sub/thing.h>\nint main(void) {\n    return thing_x(1);\n}\n",
+        )]);
+        s.open_path("c/imp.c");
+        // Line 1: "int main(void) {" — `main` at col 4.
+        s.set_point(1, 5, 5);
+        s.xref_find_definitions();
+        // The name is indexed in this file: the same-file unique case is
+        // a silent jump (the pre-B5 outcome for this press, byte-for-
+        // byte) — never the B5 flag (the gate allows the point on its
+        // own name).
+        assert!(!s.picker_open(), "same-file unique: silent jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "c/imp.c");
+        assert_eq!(s.point_line(), 1, "landed on `main`'s own definition line");
+
+        // The forced list (`M->`): the picker is legitimate and
+        // preselected on `main`.
+        s.xref_find_definitions_picker();
+        assert!(s.picker_open(), "M->: the picker is legitimate (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("c/imp.c:2"),
+            "`main`'s definition (line 1, 1-based 2) is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+    }
+
+    // —— plan-017 issue 03: Java `a.b.C` → `a/b/C.java` (the conventions
+    // mechanism) ——————————————
+
+    /// plan-017 issue 03 (Java, direction: the landing). The file's
+    /// `import a.b.C;` (the grammar's `import_declaration` carrying the
+    /// whole `scoped_identifier "a.b.C"`) places `C` by the JLS §7.6
+    /// convention in `a/b/C.java`; the index's name-keyed candidates
+    /// (two `C` classes exist in the project) NARROW to the convention
+    /// file — the jump lands on the right class, not the decoy.
+    #[test]
+    fn xref_java_import_narrows_to_convention_file_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/a/b/C.java",
+                "package a.b;\npublic class C {\n    public int use() { return 1; }\n}\n",
+            ),
+            (
+                "src/other/C.java",
+                "package other;\npublic class C {\n    public int decoy() { return 2; }\n}\n",
+            ),
+            (
+                "src/main/App.java",
+                "package main;\n\nimport a.b.C;\n\npublic class App {\n    public void run() {\n        C x;\n    }\n}\n",
+            ),
+        ]);
+        s.open_path("src/main/App.java");
+        // Line 6: "        C x;" — the bare `C` at col 8.
+        s.set_point(6, 8, 8);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the import narrows to the convention file's one C (the decoy is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/a/b/C.java:2"),
+            "the convention file's class is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/a/b/C.java", "landed in the convention file");
+        assert_eq!(s.point_line(), 1, "on the class's definition line");
+    }
+
+    /// plan-017 issue 03 (Java, direction: the flag). The import places
+    /// `C` in `a/b/C.java` — a file the tree does not hold (and `C` is
+    /// indexed nowhere). The JLS mapping is HARD: a candidate in another
+    /// package would be a DIFFERENT type — so the name is the named
+    /// UNRESOLVED flag, never a picker, never the superset.
+    #[test]
+    fn xref_java_imported_class_missing_from_tree_is_flagged() {
+        let (mut s, _dir) = store_with_index(&[(
+            "src/main/App.java",
+            "package main;\nimport a.b.C;\npublic class App {\n    void run() {\n        C x;\n    }\n}\n",
+        )]);
+        s.open_path("src/main/App.java");
+        // Line 4: "        C x;" — the bare `C` at col 8.
+        s.set_point(4, 8, 8);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "src/main/App.java", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `C`"),
+            "the flagged name is the imported one: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 03 (Java, byte-for-byte): a SAME-PACKAGE reference
+    /// with no import for the name — the convention has nothing to
+    /// narrow by, and the bare name-keyed lookup stands exactly as
+    /// today (the JLS: same-package types need no import).
+    #[test]
+    fn xref_java_same_package_reference_keeps_bare_lookup() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/main/App.java",
+                "package main;\npublic class App {\n    void run() { B b; }\n}\n",
+            ),
+            ("src/main/B.java", "package main;\npublic class B {}\n"),
+        ]);
+        s.open_path("src/main/App.java");
+        // Line 2: "    void run() { B b; }" — `B` at col 17.
+        s.set_point(2, 17, 17);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/main/B.java:2"),
+            "the bare name-keyed lookup carried it: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/main/B.java");
+        assert_eq!(s.point_line(), 1, "on `B`'s class line");
+    }
+
+    /// plan-017 issue 03 (Java, the qualified-reference guard): a field
+    /// access `A.c` must NEVER be mapped through the file's
+    /// `import a.b.C;` — JLS §7.5.1, an import never shadows a
+    /// qualified reference; the bare `c` name-keyed lookup stands
+    /// (same-file `A`'s own `c` method first, the other-file `c`
+    /// second — the convention narrows NOTHING here).
+    #[test]
+    fn xref_java_qualified_reference_ignores_import_binding() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/A.java",
+                "import a.b.C;\npublic class A {\n    int c;\n    void f() {\n        int x = A.c;\n    }\n    static int c() { return 2; }\n}\n",
+            ),
+            (
+                "src/a/b/C.java",
+                "package a.b;\npublic class C {\n    public int c() { return 1; }\n}\n",
+            ),
+        ]);
+        s.open_path("src/A.java");
+        // Line 4: "        int x = A.c;" — `c` at col 18 (the
+        // field_access token is `A.c`, the bare name is `c`).
+        s.set_point(4, 18, 18);
+        s.xref_find_definitions();
+        // The bare `c` lookup: TWO indexed `c` methods (A's own first —
+        // same-file-first), the picker offers both. The convention did
+        // NOT narrow to the import's `a/b/C.java` (that shape would
+        // leave exactly one row there).
+        assert!(s.picker_open(), "two bare-`c` candidates: picker (msg: {})", s.message);
+        assert_eq!(
+            s.picker_filtered().len(),
+            2,
+            "the qualified reference keeps BOTH candidates (no import narrowing): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/A.java:7"),
+            "`A`'s own `c` (line 6, 1-based 7) is preselected same-file-first: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+    }
+
+    /// plan-017 issue 03 (Java, the explicitly-qualified reference):
+    /// `a.b.C` at the point with NO import in the file — the 011-06
+    /// path token carries the `scoped_type_identifier` whole; the JLS
+    /// package-simple shape (lowercase head — a package name is all
+    /// lowercase, §1.3) places it in `a/b/C.java`.
+    #[test]
+    fn xref_java_qualified_type_reference_uses_convention_without_import() {
+        let (mut s, _dir) = store_with_index(&[
+            ("a/b/C.java", "package a.b;\npublic class C {}\n"),
+            ("src/Main.java", "public class Main {\n    void f() {\n        a.b.C x;\n    }\n}\n"),
+        ]);
+        s.open_path("src/Main.java");
+        // Line 2: "        a.b.C x;" — `C` at col 12 (inside the
+        // whole `a.b.C` path token).
+        s.set_point(2, 12, 12);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the qualified shape narrows to the one file: {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("a/b/C.java:2"),
+            "the convention tail matched at the project root: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "a/b/C.java");
+        assert_eq!(s.point_line(), 1, "on the class's definition line");
+    }
+
+    /// plan-017 issue 03 (Java, the wildcard flag row): `import a.b.*;`
+    /// places no single class — the binding extractor stays out, and
+    /// the bare `C` keeps the name-keyed superset (the same-package `C`
+    /// is a legitimate candidate; the convention must not guess `a.b.C`
+    /// over it).
+    #[test]
+    fn xref_java_wildcard_import_keeps_bare_superset() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "src/main/App.java",
+                "package main;\nimport a.b.*;\npublic class App {\n    void run() { C x; }\n}\n",
+            ),
+            ("src/main/C.java", "package main;\npublic class C {}\n"),
+        ]);
+        s.open_path("src/main/App.java");
+        // Line 3: "    void run() { C x; }" — `C` at col 17.
+        s.set_point(3, 17, 17);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "the bare superset stands (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("src/main/C.java:2"),
+            "the same-package `C` is the candidate (never a guessed `a.b.C`): {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "src/main/C.java");
+    }
+
+
+    /// plan-017 B5 (Java direction, the same shape as the C pin): M-. on
+    /// `A.c` in a Java buffer — the Java outline indexes classes /
+    /// methods only (fields are deliberately out — queries.rs), so the
+    /// bare `c` (and the whole path `A.c`) has NO indexed definition;
+    /// the point sits on a token OTHER than the enclosing method `f`'s
+    /// own name, and Java has no tooling provider — the named
+    /// UNRESOLVED flag stands, never the enclosing method's picker.
+    /// (The convention pre-step does NOT fire here: `A.c`'s head is a
+    /// type name, not a package name — the JLS package-simple shape the
+    /// pre-step requires is lowercase-head; never a guess.)
+    #[test]
+    fn xref_java_field_access_is_unresolved_not_misrouted() {
         let (mut s, _dir) = store_with_index(&[(
             "src/A.java",
             "class A {\n    int c;\n    void f() {\n        int x = A.c;\n    }\n}\n",
@@ -1687,15 +1981,11 @@ use super::*;
         // Line 3 (0-based): "        int x = A.c;" — `c` at col 18.
         s.set_point(3, 18, 18);
         s.xref_find_definitions();
-        // (jump-ambiguity) the enclosing fallback is a by-LINE guess →
-        // the picker (best preselected); RET accepts the top guess.
-        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
-        s.run_selected();
-        assert_eq!(s.view_name_display(), "src/A.java");
-        assert_eq!(
-            s.point_line(),
-            2,
-            "the enclosing method (msg: {})",
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "src/A.java", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `c`"),
+            "the flagged name is the one at the point: `{}`",
             s.message
         );
     }

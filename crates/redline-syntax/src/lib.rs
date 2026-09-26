@@ -3,7 +3,9 @@
 
 pub mod cache;
 pub mod clojure;
+pub mod conventions;
 pub mod highlight;
+pub mod java;
 pub mod language;
 pub mod node;
 pub mod queries;

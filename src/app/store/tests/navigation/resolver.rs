@@ -138,17 +138,21 @@ use super::*;
     fn xref_workspace_hit_and_enclosing_hit_skip_resolver() {
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "fn main() { target(); }\n"),
-            ("src/lib.rs", "pub fn target() {}\n"),
+            ("src/lib.rs", "pub fn target() {\n\n}\n"),
         ]);
         s.open_path("src/main.rs");
         // Direct hit under the point → no fall-through.
         s.set_point(0, 12, 12);
         s.xref_find_definitions();
         assert_eq!(s.resolve_generation, 1, "direct hit: one supersede bump, no job");
-        // Enclosing hit → no fall-through either (a second supersede bump).
+        // Enclosing hit (plan-017 B5: the point carries no token — the
+        // blank line inside `target` — so the by-line enclosing answer
+        // still stands and skips the resolver; a point on a DIFFERENT
+        // token no longer reaches the enclosing guess at all).
         s.open_path("src/lib.rs");
-        s.set_point(0, 0, 0);
+        s.set_point(1, 0, 0);
         s.xref_find_definitions();
+        assert!(s.picker_open(), "enclosing fallback: picker (msg: {})", s.message);
         assert_eq!(s.resolve_generation, 2, "enclosing hit: one supersede bump, no job");
     }
 
