@@ -3204,3 +3204,232 @@ fn tooling_refinement_lands_on_the_name_for_live_definition_lines() {
             s.message
         );
     }
+
+    // —— plan-017 issue 08: the flag rows (the residual — what we have
+    // decided CANNOT be resolved statically, written after the
+    // resolvable set was known so the residual is exactly what is left).
+    // Every case below is pinned BOTH directions: the flagged form
+    // flags (no picker, no jump, the named `unresolved` flag — never a
+    // wrong landing), and the things that DO resolve in the same
+    // language still resolve (cited alongside: the issue-04/06/07 and
+    // the alias-jump pins, re-run in the same suite). ————————
+
+    /// plan-017 issue 08 (C#, direction: the flag). C# has NO directory
+    /// convention (a namespace may live anywhere in the project — a
+    /// convention row would be a guess), and no tooling provider: M-. on
+    /// a name the project index does not hold is the named UNRESOLVED
+    /// flag, never the enclosing method's picker (the pre-B5 shape) and
+    /// never a same-named-type jump.
+    #[test]
+    fn xref_csharp_unresolvable_call_is_unresolved_not_misrouted() {
+        let (mut s, _dir) = store_with_index(&[(
+            "cs/Main.cs",
+            "namespace App {\n    class Main {\n        static void Run() {\n            ExternalThing.Go();\n        }\n    }\n}\n",
+        )]);
+        s.open_path("cs/Main.cs");
+        // Line 3: "            ExternalThing.Go();" — `Go` at col 27..28.
+        s.set_point(3, 28, 28);
+        s.xref_find_definitions();
+        assert!(
+            !s.picker_open(),
+            "no picker, no jump (msg: {})",
+            s.message
+        );
+        assert_eq!(s.view_name_display(), "cs/Main.cs", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Go`"),
+            "the flagged name is the one at the point, not the enclosing `Run`: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 08 (Scheme, direction: the flag). A R6RS library
+    /// reference (`foo:bar` from `(import (library (foo core)))`) cannot
+    /// be mapped to a file portably — the library layout is
+    /// implementation-defined (Chicken / Gambit / Racket each differ,
+    /// and Racket has no `.scm` convention at all) — and no tooling
+    /// provider handles Scheme: M-. on the library name is the named
+    /// UNRESOLVED flag, never the enclosing function's picker.
+    #[test]
+    fn xref_scheme_unresolvable_library_name_is_unresolved_not_misrouted() {
+        let (mut s, _dir) = store_with_index(&[(
+            "scm/main.scm",
+            "(import (library (foo core)))\n(define (run x)\n  (foo:bar x))\n",
+        )]);
+        s.open_path("scm/main.scm");
+        // Line 2: "  (foo:bar x)" — `foo:bar` at col 3..9 (one Lisp word).
+        s.set_point(2, 7, 7);
+        s.xref_find_definitions();
+        assert!(
+            !s.picker_open(),
+            "no picker, no jump (msg: {})",
+            s.message
+        );
+        assert_eq!(s.view_name_display(), "scm/main.scm", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `foo:bar`"),
+            "the flagged name is the library name, not the enclosing `run`: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 08 (Scheme, direction: the guard). The flag must
+    /// not swallow the resolvable set: a Scheme definition that IS in
+    /// the workspace still lands (the name-keyed index is untouched by
+    /// the flag row — the cross-file unique candidate, preselected,
+    /// lands on RET).
+    #[test]
+    fn xref_scheme_in_workspace_definition_still_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            ("scm/main.scm", "(define (run x)\n  (helper x))\n"),
+            ("scm/lib.scm", "(define (helper x)\n  x)\n"),
+        ]);
+        s.open_path("scm/main.scm");
+        // Line 1: "  (helper x)" — `helper` at col 3..9.
+        s.set_point(1, 6, 6);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("scm/lib.scm:1"),
+            "the in-workspace defn is preselected: {:?}",
+            s.picker_filtered()
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "scm/lib.scm", "landed in the defining file");
+        assert_eq!(s.point_line(), 0, "on the defn line");
+    }
+
+    /// plan-017 issue 08 (C++ semantic resolution, direction: the flag).
+    /// A name only ADL / templates / an angle-bracket include could
+    /// resolve (`swap` — its declaration lives in `<algorithm>` / the
+    /// standard, not in this project): no C++ tooling provider exists,
+    /// so M-. must NOT silently land on a plausible-looking symbol
+    /// (the enclosing function, or a same-named workspace symbol) — it
+    /// is the named UNRESOLVED flag. The C++ twin of
+    /// `xref_c_angle_include_is_unresolved_not_a_guess` (the angle
+    /// include's `-I` limit); the quoted-include landing stays pinned by
+    /// `xref_cpp_quoted_include_narrows_to_convention_header_and_lands`.
+    #[test]
+    fn xref_cpp_semantic_name_is_unresolved_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[(
+            "cpp/imp.cpp",
+            "#include <vector>\nnamespace demo {\nint run(int a, int b) {\n    swap(a, b);\n    return a;\n}\n}\n",
+        )]);
+        s.open_path("cpp/imp.cpp");
+        // Line 3: "    swap(a, b);" — `swap` at col 4..7.
+        s.set_point(3, 6, 6);
+        s.xref_find_definitions();
+        assert!(
+            !s.picker_open(),
+            "no picker, no jump (msg: {})",
+            s.message
+        );
+        assert_eq!(s.view_name_display(), "cpp/imp.cpp", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `swap`"),
+            "the semantic name is flagged, not the enclosing `run`: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 08 (Python relative imports, direction: the
+    /// flag). `from . import json` binds `json` from the ENCLOSEING
+    /// PACKAGE — filesystem-local, never an installed module — and the
+    /// local submodule is ABSENT from the project tree (the index has
+    /// no `dumps`), so M-. on the dotted use reaches the tooling seam.
+    /// Pre-fix the seam probed `json` as an ABSOLUTE module and landed
+    /// in the stdlib json `__init__.py` (measured live: a
+    /// plausible-looking wrong jump for a name the file says is a
+    /// relative submodule). Now: the named UNRESOLVED flag — the
+    /// sys.path root is unknown from the buffer path, and a same-named-
+    /// module jump is exactly the guess the plan forbids.
+    ///
+    /// MUTATION PIN (the brief's flag-case mutation): making the case
+    /// resolve anyway — deleting the `python_relative_import_flags`
+    /// guard in `start_symbol_resolution` (or making
+    /// `python_relative_import_binds` return `false`) — sends the token
+    /// back to the tooling chain (live: the stdlib landing; here: the
+    /// `no provider resolution for \`json.dumps\`` miss) and reddens
+    /// this test.
+    #[test]
+    fn xref_python_relative_import_dotted_use_is_unresolved_not_misresolved() {
+        let (mut s, _dir) = store_with_index(&[(
+            "pkg/util.py",
+            "from . import json\n\n\ndef render():\n    return json.dumps({})\n",
+        )]);
+        s.open_path("pkg/util.py");
+        // Line 4: "    return json.dumps({})" — `dumps` at col 16..20.
+        s.set_point(4, 19, 19);
+        s.xref_find_definitions();
+        assert!(
+            !s.picker_open(),
+            "no picker, no jump (msg: {})",
+            s.message
+        );
+        assert_eq!(s.view_name_display(), "pkg/util.py", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `json.dumps`"),
+            "the relative-import-bound name is the named flag, never a same-named-module jump: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 08 (Python relative imports, direction: the guard
+    /// — the flag must not swallow the resolvable set). An ABSOLUTE
+    /// import (`import json`) is NOT a relative binding: the same
+    /// keystrokes keep the tooling seam byte-for-byte (no runtime in
+    /// unit tests — the miss names the token; the live stdlib landing is
+    /// the 011-06 L-P1 pin). A too-broad flag would report
+    /// `unresolved: `json.dumps`` here and undo 011-06.
+    #[test]
+    fn xref_python_absolute_import_dotted_use_still_reaches_the_tooling_seam() {
+        let (mut s, _dir) = store_with_index(&[(
+            "main.py",
+            "import json\n\n\ndef render():\n    return json.dumps({})\n",
+        )]);
+        s.open_path("main.py");
+        // Line 4: "    return json.dumps({})" — `dumps` at col 16..20.
+        s.set_point(4, 19, 19);
+        s.xref_find_definitions();
+        assert!(
+            !s.message.contains("unresolved: `json.dumps`"),
+            "the absolute binding is NOT flagged: `{}`",
+            s.message
+        );
+        assert!(
+            s.message.contains("no provider resolution for `json.dumps`"),
+            "the tooling seam stands (the live stdlib landing is 011-06 L-P1): `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 08 (Python relative imports, the bare shape). A
+    /// bare name bound by a relative import is NOT guarded (the guard is
+    /// the dotted shape only — a bare press has no module segment to
+    /// misprobe): it keeps the provider's own HONEST miss (measured
+    /// live: `no provider resolution for `helper`: bare symbol `helper`
+    /// has no module path …`) — never a jump, and not the `unresolved`
+    /// flag (the message shape stays byte-for-byte the provider's).
+    #[test]
+    fn xref_python_relative_import_bare_use_keeps_the_provider_miss() {
+        let (mut s, _dir) = store_with_index(&[(
+            "pkg/bare.py",
+            "from . import helper\n\n\ndef render():\n    return helper()\n",
+        )]);
+        s.open_path("pkg/bare.py");
+        // Line 4: "    return helper()" — `helper` at col 10..15.
+        s.set_point(4, 13, 13);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "pkg/bare.py", "the view did not move");
+        assert!(
+            !s.message.contains("unresolved: `helper`"),
+            "the bare shape is not the `unresolved` flag: `{}`",
+            s.message
+        );
+        assert!(
+            s.message.contains("no provider resolution for `helper`"),
+            "the provider's own honest miss stands: `{}`",
+            s.message
+        );
+    }

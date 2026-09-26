@@ -1,5 +1,13 @@
 use super::*;
 
+/// The effective import binding of a BARE Python name (the module path
+/// segments, item included — or the RELATIVE marker: the binding is from
+/// an enclosing package, never a path, never an installed module).
+enum PythonImportBinding {
+    Absolute(Vec<String>),
+    Relative,
+}
+
 impl AppStore {
     /// (007-03) The FULL original path of the `use` declaration that brings
     /// `symbol` into scope at `byte` (e.g. `use serde::Deserialize;` →
@@ -577,33 +585,67 @@ impl AppStore {
 
     /// (011-02) The Python scope hint: a BARE symbol → the module path +
     /// item its import binds it to. A dotted symbol (`os.path.join`) carries
-    /// its own module path → EMPTY (never treated as bare).
+    /// its own module path → EMPTY (never treated as bare). A RELATIVE
+    /// import (`from . import X`) keeps its pre-plan-017 EMPTY hint (the
+    /// sys.path root is unknown — the binding is still RECORDED, see
+    /// `python_relative_import_binds`).
     pub(in crate::app::store) fn python_scope_for(source: &str, byte: usize, symbol: &str) -> Vec<String> {
         if symbol.contains('.') {
             return Vec::new();
         }
-        Self::python_import_path_for_symbol(source, byte, symbol).unwrap_or_default()
+        match Self::python_import_path_for_symbol(source, byte, symbol) {
+            Some(PythonImportBinding::Absolute(path)) => path,
+            _ => Vec::new(),
+        }
     }
 
-    /// The module path (segments, item included) of the import that binds a
-    /// BARE Python `symbol` at `byte`:
-    /// - `from a import X` → `["a", "X"]`; `from a.b import X` →
-    ///   `["a", "b", "X"]`; `from a import X as Y` → the original `X` for
-    ///   bare `Y`;
-    /// - `import a.b as c` → `["a", "b"]` for bare `c` (the module alias);
+    /// (plan-017 issue 08) Whether a RELATIVE import in this file binds the
+    /// BARE `symbol` at `byte` — `from . import X`, `from ..pkg import X`,
+    /// `from . import X as Y` (and the re-import-shadowed shapes, the same
+    /// walk and shadowing rule as `python_scope_for`). A relative import
+    /// binds names from the enclosing PACKAGE: filesystem-local, never an
+    /// installed module, and the sys.path root is unknown from the buffer
+    /// path alone — so a dotted use of the bound name (`X.member`) must not
+    /// be probed as an absolute module path (the tooling seam's guard uses
+    /// this: the name is the plan-017 issue 08 Python relative-import flag
+    /// row — flagged, never a same-named-module jump).
+    pub(in crate::app::store) fn python_relative_import_binds(
+        source: &str,
+        byte: usize,
+        symbol: &str,
+    ) -> bool {
+        matches!(
+            Self::python_import_path_for_symbol(source, byte, symbol),
+            Some(PythonImportBinding::Relative)
+        )
+    }
+
+    /// The effective import binding of a BARE Python `symbol` at `byte`
+    /// (the module path + item, or the relative marker):
+    /// - `from a import X` → `Absolute(["a", "X"])`; `from a.b import X` →
+    ///   `Absolute(["a", "b", "X"])`; `from a import X as Y` → the
+    ///   original `X` for bare `Y`;
+    /// - `import a.b as c` → `Absolute(["a", "b"])` for bare `c` (the
+    ///   module alias);
     /// - a plain `import a.b` binds ONLY the top-level `a` → never a hint
     ///   for bare `b` (not guessed);
-    /// - relative imports (`from . import X`), wildcards (`import *`), and
-    ///   `from a import b.c` (binds `b`, an attribute walk) → `None`
-    ///   (the sys.path root is unknown from the buffer path alone — never
-    ///   guessed).
+    /// - relative imports (`from . import X`) → `Relative` (the enclosing
+    ///   package is ambiguous without the sys.path root — never a path);
+    /// - wildcards (`import *`) and `from a import b.c` (binds `b`, an
+    ///   attribute walk) → `None` (never guessed).
     ///
     /// Bounded: the module level + the enclosing `function`/`class` blocks
     /// only (innermost first — a local import shadows the module-level
     /// one); imports nested deeper (under an `if`, etc.) are not counted.
     /// Within a block the LAST matching statement at/before `byte` wins
-    /// (a re-import shadows the earlier one).
-    fn python_import_path_for_symbol(source: &str, byte: usize, symbol: &str) -> Option<Vec<String>> {
+    /// (a re-import shadows the earlier one — including a relative
+    /// re-import over an earlier absolute one: the effective binding is
+    /// the one in force at the point).
+    fn python_import_path_for_symbol(
+        source: &str,
+        byte: usize,
+        symbol: &str,
+    ) -> Option<PythonImportBinding> {
         let language = redline_syntax::queries::language_for(
             redline_syntax::registry::LanguageId::Python,
         )?;
@@ -651,7 +693,7 @@ impl AppStore {
             } else {
                 scope.child_by_field_name("body")?
             };
-            let mut hit: Option<Vec<String>> = None;
+            let mut hit: Option<PythonImportBinding> = None;
             for i in 0..block.child_count() {
                 let child = block.child(i)?;
                 match child.kind() {
@@ -676,20 +718,21 @@ impl AppStore {
     }
 
     /// One Python import statement: the original path the entry binds to
-    /// `symbol` (`None` when no entry names it — plain `import a.b`,
-    /// relative modules, wildcards, and attribute-walk entries are never
-    /// guessed).
+    /// `symbol` (the ABSOLUTE module path — or the RELATIVE marker when
+    /// the binding comes from a `from . import …` / `from ..pkg import …`
+    /// statement; `None` when no entry names it; wildcards and
+    /// attribute-walk entries are never guessed).
     fn python_import_stmt_path(
         stmt: tree_sitter::Node,
         source: &[u8],
         symbol: &str,
-    ) -> Option<Vec<String>> {
+    ) -> Option<PythonImportBinding> {
         match stmt.kind() {
             "import_statement" => {
                 // Each entry is field `name`: a `dotted_name` (binds only
                 // its TOP-LEVEL segment — never a hint) or an
                 // `aliased_import` (binds the alias to the full module).
-                let mut hit: Option<Vec<String>> = None;
+                let mut hit: Option<PythonImportBinding> = None;
                 for i in 0..stmt.child_count() {
                     let child = stmt.child(i)?;
                     if child.kind() != "aliased_import" {
@@ -705,19 +748,21 @@ impl AppStore {
                     let Some(name) = child.child_by_field_name("name") else {
                         continue;
                     };
-                    hit = Some(Self::python_dotted_segments(name, source)?);
+                    hit = Some(PythonImportBinding::Absolute(
+                        Self::python_dotted_segments(name, source)?,
+                    ));
                 }
                 hit
             }
             "import_from_statement" => {
                 let module = stmt.child_by_field_name("module_name")?;
-                let base = if module.kind() == "relative_import" {
-                    return None; // `from . import X`: the enclosing package is
-                    // ambiguous without the sys.path root — not guessed.
-                } else {
-                    Self::python_dotted_segments(module, source)?
-                };
-                let mut hit: Option<Vec<String>> = None;
+                // plan-017 issue 08: a `relative_import` module_name
+                // (`from . import X`, `from ..pkg import X`) binds names
+                // from the enclosing package — never a PATH (the sys.path
+                // root is unknown), but the binding IS recorded (the
+                // tooling seam's relative-import guard reads it).
+                let relative = module.kind() == "relative_import";
+                let mut hit: Option<PythonImportBinding> = None;
                 for i in 0..stmt.child_count() {
                     let child = stmt.child(i)?;
                     match child.kind() {
@@ -729,24 +774,32 @@ impl AppStore {
                             if alias != symbol {
                                 continue;
                             }
-                            let Some(name) = child.child_by_field_name("name") else {
-                                continue;
-                            };
-                            let item = Self::python_dotted_segments(name, source)?;
-                            if item.len() != 1 {
-                                continue; // `from a import b.c` binds `b`, not `b.c`.
+                            if relative {
+                                hit = Some(PythonImportBinding::Relative);
+                            } else {
+                                let Some(name) = child.child_by_field_name("name") else {
+                                    continue;
+                                };
+                                let item = Self::python_dotted_segments(name, source)?;
+                                if item.len() != 1 {
+                                    continue; // `from a import b.c` binds `b`, not `b.c`.
+                                }
+                                let mut full = Self::python_dotted_segments(module, source)?;
+                                full.extend(item);
+                                hit = Some(PythonImportBinding::Absolute(full));
                             }
-                            let mut full = base.clone();
-                            full.extend(item);
-                            hit = Some(full);
                         }
                         "dotted_name" => {
                             // `from a import b` — binds the (single) name.
                             let item = Self::python_dotted_segments(child, source)?;
                             if item.len() == 1 && item[0] == symbol {
-                                let mut full = base.clone();
-                                full.push(item[0].clone());
-                                hit = Some(full);
+                                if relative {
+                                    hit = Some(PythonImportBinding::Relative);
+                                } else {
+                                    let mut full = Self::python_dotted_segments(module, source)?;
+                                    full.push(item[0].clone());
+                                    hit = Some(PythonImportBinding::Absolute(full));
+                                }
                             }
                         }
                         _ => {} // `wildcard_import`: names no specific symbol.

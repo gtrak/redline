@@ -386,6 +386,47 @@ use super::*;
         }
     }
 
+    /// plan-017 issue 08: the RELATIVE-import binding detection the
+    /// tooling seam's guard reads (`python_relative_import_binds`) —
+    /// the shapes that bind are exactly the relative import statements
+    /// (`from . import X`, `from ..pkg import X`, the `as`-aliased
+    /// shapes), with the same re-import-shadowing rule as the scope
+    /// hint; every non-relative binding is `false` (the guard never
+    /// fires, the chain stands byte-for-byte).
+    #[test]
+    fn python_relative_import_binds_per_the_grammar() {
+        for (name, src, symbol, binds) in [
+            ("single dot", "from . import Thing\nThing()\n", "Thing", true),
+            ("two dots", "from ..mod import Thing\nThing()\n", "Thing", true),
+            ("aliased", "from . import Thing as T\nT()\n", "T", true),
+            // `from . import Thing as T` binds `T` only: the original
+            // name is not in scope.
+            ("aliased original not bound", "from . import Thing as T\nT()\n", "Thing", false),
+            // Re-import shadowing (the same rule as the scope hint):
+            // the LAST matching statement at/before the point wins.
+            ("relative re-import shadows absolute",
+             "from a import Thing\nfrom . import Thing\nThing()\n", "Thing", true),
+            ("absolute re-import shadows relative",
+             "from . import Thing\nfrom a import Thing\nThing()\n", "Thing", false),
+            // Non-relative shapes: never a relative binding.
+            ("absolute from-import", "from a import Thing\nThing()\n", "Thing", false),
+            ("plain import top level", "import a.b\nb()\n", "b", false),
+            ("module alias", "import a.b as c\nc()\n", "c", false),
+        ] {
+            let (mut s, _dir) = store_with_index(&[("main.py", src)]);
+            s.open_path("main.py");
+            let at = src.rfind(symbol).expect("fixture");
+            let (line, col) = point_of(src, at);
+            s.set_point(line, col, col);
+            // ASCII fixture: the byte offset IS `at` (the point's byte).
+            assert_eq!(
+                AppStore::python_relative_import_binds(src, at, symbol),
+                binds,
+                "{name}: binds = {binds}"
+            );
+        }
+    }
+
     /// Discriminating: a BARE symbol dot-imported in Go carries the
     /// local package name (the import path's last segment) + the symbol.
     #[test]

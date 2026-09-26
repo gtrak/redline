@@ -2047,6 +2047,26 @@ impl AppStore {
             self.minibuffer_message("no project");
             return;
         };
+        // plan-017 issue 08 (the Python relative-import flag row): a name
+        // bound by a RELATIVE import (`from . import x`, `from ..pkg
+        // import x`, the `as`-aliased shapes) lives in the enclosing
+        // PACKAGE — filesystem-local, never an installed module. This
+        // seam runs only after the workspace index missed the name (the
+        // index covers the package-local definitions), and the sys.path
+        // root is unknown from the buffer path alone — so probing the
+        // token's first segment as an absolute module would land on a
+        // same-named installed / stdlib module (measured pre-fix: `from
+        // . import json` + M-. on `json.dumps` landed in the stdlib json
+        // `__init__.py` — a plausible-looking wrong jump). Report the
+        // named unresolved flag instead; every non-relative binding and
+        // every other language stays on the chain byte-for-byte. The
+        // bare no-dot shape is deliberately NOT guarded: the provider's
+        // own "bare symbol has no module path" miss is already an honest
+        // named flag.
+        if self.python_relative_import_flags(symbol, from_file) {
+            self.minibuffer_message(&format!("unresolved: `{symbol}`"));
+            return;
+        }
         let root = project.root.clone();
         let symbol_owned = symbol.to_string();
         // issue-non-rust-receiver-resolution: a pending fetch prompt
@@ -2309,6 +2329,46 @@ impl AppStore {
     pub(in crate::app::store) fn resolution_language(&self, from_file: &str) -> Option<String> {
         let lang = self.grammar_registry.language_for(from_file);
         (lang != redline_syntax::registry::LanguageId::Plain).then(|| lang.name().to_string())
+    }
+
+    /// (plan-017 issue 08) The Python relative-import guard for the
+    /// tooling-resolver seam: `true` when the buffer's language is
+    /// Python, the token is path-shaped, and its FIRST segment is bound
+    /// by a RELATIVE import in the buffer at the point — `from . import
+    /// x`, `from ..pkg import x`, `from . import x as y`. A relative
+    /// import binds a name from the enclosing package (filesystem-local,
+    /// never an installed module; the sys.path root is unknown from the
+    /// buffer path alone), and this seam runs only on index misses — so
+    /// an absolute-module probe of the first segment would misresolve to
+    /// a same-named installed / stdlib module. The guard reads the
+    /// press's own buffer and point (`resolver_scope`'s pattern); any
+    /// miss (no buffer, no point byte, no parse) degrades to the
+    /// unchanged chain (byte-for-byte).
+    fn python_relative_import_flags(&self, symbol: &str, from_file: &str) -> bool {
+        if !symbol.contains('.') {
+            return false;
+        }
+        if self.grammar_registry.language_for(from_file) != LanguageId::Python {
+            return false;
+        }
+        let Some(first) = symbol.split('.').next() else {
+            return false;
+        };
+        if first.is_empty() {
+            return false;
+        }
+        let Some(key) = self.buffers.current().map(String::from) else {
+            return false;
+        };
+        let Some(buf) = self.buffers.get(&key) else {
+            return false;
+        };
+        let p = self.file_point();
+        let Some(byte) = point_byte_offset(&buf.rope, p.line, p.col) else {
+            return false;
+        };
+        let source = buf.rope.to_string();
+        Self::python_relative_import_binds(&source, byte, first)
     }
 
     /// (007-03 / 011-02) The `SymbolContext.scope` hint for `symbol`, from

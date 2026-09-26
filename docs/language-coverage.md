@@ -287,16 +287,99 @@ absolute guess (the tails are matched against the indexed files):
   `xref_go_local_import_narrows_to_module_directory_and_lands`,
   `xref_go_aliased_import_lands_in_the_module_directory`,
   `import_shapes_bind_per_the_grammar` (go.rs).
-- **Ruby — IN FLIGHT in a sibling lane** (plan 017 issue 06,
-  `require_relative` → the sibling `.rb`; the `?`/`!` constituent rule it
-  rides on has landed — see the word rule above). Not claimed here.
-- **Not landed — the flag rows** (plan 017 issue 08, by design
-  "flag, don't guess"): C# (no directory convention — a convention row
-  would be a guess), Scheme (library layout implementation-defined),
-  Ruby bare `require` ($LOAD_PATH), C++ semantic forms (ADL / templates /
-  using-directives), Python relative `from .` (the sys.path root is
-  unknown); plus Bash relative `source` / `.` (plan 017 issue 07). None
-  of these is claimed by this file.
+- **Ruby — works (unit).** (plan 017 issue 06) A DETERMINISTIC
+  `require_relative "x"` → `x.rb` relative to the REQUIRING file's own
+  directory (ruby-lang.org `Module#require_relative` / `__dir__`
+  semantics; the `?`/`!` constituent rule it rides on has landed — see
+  the word rule above): the reference is a CONSTANT whose defining
+  file is the required one, and the convention narrows the index's
+  name-keyed candidates to the required file (a same-named file in
+  another directory is a decoy, out). The LOAD-PATH forms — bare
+  `require "x"` and `autoload :C, "x"` — go through `$LOAD_PATH`, which
+  redline cannot know: they are the named `unresolved` flag (the flag
+  rows below), never a guess. Pinned:
+  `xref_ruby_require_relative_narrows_to_required_file_and_lands`,
+  `xref_ruby_load_path_require_is_flagged_not_a_guess`,
+  `xref_ruby_autoload_is_flagged_not_a_guess`,
+  `xref_ruby_require_relative_absent_from_tree_is_flagged`
+  (definitions.rs) + `bare_require_relative_is_the_deterministic_`
+  `target` / `load_path_require_is_flagged_never_a_guess` (ruby.rs).
+- **Bash — works (unit).** (plan 017 issue 07) `source ./sub/x.sh` /
+  `. ./x.sh` (a `command` whose `command_name` is exactly `source` or
+  `.` — the dot builtin is structurally distinguishable from a `.` in
+  any other position) → the target path: a relative target joins the
+  SOURCING file's own directory (the static base — the runtime cwd is
+  unknowable to a static tool; the shells' cwd behavior is measured in
+  the module doc), an absolute target under the workspace root is
+  stripped; the BARE name is the `$PATH` lookup (bash manual, `source`
+  / `.`: "FILE is searched for in $PATH") and is the named
+  `unresolved` flag (the flag rows below), as are dynamic / glob /
+  tilde arguments. Pinned: `xref_bash_relative_source_narrows_to_`
+  `sourced_file_and_lands`,
+  `xref_bash_dot_builtin_narrows_to_sourced_file_and_lands`,
+  `xref_bash_bare_source_name_is_flagged_not_a_guess`,
+  `xref_bash_relative_source_absent_from_tree_is_flagged`
+  (definitions.rs) + `relative_source_target_is_the_sourcing_file_`
+  `directory_join` / `dot_builtin_is_the_same_carrier` (bash.rs).
+- **The flag rows — works (unit + live).** (plan 017 issue 08, by
+  design "flag, don't guess" — written LAST so the residual is
+  exactly what the resolvable set above left, not a guess): the cases
+  decided UNRESOLVABLE statically, each pinned BOTH directions (the
+  flagged form flags — no picker, no jump, the named `unresolved`
+  flag, never a wrong landing — and the things that DO resolve in the
+  same language still resolve):
+  - **C#** — no directory convention (a namespace may live anywhere in
+    the project; a convention row would be a guess) and no tooling
+    provider: M-. on a name the project index does not hold →
+    `unresolved: \`<name>\`` (`xref_csharp_unresolvable_call_is_`
+    `unresolved_not_misrouted`); in-project definitions still land
+    (`xref_csharp_property_access_lands_in_project_index`).
+  - **Scheme** — library layout implementation-defined (R6RS/R7RS
+    mandate the library FORM, not its file mapping; Chicken / Gambit /
+    Racket differ, and Racket has no `.scm` convention at all); no
+    toolchain provider: M-. on a library name (`foo:bar` from
+    `(import (library (foo core)))`) → `unresolved: \`foo:bar\``
+    (`xref_scheme_unresolvable_library_name_is_unresolved_not_`
+    `misrouted`); in-workspace definitions still land
+    (`xref_scheme_in_workspace_definition_still_lands`).
+  - **Ruby bare `require` / `autoload`** — the `$LOAD_PATH` search
+    (gem `lib/` roots under Bundler; env-dependent) → the flag, pinned
+    above with the issue-06 pins.
+  - **C++ semantic forms** — ADL / templates / using-directives need
+    semantic (compiler-level) resolution, and the angle include's
+    `-I` / system path is not in the tree (`system_lib_string` is a
+    leaf — the structural `-I` limit, issue 04); no C++ tooling
+    provider: M-. on such a name (`swap(a, b)` — declared only in
+    `<algorithm>`) → `unresolved: \`swap\``, never the enclosing
+    function (`xref_cpp_semantic_name_is_unresolved_not_a_guess`);
+    quoted includes still land (the issue-04 pins above).
+  - **Python relative `from . import x`** — the enclosing package's
+    sys.path root is unknown from the buffer path, and a relative
+    import binds the enclosing package — never an installed module.
+    MEASURED and FIXED in this issue: the BARE shape (`x`) already
+    carried the provider's own honest miss (live: `no provider
+    resolution for \`x\`: bare symbol \`x\` has no module path …` — a
+    named miss, no jump); the DOTTED shape (`x.member`) MISRESOLVED —
+    the tooling seam probed the first segment as an ABSOLUTE module
+    and landed in the same-named installed / stdlib module (live,
+    pre-fix: `from . import json` + M-. on `json.dumps` →
+    `/usr/lib/python3.14/json/__init__.py:185` for a name the file
+    says is a local relative submodule). The seam now carries the
+    relative-import guard (the scope-hint walk records the binding as
+    `Absolute` / `Relative`, the same re-import-shadowing rule; the
+    hint itself is byte-for-byte unchanged): a relative-bound first
+    segment is the named `unresolved` flag instead of the chain probe
+    (live, post-fix: `unresolved: \`json.dumps\`` — no picker, no
+    jump). The BARE shape is deliberately unguarded (the provider's
+    miss stands byte-for-byte), and the ABSOLUTE binding is pinned NOT
+    flagged (`import json` + `json.dumps` still reaches the tooling
+    seam — the live stdlib landing stays the 011-06 L-P1 pin, in the
+    gate battery). Pinned: `xref_python_relative_import_dotted_use_`
+    `is_unresolved_not_misresolved`,
+    `xref_python_absolute_import_dotted_use_still_reaches_the_`
+    `tooling_seam`, `xref_python_relative_import_bare_use_keeps_the_`
+    `provider_miss` (definitions.rs) +
+    `python_relative_import_binds_per_the_grammar` (imports.rs).
 
 **The unresolved flag (plan-017 B5) — every language without a tooling
 provider.** When the point sits on a token that is NOT the enclosing
@@ -314,10 +397,24 @@ DOES handle the language (or the extension is unknown — the chain keeps
 its in-order walk), the point's own token goes to the tooling seam
 instead: tooling stays authoritative over the flag (an in-function
 `tokio::spawn` resolves through cargo, it does not report
-unresolved). Pinned: `xref_b5_c_call_in_main_is_unresolved_not_a_picker`,
+unresolved). ONE provider-carrying exception (plan-017 issue 08, the
+Python relative-import flag row): a token whose FIRST segment is bound
+by a `from . import …` in the buffer is the named flag EVEN though a
+python provider exists — the absolute-module probe of a relative
+binding would land on a same-named installed / stdlib module (the
+sys.path root is unknown from the buffer path, and a relative import is
+never an installed module); the bare no-dot shape and every other
+language keep the tooling seam byte-for-byte. Pinned: `xref_b5_c_call_`
+`in_main_is_unresolved_not_a_picker`,
 `xref_b5_point_on_enclosing_name_keeps_the_picker`,
 `xref_c_field_access_is_unresolved_not_misrouted`,
-`xref_java_field_access_is_unresolved_not_misrouted`.
+`xref_java_field_access_is_unresolved_not_misrouted`,
+`xref_csharp_unresolvable_call_is_unresolved_not_misrouted`,
+`xref_scheme_unresolvable_library_name_is_unresolved_not_misrouted`,
+`xref_cpp_semantic_name_is_unresolved_not_a_guess`,
+`xref_python_relative_import_dotted_use_is_unresolved_not_`
+`misresolved` (and its two guard twins — the absolute binding still
+reaches the seam, and the bare shape keeps the provider's own miss).
 
 **Fetch confirmation — and a refusal now says WHY (F2).** No provider
 ever installs without the operator: an install step (`cargo fetch`,
