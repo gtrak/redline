@@ -768,3 +768,21 @@ the pin is worthless — otherwise a real, well-pinned behaviour gets rewritten 
 
 This is the mirror of the older rule that a test can be aimed at nothing: **a mutation can be aimed at
 nothing too.**
+
+## "The wrong site" includes the wrong KIND of construct
+
+The rule above says a mutation in the wrong site proves nothing. Today it was extended twice more, both in
+the same hour:
+
+- A mutation aimed at an **`unsafe extern "C"` declaration** stayed green, while the same lint fired
+  immediately when aimed at an **`unsafe { … }` block**. `undocumented_unsafe_blocks` covers blocks, not
+  declarations — so the *construct kind* is part of aiming.
+- An earlier attempt replaced only the **first line** of a **multi-line** comment block, leaving the rest,
+  and stayed green.
+
+So when a mutation does not redden, the checklist is now three questions, in order: (1) is this the site the
+test/lint actually exercises? (2) is this the **kind** of construct it covers? (3) did I change the whole
+thing, not just its first line?
+
+The general form, which is the through-line of this project's worst bugs AND its worst verifications: **a
+check aimed at the wrong subject passes silently, and a silent pass looks exactly like success.**
