@@ -45,7 +45,10 @@ enum XrefMdotOutcome {
     /// report `orphaned`): never a jump, and never the enclosing
     /// symbol's picker (a plausible-looking lie about where the
     /// definition is — the C header-declared call in `main` used to
-    /// open a picker on `main`).
+    /// open a picker on `main`). Also the convention's HARD-mapping
+    /// miss (plan-017 issue 03 / 05): the Java import / qualified class
+    /// and the Go in-module import that the convention places in a file
+    /// the index does not hold.
     Unresolved(String),
     /// A guard message ("no buffer", "no file…", …) was already
     /// reported; the caller returns.
@@ -346,6 +349,7 @@ impl AppStore {
                         line,
                         col: self.point_col(),
                     },
+                    &project.root,
                     &rel,
                     ident,
                     path_token,
@@ -541,6 +545,7 @@ impl AppStore {
         index: &SymbolIndex,
         lang: LanguageId,
         point: &XrefPointContext,
+        project_root: &std::path::Path,
         rel: &str,
         ident: &str,
         path_token: &str,
@@ -603,6 +608,7 @@ impl AppStore {
         if matches!(
             lang,
             LanguageId::Clojure | LanguageId::Java | LanguageId::C | LanguageId::Cpp
+                | LanguageId::Go
         ) {
             // The full source materializes here — the pre-step's own
             // parse (the same lazy shape as the receiver
@@ -610,7 +616,12 @@ impl AppStore {
             // language's press ever pays it).
             let source = point.rope.to_string();
             match redline_syntax::conventions::convention_name_for_reference(
-                lang, &source, ident, path_token,
+                lang,
+                &source,
+                ident,
+                path_token,
+                project_root,
+                rel,
             ) {
                 Ok(Some(conv_name)) => {
                     let tails = redline_syntax::conventions::convention_file_tails(
@@ -620,7 +631,13 @@ impl AppStore {
                     if let Some(all) = Self::xref_definition_candidates(index, ident, path_token, rel) {
                         let narrowed: Vec<crate::nav::index::Location> = all
                             .iter()
-                            .filter(|loc| tails.iter().any(|t| loc.file.ends_with(t)))
+                            .filter(|loc| {
+                                tails.iter().any(|t| {
+                                    redline_syntax::conventions::convention_file_matches(
+                                        lang, t, &loc.file,
+                                    )
+                                })
+                            })
                             .cloned()
                             .collect();
                         if !narrowed.is_empty() {
@@ -632,34 +649,35 @@ impl AppStore {
                         }
                         // The convention places the name in a file the
                         // index does not hold. Per-language CONVENTION
-                        // SEMANTICS: Java's JLS mapping is HARD — an
-                        // imported `a.b.C` is THAT class, and a
-                        // candidate in another package is a DIFFERENT
-                        // type (offering the superset would be the
-                        // plausible-looking lie the B5 decision forbids):
-                        // FLAGGED. Clojure's namespace layout is SOFT
-                        // (project-local source roots, non-standard
-                        // directories): the empty intersection degrades
-                        // to the BARE name-keyed superset (the Part-2
-                        // behavior — never an empty answer where the
-                        // name is indexed).
+                        // SEMANTICS: Java's JLS mapping and Go's
+                        // in-module mapping are HARD — an imported
+                        // `a.b.C` / `pkg.Sym` is THAT class / package,
+                        // and a candidate in another package is a
+                        // DIFFERENT type (offering the superset would be
+                        // the plausible-looking lie the B5 decision
+                        // forbids): FLAGGED. Clojure's namespace layout
+                        // is SOFT (project-local source roots, non-
+                        // standard directories): the empty intersection
+                        // degrades to the BARE name-keyed superset (the
+                        // Part-2 behavior — never an empty answer where
+                        // the name is indexed).
                         return match lang {
-                            LanguageId::Java => {
-                                Err(XrefConventionFlag::Unresolved(ident.to_string()))
-                            }
+                            LanguageId::Java | LanguageId::Go => Err(
+                                XrefConventionFlag::Unresolved(ident.to_string()),
+                            ),
                             _ => Ok(Some(all)),
                         };
                     }
-                    // `ident` has no indexed definition at all. Java:
-                    // the import / qualified-class reference is
-                    // FLAGGED (the convention placed it in a file the
+                    // `ident` has no indexed definition at all. Java / Go:
+                    // the import / qualified-class / in-module reference
+                    // is FLAGGED (the convention placed it in a file the
                     // tree does not hold). Clojure: today's outcome
                     // stands (the bare name-keyed miss — the B5 flag /
                     // the resolver seam — byte-for-byte Part-2).
                     return match lang {
-                        LanguageId::Java => {
-                            Err(XrefConventionFlag::Unresolved(ident.to_string()))
-                        }
+                        LanguageId::Java | LanguageId::Go => Err(
+                            XrefConventionFlag::Unresolved(ident.to_string()),
+                        ),
                         _ => Ok(None),
                     };
                 }
@@ -669,10 +687,16 @@ impl AppStore {
                     // name-keyed lookup below stands, byte-for-byte.
                 }
                 Err(flagged) => {
-                    // A namespaced reference the file does not declare
-                    // (the Clojure dotless alias): FLAGGED — a wrong
-                    // jump is worse than no jump.
-                    return Err(XrefConventionFlag::UnresolvableAlias(flagged));
+                    // A namespaced / qualified reference the convention
+                    // cannot place: the Clojure dotless alias the file's
+                    // `ns` form does not declare, or the Go import
+                    // OUTSIDE the module path (a third-party dependency —
+                    // no toolchain, no network, never a guess): FLAGGED —
+                    // a wrong jump is worse than no jump.
+                    return Err(match lang {
+                        LanguageId::Clojure => XrefConventionFlag::UnresolvableAlias(flagged),
+                        _ => XrefConventionFlag::Unresolved(flagged),
+                    });
                 }
             }
         }

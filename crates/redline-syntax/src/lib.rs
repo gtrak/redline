@@ -5,6 +5,7 @@ pub mod cache;
 pub mod c_cpp;
 pub mod clojure;
 pub mod conventions;
+pub mod go;
 pub mod highlight;
 pub mod java;
 pub mod language;

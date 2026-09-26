@@ -923,6 +923,7 @@ version = "0.1.0"
 dependencies = [
  "ropey",
  "streaming-iterator",
+ "tempfile",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",

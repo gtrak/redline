@@ -64,3 +64,9 @@ tree-sitter-c-sharp = "=0.23.5"    # 0.25-gen bump (grammar-bumps lane): full wo
 tree-sitter-ruby = "=0.23.1"
 tree-sitter-scheme = "=0.24.7"
 tree-sitter-clojure = "=0.1.0"
+
+[dev-dependencies]
+# Test fixtures (the go module-discovery walk, the conventions rows that
+# read a project's own go.mod): already in the lock at the workspace
+# pin.
+tempfile = "3.27"

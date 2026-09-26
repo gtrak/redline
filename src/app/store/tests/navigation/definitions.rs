@@ -2125,6 +2125,212 @@ use super::*;
         assert_eq!(s.view_name_display(), "sub/thing.hpp", "landed in the convention header");
     }
 
+    // — plan-017 issue 05: Go in-module import path → directory (the
+    // conventions mechanism) ———————————————————————————
+    //
+    // The module line is the convention's workspace input: the fixture
+    // `go.mod` (`module github.com/x/y`) sits at the project root, and
+    // the convention reads it as a file (offline — no `go` toolchain on
+    // this box, audit F4; the legs below are therefore REAL, not
+    // skipped).
+
+    /// plan-017 issue 05 (Go, direction: the landing). The file's
+    /// `import "github.com/x/y/engine/sub"` sits under the module path
+    /// (`go.mod` line `module github.com/x/y`), so the import maps to
+    /// the module-relative DIRECTORY `engine/sub/`; the index's
+    /// name-keyed candidates for `Fn` (TWO same-named packages exist —
+    /// `legacy/` declares `package sub` just as `engine/sub/` does) NARROW
+    /// to the import's directory — the jump lands on the right package,
+    /// not the decoy. The narrowing is the module-prefix strip, not the
+    /// package name (both packages are named `sub` — a name-keyed or
+    /// package-name heuristic would offer both rows).
+    #[test]
+    fn xref_go_local_import_narrows_to_module_directory_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            ("go.mod", "module github.com/x/y\n\ngo 1.24\n"),
+            (
+                "engine/sub/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 1\n}\n",
+            ),
+            (
+                "legacy/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 2\n}\n",
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"github.com/x/y/engine/sub\"\n\nfunc main() {\n\tsub.Fn()\n}\n",
+            ),
+        ]);
+        s.open_path("main.go");
+        // Line 5 (0-based): "\tsub.Fn()" — `Fn` at col 5 (inside the
+        // whole `sub.Fn` path token the Go selector container carries).
+        s.set_point(5, 6, 6);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the import's module-relative directory narrows to the right package (the same-named package in legacy/ is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("engine/sub/thing.go:3"),
+            "the convention directory's function is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(
+            s.view_name_display(),
+            "engine/sub/thing.go",
+            "landed in the import's directory"
+        );
+        assert_eq!(s.point_line(), 2, "on `Fn`'s definition line");
+    }
+
+    /// plan-017 issue 05 (Go, direction: the aliased landing). The alias
+    /// (`import w "github.com/x/y/engine/sub"` — the baml real shape,
+    /// where the alias shadows the last path segment `pkg`) places the
+    /// package in the SAME module-relative directory; the decoy stays
+    /// out.
+    #[test]
+    fn xref_go_aliased_import_lands_in_the_module_directory() {
+        let (mut s, _dir) = store_with_index(&[
+            ("go.mod", "module github.com/x/y\n\ngo 1.24\n"),
+            (
+                "engine/sub/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 1\n}\n",
+            ),
+            (
+                "legacy/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 2\n}\n",
+            ),
+            (
+                "cli/main.go",
+                "package main\n\nimport w \"github.com/x/y/engine/sub\"\n\nfunc main() {\n\tw.Fn()\n}\n",
+            ),
+        ]);
+        s.open_path("cli/main.go");
+        // Line 5 (0-based): "\tw.Fn()" — `Fn` at col 3.
+        s.set_point(5, 4, 4);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the alias narrows to the module-relative directory: {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("engine/sub/thing.go:3"),
+            "the aliased import's directory is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "engine/sub/thing.go", "landed");
+    }
+
+    /// plan-017 issue 05 (Go, direction: the third-party flag). The
+    /// import `github.com/third/pkg` is OUTSIDE the module path — a
+    /// third-party dependency (no toolchain, no network, never a guess).
+    /// The tree even carries a LOCAL `pkg/` directory with a same-named
+    /// `Third` (the name-keyed superset would offer it) — the convention
+    /// must NOT land there: the name is the named UNRESOLVED flag.
+    #[test]
+    fn xref_go_third_party_import_is_flagged_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[
+            ("go.mod", "module github.com/x/y\n\ngo 1.24\n"),
+            (
+                "pkg/thing.go",
+                "package pkg\n\nfunc Third() int {\n\treturn 3\n}\n",
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"github.com/third/pkg\"\n\nfunc main() {\n\tpkg.Third()\n}\n",
+            ),
+        ]);
+        s.open_path("main.go");
+        // Line 5 (0-based): "\tpkg.Third()" — `Third` at col 5.
+        s.set_point(5, 6, 6);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.go", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Third`"),
+            "the third-party reference is flagged, not the local same-named package: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 05 (Go, direction: the absent local package flag).
+    /// The import `github.com/x/y/absent` is UNDER the module path, but
+    /// the tree does not hold the `absent/` directory (and `Fn` IS
+    /// indexed — in another package). The in-module mapping is HARD (like
+    /// the JLS one): a candidate in a DIFFERENT package is a different
+    /// symbol — the superset would be the plausible-looking lie, so the
+    /// name is the named UNRESOLVED flag.
+    #[test]
+    fn xref_go_local_import_absent_from_tree_is_flagged() {
+        let (mut s, _dir) = store_with_index(&[
+            ("go.mod", "module github.com/x/y\n\ngo 1.24\n"),
+            (
+                "sub/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 1\n}\n",
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"github.com/x/y/absent\"\n\nfunc main() {\n\tabsent.Fn()\n}\n",
+            ),
+        ]);
+        s.open_path("main.go");
+        // Line 5 (0-based): "\tabsent.Fn()" — `Fn` at col 8.
+        s.set_point(5, 9, 9);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.go", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `Fn`"),
+            "the absent package's reference is flagged (the same-named `Fn` elsewhere is a DIFFERENT package): `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 05 (Go, the silent shape): a DOT-imported reference
+    /// is BARE (`Fn()` — `path_token == ident`). A dot import cannot be
+    /// narrowed (the bare name could be any dot-imported package's, or
+    /// the file's own package) — the convention stays silent, and the
+    /// name-keyed SUPERSET stands (both same-named packages offered,
+    /// never narrowed, never flagged).
+    #[test]
+    fn xref_go_dot_import_bare_reference_keeps_the_superset() {
+        let (mut s, _dir) = store_with_index(&[
+            ("go.mod", "module github.com/x/y\n\ngo 1.24\n"),
+            (
+                "sub/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 1\n}\n",
+            ),
+            (
+                "legacy/thing.go",
+                "package sub\n\nfunc Fn() int {\n\treturn 2\n}\n",
+            ),
+            (
+                "main.go",
+                "package main\n\nimport . \"github.com/x/y/sub\"\n\nfunc main() {\n\tFn()\n}\n",
+            ),
+        ]);
+        s.open_path("main.go");
+        // Line 5 (0-based): "\tFn()" — `Fn` at col 1.
+        s.set_point(5, 2, 2);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "the bare superset stands (msg: {})", s.message);
+        assert_eq!(
+            s.picker_filtered().len(),
+            2,
+            "the dot import narrows NOTHING (both same-named packages offered): {:?}",
+            s.picker_filtered()
+        );
+    }
+
     /// newlang-paths (e2e pin, C#): M-. on `o.P` in a C# buffer — the
     /// C# outline indexes properties (queries.rs): the whole path `o.P`
     /// has no indexed symbol, but the fall-through to the last segment
