@@ -725,3 +725,29 @@ The discipline must survive long chains, which is exactly where it gets dropped.
 
 and read the log separately. If a status matters, it must come from `$?`/`${PIPESTATUS[0]}` on the
 command itself, never from the end of a pipeline.
+
+## A hung probe is indistinguishable from a stalled agent
+
+A lane that "needs attention (no observed activity for 120s)" may not be thinking — it may be **blocked on a
+probe it launched**. Observed: a throwaway `examples/dbg` binary ran for **13 minutes**; the lane looked
+stalled, its log went quiet, and the attention signal fired. Nothing was wrong with the model.
+
+**Rule for probes: bounded by construction.** Print once and return. No `loop`, no blocking reads, no
+waiting on stdin, no unbounded iteration. If a probe cannot be made to terminate, that is itself a finding
+to report — never a thing to run.
+
+**Orchestrator triage when a lane goes quiet:** check for runaway processes and read their **cwd**:
+
+    ps -eo etime,args | grep -E "examples/|cargo|gate" | grep -v grep
+    readlink /proc/<pid>/cwd
+
+This matters because the cwd identifies **which** lane is actually stuck. In the observed case the lane
+showing "no activity" was the *audit* lane, while the hung process's cwd was the *sibling's* worktree — the
+first diagnosis was wrong, and only the cwd check caught it.
+
+**Unblocking:** kill the specific pid (never a broad `pkill` pattern), then steer the lane with the rule and
+with whatever it should commit first. Killing a lane's process is interfering with its run, so **disclose
+it** — but note it is strictly less destructive than interrupting the run, which would discard its context.
+
+Corollary already in force: a lane with modified files and no commit is the state that has destroyed
+finished work twice here (`git checkout -- <file>` restores from the INDEX). Commit first, probe second.
