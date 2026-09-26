@@ -610,6 +610,7 @@ impl AppStore {
             LanguageId::Clojure | LanguageId::Java | LanguageId::C | LanguageId::Cpp
                 | LanguageId::Go
                 | LanguageId::Ruby
+                | LanguageId::Bash
         ) {
             // The full source materializes here — the pre-step's own
             // parse (the same lazy shape as the receiver
@@ -651,35 +652,43 @@ impl AppStore {
                         // The convention places the name in a file the
                         // index does not hold. Per-language CONVENTION
                         // SEMANTICS: Java's JLS mapping, Go's
-                        // in-module mapping, and Ruby's require_relative
-                        // mapping are HARD — an imported `a.b.C` /
-                        // `pkg.Sym` / required `Thing` is THAT class /
-                        // package / constant, and a candidate in another
-                        // (un-required) file is a DIFFERENT symbol
-                        // (offering the superset would be the
-                        // plausible-looking lie the B5 decision forbids):
-                        // FLAGGED. Clojure's namespace layout
+                        // in-module mapping, Ruby's require_relative
+                        // mapping, and Bash's source/`.` mapping are
+                        // HARD — an imported `a.b.C` / `pkg.Sym` /
+                        // required `Thing` / a name a relative source
+                        // places is THAT class / package / constant /
+                        // sourced file, and a candidate in another
+                        // (un-required / unsourced) file is a
+                        // DIFFERENT symbol (offering the superset would
+                        // be the plausible-looking lie the B5 decision
+                        // forbids): FLAGGED. Clojure's namespace layout
                         // is SOFT (project-local source roots, non-
                         // standard directories): the empty intersection
                         // degrades to the BARE name-keyed superset (the
                         // Part-2 behavior — never an empty answer where
                         // the name is indexed).
                         return match lang {
-                            LanguageId::Java | LanguageId::Go | LanguageId::Ruby => Err(
+                            LanguageId::Java
+                            | LanguageId::Go
+                            | LanguageId::Ruby
+                            | LanguageId::Bash => Err(
                                 XrefConventionFlag::Unresolved(ident.to_string()),
                             ),
                             _ => Ok(Some(all)),
                         };
                     }
                     // `ident` has no indexed definition at all. Java / Go /
-                    // Ruby: the import / qualified-class / in-module /
-                    // require_relative reference is FLAGGED (the
-                    // convention placed it in a file the tree does not
-                    // hold). Clojure: today's outcome
+                    // Ruby / Bash: the import / qualified-class /
+                    // in-module / require_relative / source reference is
+                    // FLAGGED (the convention placed it in a file the
+                    // tree does not hold). Clojure: today's outcome
                     // stands (the bare name-keyed miss — the B5 flag /
                     // the resolver seam — byte-for-byte Part-2).
                     return match lang {
-                        LanguageId::Java | LanguageId::Go | LanguageId::Ruby => Err(
+                        LanguageId::Java
+                        | LanguageId::Go
+                        | LanguageId::Ruby
+                        | LanguageId::Bash => Err(
                             XrefConventionFlag::Unresolved(ident.to_string()),
                         ),
                         _ => Ok(None),

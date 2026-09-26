@@ -1,6 +1,7 @@
 //! Syntax highlighting: grammar registry, highlight pipeline, and cache.
 //! Plain Rust — zero iocraft/tokio (plan layering rule).
 
+pub mod bash;
 pub mod cache;
 pub mod c_cpp;
 pub mod clojure;

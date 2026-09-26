@@ -49,6 +49,19 @@
 //!   through `$LOAD_PATH`, which redline cannot know: they are never a
 //!   tail and their constant is the `Err` (FLAGGED, never a guess — the
 //!   same rule as the C/C++ angle include and the Go third-party import).
+//! - Bash (plan-017 issue 07): the `source` / `.` command (a `command`
+//!   whose `command_name` is exactly `source` or `.` — the dot builtin is
+//!   structurally distinguishable from a `.` in any other position)
+//!   (`bash::reference_convention_name` / `convention_tails` — the bash
+//!   manual's `source` / `.` entries). A relative or absolute FILE is a
+//!   PATH and is decidable: relative → the sourcing file's own directory
+//!   joined (the static base — the runtime cwd is unknowable to a static
+//!   tool; the shells' cwd behavior is measured in the module doc),
+//!   absolute under the workspace root → stripped. A BARE name is a
+//!   `$PATH` lookup ("FILE is searched for in $PATH") — never a tail;
+//!   so are dynamic / glob / tilde arguments and an absolute path outside
+//!   the root: they are the `Err` arm (FLAGGED, never a same-named-file
+//!   guess — the same rule as the C/C++ angle include).
 //!
 //! Not wired (the audit's flag rows — a table row would be a guess):
 //! C# (no directory convention), Scheme (library layout
@@ -113,6 +126,18 @@ pub fn convention_name_for_reference(
         // guess). `project_root` is not needed (the target is fully
         // determined by `rel` + the required name).
         LanguageId::Ruby => crate::ruby::reference_convention_name(source, ident, path_token, rel),
+        // Bash: the reference is a bare name whose defining file is a
+        // `source` / `.` target. The convention yields the file's
+        // PLACEABLE targets — a relative path (the sourcing file's own
+        // directory joined — the static base, `rel`) or an absolute path
+        // under the workspace root (stripped, `project_root`); the BARE
+        // name (the `$PATH` lookup), a dynamic / glob / tilde argument,
+        // and an absolute path outside the root are the `Err` arm
+        // (FLAGGED — the target is unknowable, never a same-named-file
+        // guess). A function defined in the file keeps the bare lookup.
+        LanguageId::Bash => {
+            crate::bash::reference_convention_name(source, ident, path_token, project_root, rel)
+        }
         // No convention row yet: the bare name-keyed lookup stands.
         _ => Ok(None),
     }
@@ -140,6 +165,11 @@ pub fn convention_file_tails(lang: LanguageId, name: &str) -> Option<Vec<String>
         // pre-step's always-behavior; the directory join keeps a
         // same-named file in another directory out).
         LanguageId::Ruby => Some(crate::ruby::convention_tails(name)),
+        // Bash: one tail per placeable source target, the full
+        // project-relative path (the file-tail `ends_with` row — the
+        // directory join keeps a same-named file in another directory
+        // out).
+        LanguageId::Bash => Some(crate::bash::convention_tails(name)),
         _ => None,
     }
 }
@@ -470,6 +500,49 @@ mod tests {
             Ok(None),
             "a lowercase `?`-suffixed method reference keeps the bare lookup"
         );
+        // Bash (plan-017 issue 07): the dispatch reaches the bash module.
+        // A cross-file name in a file with a RELATIVE source target
+        // yields the sourcing-file-directory-joined target carrier
+        // (bash is `rel`- and `project_root`-dependent — a full six-
+        // argument call, not the four-argument shim). A BARE name is the
+        // `$PATH` lookup and flags; a same-file function keeps the bare
+        // lookup; a source-free file is silent.
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::Bash,
+                "source ./sub/helper.sh\nmain_fn() {\n  helper_fn\n}\n",
+                "helper_fn",
+                "helper_fn",
+                Path::new("/nonexistent-redline"),
+                "scripts/run.sh"
+            ),
+            Ok(Some("scripts/sub/helper.sh".to_string())),
+            "a relative source target is the carrier (the sourcing file's directory join)"
+        );
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::Bash,
+                "source helper\nmain_fn() {\n  helper_fn\n}\n",
+                "helper_fn",
+                "helper_fn",
+                Path::new("/nonexistent-redline"),
+                "scripts/run.sh"
+            ),
+            Err("helper_fn".to_string()),
+            "a bare name is a $PATH lookup: flagged, never a guess"
+        );
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::Bash,
+                "source helper\nwrap_fn() { :; }\n",
+                "wrap_fn",
+                "wrap_fn",
+                Path::new("/nonexistent-redline"),
+                "scripts/run.sh"
+            ),
+            Ok(None),
+            "a same-file function keeps the bare lookup"
+        );
         // The tails table mirrors the dispatch.
         assert_eq!(
             convention_file_tails(LanguageId::Clojure, "some.ns"),
@@ -500,6 +573,12 @@ mod tests {
         assert_eq!(
             convention_file_tails(LanguageId::Ruby, "lib/one.rb\nlib/two.rb"),
             Some(vec!["lib/one.rb".to_string(), "lib/two.rb".to_string()])
+        );
+        // Bash: one tail per placeable source target (the full
+        // project-relative path, the file-tail `ends_with` row).
+        assert_eq!(
+            convention_file_tails(LanguageId::Bash, "scripts/a/x.sh\nscripts/b/y.sh"),
+            Some(vec!["scripts/a/x.sh".to_string(), "scripts/b/y.sh".to_string()])
         );
         // The match predicate per row: the file-tail rows are `ends_with`
         // (byte-for-byte the pre-step's always-behavior); Go's directory
@@ -541,6 +620,19 @@ mod tests {
             LanguageId::Ruby,
             "lib/thing.rb",
             "elsewhere/thing.rb"
+        ),
+        "a same-named file in another directory does not carry the tail");
+        // Bash: a file tail — `ends_with`, and the directory join keeps a
+        // same-named file in another directory out (the decoy).
+        assert!(convention_file_matches(
+            LanguageId::Bash,
+            "scripts/sub/helper.sh",
+            "scripts/sub/helper.sh"
+        ));
+        assert!(!convention_file_matches(
+            LanguageId::Bash,
+            "scripts/sub/helper.sh",
+            "elsewhere/sub/helper.sh"
         ),
         "a same-named file in another directory does not carry the tail");
         assert_eq!(convention_file_tails(LanguageId::Rust, "std"), None);

@@ -2494,6 +2494,211 @@ use super::*;
         );
     }
 
+    // — plan-017 issue 07: Bash relative `source` / `.` (the conventions
+    // mechanism) —————————————————————————
+    //
+    // The source forms are the `source` command and the `.` special
+    // builtin (a `command` whose `command_name` is exactly `source` or
+    // `.` — the dot builtin is structurally distinguishable from a `.`
+    // in any other position). A relative or absolute FILE is a PATH and
+    // is decidable (relative → the sourcing file's own directory joined —
+    // the static base; the runtime cwd is unknowable to a static tool);
+    // a BARE name is a `$PATH` lookup and flags, never a guess.
+
+    /// plan-017 issue 07 (Bash, direction: the landing). The file's
+    /// `source ./sub/helper.sh` places the function `helper_fn` by the
+    /// sourcing-file-directory convention in `scripts/sub/helper.sh`;
+    /// the index's name-keyed candidates (TWO same-named files in two
+    /// directories both define `helper_fn`) NARROW to the sourced file —
+    /// the jump lands on the right file, not the decoy. The narrowing is
+    /// the sourcing-file-relative PATH, not the base name (both files
+    /// end in `sub/helper.sh` — a base-name-only tail would offer both
+    /// rows; the mutation pin).
+    #[test]
+    fn xref_bash_relative_source_narrows_to_sourced_file_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "#!/bin/bash\nsource ./sub/helper.sh\nmain_fn() {\n  helper_fn\n}\n",
+            ),
+            ("scripts/sub/helper.sh", "helper_fn() { :; }\n"),
+            ("elsewhere/sub/helper.sh", "helper_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        // Line 3 (0-based): "  helper_fn" — `helper_fn` at col 3.
+        s.set_point(3, 3, 3);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the relative source narrows to the sourced file (the same-named decoy is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("scripts/sub/helper.sh:1"),
+            "the sourced file's function is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(
+            s.view_name_display(),
+            "scripts/sub/helper.sh",
+            "landed in the sourced file"
+        );
+        assert_eq!(s.point_line(), 0, "on the function's definition line");
+    }
+
+    /// plan-017 issue 07 (Bash, direction: the landing, `.` form). The
+    /// `.` special builtin (a `command` whose `command_name` is exactly
+    /// `.`) is the SAME carrier as `source` — the landing is identical.
+    #[test]
+    fn xref_bash_dot_builtin_narrows_to_sourced_file_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "#!/bin/sh\n. ./sub/helper.sh\nmain_fn() {\n  helper_fn\n}\n",
+            ),
+            ("scripts/sub/helper.sh", "helper_fn() { :; }\n"),
+            ("elsewhere/sub/helper.sh", "helper_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        // Line 3 (0-based): "  helper_fn" — `helper_fn` at col 3.
+        s.set_point(3, 3, 3);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the `.` builtin narrows to the sourced file: {:?}",
+            s.picker_filtered()
+        );
+        s.run_selected();
+        assert_eq!(
+            s.view_name_display(),
+            "scripts/sub/helper.sh",
+            "landed in the sourced file"
+        );
+    }
+
+    /// plan-017 issue 07 (Bash, direction: the BARE-name flag). `source
+    /// helper` is a `$PATH` lookup — which file it is is
+    /// environment-dependent, which redline cannot know. The tree even
+    /// carries a plausible-looking stranger `elsewhere/helper.sh` that
+    /// defines `helper_fn` (the name-keyed superset would offer it) — the
+    /// convention must NOT land there: the name is the named UNRESOLVED
+    /// flag, never a same-named-file guess.
+    #[test]
+    fn xref_bash_bare_source_name_is_flagged_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "source helper\nmain_fn() {\n  helper_fn\n}\n",
+            ),
+            ("elsewhere/helper.sh", "helper_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        // Line 2 (0-based): "  helper_fn" — `helper_fn` at col 3.
+        s.set_point(2, 3, 3);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "scripts/run.sh", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `helper_fn`"),
+            "a bare name is a $PATH lookup: flagged, not the same-named workspace file: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 07 (Bash, direction: the absent relative path
+    /// flag). `source ./sub/missing.sh` places `missing_fn` in
+    /// `scripts/sub/missing.sh` — a file the tree does not hold (and a
+    /// same-named `elsewhere/sub/missing.sh` is a plausible-looking
+    /// stranger). The source mapping is HARD: a candidate in an
+    /// unsourced file is a different symbol — the name is the named
+    /// UNRESOLVED flag, never a jump to the stranger.
+    #[test]
+    fn xref_bash_relative_source_absent_from_tree_is_flagged() {
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "source ./sub/missing.sh\nmain_fn() {\n  missing_fn\n}\n",
+            ),
+            ("elsewhere/sub/missing.sh", "missing_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        // Line 2 (0-based): "  missing_fn" — `missing_fn` at col 3.
+        s.set_point(2, 3, 3);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "scripts/run.sh", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `missing_fn`"),
+            "the absent source target is flagged (the same-named file elsewhere is a DIFFERENT file): `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 07 (Bash, the same-file non-regression): a
+    /// function DEFINED IN THIS FILE is a same-file reference, not a
+    /// cross-file source — even though the file also has source forms
+    /// (placeable AND a bare `$PATH` one) that would otherwise flag a
+    /// cross-file name. The convention stays silent (the local-function
+    /// exclusion), and the bare name-keyed lookup offers the same-file
+    /// definition first — never a flag.
+    #[test]
+    fn xref_bash_same_file_function_keeps_the_bare_lookup() {
+        // The silent-jump shape (no decoy): same-file unique → direct.
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "source ./sub/helper.sh\nsource helper\nwrap_fn() { :; }\nmain_fn() {\n  wrap_fn\n}\n",
+            ),
+            ("scripts/sub/helper.sh", "other_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        // Line 4 (0-based): "  wrap_fn" — `wrap_fn` at col 3.
+        s.set_point(4, 3, 3);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "same-file unique: silent jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "scripts/run.sh", "stayed in the same file");
+        assert_eq!(
+            s.point_line(),
+            2,
+            "on the same-file `wrap_fn` line, not flagged: {}",
+            s.message
+        );
+        // The decoy shape (a `$PATH`-sourced stranger defines the same
+        // name): still no flag — the picker opens with the same-file row
+        // preselected (the bare name-keyed superset, same-file-first).
+        let (mut s, _dir) = store_with_index(&[
+            (
+                "scripts/run.sh",
+                "source helper\nwrap_fn() { :; }\nmain_fn() {\n  wrap_fn\n}\n",
+            ),
+            ("elsewhere/helper.sh", "wrap_fn() { :; }\n"),
+        ]);
+        s.open_path("scripts/run.sh");
+        s.set_point(3, 3, 3);
+        s.xref_find_definitions();
+        assert!(
+            !s.message.contains("unresolved"),
+            "a local function is never flagged, even with a bare $PATH source: `{}`",
+            s.message
+        );
+        assert!(
+            s.picker_open(),
+            "the bare superset stands (same-file row preselected)"
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("scripts/run.sh:"),
+            "the same-file definition is the preselected row: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+    }
+
     /// newlang-paths (e2e pin, C#): M-. on `o.P` in a C# buffer — the
     /// C# outline indexes properties (queries.rs): the whole path `o.P`
     /// has no indexed symbol, but the fall-through to the last segment
