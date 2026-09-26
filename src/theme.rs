@@ -10,7 +10,6 @@ use redline_syntax::highlight::HIGHLIGHT_FACES;
 
 /// Stub palette of terminal colors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum Color {
     /// Terminal default (no explicit color).
     #[default]
