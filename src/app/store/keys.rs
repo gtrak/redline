@@ -234,7 +234,17 @@ impl AppStore {
             self.pending.clear();
             return;
         }
-        if key.code == KeyCode::Enter {
+        // Newline (issue-commit-editor-pasted-newline): a typed RET arrives
+        // as `Enter` (0x0D); a PASTED newline arrives as C-j — the terminal
+        // LF byte (0x0A) decodes to `Char('j')`+CONTROL in raw mode, NOT to
+        // an `Enter` event (measured with tools/probe_keydump; the app
+        // requests no bracketed paste, so a paste is ordinary key bytes, and
+        // the LF byte is a control char, not a line key). The commit message
+        // is a line-oriented document, so BOTH forms insert a real `'\n'`
+        // at the cursor, byte-identical to typing the same characters by hand.
+        // (Previously C-j fell through to the engine, was unbound, and was
+        // silently dropped — a paste glued the lines together.)
+        if key.code == KeyCode::Enter || key == Key::ctrl_char('j') {
             self.commit_editor_newline();
             self.pending.clear();
             return;

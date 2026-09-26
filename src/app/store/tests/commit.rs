@@ -411,3 +411,124 @@ use super::*;
         assert_eq!(top_paged, 0, "n (next page) must reset the window to the top");
     }
 
+
+    // ── issue-commit-editor-pasted-newline: a pasted newline is C-j ──────
+
+    /// issue-commit-editor-pasted-newline: a terminal paste arrives as
+    /// ordinary key bytes (the app requests no bracketed paste). The
+    /// MEASURED decode (tools/probe_keydump, raw mode) of a pasted string
+    /// is: printable chars -> `Char(c)`, and the LF byte (0x0A) ->
+    /// `Char('j')`+CONTROL (C-j) — NOT an `Enter` event, NOT a literal
+    /// `Char('\\n')`. This helper mirrors that decode so the tests feed
+    /// the modal exactly what a real paste would deliver.
+    fn paste_keys(paste: &str) -> Vec<crate::app::keymap::Key> {
+        paste
+            .chars()
+            .map(|c| {
+                if c == '\n' {
+                    crate::app::keymap::Key::ctrl_char('j')
+                } else {
+                    crate::app::keymap::Key::new(crate::app::keymap::KeyCode::Char(c))
+                }
+            })
+            .collect()
+    }
+
+    /// issue-commit-editor-pasted-newline: pasting a multi-line commit
+    /// message must insert REAL newlines, byte-exactly, into the editor
+    /// buffer. The pre-fix build dropped every LF (it arrived as C-j,
+    /// unbound in this modal), so the two lines concatenated with no
+    /// separator. Asserted as ONE whole-value equality on the buffer's
+    /// exact bytes — an `in`/`contains` check could not falsify a dropped
+    /// newline (the probe that missed the notes bug is the cautionary
+    /// example): the newlines are present (positive) AND the surrounding
+    /// prefill text is undisturbed (negative).
+    #[test]
+    fn pasted_newline_in_commit_editor_lands_byte_exact_in_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = git_store_with_staged(dir.path());
+        store.open_commit_editor();
+        let prefill = store.commit_editor.as_ref().unwrap().rope.to_string();
+        for k in paste_keys("line1\nline2\n") {
+            store.key_event(k);
+        }
+        let text = store.commit_editor.as_ref().unwrap().rope.to_string();
+        assert_eq!(
+            text,
+            format!("{prefill}line1\nline2\n"),
+            "pasted newlines must land byte-exact in the commit message buffer (no dropped LF, no glued lines)"
+        );
+    }
+
+    /// issue-commit-editor-pasted-newline: typing a newline by hand (RET
+    /// -> Enter) and pasting one (LF -> C-j) must produce BYTE-IDENTICAL
+    /// commit-message buffers — the acceptance criterion is "a paste
+    /// behaves the same as typing the same characters by hand".
+    #[test]
+    fn typed_and_pasted_newline_are_byte_identical_in_commit_editor() {
+        // Typed: "line1", RET (Enter), "line2", RET.
+        let dir = tempfile::tempdir().unwrap();
+        let mut typed = git_store_with_staged(dir.path());
+        typed.open_commit_editor();
+        let prefill = typed.commit_editor.as_ref().unwrap().rope.to_string();
+        for c in "line1".chars() {
+            typed.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        typed.key_event(key("RET"));
+        for c in "line2".chars() {
+            typed.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        typed.key_event(key("RET"));
+        // Pasted: the same characters, with the LFs decoded as C-j.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut pasted = git_store_with_staged(dir2.path());
+        pasted.open_commit_editor();
+        for k in paste_keys("line1\nline2\n") {
+            pasted.key_event(k);
+        }
+        let typed_text = typed.commit_editor.as_ref().unwrap().rope.to_string();
+        let pasted_text = pasted.commit_editor.as_ref().unwrap().rope.to_string();
+        assert_eq!(
+            typed_text, pasted_text,
+            "a pasted newline must be byte-identical to a typed one"
+        );
+        assert_eq!(
+            typed_text,
+            format!("{prefill}line1\nline2\n"),
+            "and both must be byte-exact (surrounding prefill undisturbed)"
+        );
+    }
+
+    /// issue-commit-editor-pasted-newline: end-to-end on disk — a pasted
+    /// multi-line message survives the commit, and the committed message
+    /// read back from git is byte-exact. `git log --pretty=%B` returns the
+    /// full multi-line body (a subject-only `%s` read-back could not see a
+    /// dropped second line the way the notes probe's `in` check could not).
+    #[test]
+    fn pasted_multiline_commit_message_commits_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut store = git_store_with_staged(root);
+        store.open_commit_editor();
+        for k in paste_keys("line1\nline2\n") {
+            store.key_event(k);
+        }
+        store.key_event(key("C-c"));
+        store.key_event(key("C-c"));
+        assert!(store.commit_editor.is_none(), "editor closed after commit");
+        let out = std::process::Command::new("git")
+            .arg("-C").arg(root)
+            .args(["log", "-1", "--pretty=%B"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        assert_eq!(
+            &out.stdout[..],
+            b"line1\nline2\n",
+            "committed message must be byte-exact (the pasted LF must survive)"
+        );
+    }
