@@ -20,6 +20,8 @@ mod ui;
 
 #[cfg(test)]
 mod perf;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// The ONE lock every test that mutates process-global environment
 /// holds while its env guard is live (P3b): `std::env::set_var`

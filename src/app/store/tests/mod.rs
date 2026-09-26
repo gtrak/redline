@@ -3,42 +3,23 @@ use crate::app::keymap::parse_key;
 use crate::git::blame::BlameLine;
 use crate::git::log::LogEntry;
 
-    /// Shared git CLI for the store tests. The author identity is
+    /// Shared git CLI for the store tests — delegates to
+    /// `crate::test_support::git_cli` (the single implementation; the
+    /// hermetic env block is stated there, once). The author identity is
     /// parameterized: the standard fixture is "Test"/"test@example.com"; the
     /// magit windowing test historically used the short "T"/"t@e.com" (it only
-    /// sets commit metadata, so it is kept verbatim rather than collapsed).
-    /// The GIT_CONFIG_* vars make every call hermetic: host identity/config
-    /// can never leak in.
+    /// sets commit metadata, so it is kept verbatim rather than collapsed), and
+    /// the windowing fixture the mixed "Test"/"t@e.com".
     fn git_cli(dir: &std::path::Path, args: &[&str], name: &str, email: &str) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", name)
-            .env("GIT_AUTHOR_EMAIL", email)
-            .env("GIT_COMMITTER_NAME", name)
-            .env("GIT_COMMITTER_EMAIL", email)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        crate::test_support::git_cli(dir, args, name, email);
     }
 
-    /// Shared repo-priming sequence (init + identity config). `gpgsign_false`
-    /// mirrors which tests configured `commit.gpgsign` — the magit windowing
-    /// test never did, so it stays honest to its original body.
+    /// Shared repo-priming sequence (delegates to
+    /// `crate::test_support::git_repo_init`). `gpgsign_false` mirrors which
+    /// tests configured `commit.gpgsign` — the magit windowing test never did,
+    /// so it stays honest to its original body.
     fn git_repo_init(dir: &std::path::Path, name: &str, email: &str, gpgsign_false: bool) {
-        git_cli(dir, &["init", "-q", "-b", "main"], name, email);
-        git_cli(dir, &["config", "user.name", name], name, email);
-        git_cli(dir, &["config", "user.email", email], name, email);
-        if gpgsign_false {
-            git_cli(dir, &["config", "commit.gpgsign", "false"], name, email);
-        }
+        crate::test_support::git_repo_init(dir, name, email, gpgsign_false);
     }
 
     /// A store rooted in `dir` as the project start, with persistence

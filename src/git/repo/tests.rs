@@ -9,27 +9,10 @@ use crate::model::sections::StatusTree;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Run the git CLI in `dir`, with an isolated global config and
-/// committed author/committer identity so the tests are hermetic.
+/// The standard fixture identity ("Test"/"test@example.com"); the hermetic
+/// env block lives once in `crate::test_support`.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::test_support::git_cli(dir, args, "Test", "test@example.com")
 }
 
 /// Back-date `path`'s mtime/ctime 5 s into the past (GNU `touch`). This puts
@@ -50,10 +33,7 @@ fn backdate(path: &Path) {
 }
 
 fn init_repo(dir: &Path) -> GitRepo {
-    git(dir, &["init", "-q", "-b", "main"]);
-    git(dir, &["config", "user.name", "Test"]);
-    git(dir, &["config", "user.email", "test@example.com"]);
-    git(dir, &["config", "commit.gpgsign", "false"]);
+    crate::test_support::git_repo_init(dir, "Test", "test@example.com", true);
     GitRepo::discover(dir).expect("discover the repo")
 }
 

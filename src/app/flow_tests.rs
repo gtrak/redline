@@ -88,29 +88,18 @@ fn rows_containing(frame: &str, token: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Run git in `dir`; panic on failure (fixture hygiene).
+/// Run git in `dir`; panic on failure (fixture hygiene). Delegates to the
+/// crate-wide harness: the standard "Test"/"test@example.com" fixture
+/// identity plus the hermetic env block. Note this file's two former copies
+/// set NO env at all, so they inherited the developer's `~/.gitconfig` —
+/// routing them through `crate::test_support` is what fixes that.
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    crate::test_support::git_cli(dir, args, "Test", "test@example.com");
 }
 
+/// Git stdout (read-only fixture checks: diff/log/status).
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).to_string()
+    crate::test_support::git_cli(dir, args, "Test", "test@example.com")
 }
 
 /// `src/main.rs` content mirroring the PTY fixture's expectations: the

@@ -256,29 +256,12 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// The standard fixture identity ("Test"/"test@example.com"), set
+    /// per-child exactly as before: the oracle scenario's env is whatever
+    /// the test's EnvScope pins in the PROCESS env, which a per-child
+    /// `Command::env` never reaches.
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            // The git CLI (used only for setup/verification commits) needs an
-            // author. Set per-child so they never reach the process env that
-            // the wrapper's own `git var` subprocesses inherit — the oracle
-            // scenario's env is whatever the test's EnvScope pins.
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        crate::test_support::git_cli(dir, args, "Test", "test@example.com")
     }
 
     fn init_repo(dir: &Path, with_author: bool) -> GitRepo {
