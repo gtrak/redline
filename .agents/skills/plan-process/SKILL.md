@@ -751,3 +751,20 @@ it** — but note it is strictly less destructive than interrupting the run, whi
 
 Corollary already in force: a lane with modified files and no commit is the state that has destroyed
 finished work twice here (`git checkout -- <file>` restores from the INDEX). Commit first, probe second.
+
+## A mutation that does not redden is AMBIGUOUS — confirm you mutated the site the test exercises
+
+Two different meanings, and they need opposite responses: either the pin is vacuous (bad), or **you mutated
+a line the test never reaches** (your mistake, and it teaches nothing).
+
+Observed: forcing the B5 gate open in `src/app/store/navigation/xref.rs` left
+`xref_b5_c_call_in_main_is_unresolved_not_a_picker` **green**. The gate exists at **both** fallback sites —
+the project path in `definitions.rs` and the external-buffer path in `xref.rs` — and the test lives in
+`navigation::definitions`. Mutating the `definitions.rs` site reddened it on the first run.
+
+**The tell is the test's own module path** (`navigation::definitions::…`). Read it before choosing a line to
+mutate. And when a mutation survives, ask "did I touch the line this test depends on?" *before* concluding
+the pin is worthless — otherwise a real, well-pinned behaviour gets rewritten to chase a phantom.
+
+This is the mirror of the older rule that a test can be aimed at nothing: **a mutation can be aimed at
+nothing too.**
