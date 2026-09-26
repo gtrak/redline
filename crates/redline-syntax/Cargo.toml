@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Syntax highlighting for redline: tree-sitter grammar registry, highlight pipeline, and cache (plain Rust — zero iocraft/tokio, plan layering rule)"
 
+# issue-guardrails: workspace lints (undocumented_unsafe_blocks deny —
+# every `unsafe` block needs a `// SAFETY:` comment; see the root
+# Cargo.toml's [workspace.lints] for the rationale).
+[lints]
+workspace = true
+
 [dependencies]
 # ── text model ──────────────────────────────────────────────────────────────
 ropey = "1.6.1"

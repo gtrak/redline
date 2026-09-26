@@ -656,7 +656,20 @@ mod tests {
                 .iter()
                 .map(|(k, _)| (k.to_string(), std::env::var_os(k)))
                 .collect();
+            // SAFETY: `set_var` is unsafe in edition 2024 because it races
+            // with ANY concurrent `env::var`/`var_os` reader on another
+            // thread (process-wide, not per-variable). This runs while
+            // holding `crate::ENV_LOCK` (kept in the struct, declared
+            // after `restore`, so it drops LAST — the `Drop` restore below
+            // also runs under the lock), and every other env-mutating
+            // test in this crate (`git::commit`'s `EnvScope`, the
+            // `ui::file_view` tint tests) takes that same lock.
+            // Known residual (reported, issue-guardrails P1): the
+            // `app::store` fetch tests still mutate/read `PATH` under
+            // their own `PATH_LOCK` — to be moved onto `ENV_LOCK`.
             for (k, v) in pairs {
+                // SAFETY: as above — under `crate::ENV_LOCK`, held for
+                // this guard's whole life.
                 unsafe { std::env::set_var(k, v); }
             }
             Self { restore, _lock }
@@ -665,14 +678,25 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            // SAFETY: same invariant as `set` above — `_lock` is declared
+            // after `restore`, so it drops LAST: the restore completes
+            // (every `set_var`/`remove_var` here) before the
+            // `ENV_LOCK`-serialized window closes.
             for (k, v) in self.restore.drain() {
                 match v {
-                    Some(v) => unsafe { std::env::set_var(k, v); },
-                    None => unsafe { std::env::remove_var(k); },
+                    Some(v) => {
+                        // SAFETY: same invariant as `set` above — the
+                        // `ENV_LOCK` guard is still live (`_lock` drops
+                        // last), so this restore cannot race a concurrent
+                        // environment reader.
+                        unsafe { std::env::set_var(k, v); }
+                    }
+                    None => {
+                        // SAFETY: same invariant as the arm above.
+                        unsafe { std::env::remove_var(k); }
+                    }
                 }
             }
-            // `_lock` (declared after `restore`) drops last: the env is
-            // fully restored before the serialization window closes.
         }
     }
 

@@ -20,6 +20,23 @@ cargo build --release
 # binary at target/release/redline
 ```
 
+## Development gate
+
+A pre-push hook (tracked at `.githooks/pre-push`) runs the fast gate
+(`tools/gate.sh fast` — build + clippy + tests, no PTY battery) before any
+push. Install it once per clone:
+
+```sh
+tools/install-hooks.sh   # = git config core.hooksPath .githooks
+```
+
+It is advisory (`git push --no-verify` bypasses it) and only active in
+clones that ran the install step — `.git/hooks/` is not versioned, so
+`core.hooksPath` is the only shareable install. `core.hooksPath` is repo
+config shared by all worktrees, so a push from any worktree gates that
+worktree's checkout (the branch being pushed). The full release gate is
+`tools/gate.sh full` (adds the PTY battery).
+
 ## Quick start
 
 ```sh

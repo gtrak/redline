@@ -2808,16 +2808,28 @@ mod tests {
     // precedence row is a distinct observable pinned below, per CELL
     // (canvas background_color), not by a screenshot.
     //
-    // Every test here reads the process-global theme (`theme::current()`) to
-    // compute its expectations, and ONE of them (`current_line_face_is_read_from_the_theme_not_hard_coded`)
-    // swaps that global. The lock serializes the module's tint tests so a
-    // swap can never land between another test's theme read and its render.
-    static TINT_TEST_LOCK: std::sync::Mutex<()> =
-        std::sync::Mutex::new(());
-    /// Hold the tint-test lock for the duration of one test (see the
-    /// module note above; the guard must stay alive until the test ends).
+    // Every test here reads the process-global theme (`theme::current()`)
+    // to compute its expectations, and ONE of them
+    // (`current_line_face_is_read_from_the_theme_not_hard_coded`)
+    // swaps that global; the truecolor pins additionally mutate the
+    // process-global `COLORTERM` env var. Each test holds
+    // `crate::ENV_LOCK` (see `tint_test_lock` below): one mutex excludes
+    // BOTH the theme swap and the env mutation from every other env-
+    // mutating/reading test in the crate.
+    /// Hold the crate-level env lock for the duration of one tint test
+    /// (the guard must stay alive until the test ends). These tests
+    /// mutate TWO process globals — the theme (`theme::set_current`) and
+    /// `COLORTERM` — so they must serialize against EVERY other
+    /// env-mutating test in the crate, not just this module's own tests:
+    /// `set_var`/`remove_var` are unsafe (edition 2024) because they race
+    /// with ANY concurrent `env::var`/`var_os` reader on another thread
+    /// (process-wide, not per-variable), and a module-local lock would
+    /// not exclude `git::commit`'s `EnvScope` or `model::files`'s
+    /// `EnvGuard`. `crate::ENV_LOCK` is that shared lock (main.rs);
+    /// holding it also serializes the theme swap against the other tint
+    /// tests, as the module-local lock did.
     fn tint_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        TINT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// A plain (non-annotated, non-note) code row at buffer line `line`.
@@ -3249,6 +3261,10 @@ mod tests {
         let t = theme::current();
         // Save and remove COLORTERM to force the no-truecolor path.
         let prev_colorterm = std::env::var("COLORTERM").ok();
+        // SAFETY: the test holds `crate::ENV_LOCK` (via `tint_test_lock`)
+        // for its whole body, and every env-mutating test in the crate
+        // takes that same lock — no concurrent environment access can
+        // interleave.
         unsafe { std::env::remove_var("COLORTERM"); }
         // Now truecolor is disabled: the palette fallback must be used.
         assert!(!crate::ui::truecolor_enabled(), "precondition: truecolor off");
@@ -3273,9 +3289,17 @@ mod tests {
             "canvas cell: the 16-colour fallback (SGR 48;5;8) is painted"
         );
         // Restore COLORTERM (or its absence).
+        // SAFETY: same invariant as the removal above — the `ENV_LOCK`
+        // guard spans the whole test body.
         match prev_colorterm {
-            Some(v) => unsafe { std::env::set_var("COLORTERM", v); },
-            None => unsafe { std::env::remove_var("COLORTERM"); },
+            Some(v) => {
+                // SAFETY: as above — still under `crate::ENV_LOCK`.
+                unsafe { std::env::set_var("COLORTERM", v); }
+            }
+            None => {
+                // SAFETY: as above — still under `crate::ENV_LOCK`.
+                unsafe { std::env::remove_var("COLORTERM"); }
+            }
         }
     }
 
@@ -3289,6 +3313,10 @@ mod tests {
         let _lock = tint_test_lock();
         let t = theme::current();
         let prev_colorterm = std::env::var("COLORTERM").ok();
+        // SAFETY: the test holds `crate::ENV_LOCK` (via `tint_test_lock`)
+        // for its whole body, and every env-mutating test in the crate
+        // takes that same lock — no concurrent environment access can
+        // interleave.
         unsafe { std::env::set_var("COLORTERM", ""); }
         assert!(!crate::ui::truecolor_enabled(), "precondition: truecolor off");
         let tint = current_line_bg(&t);
@@ -3299,9 +3327,18 @@ mod tests {
             iocraft::Color::Rgb { r: 35, g: 35, b: 35 },
             "MUTATION: the 16-colour fallback must NOT emit the truecolor Rgb value"
         );
+        // SAFETY: same invariant as the set above — the `ENV_LOCK` guard
+        // spans the whole test body, so the restore cannot race a
+        // concurrent environment reader.
         match prev_colorterm {
-            Some(v) => unsafe { std::env::set_var("COLORTERM", v); },
-            None => unsafe { std::env::remove_var("COLORTERM"); },
+            Some(v) => {
+                // SAFETY: as above — still under `crate::ENV_LOCK`.
+                unsafe { std::env::set_var("COLORTERM", v); }
+            }
+            None => {
+                // SAFETY: as above — still under `crate::ENV_LOCK`.
+                unsafe { std::env::remove_var("COLORTERM"); }
+            }
         }
     }
 }

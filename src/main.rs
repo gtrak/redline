@@ -24,10 +24,16 @@ mod perf;
 /// The ONE lock every test that mutates process-global environment
 /// holds while its env guard is live (P3b): `std::env::set_var`
 /// mutates process state, and other threads reading env vars
-/// concurrently is UB per the Rust docs — so `model::files`'s
-/// `EnvGuard` and `git::commit`'s `IsolatedHome` serialize on this
-/// shared crate-level mutex (separate per-module locks would not
-/// exclude each other).
+/// concurrently is UB per the Rust docs (any variable — a reader of
+/// `COLORTERM` races a writer of `HOME`) — so env-mutating tests
+/// serialize on this shared crate-level mutex (separate per-module
+/// locks would not exclude each other). Users: `git::commit`'s
+/// `EnvScope` (+ its tests' per-body `TZ`/`GIT_AUTHOR_*` pins),
+/// `model::files`'s `EnvGuard` (+ `model::project`'s usage), and the
+/// `ui::file_view` tint tests' `COLORTERM` pins. Known residual (P1
+/// finding, issue-guardrails): the `app::store` fetch tests read/mutate
+/// `PATH` under their own `PATH_LOCK` — recommendation: move them onto
+/// this lock (issue-git-test-harness lane owns that file).
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -145,6 +151,10 @@ mod tty_stdout {
     use std::os::fd::RawFd;
     use std::os::unix::io::AsRawFd;
 
+    // SAFETY: POSIX libc declarations with exact C-ABI signatures
+    // (`int dup(int)`, `int dup2(int, int)`, `int close(int)`); each call
+    // site below states the fd-ownership invariant that makes ITS call
+    // sound.
     unsafe extern "C" {
         fn dup(fd: RawFd) -> RawFd;
         fn dup2(oldfd: RawFd, newfd: RawFd) -> RawFd;
@@ -171,6 +181,11 @@ mod tty_stdout {
     /// Save fd 1 and point it at `/dev/tty`. The caller must verify
     /// stdout is not a tty first (this is a no-op mistake on a tty).
     pub fn reroute_stdout_to_tty() -> io::Result<ReroutedStdout> {
+        // SAFETY: fd 1 is the process's stdout — valid for the process's
+        // whole life (opened before `main`). `dup` returns a NEW fd that
+        // is uniquely ours: every path below either closes it (the two
+        // `close(original)` calls) or transfers unique ownership to a
+        // `File::from_raw_fd` — never both.
         let original = unsafe { dup(1) };
         if original < 0 {
             return Err(io::Error::last_os_error());
@@ -185,10 +200,24 @@ mod tty_stdout {
             // No controlling tty: undo the `dup` and report — the dump
             // will be skipped rather than corrupt the redirected stream.
             Err(e) => {
+                // SAFETY: `original` came from our `dup` above and has not
+                // been closed yet. This path (the `/dev/tty` open failed)
+                // is mutually exclusive with the other two paths that end
+                // this function — the `dup2`-failure path and the
+                // success path (which hands the fd to `from_raw_fd`) — so
+                // this is its only close. A double close would be UB, not
+                // a leak.
                 let _ = unsafe { close(original) };
                 return Err(e);
             }
         };
+        // SAFETY: `tty` is an owned `File` we just opened, so its raw fd
+        // is valid, and fd 1 is the process's own fd — a legal `dup2`
+        // target (replaced atomically). OWNERSHIP CONSEQUENCE, the real
+        // invariant here: on success, fd 1 *is* a dup of `tty`, so the
+        // render loop's writes (which go through fd 1) only work while
+        // `tty` stays open — it is kept in `ReroutedStdout` and must
+        // outlive the render loop to process exit.
         let dup2 = unsafe { dup2(tty.as_raw_fd(), 1) };
         if dup2 < 0 {
             // The tty fd stays open (closed at process exit); report and
@@ -196,6 +225,11 @@ mod tty_stdout {
             // original fd is now dead weight (nothing will write to it,
             // and `original_stdout: None` means `emit_dump` never sees
             // it) — close it rather than leak it for the process life.
+            // SAFETY: `original` came from our `dup` and has not been
+            // closed yet. This path is mutually exclusive with the other
+            // two paths that end this function (the open-failure path
+            // already returned; the success path keeps the fd), so this
+            // is its only close — a double close would be UB, not a leak.
             let _ = unsafe { close(original) };
             Ok(ReroutedStdout {
                 original_stdout: None,
@@ -274,8 +308,14 @@ fn emit_dump(dump: &str, sink: &DumpSink) {
         DumpSink::Rerouted(rerouted) => {
             if let Some(fd) = rerouted.original_stdout {
                 use std::os::fd::FromRawFd;
-                // `from_raw_fd` takes ownership: the fd is closed on drop
-                // (fine — the dump is the last thing written to it).
+                // SAFETY: `fd` is the `original_stdout` from our `dup`;
+                // on the success path it was never closed (the two
+                // `close(original)` calls return before this sink ever
+                // exists), so the fd is still valid. `from_raw_fd` takes
+                // UNIQUE ownership: this `File` is now the only owner and
+                // the only thing that will close it (on drop, after the
+                // dump) — closing the fd anywhere else would be a double
+                // close (UB).
                 unsafe { std::fs::File::from_raw_fd(fd) }
                     .write_all(dump.as_bytes())
                     .is_ok()

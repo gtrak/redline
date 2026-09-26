@@ -2,11 +2,33 @@
 members = ["crates/*"]
 resolver = "2"
 
+# issue-guardrails (part B): every `unsafe` block in the workspace must
+# carry a `// SAFETY:` comment naming the invariant that makes it sound.
+# VERIFIED ON THIS TOOLCHAIN (rustc/clippy 1.97.1, 2026-07-14): this is a
+# CLIPPY lint, not a rustc lint — rustc rejects the bare name
+# (`unknown lint: undocumented_unsafe_blocks`) and clippy asks that it be
+# addressed as `clippy::undocumented_unsafe_blocks` (currently
+# deprecated-but-functional on this toolchain; the part-B negative test
+# proves it fires here). Consequence: it only fires under `cargo clippy`,
+# so the enforcement point is the gate (tools/gate.sh — every tier runs
+# clippy) and the pre-push hook, not plain `cargo build`.
+[workspace.lints.rust]
+# The workspace currently has NO `unsafe fn`; deny so one can never
+# appear and silently un-check its inner unsafe ops (that lint is
+# allow-by-default on `unsafe fn` bodies).
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 [package]
 name = "redline"
 version = "0.1.0"
 edition = "2024"
 description = "Read-focused, emacs-flavored TUI code browser for the agent-coding loop"
+
+[lints]
+workspace = true
 
 [dependencies]
 # ── UI layer ────────────────────────────────────────────────────────────────

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# redline pre-push hook: run the fast gate (build + clippy + tests) before
+# any push lands on the remote.
+#
+# HONEST LIMITS (read before blaming this hook):
+#   * ADVISORY. `git push --no-verify` skips it entirely; so do most
+#     remote-side flows (force pushes from other clones, the remote's own
+#     CI, ...). It stops accidental pushes from THIS checkout, nothing more.
+#   * CLONE-LOCAL INSTALL. `.git/hooks/` is not versioned, so a fresh clone
+#     has NO hooks until someone runs the install step:
+#       tools/install-hooks.sh   (or: git config core.hooksPath .githooks)
+#     Clones that skip it get no gate at all — this file being tracked
+#     does not make it run.
+#   * core.hooksPath IS repo config shared by every worktree of this
+#     repository (verified: a `git config core.hooksPath` written from a
+#     worktree lands in the shared .git/config). A push from
+#     .agents/worktrees/<n> therefore runs this hook with cwd = that
+#     worktree's top level, and the gate checks THAT worktree's checkout
+#     (the branch being pushed). That is the desired behaviour — it gates
+#     the branch — not a bug.
+#   * ANY REF. It runs for pushes of any ref (branches, tags) and even
+#     for ref deletions; the gate verdict is about the local checkout,
+#     not the ref being pushed.
+#   * FAST TIER ONLY, deliberately: `tools/gate.sh fast` (build + clippy +
+#     tests, ~30 s). Never a PTY tier here — the PTY battery's
+#     load-sensitive flake class is exactly what a push-blocking gate
+#     must not have. If `fast` ever proves too slow, say so and raise the
+#     tier deliberately; do not silently trim a stage.
+set -u
+# Hooks may run from any cwd; pin the checkout this push originates from.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+exec bash tools/gate.sh fast

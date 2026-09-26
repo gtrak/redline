@@ -387,7 +387,9 @@ mod tests {
     /// environment is exactly what the test says it is. Every touched var
     /// is saved and restored. Must be held under `crate::ENV_LOCK` (other
     /// threads reading env vars concurrently is UB; the same lock is held
-    /// by `model::files`'s `EnvGuard`).
+    /// by `model::files`'s `EnvGuard`). In every user, the `ENV_LOCK`
+    /// guard is acquired BEFORE the `EnvScope`, so the `Drop` restore
+    /// also runs under the lock.
     struct EnvScope {
         home: std::path::PathBuf,
         prev: Vec<(String, Option<std::ffi::OsString>)>,
@@ -414,6 +416,14 @@ mod tests {
                 .chain(REMOVE_VARS.iter().copied())
                 .map(|v| (v.to_string(), std::env::var_os(v)))
                 .collect();
+            // SAFETY: `set_var`/`remove_var` are unsafe in edition 2024
+            // because they race with ANY concurrent `env::var`/`var_os`
+            // reader on another thread (the race is process-wide, not
+            // per-variable). This block runs only while the caller's
+            // `crate::ENV_LOCK` guard is live (acquired before the
+            // `EnvScope` in all eight tests), and every env-mutating test
+            // in the crate takes that same lock — so no concurrent
+            // environment access can interleave.
             unsafe {
                 std::env::set_var("HOME", &home);
                 std::env::set_var("XDG_CONFIG_HOME", &home);
@@ -427,6 +437,10 @@ mod tests {
     }
     impl Drop for EnvScope {
         fn drop(&mut self) {
+            // SAFETY: same invariant as `apply` — this `Drop` runs in the
+            // calling test's body, where its `ENV_LOCK` guard (declared
+            // before the `EnvScope`) is still live, so the restore cannot
+            // race a concurrent environment reader.
             unsafe {
                 for (var, saved) in &self.prev {
                     match saved {
@@ -504,6 +518,9 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         for tz in ["America/New_York", "Asia/Kolkata"] {
+            // SAFETY: the test holds `crate::ENV_LOCK` for its whole body,
+            // and every env-mutating test in the crate takes that lock —
+            // no concurrent environment access can interleave.
             unsafe { std::env::set_var("TZ", tz) };
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
@@ -534,6 +551,8 @@ mod tests {
                 recorded, want,
                 "TZ={tz}: recorded offset must be git's ({off}), not the digits reinterpreted"
             );
+            // SAFETY: as above — the `ENV_LOCK` guard spans the whole
+            // loop, so removing `TZ` cannot race a concurrent reader.
             unsafe { std::env::remove_var("TZ") };
         }
     }
@@ -572,7 +591,10 @@ mod tests {
         );
         // The env layer too — a level the old code never read at all — and it
         // must move the AUTHOR only (independence).
+        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // every env-mutating test in the crate takes that same lock.
         unsafe { std::env::set_var("GIT_AUTHOR_NAME", "Env Three") };
+        // SAFETY: same as the line above (the lock guard is unchanged).
         unsafe { std::env::set_var("GIT_AUTHOR_EMAIL", "three@example.com") };
         std::fs::write(root.join("a.txt"), "a\nB\nC\n").unwrap();
         g.stage_file("a.txt").unwrap();
@@ -587,6 +609,8 @@ mod tests {
     fn commit_env_identities_equal_git_var() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
+        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // every env-mutating test in the crate takes that same lock.
         unsafe {
             std::env::set_var("GIT_AUTHOR_NAME", "Env Author");
             std::env::set_var("GIT_AUTHOR_EMAIL", "env@example.com");
@@ -636,6 +660,8 @@ mod tests {
     fn commit_invented_identity_equals_git_var() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
+        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // every env-mutating test in the crate takes that same lock.
         unsafe {
             std::env::set_var("EMAIL", "invented@example.com");
         }
