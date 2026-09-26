@@ -343,7 +343,7 @@ impl ToolingProvider for JsProvider {
     }
 
     fn languages(&self) -> &'static [&'static str] {
-        &["javascript", "typescript", "tsx", "jsx"]
+        &["javascript", "typescript", "tsx"]
     }
 
     fn resolve(&self, ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {

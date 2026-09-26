@@ -241,7 +241,7 @@ fn run(cfg: SearchConfig, bus: SearchBus, generation: usize, root: PathBuf) {
                 });
                 return;
             };
-            for glob in globs {
+            for glob in &globs {
                 if types_builder.add(t, glob).is_err() {
                     bus.send(SearchEvent::Error {
                         message: format!("file type `{t}` is not usable"),
@@ -462,25 +462,17 @@ fn git_ignored_by_ancestors(
 }
 
 /// Built-in type name → representative glob(s) for the `rg --type` filter
-/// (the pinned `TypesBuilder` registers types by name + glob; redline maps
-/// the common type names to their glob families, mirroring the grammar
-/// registry's extension map). `None` for an unknown type name.
-fn type_globs(name: &str) -> Option<&'static [&'static str]> {
-    Some(match name {
-        "rust" => &["*.rs"],
-        "typescript" => &["*.ts"],
-        "javascript" => &["*.js"],
-        "python" => &["*.py"],
-        "go" => &["*.go"],
-        "c" => &["*.c", "*.h"],
-        "cpp" => &["*.cpp", "*.cc", "*.hpp", "*.hh"],
-        "toml" => &["*.toml"],
-        "json" => &["*.json"],
-        "yaml" => &["*.yml", "*.yaml"],
-        "bash" => &["*.sh"],
-        "markdown" => &["*.md"],
-        _ => return None,
-    })
+/// (the pinned `TypesBuilder` registers types by name + glob). Driven
+/// from the language registry (the same single source of truth as the
+/// extension map in `registry.rs`): every non-Plain language's extensions
+/// become `*.<ext>` globs, so adding a language to the registry
+/// automatically gives it search-type coverage (no hand-synced second
+/// list to drift). `None` for Plain or an unknown name.
+fn type_globs(name: &str) -> Option<Vec<String>> {
+    redline_syntax::language::LANGUAGES
+        .iter()
+        .find(|spec| spec.name == name && spec.id != LanguageId::Plain)
+        .map(|spec| spec.extensions.iter().map(|ext| format!("*.{ext}")).collect())
 }
 
 /// The streaming sink: posts a `Hit` per matched line (the line-oriented
@@ -1214,6 +1206,63 @@ mod tests {
         );
         assert!(files.contains(&"graft/cache/other.md"));
         drop(bus);
+    }
+
+    // ── cross-check: registry ↔ search type + provider dispatch ─────────
+
+    /// Every non-Plain language in the registry must have a search-type
+    /// filter (the `rg --type` name is the language's own name, and
+    /// `type_globs` is driven from the registry so this is structural —
+    /// the guard catches a future regression to a hand-maintained list
+    /// or a lookup bug that silently drops a name).
+    #[test]
+    fn type_globs_covers_all_registry_languages() {
+        use redline_syntax::language::LANGUAGES;
+        for spec in &LANGUAGES {
+            if spec.id == LanguageId::Plain {
+                continue;
+            }
+            let globs = type_globs(spec.name)
+                .unwrap_or_else(|| panic!(
+                    "type_globs is missing language `{}` ({:?})",
+                    spec.name, spec.id
+                ));
+            assert!(!globs.is_empty(),
+                "type_globs({}) returned an empty glob list",
+                spec.name);
+        }
+    }
+
+    /// Every entry in every provider's `languages()` dispatch list must
+    /// be a registered language name (the single source of truth is the
+    /// `LanguageSpec` table). A typo like `"jsx"` (an extension, not a
+    /// language name) or a stale entry after a language rename fails here
+    /// with the offending provider and string named.
+    #[test]
+    fn provider_languages_are_registered_names() {
+        use redline_resolve::{
+            CargoProvider, ToolingProvider,
+            providers::{go_provider::GoProvider, js_provider::JsProvider, python_provider::PythonProvider},
+        };
+        use redline_syntax::language::LANGUAGES;
+
+        let registered: Vec<&str> = LANGUAGES.iter().map(|s| s.name).collect();
+        let providers = [
+            ("cargo", &CargoProvider::new() as &dyn ToolingProvider),
+            ("js", &JsProvider::new() as &dyn ToolingProvider),
+            ("python", &PythonProvider::new() as &dyn ToolingProvider),
+            ("go", &GoProvider::new() as &dyn ToolingProvider),
+        ];
+        for (label, provider) in &providers {
+            for lang in provider.languages() {
+                assert!(
+                    registered.contains(lang),
+                    "provider `{label}` (name `{}`) lists language `{lang}` which is \
+                     not a registered LanguageSpec name (registered: {registered:?})",
+                    provider.name()
+                );
+            }
+        }
     }
 
 }
