@@ -55,16 +55,39 @@ def capture(app):
     return [app.row_text(r) for r in content_rows(app)]
 
 
+def settle_once(app):
+    """Read until the app's last frame is fully applied, then capture.
+
+    issue-sweep-file-search-flake: the capture must never land MID-FRAME.
+    iocraft wraps each frame in a synchronized update (?2026h … ?2026l) and
+    the frame's bytes take longer than this capture's 20 ms quiet window to
+    flush under load, so a quiet-exit can fire while the frame is still
+    streaming; a capture then reads a TORN screen (rows of the new and old
+    frame mixed, sometimes a CUP split across the read boundary that pyte
+    renders as literal text — measured live: a search header reading
+    '2;1H…README.md (2)'). The app repaints only on events, so a torn
+    state persists and the two-identical-captures stability check below
+    confirms it as "stable". `App.frame_complete()` is the gate: the
+    capture is only taken once the bytes after the last sync-close are
+    cursor-placement bytes (or none)."""
+    for _ in range(8):
+        app._read(0.1, quiet=0.02)
+        if app.frame_complete():
+            break
+    return capture(app)
+
+
 def stable_capture(app, tries=8, pause=0.35):
     """Capture until the frame is quiescent (two identical captures `pause`
-    seconds apart) so timing variance does not produce spurious diffs."""
+    seconds apart) so timing variance does not produce spurious diffs. Every
+    capture is frame-settled first (settle_once) — a mid-frame capture cannot
+    be repaired by a later identical one (see settle_once)."""
     import time
-    prev = None
-    frame = capture(app)
+    prev = settle_once(app)
+    frame = prev
     for _ in range(tries):
         time.sleep(pause)
-        app._read(0.1, quiet=0.02)
-        cur = capture(app)
+        cur = settle_once(app)
         if cur == prev:
             return cur
         prev = cur
@@ -146,6 +169,13 @@ def home_boot():
     the derived group sample (labels/keys exactly once), the standard help
     line, and NO `*scratch*` anywhere. A fresh PTY each."""
     app = App(REPO, rows=ROWS, cols=COLS)
+    # Frame-settled capture (settle_once's rationale applies to the boot
+    # frame too: a mid-frame read of the first paint is equally torn).
+    import time
+    for _ in range(8):
+        app._read(0.1, quiet=0.02)
+        if app.frame_complete():
+            break
     frame = [app.row_text(r) for r in range(ROWS)]
     text = "\n".join(frame)
     once = lambda tok: sum(1 for r in frame if tok in r) == 1

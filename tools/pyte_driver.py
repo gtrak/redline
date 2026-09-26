@@ -320,6 +320,35 @@ class App:
     # no post-sync CUP, and gating those reads would wait the full cap.
     _SYNC_END_RE = re.compile(rb"\x1b\[\?2026l")
     _CUP_RE = re.compile(rb"\x1b\[(\d+);(\d+)[Hf]")
+    # The only bytes that ever FOLLOW a frame's ?2026l sync-close (measured
+    # across every view's frames: empty, or the deferred cursor placement
+    # `ESC[?25h` + CUP `ESC[r;cH` — plan 013's detached MoveTo). Anything
+    # else after the close means the frame's content is still in flight.
+    _FRAME_TAIL_RE = re.compile(
+        rb"^(?:\x1b\[\?25[hl]|\x1b\[\d+;\d+[Hf])*$")
+
+    def frame_complete(self):
+        """True when the stream's last frame has fully closed.
+
+        iocraft wraps every frame in a synchronized update
+        (`?2026h` … `?2026l`) and places the cursor AFTER the close. A
+        quiet window (the `_read` quiet-exit) can fire MID-FRAME when the
+        frame's bytes take longer than the window to flush (frame delivery
+        is tens of ms under load; stable_capture's window is 20 ms), and a
+        capture taken then reads a TORN screen — half the rows of the new
+        frame, half of the old, and sometimes a CUP split across the read
+        boundary that pyte renders as literal text. The app repaints only
+        on events, so a later "identical capture" cannot heal it: the torn
+        state is stable. This gate says "frame complete" only when the
+        bytes after the last sync-close are cursor-placement bytes (or
+        none) — content bytes after the close mean the frame is still in
+        flight and the caller must keep reading.
+        """
+        matches = list(self._SYNC_END_RE.finditer(self.raw_tail))
+        if not matches:
+            return True  # no synchronized frame has started
+        # The tail is capped at 1.5 MB, so this scan is cheap per call.
+        return bool(self._FRAME_TAIL_RE.match(self.raw_tail[matches[-1].end():]))
 
     def cup_after_sync(self, buf=None):
         """(row, col) — 1-based terminal coordinates — of the last CUP

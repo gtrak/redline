@@ -91,10 +91,15 @@ def text(app):
 def flat_text(app):
     """Screen text with all whitespace runs collapsed to single spaces.
 
-    A prompt or message that wraps past 80 cols (the pool-lane fixture paths
-    are longer than the shared /tmp ones, so the quit-save prompt's key list
-    wraps onto the next row) must not defeat substring assertions: the wrap
-    point is a layout artifact, not a missing prompt.
+    Used so a newline (a message that the terminal itself wrapped before the
+    app's own single-line discipline took hold, or a legacy wrap-era frame)
+    does not defeat substring assertions. NOTE: the current app does NOT
+    wrap long minibuffer messages — the minibuffer is NoWrap +
+    overflow-hidden (plan-017 F2, `src/ui/root/widgets.rs`): the message
+    occupies exactly one row and everything past the right edge is CLIPPED
+    (pinned by the store-side test `minibuffer_long_text_stays_one_row`).
+    Assertions that need the right edge of a long message must therefore
+    account for the clip, not assume a wrap (issue-sweep-quit-prompt-flake).
     """
     return re.sub(r"\s+", " ", text(app))
 
@@ -374,8 +379,27 @@ def _read_notes(path):
 
 def flow_quit_prompt_y():
     """Modified notes + `C-x C-c` → prompt names the path; `y` writes the
-    file (contents asserted on disk) and the process ends with exit 0."""
+    file (contents asserted on disk) and the process ends with exit 0.
+
+    issue-sweep-quit-prompt-flake: the prompt is a SINGLE clipped row, not a
+    wrapping one (NoWrap + overflow-hidden, plan-017 F2). The full prompt is
+    "Save this buffer: <path>? (y, n, !, C-g)" — with the gate's fixture
+    root (/tmp/fx<pid>/...) the path pushes it past the 80-col right edge and
+    the key list is CLIPPED: it is simply not on the screen (measured:
+    row22 = ' Save this buffer: /tmp/fx607194/…/.redline-notes.md? (y, n, !, ').
+    The old assertion (flat_text + PROMPT_KEYS) assumed the wrap-era layout
+    and failed 100% of gate-full runs from ba70fa8 onward — the prompt was
+    armed and fully functional (y saved + exit 0 + on-disk write) while the
+    assertion read "prompt not rendered". Now the gate asserts what the
+    layout PROMISES: the left edge (head + buffer path) is always visible;
+    the key list is asserted only when the prompt fits the row
+    (prompt_len <= COLS-1, which holds at the shared /tmp root and the
+    pool lanes). The state machine itself (prompt armed → y → save → exit 0
+    → on-disk bytes) is asserted unconditionally below.
+    """
     notes = os.path.join(REPO, ".redline-notes.md")
+    prompt_len = len("Save this buffer: %s? %s" % (notes, PROMPT_KEYS))
+    keys_visible = prompt_len <= COLS - 1
     try:
         app = App(REPO, rows=ROWS, cols=COLS)
         app.key("C-x n")
@@ -387,11 +411,13 @@ def flow_quit_prompt_y():
         # Positive gate (loop-02): the prompt must render before the
         # path/keys asserts — a quit that hasn't painted yet is not a
         # verdict (and exit-0 below independently gates it: a pending
-        # prompt blocks the exit).
+        # prompt blocks the exit). Only the visible part of the prompt is
+        # asserted (see the clip contract above).
         prompted = wait_for(
             app, lambda: (PROMPT_HEAD in flat_text(app)
                           and ".redline-notes.md" in flat_text(app)
-                          and PROMPT_KEYS in flat_text(app)), 4.0)
+                          and (PROMPT_KEYS in flat_text(app)
+                               if keys_visible else True)), 4.0)
         alive = reap(app) is None
         app.key("y", settle=2.0)
         status = wait_exit(app)
@@ -401,7 +427,9 @@ def flow_quit_prompt_y():
         record("quit-prompt-y", "C-x n,QY;C-x C-c;y", ok,
                f"notes-open={notes_open} prompt-rendered-with-path={prompted} "
                f"alive-during-prompt={alive} exit-0-after-y={status == 0} "
-               f"file-contains-edit={('QY' in on_disk)} (status={status})")
+               f"file-contains-edit={('QY' in on_disk)} "
+               f"prompt-len={prompt_len} keys-clipped={not keys_visible} "
+               f"(status={status})")
     finally:
         try:
             app.kill()
