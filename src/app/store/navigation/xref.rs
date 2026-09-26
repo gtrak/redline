@@ -524,7 +524,7 @@ impl AppStore {
 
     /// 011-06: the per-language DOTTED path-container node kinds — exactly
     /// the containers 011-03's `node_at` whole-path machinery returns, as
-    /// pinned per language in `src/syntax/node.rs`: JS/TS/TSX
+    /// pinned per language in `crates/redline-syntax/src/node/`: JS/TS/TSX
     /// `member_expression` (`a.b.c`) and the TS-only nested type
     /// identifiers, Python's `attribute` (`a.b.c`), Go's
     /// `selector_expression` / `qualified_type` (`pkg.Fn`), C's

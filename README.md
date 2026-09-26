@@ -91,7 +91,7 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `C-c p t` | toggle-tree | Toggle the file-tree sidebar |
 | `M-x` | toggle-tree-follow | Toggle tree buffer-follow (off by default) |
 | `M-x` | open-palette | Command palette |
-| `M-.` | xref-find-definitions | Jump to the definition of the symbol AT the cursor: the identifier run at the point's column (a `::`-path like `tokio::spawn` is read as one token; a cursor parked right after the name counts). Same-file definitions are jumpable and listed first (struct + impl in one file is the normal case); one candidate jumps, several open the picker. When the workspace has no definition, the jump falls through to the language tooling (Rust: `cargo metadata` → registry source dir, `cargo fetch` if needed — status line shows `resolving …`) and the resolved external source opens READ-ONLY; a miss reports `no provider resolution for …`. INSIDE an external buffer, M-. navigates within the owning crate: the crate's source tree is indexed in the background at the first landing (status line shows `indexing crate …`), and the same selection rule runs against that crate index (crate-relative candidates; a crate miss still falls through to the resolver, so a second crate lands and gets indexed the same way) |
+| `M-.` | xref-find-definitions | Jump to the definition of the symbol AT the cursor: the identifier run at the point's column (a `::`-path like `tokio::spawn` is read as one token; a cursor parked right after the name counts). Same-file definitions are jumpable and listed first (struct + impl in one file is the normal case); one candidate jumps, several open the picker. When the workspace has no definition, the jump falls through to the language tooling — four providers: Rust (`cargo metadata` → registry source dir, `cargo fetch` if needed), JavaScript/TypeScript/TSX (`node_modules` + `package.json`, `npm install` for a missing package), Python (stdlib/site-packages via `importlib`, `pip install` for a missing package), and Go (`go.mod` → module dir, `go` toolchain) — status line shows `resolving …`; the resolved external source opens READ-ONLY. A fetch that would install anything first asks on the input path (`fetch on demand: <command> (from <file>) (y/n)?`), and a refusal says why (`install refused: <command> was declined at the fetch confirmation (nothing was installed)`); a miss reports `no provider resolution for …` with the provider's own reason leading (no such symbol, not an npm project, no go.mod, …). Clojure, Java, C/C++, and Go also resolve imports IN-workspace by convention (Clojure alias → namespace → file; Java `a.b.C` → `a/b/C.java`; C/C++ quoted `#include "a/b.h"`; Go in-module path → package dir), and a name the convention cannot place is reported `unresolved: <name>` — never a guessed jump. The per-language grid is `docs/language-coverage.md`. INSIDE an external buffer, M-. navigates within the owning crate: the crate's source tree is indexed in the background at the first landing (status line shows `indexing crate …`), and the same selection rule runs against that crate index (crate-relative candidates; a crate miss still falls through to the resolver, so a second crate lands and gets indexed the same way) |
 | `M-,` | jump-back | Pop back in the jump stack |
 | `C-i` / `Tab` | jump-forward | Walk forward in the jump stack |
 | `M-i` | imenu | Open the imenu outline (external buffers get the outline from the owning crate's background index) |
@@ -208,13 +208,14 @@ inside the profiled root adds the CSV itself to the walked tree (a warm
 repeat run sees it), and the reported ms figures are load-sensitive.
 ## Architecture
 
-- `docs/language-coverage.md` — the language × capability grid (all 14 registry languages: what works live / unit-only / bails / is not implemented)
+- `docs/language-coverage.md` — the language × capability grid (all 19 registry languages: what works live / unit-only / bails / is not implemented)
+- `crates/redline-syntax/` — tree-sitter grammar registry, highlight pipeline, cache (workspace crate; moved from `src/syntax/` in plan 014 stage 1)
+- `crates/redline-resolve/` — the M-. tooling-provider chain (Rust / JS-TS / Python / Go) behind the tooling fall-through
 - `src/app/` — store, command registry, keymap engine, watcher
 - `src/model/` — project, buffer (ropey), file walk
 - `src/nav/` — symbol index (tree-sitter, rayon-parallel)
 - `src/search/` — ripgrep-embedded, references, occur
 - `src/git/` — git2 wrapper: status, staging, log, blame, commit
-- `src/syntax/` — tree-sitter grammars, highlight cache
 - `src/ui/` — iocraft components: file view, magit, picker, tree, log
 - `src/theme.rs` — dark/light themes
 

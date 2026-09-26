@@ -7,7 +7,7 @@
 //! node kinds), and except Markdown, which has no comment or string node
 //! kinds at all (the filter is inactive there; documented exception). The
 //! issue 05 query infrastructure (thread-local parser + cached `Query`)
-//! is reused; all tree-sitter churn stays in `src/syntax/`.
+//! is reused; all tree-sitter churn stays in `crates/redline-syntax/`.
 //!
 //! `search/references` asks for these ranges per file: hits whose byte
 //! offset falls inside one are dropped (comment/string hits); files whose

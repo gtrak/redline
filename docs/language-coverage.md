@@ -127,17 +127,236 @@ is gone), and the ones that ALSO have a scope walker key it by scope
 scope is always empty and they resolve across distances but not across
 same-scope name repeats), degrading to the plain line anchor for languages
 with no identifier kind (Yaml, Markdown, Plain), for legacy records, and
-for points off a symbol.
+for points off a symbol. Two measured limits of the Rust symbol anchor
+are filed, not fixed (`issue-annotation-stage-2b` addendum, 2026-09-23):
+a struct field's type identity carries **no scope** (the Rust scope
+walker covers impls / fns / mods, not struct bodies — `struct A { name:
+String }` anchors as `(type_identifier, "String", [])`, so a common
+type like `String` collides across structs and the note degrades to the
+text rules), and a reference type such as `&'a str` captures **no anchor
+at all** (a silent line-tied degradation).
+
+## Mechanisms with no grid column (measured the same way)
+
+The grid was built capability-by-capability as features landed, so
+whole mechanisms never got a row. Each entry below carries the same
+evidence standard as the grid (a test name, a drive leg, or a source
+line) and the same vocabulary.
+
+**Rust field / trait tables (field and impl-method M-.,
+find-implementations) — RUST-ONLY.** `rust_tables` / `rust_fields` /
+`rust_traits` (`src/nav/index/symbol_index.rs`) are built in the same
+rayon pass as the outline (the same trees — zero extra parse cost):
+`self.<member>` resolves through the LEXICALLY ENCLOSING impl's type
+to the struct's field line or the impl method's line, a
+`let x: Type` / `let x = Type { … }` binding rides the same tables,
+and a trait name opens the find-implementations picker over the
+`impl Trait for Type` blocks. Pinned: `xref_self_receiver_field_lands_on_the_field_name_column`,
+`xref_local_binding_method_call_narrows_ambiguous_impls`,
+`find_implementations_opens_picker_of_trait_impls` (tests/navigation/
+definitions.rs). Every other language: no tables exist (`rust_tables_query: Some`
+on the Rust registry row only), and M-. falls through to the
+name-keyed index byte-for-byte. **Stated correctness limit:**
+`field_locations` is keyed by the **bare struct name** (`rust_fields`:
+struct name → field name → locations), so two same-named structs in
+different modules with a same-named field COLLAPSE — the never-guess
+contract is weakened by the keying, not by the lookup logic.
+
+**imenu impl-parent grouping — RUST-ONLY.** An impl method renders one
+level deeper, under the impl's type (`imenu_candidate` /
+`imenu_depth`, `src/app/store/picker.rs`; the data is
+`current_buffer_rust_tables`, `src/app/store/navigation/xref.rs` —
+`None` for every non-Rust buffer, so the flat enclosing-extent indent
+stands byte-for-byte in all other languages). Pinned:
+`unit_flow_imenu_impl_parent_grouping` (flow_tests.rs),
+`imenu_groups_impl_methods_under_the_struct`,
+`imenu_non_rust_stays_flat` (the non-Rust degradation).
+
+**M-? references — UNIFORM for all 18 grammar-bearing languages.** A
+word-boundary, fixed-string ripgrep search over the project, filtered
+per file by the tree-sitter token class: comment / string hits are
+dropped wherever a grammar exists (`references_filter` →
+`comment_string_ranges`, `src/search/references.rs` +
+`crates/redline-syntax/src/tokens.rs`), and the extracted run obeys the
+per-language word rule below (the Lisp family references the last `/`
+segment, keyword markers stripped). Two documented exceptions: Markdown's
+filter is INACTIVE (the grammar has no comment or string node kinds —
+the hits are kept), and Plain is the no-filter fallback (comment / string
+hits are kept). Pinned: `references_drops_comment_and_string_hits`,
+`references_fallback_keeps_comment_and_string_hits`,
+`references_at_point_searches_the_symbol`.
+
+**`injections_query` — loaded but INERT (uniformly, for every
+language).** Three registry rows carry a non-empty injections query
+(Rust, JavaScript, Markdown), and `registry.rs` passes it to
+`HighlightConfiguration::new` — but the injection callback is
+`|_| None` (`crates/redline-syntax/src/highlight.rs`). Net effect:
+fenced code blocks in Markdown, Rust `html!` macro bodies, and JS
+tagged templates are **never** highlighted as their embedded language.
+The inertness is uniform, so the Markdown "highlighting — works" cell in
+the grid above is read as NOT covering embedded-language highlighting.
+
+**Per-language word / symbol rule** (issue-language-aware-symbols,
+landed `b3f8234`). The word-constituent set per language (`WordRule` /
+`is_word_char`, `crates/redline-syntax/src/language.rs` — consulted by
+the word motions, the M-? / M-. extraction, the ripgrep word-boundary
+sink, and the kill-word walks; alnum + `_` is the base for every
+language):
+
+- `-` additionally: **Scheme, Clojure** (the Lisp reader's symbol
+  alphabet) and **Toml** (bare keys — probe: `a-b` / `key-x` each parse
+  as ONE `bare_key`; `-` is not an operator there)
+- `$` additionally: **JavaScript, TypeScript, Tsx** (probe: `$foo`,
+  `bar$`, `$bar` each parse as ONE `identifier`; `-` STAYS a boundary
+  — arithmetic)
+- `?` `!` additionally: **Ruby** (method suffixes — probe: `empty?` /
+  `save!` are ONE `identifier`; the ternary `?` stays a separate
+  whitespace-separated node)
+- `* + ! - ? < > = . / :` additionally: **Scheme, Clojure** (the Lisp
+  reader's symbol alphabet `[a-zA-Z0-9*+!?:_.-/]` — probe:
+  `jwks/fetch-issuer-info` and `::jwks/local` are ONE node each; the
+  quote form keeps its own `'` and stays a boundary)
+- base only (alnum + `_`): **Rust, Python, Go, C, Cpp, Java, CSharp,
+  Bash, Json, Yaml, Markdown, Plain** — 12 rows
+
+Measured from the registry's `word_rule` column: 12 Default / 3 Dollar /
+1 Suffix / 2 Lisp / 1 BareKey = 19 rows. Pinned BOTH directions by
+`word_rule_is_per_language` (the new constituents are one word AND the
+operators that should split still split). What the rule does NOT cover:
+a Rust lifetime `'a` still extracts `a` on M-. (the tick is not a word
+char — audit B4, recorded, not claimed), and the struct-field /
+reference-type anchor limits noted in the notes row above.
+
+**Import / alias / module resolution — the plan-017 conventions
+mechanism.** A SHARED pre-step in M-. (`crates/redline-syntax/src/
+conventions.rs`: the conventions table, name → path tails, plus the
+per-language import/alias extractor; ONE call site in
+`src/app/store/navigation/definitions.rs` — no per-language branch, a
+new language is a table row plus a query). It composes with the index:
+the convention narrows the index's name-keyed candidates to the files
+it places the definition in — never a second resolver engine, never an
+absolute guess (the tails are matched against the indexed files):
+
+- **Clojure — works (unit).** The `ns`-form alias map (`clojure::ns_aliases`
+  — alias entries + identity entries for un-aliased requires; first-
+  `ns`-form-only, no parseable ns form → `None`, caller must not guess),
+  `alias/var` and `::alias/var` references → the namespace → file tails
+  (dots → `/`, hyphens → `_`, `.clj` / `.cljc` / `.cljs`). SOFT layout
+  semantics: an empty intersection degrades to the bare name-keyed
+  superset (never an empty answer where the name is indexed); a dotless
+  alias the file's `ns` form does not declare is FLAGGED (`cannot
+  resolve namespace alias …`), never guessed. Pinned:
+  `xref_clojure_namespace_alias_jumps_to_var`,
+  `xref_clojure_unresolvable_alias_is_flagged`,
+  `ns_form_alias_and_identity_entries` (clojure.rs).
+- **Java — works (unit).** A single-type `import a.b.C` binds `C` →
+  `a/b/C.java` (JLS §7.6 — the pinned grammar holds the whole path as
+  ONE `scoped_identifier`); a qualified type reference WITHOUT an import
+  rides the same convention. HARD semantics: the import placed the name
+  in a file the index does not hold → the named `unresolved` flag
+  (below), not a same-named-file jump. Pinned:
+  `xref_java_import_narrows_to_convention_file_and_lands`,
+  `xref_java_qualified_type_reference_uses_convention_without_import`,
+  `xref_java_field_access_is_unresolved_not_misrouted`,
+  `single_type_import_binds_simple_name_to_fqn` (java.rs). Wildcard and
+  static-member imports: no convention row — they stay on the name-keyed
+  lookup.
+- **C / C++ — works (unit).** A QUOTED `#include "a/b.h"` → the include's
+  path (with the directory join — `sub/thing.h`, never `thing.h`, which
+  is what keeps a same-base-name decoy in another directory out) as a
+  tail, matched against the index's name-keyed candidates (the
+  quoted-include search order: the including file's directory / source
+  roots). ANGLE includes are excluded **by construction**, not by
+  convention: `#include <a.h>` is a DIFFERENT node kind
+  (`system_lib_string` — a leaf with no content child), so the `-I` /
+  system path simply is not in the tree to extract; an angle-only name
+  stays on the `unresolved` flag (no C/C++ tooling provider). Pinned:
+  `xref_c_quoted_include_narrows_to_convention_header_and_lands`,
+  `xref_cpp_quoted_include_narrows_to_convention_header_and_lands`,
+  `xref_c_angle_include_is_unresolved_not_a_guess`,
+  `c_quoted_includes_are_the_carrier_angle_is_excluded` (c_cpp.rs).
+- **Go — works (unit).** An in-module `import "a/b/c"` (plain / aliased /
+  dot / blank forms) → the module-relative package DIRECTORY; the module
+  path is read from the repository's own `go.mod` (the nearest go.mod
+  walking up from the file, BOUNDED to the workspace root so a stray
+  parent go.mod cannot capture a file) — offline, no toolchain; the
+  import alias shadows the last path segment. An import OUTSIDE the
+  module path is FLAGGED (a third-party dependency — no toolchain, no
+  guess); cross-module / download resolution stays on the `go` tooling
+  provider (toolchain-gated — no `go` on this box, audit F4). Pinned:
+  `xref_go_local_import_narrows_to_module_directory_and_lands`,
+  `xref_go_aliased_import_lands_in_the_module_directory`,
+  `import_shapes_bind_per_the_grammar` (go.rs).
+- **Ruby — IN FLIGHT in a sibling lane** (plan 017 issue 06,
+  `require_relative` → the sibling `.rb`; the `?`/`!` constituent rule it
+  rides on has landed — see the word rule above). Not claimed here.
+- **Not landed — the flag rows** (plan 017 issue 08, by design
+  "flag, don't guess"): C# (no directory convention — a convention row
+  would be a guess), Scheme (library layout implementation-defined),
+  Ruby bare `require` ($LOAD_PATH), C++ semantic forms (ADL / templates /
+  using-directives), Python relative `from .` (the sys.path root is
+  unknown); plus Bash relative `source` / `.` (plan 017 issue 07). None
+  of these is claimed by this file.
+
+**The unresolved flag (plan-017 B5) — every language without a tooling
+provider.** When the point sits on a token that is NOT the enclosing
+symbol's own name, the index misses, and no tooling provider handles
+the buffer's language, M-. reports `unresolved: \`<name>\`` — a named
+flag (the M-. analog of the annotations' `orphaned`): no picker, no
+jump, no enclosing-symbol fallback. The audit's misroute (M-. on a C
+function called inside `main` opened a picker on `main`) is gone. The
+enclosing fallback stands byte-for-byte in its two legitimate shapes —
+the point on the enclosing symbol's OWN NAME (column-precise via
+`point_on_symbol_name`, compared through the per-language word rule) —
+or the point carrying NO token at all (a blank / comment point keeps
+the by-line "jump to the enclosing function" press). When a provider
+DOES handle the language (or the extension is unknown — the chain keeps
+its in-order walk), the point's own token goes to the tooling seam
+instead: tooling stays authoritative over the flag (an in-function
+`tokio::spawn` resolves through cargo, it does not report
+unresolved). Pinned: `xref_b5_c_call_in_main_is_unresolved_not_a_picker`,
+`xref_b5_point_on_enclosing_name_keeps_the_picker`,
+`xref_c_field_access_is_unresolved_not_misrouted`,
+`xref_java_field_access_is_unresolved_not_misrouted`.
+
+**Fetch confirmation — and a refusal now says WHY (F2).** No provider
+ever installs without the operator: an install step (`cargo fetch`,
+`pip install`, `npm install`) runs only after the input-path banner
+`fetch on demand: <command> (from <file>) (y/n)?` — `y` approves the
+exact command on screen, `n` / C-g / ESC decline, and a stale or
+superseded ask is declined WITHOUT a banner (no unconfirmed install,
+ever; a missing confirmation hook REFUSES — fail-safe, not fail-open).
+A refusal now carries the reason, and the reason LEADS the report (F2,
+`ba70fa8`): the provider's own miss detail — e.g. `install refused:
+\`pip install x\` was declined at the fetch confirmation (nothing was
+installed)`, `not an npm project`, `no go.mod under workspace root …` —
+leads the `no provider resolution for …` line (a single-attempt chain
+surfaces its provider's own reason; a multi-provider walk names the
+provider on an `install refused` detail; unrelated multi-provider bails
+keep the generic shape). Pinned: `confirm_or_refuse` (crates/
+redline-resolve), `apply_fetch_prompt` / `fetch_confirm_key` (src/app/
+store/navigation/definitions.rs), `fetch_declined_refuses_pip_install`,
+`fetch_accepted_runs_stub_pip_exactly_once`,
+`fetch_stale_ask_is_declined_without_a_banner` (tests/navigation/
+receiver.rs).
 
 ## In-project M-. vs cross-project M-. (reading the grid)
 
 The outline column is the floor: for every language with a definition
-query (all 17 non-Plain), definitions **inside the opened project** are
+query (16 of the 18 grammar-bearing languages — JSON and YAML carry
+`definition_query: None` deliberately, issue-json-yaml-no-symbols, and
+Plain has no grammar at all), definitions **inside the opened project**
+are
 M-. targets through the project index (the project walk has no
 extension filter — provider-matrix, C/C++ section). Everything in the
 right half of the grid (path-shaped, bare-via-import, provider,
 in-library follow-up) is about M-. **outside** the project index, and
-is where languages genuinely diverge.
+is where languages genuinely diverge. The mechanisms that never got a
+grid column (the Rust field/trait tables, imenu impl-parent grouping,
+`M-?` references, the inert `injections_query`, the per-language word
+rule, the plan-017 import conventions, the B5 unresolved flag, and the
+fetch confirmation) are measured in the section after the
+language-agnostic row below.
 
 ## Gaps (prioritized — what is missing per language)
 
@@ -158,6 +377,15 @@ is where languages genuinely diverge.
    indexable — but no provider can ever produce the landing.
    Highest-value gap if C/C++ source navigation is a goal; the index
    side and the syntax side are done, the resolution side is absent.
+   *Addendum (plan 017): the in-workspace half has since LANDED — the
+   QUOTED `#include` resolves through the conventions mechanism
+   (017-04; the angle-include limit is STRUCTURAL: `system_lib_string`
+   is a leaf with no content child, so the `-I` / system path is not in
+   the tree to extract), and the enclosing-fallback misroute is gone
+   (B5 — an unresolvable name in a function reports the named
+   `unresolved` flag instead of a picker on the enclosing symbol; see
+   the mechanism rows above). What still stands: no C/C++ tooling
+   provider, and the C++ semantic forms stay flagged.*
 2. **TypeScript / Tsx: no live drive leg.** Every TS/Tsx cell rests on
    the shared JS machinery's unit pins; `drive_issue_011_05`/`_06` only
    exercise JavaScript. A TS leg (or an explicit "TS rides the JS
@@ -221,6 +449,11 @@ is where languages genuinely diverge.
    `set_language` fails. Re-landing Clojure needs a grammar crate whose
    parser targets the pinned runtime — or a deliberate runtime bump,
    which is a separate ABI-pinning decision, not this lane's.
+   *Addendum (plan 017): the RESOLUTION half has landed too — the
+   Clojure alias/namespace conventions ride the shared conventions
+   mechanism (the ns-form alias map; `alias/var` and `::alias/var` →
+   namespace → file tails; an undeclared dotless alias is flagged, never
+   guessed — see the "Import / alias / module resolution" row above).*
 
 ## Known corners (documented simplifications — not gaps)
 
@@ -267,6 +500,24 @@ these pinned corners, recorded here so they are not re-filed as bugs:
    `symbol_at_point_java_csharp_ruby_degradation_stays_bare`).
    (JSON/Bash/Markdown/Scheme have no dotted path container to
    enumerate in the first place.)
+5. **The js provider's `jsx` dispatch string is dead (audit F1).**
+   `JsProvider::languages()` is
+   `["javascript","typescript","tsx","jsx"]`, but no registry row is
+   named `"jsx"` — jsx FILES map to the JavaScript row (its extension
+   list includes `jsx`), so the `"jsx"` string never matches a
+   dispatch. The provider's effective coverage is the JavaScript /
+   TypeScript / Tsx rows; the dead string is harmless, but the
+   dispatch table names a language that does not exist.
+6. **`.mdx` files map to the Markdown grammar (audit F3).** The Markdown
+   row's extensions include `mdx`, so an MDX `import X from "…"` line
+   parses as a plain `paragraph` — MDX imports are invisible to redline
+   (the Markdown grammar has no import construct). Known limitation, not
+   a plan-017 work item (MDX as its own language is out of scope).
+7. **A Scheme library's name is indexed under its FIRST name-list
+   symbol only (audit F6).** `(define-library (foo core) …)` keys the
+   outline under `foo`, dropping the library path `foo.core` (the flat
+   grammar has no path-shaped node for it). Any future Scheme import
+   work must re-key to the full library path.
 
 ## What this file deliberately does NOT claim
 

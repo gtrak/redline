@@ -1724,7 +1724,7 @@ pub struct AppStore {
     /// refresh (watcher-driven live refresh is issue 04).
     dirty: Option<DirtyCounts>,
     /// Grammar registry (built once at startup; all tree-sitter API
-    /// churn is isolated in `src/syntax/registry.rs`).
+    /// churn is isolated in `crates/redline-syntax/src/registry.rs`).
     pub grammar_registry: GrammarRegistry,
     /// Highlight cache: keyed by (path, mtime, theme); bounded memory.
     pub highlight_cache: HighlightCache,
