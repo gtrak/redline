@@ -211,23 +211,17 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn file(path: impl AsRef<std::path::Path>, content: &str) {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(path, content).unwrap();
-    }
+    use crate::model::write_test_file;
 
     #[test]
     fn git_root_wins_over_markers_above() {
         let dir = tempfile::tempdir().unwrap();
         // Outer project (marker), inner git repo, deep start dir.
-        file(dir.path().join("Cargo.toml"), "[package]\n");
+        write_test_file(dir.path().join("Cargo.toml"), "[package]\n");
         fs::create_dir_all(dir.path().join("inner/.git")).unwrap();
         let deep = dir.path().join("inner/src");
         fs::create_dir_all(&deep).unwrap();
-        file(deep.join("main.rs"), "fn main() {}\n");
+        write_test_file(deep.join("main.rs"), "fn main() {}\n");
 
         let root = detect_root(&deep).expect("a project must be found");
         assert_eq!(root, fs::canonicalize(dir.path().join("inner")).unwrap());
@@ -237,7 +231,7 @@ mod tests {
     fn git_file_counts_as_git_root() {
         // Worktrees/submodules store `.git` as a file.
         let dir = tempfile::tempdir().unwrap();
-        file(dir.path().join(".git"), "gitdir: /elsewhere\n");
+        write_test_file(dir.path().join(".git"), "gitdir: /elsewhere\n");
         let sub = dir.path().join("a/b");
         fs::create_dir_all(&sub).unwrap();
         assert_eq!(detect_root(&sub), Some(fs::canonicalize(dir.path()).unwrap()));
@@ -246,7 +240,7 @@ mod tests {
     #[test]
     fn marker_fallback_finds_nearest_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        file(dir.path().join("pyproject.toml"), "[project]\n");
+        write_test_file(dir.path().join("pyproject.toml"), "[project]\n");
         let src = dir.path().join("src");
         fs::create_dir_all(&src).unwrap();
         assert_eq!(detect_root(&src), Some(fs::canonicalize(dir.path()).unwrap()));
@@ -257,7 +251,7 @@ mod tests {
         for marker in ["Cargo.toml", "package.json", "pyproject.toml", "go.mod", ".projectile"]
         {
             let dir = tempfile::tempdir().unwrap();
-            file(dir.path().join(marker), "x\n");
+            write_test_file(dir.path().join(marker), "x\n");
             let sub = dir.path().join("sub");
             fs::create_dir_all(&sub).unwrap();
             assert_eq!(
@@ -271,10 +265,10 @@ mod tests {
     #[test]
     fn nearest_marker_wins() {
         let dir = tempfile::tempdir().unwrap();
-        file(dir.path().join("Cargo.toml"), "[package]\n");
+        write_test_file(dir.path().join("Cargo.toml"), "[package]\n");
         let nested = dir.path().join("nested");
         fs::create_dir_all(&nested).unwrap();
-        file(nested.join("package.json"), "{}\n");
+        write_test_file(nested.join("package.json"), "{}\n");
         assert_eq!(detect_root(&nested), Some(fs::canonicalize(&nested).unwrap()));
     }
 

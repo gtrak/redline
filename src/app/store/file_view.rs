@@ -1797,14 +1797,16 @@ impl AppStore {
         self.minibuffer_message("Go to line: ");
     }
 
-    /// Whether goto-line mode is active.
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// Whether goto-line mode is active (test-only accessor; no production
+    /// caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn goto_line_active(&self) -> bool {
         self.goto_line_active
     }
 
-    /// The goto-line input buffer (for display).
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// The goto-line input buffer (test-only accessor, no production caller;
+    /// for display/tests).
+    #[allow(dead_code)] // test-only accessor
     pub fn goto_line_input(&self) -> &str {
         &self.goto_line_input
     }

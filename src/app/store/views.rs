@@ -68,8 +68,9 @@ impl AppStore {
         self.menu.open
     }
 
-    /// The current submenu path (empty at the top level).
-    #[allow(dead_code)] // used by the menu tests; public accessor for future UI
+    /// The current submenu path (empty at the top level; test-only accessor,
+    /// no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn menu_path(&self) -> &KeySeq {
         &self.menu.path
     }
@@ -161,8 +162,9 @@ impl AppStore {
             .collect()
     }
 
-    /// The menu entries at the current submenu path.
-    #[allow(dead_code)] // used by the menu tests; public accessor for future UI
+    /// The menu entries at the current submenu path (test-only accessor,
+    /// no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn menu_entries(&self) -> Vec<TransientMenuEntry> {
         self.menu_entries_for_path(&self.menu.path)
     }

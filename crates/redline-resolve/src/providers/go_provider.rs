@@ -631,17 +631,8 @@ fn item_at_start(s: &str, item: &str) -> bool {
     // bailed on non-ASCII and treated it as a boundary).
     match s.get(item.len()..).and_then(|r| r.chars().next()) {
         None => true, // item extends to end of string
-        Some(c) => !is_ident_char(c),
+        Some(c) => !crate::is_ident_char(c),
     }
-}
-
-fn is_ident_char(c: char) -> bool {
-    // C15: mirrors the redline crate's single word-char rule —
-    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
-    // redline-resolve has no dependency on redline, so the rule is
-    // duplicated here rather than imported; keep the two in sync (the
-    // sibling `crate::cargo::is_ident_char` does the same).
-    c.is_alphanumeric() || c == '_'
 }
 
 /// Find the index of the matching closing `)` for the opening `(` at
@@ -1035,11 +1026,11 @@ exclude (
     /// identifier char, so `greet` was mis-detected as a definition.
     #[test]
     fn go_line_defines_ident_char_is_unicode_aware() {
-        assert!(is_ident_char('é'), "accented letter");
-        assert!(is_ident_char('漢'), "CJK letter");
-        assert!(is_ident_char('_'));
-        assert!(!is_ident_char('-'));
-        assert!(!is_ident_char(' '));
+        assert!(crate::is_ident_char('é'), "accented letter");
+        assert!(crate::is_ident_char('漢'), "CJK letter");
+        assert!(crate::is_ident_char('_'));
+        assert!(!crate::is_ident_char('-'));
+        assert!(!crate::is_ident_char(' '));
         // Whole-word pin: `greet` inside `greeté` is NOT a definition of
         // `greet` (the `é` is an identifier char, not a boundary).
         assert_eq!(go_line_defines_item("func greeté() {", "greet"), None);

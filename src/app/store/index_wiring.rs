@@ -8,21 +8,21 @@ impl AppStore {
 
     /// Whether a file watcher is currently active (0 or 1 — exactly one at a
     /// time). Exposed for test diagnostics (the spec's "handle count" check).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only diagnostic accessor; no production caller
     pub fn watcher_count(&self) -> usize {
         usize::from(self.watcher.is_some())
     }
 
     /// The root the active watcher is watching (exactly one at a time).
     /// Exposed for test diagnostics.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only diagnostic accessor; no production caller
     pub fn watcher_active_root(&self) -> Option<&PathBuf> {
         self.watcher.as_ref().map(|w| &w.root)
     }
 
     /// Whether the watcher is runtime-suspended (`M-x toggle-watcher`).
     /// Exposed for test diagnostics.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only diagnostic accessor; no production caller
     pub fn watcher_suspended(&self) -> bool {
         self.watch_suspended
     }
@@ -351,7 +351,7 @@ impl AppStore {
     /// conservative than the old unconditional `true`: even a buffer
     /// sitting exactly on its saved position now reads modified until the
     /// next save/load re-establishes the marker.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only seam: exercises the conflict logic before the editing UI lands
     pub fn mark_locally_modified(&mut self, key: &str) {
         if let Some(buf) = self.buffers.get_mut(key) {
             buf.saved_marker = None;
@@ -890,13 +890,13 @@ impl AppStore {
     }
 
     /// Set the index directly (for tests; bypasses the background thread).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only seam: bypasses the background indexing thread
     pub fn set_index(&mut self, index: SymbolIndex) {
         self.index = index;
     }
 
-    /// The current symbol index (for tests and the UI).
-    #[allow(dead_code)]
+    /// The current symbol index (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor; the UI reads index data via views
     pub fn index(&self) -> &SymbolIndex {
         &self.index
     }

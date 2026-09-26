@@ -177,7 +177,7 @@ impl GrammarRegistry {
 /// the locals query is empty, and adding a locals query to a reuse
 /// language (or changing one for any language) fails the C13 test
 /// against `highlight::supports_reuse`.
-#[allow(dead_code)] // used by the C13 agreement test in highlight.rs
+#[allow(dead_code)] // test-only seam: no production caller; the C13 agreement test pins it
 pub(crate) fn has_locals_queries(id: LanguageId) -> bool {
     !crate::language::spec(id).locals_query.is_empty()
 }

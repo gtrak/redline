@@ -87,9 +87,9 @@ impl ChangeBus {
         self.tx.subscribe()
     }
 
-    /// The current value (synchronous, no update). Used by tests/diagnostics;
-    /// the UI consumes the bus via a live [`subscribe`](Self::subscribe) receiver.
-    #[allow(dead_code)]
+    /// The current value (synchronous, no update). Test-only accessor (the
+    /// UI consumes the bus via a live [`subscribe`](Self::subscribe) receiver).
+    #[allow(dead_code)] // test-only accessor
     pub fn current(&self) -> ProjectChange {
         self.tx.borrow().clone()
     }

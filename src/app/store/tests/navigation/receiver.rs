@@ -587,11 +587,6 @@ struct PipStub {
     old_path: Option<std::ffi::OsString>,
 }
 
-/// PATH is process-global: the stub's PATH override must never interleave
-/// with another fetch test's (each overrides PATH to its own bin dir). The
-/// fetch tests below hold this guard for their whole body.
-static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 impl PipStub {
     fn install() -> (Self, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -624,9 +619,12 @@ impl PipStub {
             bin.display(),
             std::env::var("PATH").map(|p| format!(":{p}")).unwrap_or_default()
         );
-        // SAFETY: test-only PATH override; no other thread reads PATH in
-        // this test binary (the stub only ever affects THIS test's pip
-        // lookups).
+        // SAFETY: test-only PATH override. The process environment is
+        // process-global, so std's contract is that a writer must exclude
+        // ANY concurrent reader (not just readers of THIS variable): the
+        // fetch tests below hold `crate::ENV_LOCK` for their whole body,
+        // which serializes every env reader/writer in this test binary
+        // (single process-global environment, one lock).
         unsafe { std::env::set_var("PATH", new_path) };
         (
             Self {
@@ -689,9 +687,9 @@ fn wait_resolve_event(
 /// refuses the fetch (naming the exact command that was NOT run) and the
 /// stub pip is never invoked.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the PATH override must span the whole body (incl. the `.await`s) so parallel fetch tests never interleave their stub PATHs
+#[allow(clippy::await_holding_lock)] // the ENV_LOCK must span the whole body (incl. the `.await`s) so parallel env-mutating tests never interleave (the stub PATH override lives under the same process-global environment)
 async fn fetch_declined_refuses_pip_install() {
-    let _path_guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (stub, _keep) = PipStub::install();
     let (mut s, _dir) = store_with_index(&[
         (
@@ -759,9 +757,9 @@ async fn fetch_declined_refuses_pip_install() {
 /// bails honestly when the module is still missing (the stub fetches
 /// nothing).
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the PATH override must span the whole body (incl. the `.await`s) so parallel fetch tests never interleave their stub PATHs
+#[allow(clippy::await_holding_lock)] // the ENV_LOCK must span the whole body (incl. the `.await`s) so parallel env-mutating tests never interleave (the stub PATH override lives under the same process-global environment)
 async fn fetch_accepted_runs_stub_pip_exactly_once() {
-    let _path_guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (stub, _keep) = PipStub::install();
     let (mut s, _dir) = store_with_index(&[
         (
@@ -800,9 +798,9 @@ async fn fetch_accepted_runs_stub_pip_exactly_once() {
 /// import) still reaches the fetch ask (the P1's `df`-as-module shape for
 /// a genuinely unknown name — the operator gets the choice).
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // the PATH override must span the whole body (incl. the `.await`s) so parallel fetch tests never interleave their stub PATHs
+#[allow(clippy::await_holding_lock)] // the ENV_LOCK must span the whole body (incl. the `.await`s) so parallel env-mutating tests never interleave (the stub PATH override lives under the same process-global environment)
 async fn fetch_undeclared_head_still_asks() {
-    let _path_guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_stub, _keep) = PipStub::install();
     let (mut s, _dir) = store_with_index(&[
         (

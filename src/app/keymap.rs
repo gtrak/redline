@@ -100,13 +100,6 @@ impl Key {
         Self::new(KeyCode::Enter)
     }
 
-    /// Construct a Tab key (used by tests; the built-in keymap uses the
-    /// string parser, which produces the same `Key`).
-    #[allow(dead_code)]
-    pub fn tab() -> Self {
-        Self::new(KeyCode::Tab)
-    }
-
     pub fn up() -> Self {
         Self::new(KeyCode::Up)
     }
@@ -129,7 +122,7 @@ impl Key {
 
     /// Construct an Alt+char key (used by tests; the built-in keymap uses
     /// the string parser, which produces the same `Key`).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // test-only seam: alt+char Keys cannot be built by the string parser
     pub fn alt_char(c: char) -> Self {
         Self {
             code: KeyCode::Char(c),

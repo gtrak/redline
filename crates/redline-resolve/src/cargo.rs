@@ -23,6 +23,7 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolve Rust symbols to real source via cargo metadata / fetch.
+#[derive(Default)]
 pub struct CargoProvider {
     /// Explicit `CARGO_HOME` for the cargo subprocesses. `None` = inherit the
     /// ambient environment (i.e. the user's default `~/.cargo`). Tests use a
@@ -32,18 +33,6 @@ pub struct CargoProvider {
     /// crate whose source is not already cached then fails with a clean
     /// offline-refusal error.
     offline: bool,
-    /// Cargo binary to invoke (overridable for testing).
-    cargo_bin: String,
-}
-
-impl Default for CargoProvider {
-    fn default() -> Self {
-        Self {
-            cargo_home: None,
-            offline: false,
-            cargo_bin: "cargo".to_string(),
-        }
-    }
 }
 
 impl CargoProvider {
@@ -66,12 +55,6 @@ impl CargoProvider {
         self
     }
 
-    /// Invoke a specific cargo binary (mainly for tests).
-    pub fn with_cargo_bin(mut self, bin: impl Into<String>) -> Self {
-        self.cargo_bin = bin.into();
-        self
-    }
-
     fn cargo_home(&self) -> Option<&Path> {
         self.cargo_home.as_deref()
     }
@@ -83,7 +66,7 @@ impl CargoProvider {
     }
 
     fn run_metadata(&self, workspace_root: &Path) -> anyhow::Result<CargoMetadata> {
-        let mut cmd = Command::new(&self.cargo_bin);
+        let mut cmd = Command::new("cargo");
         cmd.current_dir(workspace_root)
             .arg("metadata")
             .arg("--format-version")
@@ -121,7 +104,7 @@ impl CargoProvider {
     /// Fetch missing registry sources (sanctioned operator directive for this
     /// issue). Runs in the workspace so the whole graph is fetched.
     fn run_fetch(&self, workspace_root: &Path) -> anyhow::Result<()> {
-        let mut cmd = Command::new(&self.cargo_bin);
+        let mut cmd = Command::new("cargo");
         cmd.current_dir(workspace_root).arg("fetch");
         self.with_home(&mut cmd);
         let out =
@@ -271,8 +254,10 @@ impl ToolingProvider for CargoProvider {
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<Pkg>,
+    /// Deserialized from cargo metadata but intentionally unused; kept for
+    /// schema stability of the metadata shape.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // serde field: parsed but never read (schema stability)
     workspace_root: PathBuf,
 }
 
@@ -290,9 +275,11 @@ struct Pkg {
 
 #[derive(Deserialize, Clone)]
 struct Target {
-    #[allow(dead_code)]
+    /// Parsed but never read (only `src_path` is used); kept for schema stability.
+    #[allow(dead_code)] // serde field: parsed but never read
     name: String,
-    #[allow(dead_code)]
+    /// Parsed but never read (only `src_path` is used); kept for schema stability.
+    #[allow(dead_code)] // serde field: parsed but never read
     kind: Vec<String>,
     #[serde(default)]
     src_path: Option<String>,
@@ -452,8 +439,8 @@ fn line_defines_item(line: &str, item: &str) -> Option<&'static str> {
         let idx = search_from + rel;
         let end = idx + item.len();
         let before_ok = char_at(&stripped, idx.checked_sub(1)?)
-            .is_none_or(|c| !is_ident_char(c));
-        let after_ok = char_at(&stripped, end).is_none_or(|c| !is_ident_char(c));
+            .is_none_or(|c| !crate::is_ident_char(c));
+        let after_ok = char_at(&stripped, end).is_none_or(|c| !crate::is_ident_char(c));
         if before_ok && after_ok {
             let prefix = &stripped[..idx];
             let last = prefix
@@ -494,14 +481,6 @@ fn strip_generics(s: &str) -> String {
 
 fn char_at(s: &str, i: usize) -> Option<char> {
     s.char_indices().find(|(idx, _)| *idx == i).map(|(_, c)| c)
-}
-
-fn is_ident_char(c: char) -> bool {
-    // C15: mirrors the redline crate's single word-char rule —
-    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
-    // redline-resolve has no dependency on redline, so the rule is
-    // duplicated here rather than imported; keep the two in sync.
-    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -558,11 +537,11 @@ mod tests {
     /// boundary just like ASCII letters.
     #[test]
     fn ident_char_is_unicode_aware() {
-        assert!(is_ident_char('é'), "accented letter");
-        assert!(is_ident_char('漢'), "CJK letter");
-        assert!(is_ident_char('_'));
-        assert!(!is_ident_char('-'));
-        assert!(!is_ident_char(' '));
+        assert!(crate::is_ident_char('é'), "accented letter");
+        assert!(crate::is_ident_char('漢'), "CJK letter");
+        assert!(crate::is_ident_char('_'));
+        assert!(!crate::is_ident_char('-'));
+        assert!(!crate::is_ident_char(' '));
         // Whole-word pin: `greet` inside `greeté` is NOT a definition of
         // `greet` (the `é` is an identifier char, not a boundary).
         assert_eq!(line_defines_item("fn greeté() {", "greet"), None);

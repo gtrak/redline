@@ -22,6 +22,15 @@ mod cargo;
 
 pub use cargo::CargoProvider;
 
+/// The crate's single identifier-char rule: a Unicode alphanumeric or
+/// `_`. C15: mirrors the redline crate's word-char rule
+/// (`redline::model::buffer::is_word_char`); redline-resolve has no
+/// dependency on redline, so the rule lives here (one copy, shared by
+/// the cargo/js/go providers) rather than imported — keep the two in sync.
+pub(crate) fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// Run a command with a timeout. The child is spawned directly in this
 /// thread; stdout/stderr are drained by reader threads so the pipe buffer
 /// does not deadlock the child. On timeout the child is killed and reaped

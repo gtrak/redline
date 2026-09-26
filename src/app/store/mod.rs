@@ -252,7 +252,7 @@ pub enum ViewId {
 // construction (fail-loud, same as the old `.unwrap()`).
 
 /// Global bindings: 23 entries, shared by every view.
-pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const GLOBAL_BINDINGS: &[(&str, &str)] = &[
     ("C-g", "cancel"),
     ("M-x", "open-palette"),
     // C-x C-c (quit): bare C-x stays a prefix (pending), so both the
@@ -299,7 +299,7 @@ pub const GLOBAL_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Buffer view bindings: 53 entries.
-pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const BUFFER_BINDINGS: &[(&str, &str)] = &[
     // Bare `q` closes the view (issue 05, finding 5): consistent
     // with the list views. When the main buffer view is the only
     // view, `close-view` is a no-op — it does NOT quit the app
@@ -480,7 +480,7 @@ pub const BUFFER_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Buffer-list view bindings: 11 entries.
-pub const BUFFER_LIST_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const BUFFER_LIST_BINDINGS: &[(&str, &str)] = &[
     ("q", "close-view"),
     ("RET", "open-buffer-list-selected"),
     ("DOWN", "buffer-list-next"),
@@ -502,7 +502,7 @@ pub const BUFFER_LIST_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Magit-status view bindings: 21 entries.
-pub const MAGIT_STATUS_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const MAGIT_STATUS_BINDINGS: &[(&str, &str)] = &[
     // Magit dwim keys (issue 07): the section under the cursor
     // determines what `s`/`u`/`RET` do.
     ("q", "close-view"),
@@ -537,7 +537,7 @@ pub const MAGIT_STATUS_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Log view bindings: 12 entries.
-pub const LOG_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const LOG_BINDINGS: &[(&str, &str)] = &[
     // Log (issue 08): n/p page the history, arrows move the
     // in-page selection, RET opens the selected commit's diff,
     // q closes.
@@ -557,7 +557,7 @@ pub const LOG_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Blame view bindings: 7 entries.
-pub const BLAME_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const BLAME_BINDINGS: &[(&str, &str)] = &[
     // Blame (issue 08): read-only; q closes. Emacs motion
     // (issue 003-02): the cursor-following window keeps the
     // selected row in view on every move.
@@ -576,7 +576,7 @@ pub const BLAME_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Commit-diff view bindings: 7 entries.
-pub const COMMIT_DIFF_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const COMMIT_DIFF_BINDINGS: &[(&str, &str)] = &[
     // Read-only commit diff (issue 08): q closes back to log.
     // Emacs motion (issue 003-02): the pane has no cursor; these
     // move the window (the FileView vocabulary, no new bindings).
@@ -590,7 +590,7 @@ pub const COMMIT_DIFF_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Commit-editor view bindings: 2 entries.
-pub const COMMIT_EDITOR_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const COMMIT_EDITOR_BINDINGS: &[(&str, &str)] = &[
     // Inline commit editor (issue 08). Printable/motion keys and
     // the ESC/C-g aborts are intercepted in `key_event` before the
     // keymap engine; only the C-c C-c / C-c C-k bindings resolve
@@ -603,7 +603,7 @@ pub const COMMIT_EDITOR_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Home view bindings: 0 entries (deliberately empty).
-pub const HOME_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const HOME_BINDINGS: &[(&str, &str)] = &[
     // 06a: home has NO view-local bindings. `q` is deliberately
     // unbound (there is no buffer to close); every entry point
     // (C-x C-f, C-x g, C-x n, C-x b, C-x C-c, C-c p …, ?) is a
@@ -613,7 +613,7 @@ pub const HOME_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Search view bindings: 14 entries.
-pub const SEARCH_BINDINGS: &[(&str, &str)] = &[
+pub(crate) const SEARCH_BINDINGS: &[(&str, &str)] = &[
     // Results view (issue 06): n/p between matches, RET jump
     // (records a jump-stack entry so M-, returns), g re-run,
     // q/ESC close (cancelling an in-flight search), C-g
@@ -807,13 +807,9 @@ impl JumpStack {
         self.history.get(self.pos)
     }
 
-    #[allow(dead_code)] // used by tests and future UI wiring
-    pub fn is_empty(&self) -> bool {
-        self.history.is_empty()
-    }
-
-    /// Number of entries in the stack (for tests).
-    #[allow(dead_code)]
+    /// Number of entries in the stack (test-only accessor; no production
+    /// caller — bin crate, so test usage does not silence dead_code).
+    #[allow(dead_code)] // test-only accessor
     pub fn len(&self) -> usize {
         self.history.len()
     }
@@ -1663,13 +1659,14 @@ impl KillRing {
         self.entries.get(n).map(|s| s.as_str())
     }
 
-    /// Number of entries in the ring.
-    #[allow(dead_code)] // public API: used by tests and future UI wiring
+    /// Number of entries in the ring (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    #[allow(dead_code)] // public API: used by tests and future UI wiring
+    /// `true` when the ring is empty (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -2368,8 +2365,8 @@ impl AppStore {
         self.activity.join(" ")
     }
 
-    /// The current buffer's text (empty when no buffer is current).
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// The current buffer's text (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn buffer_text(&self) -> String {
         self.buffers
             .current_buffer()

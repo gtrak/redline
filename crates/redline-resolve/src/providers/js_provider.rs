@@ -722,8 +722,10 @@ struct PkgJson {
     module: Option<String>,
     #[serde(default)]
     exports: Option<Value>,
+    /// Parsed but never read (only `main`/`module` are consulted); kept for
+    /// schema stability of the package.json shape.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // serde field: parsed but never read
     types: Option<String>,
 }
 
@@ -763,15 +765,15 @@ fn line_defines_item(line: &str, item: &str) -> Option<&'static str> {
         let idx = search_from + rel;
         let end = idx + item.len();
         let before_ok = char_at(t, idx.checked_sub(1)?)
-            .is_none_or(|c| !is_ident_char(c));
+            .is_none_or(|c| !crate::is_ident_char(c));
         let after_ch = char_at(t, end);
-        let after_ok = after_ch.is_none_or(|c| !is_ident_char(c));
+        let after_ok = after_ch.is_none_or(|c| !crate::is_ident_char(c));
         if before_ok && after_ok {
             // Reject `X.prototype…` member references.
             if after_ch == Some('.') {
                 let after = t.get(end..).unwrap_or("");
                 if let Some(rest) = after.strip_prefix(".prototype") {
-                    let boundary = rest.chars().next().is_none_or(|c| !is_ident_char(c));
+                    let boundary = rest.chars().next().is_none_or(|c| !crate::is_ident_char(c));
                     if boundary {
                         search_from = idx + 1;
                         continue;
@@ -805,15 +807,6 @@ fn line_defines_item(line: &str, item: &str) -> Option<&'static str> {
 
 fn char_at(s: &str, i: usize) -> Option<char> {
     s.char_indices().find(|(idx, _)| *idx == i).map(|(_, c)| c)
-}
-
-fn is_ident_char(c: char) -> bool {
-    // C15: mirrors the redline crate's single word-char rule —
-    // `redline::model::buffer::is_word_char` (Unicode alphanumeric or `_`).
-    // redline-resolve has no dependency on redline, so the rule is
-    // duplicated here rather than imported; keep the two in sync (the
-    // sibling `crate::cargo::is_ident_char` does the same).
-    c.is_alphanumeric() || c == '_'
 }
 
 /// The first non-whitespace character at or after byte offset `from`.
@@ -937,11 +930,11 @@ mod tests {
     /// identifier char, so `greet` was mis-detected as a definition.
     #[test]
     fn line_defines_ident_char_is_unicode_aware() {
-        assert!(is_ident_char('é'), "accented letter");
-        assert!(is_ident_char('漢'), "CJK letter");
-        assert!(is_ident_char('_'));
-        assert!(!is_ident_char('-'));
-        assert!(!is_ident_char(' '));
+        assert!(crate::is_ident_char('é'), "accented letter");
+        assert!(crate::is_ident_char('漢'), "CJK letter");
+        assert!(crate::is_ident_char('_'));
+        assert!(!crate::is_ident_char('-'));
+        assert!(!crate::is_ident_char(' '));
         // Whole-word pin: `greet` inside `greeté` is NOT a definition of
         // `greet` (the `é` is an identifier char, not a boundary).
         assert_eq!(line_defines_item("export function greeté() {", "greet"), None);

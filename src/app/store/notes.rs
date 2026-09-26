@@ -526,14 +526,15 @@ impl AppStore {
         self.minibuffer_message(&format!("Note: {}", self.note_prompt_input));
     }
 
-    /// The `A` prompt state (for tests).
-    #[allow(dead_code)] // public API: used by tests
+    /// The `A` prompt state (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn note_prompt_active(&self) -> bool {
         self.note_prompt_active
     }
 
-    /// The `A` prompt's current input (for tests + prefill verification).
-    #[allow(dead_code)] // public API: used by tests
+    /// The `A` prompt's current input (test-only accessor, no production
+    /// caller; prefill verification).
+    #[allow(dead_code)] // test-only accessor
     pub fn note_prompt_input(&self) -> &str {
         &self.note_prompt_input
     }

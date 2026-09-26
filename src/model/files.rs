@@ -429,6 +429,8 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use crate::model::write_test_file;
+
     /// Single-path test shim: the predicate with a throwaway memo.
     /// Production callers always share one memo per invocation (one
     /// walk, one change batch — see `GitignoreMemo`).
@@ -437,17 +439,9 @@ mod tests {
         is_gitignored(root, path, is_dir, &memo)
     }
 
-    fn file(path: impl AsRef<std::path::Path>, content: &str) {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(path, content).unwrap();
-    }
-
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        file(dir.path().join("Cargo.toml"), "[package]\n");
+        write_test_file(dir.path().join("Cargo.toml"), "[package]\n");
         dir
     }
 
@@ -458,9 +452,9 @@ mod tests {
     #[test]
     fn walk_collects_regular_files_as_relative_sorted_paths() {
         let dir = project();
-        file(dir.path().join("README.md"), "hi\n");
-        file(dir.path().join("src/main.rs"), "fn main() {}\n");
-        file(dir.path().join("src/lib.rs"), "// lib\n");
+        write_test_file(dir.path().join("README.md"), "hi\n");
+        write_test_file(dir.path().join("src/main.rs"), "fn main() {}\n");
+        write_test_file(dir.path().join("src/lib.rs"), "// lib\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert_eq!(
@@ -479,11 +473,11 @@ mod tests {
             "ignored.txt\nbuild/\n*.log\n",
         )
         .unwrap();
-        file(dir.path().join("kept.txt"), "k\n");
-        file(dir.path().join("ignored.txt"), "i\n");
-        file(dir.path().join("build/output.bin"), "b\n");
-        file(dir.path().join("crash.log"), "l\n");
-        file(dir.path().join("src/deep.rs"), "d\n");
+        write_test_file(dir.path().join("kept.txt"), "k\n");
+        write_test_file(dir.path().join("ignored.txt"), "i\n");
+        write_test_file(dir.path().join("build/output.bin"), "b\n");
+        write_test_file(dir.path().join("crash.log"), "l\n");
+        write_test_file(dir.path().join("src/deep.rs"), "d\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "kept.txt"));
@@ -496,10 +490,10 @@ mod tests {
     #[test]
     fn walk_respects_nested_gitignore_outside_git_repos() {
         let dir = project();
-        file(dir.path().join("src/keep.rs"), "k\n");
-        file(dir.path().join("src/gen/out.rs"), "g\n");
-        file(dir.path().join("src/gen/.gitignore"), "out.rs\n");
-        file(dir.path().join("src/gen/visible.rs"), "v\n");
+        write_test_file(dir.path().join("src/keep.rs"), "k\n");
+        write_test_file(dir.path().join("src/gen/out.rs"), "g\n");
+        write_test_file(dir.path().join("src/gen/.gitignore"), "out.rs\n");
+        write_test_file(dir.path().join("src/gen/visible.rs"), "v\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "src/keep.rs"));
@@ -512,9 +506,9 @@ mod tests {
         let dir = project();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join(".gitignore"), "ignored.txt\nbuild/\n").unwrap();
-        file(dir.path().join("kept.txt"), "k\n");
-        file(dir.path().join("ignored.txt"), "i\n");
-        file(dir.path().join("build/x.bin"), "b\n");
+        write_test_file(dir.path().join("kept.txt"), "k\n");
+        write_test_file(dir.path().join("ignored.txt"), "i\n");
+        write_test_file(dir.path().join("build/x.bin"), "b\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "kept.txt"));
@@ -525,9 +519,9 @@ mod tests {
     #[test]
     fn walk_skips_hidden_files_and_dirs() {
         let dir = project();
-        file(dir.path().join("visible.txt"), "v\n");
-        file(dir.path().join(".dotfile"), "d\n");
-        file(dir.path().join(".hidden/inside.txt"), "h\n");
+        write_test_file(dir.path().join("visible.txt"), "v\n");
+        write_test_file(dir.path().join(".dotfile"), "d\n");
+        write_test_file(dir.path().join(".hidden/inside.txt"), "h\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "visible.txt"));
@@ -538,9 +532,9 @@ mod tests {
     #[test]
     fn walk_never_descends_into_git_dirs() {
         let dir = project();
-        file(dir.path().join("src/a.rs"), "a\n");
-        file(dir.path().join("vendor/.git/config"), "[core]\n");
-        file(dir.path().join("top-level/.git/HEAD"), "ref: refs/heads/main\n");
+        write_test_file(dir.path().join("src/a.rs"), "a\n");
+        write_test_file(dir.path().join("vendor/.git/config"), "[core]\n");
+        write_test_file(dir.path().join("top-level/.git/HEAD"), "ref: refs/heads/main\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "src/a.rs"));
@@ -559,9 +553,9 @@ mod tests {
         // The graft cache (agent output) must not appear in the file walk
         // that feeds the finder and the tree sidebar (issue 05, finding 3).
         let dir = project();
-        file(dir.path().join("src/main.rs"), "fn main() {}\n");
-        file(dir.path().join("graft/src/main.md"), "# graft card\n");
-        file(dir.path().join("graft/cache/other.md"), "cache\n");
+        write_test_file(dir.path().join("src/main.rs"), "fn main() {}\n");
+        write_test_file(dir.path().join("graft/src/main.md"), "# graft card\n");
+        write_test_file(dir.path().join("graft/cache/other.md"), "cache\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "src/main.rs"));
@@ -577,8 +571,8 @@ mod tests {
     fn walk_prunes_graft_directory_inside_git_repo() {
         let dir = project();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
-        file(dir.path().join("src/main.rs"), "fn main() {}\n");
-        file(dir.path().join("graft/card.md"), "# graft\n");
+        write_test_file(dir.path().join("src/main.rs"), "fn main() {}\n");
+        write_test_file(dir.path().join("graft/card.md"), "# graft\n");
 
         let list = FileList::build(dir.path()).unwrap();
         assert!(has(&list, "src/main.rs"));
@@ -597,13 +591,13 @@ mod tests {
             "*.log\n!important.log\nbuild/\n",
         )
         .unwrap();
-        file(dir.path().join("src/.gitignore"), "gen/\n");
-        file(dir.path().join("src/gen/out.rs"), "g\n");
-        file(dir.path().join("src/visible.rs"), "v\n");
-        file(dir.path().join("build/out.bin"), "b\n");
-        file(dir.path().join("crash.log"), "l\n");
-        file(dir.path().join("important.log"), "i\n");
-        file(dir.path().join("kept.txt"), "k\n");
+        write_test_file(dir.path().join("src/.gitignore"), "gen/\n");
+        write_test_file(dir.path().join("src/gen/out.rs"), "g\n");
+        write_test_file(dir.path().join("src/visible.rs"), "v\n");
+        write_test_file(dir.path().join("build/out.bin"), "b\n");
+        write_test_file(dir.path().join("crash.log"), "l\n");
+        write_test_file(dir.path().join("important.log"), "i\n");
+        write_test_file(dir.path().join("kept.txt"), "k\n");
         let root = dir.path();
         // Nested `.gitignore` (a root-only check would miss this).
         assert!(
@@ -784,7 +778,7 @@ mod tests {
             "nested/plain.rs",
             "excl/plain2.rs",
         ] {
-            file(root.join(rel), "x\n");
+            write_test_file(root.join(rel), "x\n");
         }
 
         // The WALK (native ignore-crate handling):
@@ -873,13 +867,13 @@ mod tests {
         // are inert (`require_git`); `.ignore` still applies to the
         // walk natively, and the predicate must agree.
         fs::write(root.join(".ignore"), "*.tmp\nbuild2/\n").unwrap();
-        file(root.join("src/.ignore"), "gen2/\n");
-        file(root.join("src/keep.rs"), "k\n");
-        file(root.join("src/gen2/out.rs"), "g\n");
-        file(root.join("src/vis.rs"), "v\n");
-        file(root.join("scratch.tmp"), "t\n");
-        file(root.join("build2/x.bin"), "b\n");
-        file(root.join("plain.rs"), "p\n");
+        write_test_file(root.join("src/.ignore"), "gen2/\n");
+        write_test_file(root.join("src/keep.rs"), "k\n");
+        write_test_file(root.join("src/gen2/out.rs"), "g\n");
+        write_test_file(root.join("src/vis.rs"), "v\n");
+        write_test_file(root.join("scratch.tmp"), "t\n");
+        write_test_file(root.join("build2/x.bin"), "b\n");
+        write_test_file(root.join("plain.rs"), "p\n");
 
         let walk = FileList::build(root).unwrap();
         let walk_set: std::collections::BTreeSet<&str> =
@@ -935,9 +929,9 @@ mod tests {
     fn hidden_component_is_never_indexed() {
         let dir = project();
         let root = dir.path();
-        file(root.join(".venv/lib/site.py"), "x\n");
-        file(root.join(".cargo/registry/crate.rs"), "x\n");
-        file(root.join("src/ok.rs"), "x\n");
+        write_test_file(root.join(".venv/lib/site.py"), "x\n");
+        write_test_file(root.join(".cargo/registry/crate.rs"), "x\n");
+        write_test_file(root.join("src/ok.rs"), "x\n");
         // Filter side (the predicate): every hidden component, at any
         // depth, in either a file path or a directory event.
         assert!(ignored(root, &root.join(".venv/lib/site.py"), false));
@@ -979,7 +973,7 @@ mod tests {
         let dir = project();
         let root = dir.path();
         fs::write(root.join(".gitignore"), "*.log\nbuild/\n").unwrap();
-        file(root.join("src/.gitignore"), "gen/\n");
+        write_test_file(root.join("src/.gitignore"), "gen/\n");
         let mut paths = Vec::new();
         let mut ignored = Vec::new();
         for i in 0..300 {
@@ -1044,17 +1038,17 @@ mod tests {
             "*.log\n!important.log\nbuild/\n",
         )
         .unwrap();
-        file(dir.path().join("kept.txt"), "hello world\n");
-        file(dir.path().join("crash.log"), "hello world\n");
-        file(dir.path().join("important.log"), "hello world\n");
-        file(dir.path().join("build/out.bin"), "hello world\n");
+        write_test_file(dir.path().join("kept.txt"), "hello world\n");
+        write_test_file(dir.path().join("crash.log"), "hello world\n");
+        write_test_file(dir.path().join("important.log"), "hello world\n");
+        write_test_file(dir.path().join("build/out.bin"), "hello world\n");
         // Subdirectory .gitignore: ignore gen/
-        file(dir.path().join("src/.gitignore"), "gen/\n");
-        file(dir.path().join("src/keep.rs"), "hello world\n");
-        file(dir.path().join("src/gen/out.rs"), "hello world\n");
-        file(dir.path().join("src/visible.rs"), "hello world\n");
+        write_test_file(dir.path().join("src/.gitignore"), "gen/\n");
+        write_test_file(dir.path().join("src/keep.rs"), "hello world\n");
+        write_test_file(dir.path().join("src/gen/out.rs"), "hello world\n");
+        write_test_file(dir.path().join("src/visible.rs"), "hello world\n");
         // graft/ directory (the documented asymmetry)
-        file(dir.path().join("graft/card.md"), "hello world\n");
+        write_test_file(dir.path().join("graft/card.md"), "hello world\n");
 
         // FileList walk (the finder side)
         let list = FileList::build(dir.path()).unwrap();

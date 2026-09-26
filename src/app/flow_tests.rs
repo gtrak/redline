@@ -47,7 +47,8 @@ fn key_null() -> Key {
 
 /// Build the symbol index synchronously and install it (no tokio runtime
 /// in unit tests — the UI's drain task can't run, so the index job's
-/// output is produced directly; `store_with_index` in store.rs does the
+/// output is produced directly; `store_with_index` in the `store` test
+/// module does the
 /// same).
 fn install_index(s: &mut AppStore, root: &std::path::Path) {
     let files_list = crate::model::files::FileList::build(root).unwrap();

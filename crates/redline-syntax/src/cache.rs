@@ -126,12 +126,10 @@ impl RetainedTrees {
         self.map.insert(key, tree);
     }
 
-    #[allow(dead_code)] // used in tests
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    #[allow(dead_code)] // used in tests
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -164,13 +162,11 @@ impl HighlightCache {
     }
 
     /// The number of cached entries.
-    #[allow(dead_code)] // used in tests
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
     /// `true` when the cache is empty.
-    #[allow(dead_code)] // used in tests
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }

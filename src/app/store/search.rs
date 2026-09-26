@@ -234,20 +234,22 @@ impl AppStore {
         self.minibuffer_message("cancel");
     }
 
-    /// Whether isearch is currently active.
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// Whether isearch is currently active (test-only accessor; no
+    /// production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn isearch_active(&self) -> bool {
         self.isearch.active
     }
 
-    /// The isearch match count.
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// The isearch match count (test-only accessor; no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn isearch_match_count(&self) -> usize {
         self.isearch.matches.len()
     }
 
-    /// The current match index (1-based, for display).
-    #[allow(dead_code)] // public API: used by tests and future UI layers
+    /// The current match index (1-based; test-only accessor, no production
+    /// caller, for display/tests).
+    #[allow(dead_code)] // test-only accessor
     pub fn isearch_match_index(&self) -> usize {
         self.isearch.current + 1
     }

@@ -95,8 +95,9 @@ impl SymbolIndex {
         Self::default()
     }
 
-    /// `true` when the file has an outline entry.
-    #[allow(dead_code)]
+    /// `true` when the file has an outline entry (test-only accessor; no
+    /// production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn has(&self, path: &str) -> bool {
         self.files.contains_key(path)
     }
@@ -211,14 +212,16 @@ impl SymbolIndex {
         out
     }
 
-    /// Number of files in which `name` is defined (cross-file).
-    #[allow(dead_code)]
+    /// Number of files in which `name` is defined (cross-file; test-only
+    /// accessor, no production caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn definition_count(&self, name: &str) -> usize {
         self.by_name.get(name).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Number of files with ≥1 symbol.
-    #[allow(dead_code)]
+    /// Number of files with ≥1 symbol (test-only accessor; no production
+    /// caller).
+    #[allow(dead_code)] // test-only accessor
     pub fn file_count(&self) -> usize {
         self.files.len()
     }

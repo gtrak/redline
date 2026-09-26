@@ -5,8 +5,9 @@
 //!
 //! 010-01 adds the Rust-only per-file tables (struct fields, impl methods
 //! with their impl kind — plan 010 Shape A rung 1) on the SAME parse
-//! (`extract_all`); the M-. self-receiver consumption in `app/store.rs`
-//! queries them synchronously, and the bare-symbol consumers keep using
+//! (`extract_all`); the M-. self-receiver consumption in the `app::store`
+//! module (the navigation concern) queries them synchronously, and the
+//! bare-symbol consumers keep using
 //! `extract_symbols` (the tables discarded). 010-03 (rung 3) extends the
 //! same tables with the per-file local binding map (written-down types
 //! only) consumed by the M-. local-binding pre-step.
@@ -853,7 +854,7 @@ pub fn extract_all_timed(
 /// parse; identical result to before 010-01. Production indexing goes
 /// through [`extract_all`] (symbols + tables in one pass); this is the
 /// stable symbols-only seam the test suites pin against.
-#[allow(dead_code)] // production uses `extract_all`; tests exercise this seam
+#[allow(dead_code)] // test-only seam: stable symbols-only API the suite pins (production uses extract_all)
 pub fn extract_symbols(lang: LanguageId, source: &str) -> Vec<Symbol> {
     extract_all(lang, source).0
 }
