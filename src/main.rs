@@ -34,7 +34,10 @@ pub(crate) mod test_support;
 /// `model::files`'s `EnvGuard` (+ `model::project`'s usage), and the
 /// `ui::file_view` tint tests' `COLORTERM` pins. Known residual (P1
 /// finding, issue-guardrails): the `app::store` fetch tests read/mutate
-/// `PATH` under their own `PATH_LOCK` — recommendation: move them onto
+/// Note: the fetch tests mutate `PATH` under `crate::ENV_LOCK`. They used to hold a local
+/// `PATH_LOCK`, which could not exclude other environment readers — and since the environment
+/// block is process-global, a narrower lock made the crate-wide invariant look protected when it
+/// was not. The recommendation below is therefore already done.
 /// this lock (issue-git-test-harness lane owns that file).
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
