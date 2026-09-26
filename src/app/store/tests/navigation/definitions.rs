@@ -1990,6 +1990,141 @@ use super::*;
         );
     }
 
+    // —— plan-017 issue 04: C/C++ quoted `#include` (the conventions
+    // mechanism) ————————————————————————
+
+    /// plan-017 issue 04 (C, direction: the landing). The file's
+    /// `#include "sub/thing.h"` (the grammar's `preproc_include` →
+    /// `string_literal` → `string_content "sub/thing.h"`) places the header
+    /// by the ISO/GCC quoted-include convention in a file whose path ends
+    /// in `sub/thing.h`; the index's name-keyed candidates (two same-named
+    /// macros exist in the project) NARROW to the included header — the
+    /// jump lands on the right header, not the decoy. The directory join in
+    /// the include path is what keeps `elsewhere/thing.h` out (a
+    /// base-name-only tail would over-match — the landing mutation pin).
+    #[test]
+    fn xref_c_quoted_include_narrows_to_convention_header_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            ("sub/thing.h", "#define THING_VALUE 42\n"),
+            ("elsewhere/thing.h", "#define THING_VALUE 43\n"),
+            (
+                "main.c",
+                "#include \"sub/thing.h\"\nint main(void) { return THING_VALUE; }\n",
+            ),
+        ]);
+        s.open_path("main.c");
+        // Line 1 (0-based): "int main(void) { return THING_VALUE; }" —
+        // `THING_VALUE` at col 24.
+        s.set_point(1, 24, 24);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the quoted include narrows to sub/thing.h (the decoy is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("sub/thing.h:1"),
+            "the convention header is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "sub/thing.h", "landed in the convention header");
+        assert_eq!(s.point_line(), 0, "on the macro's definition line");
+    }
+
+    /// plan-017 issue 04 (C, direction: the flag — the quoted include whose
+    /// header is absent from the tree). The include places `MISSING_VALUE`
+    /// in `sub/missing.h`, a file the tree does not hold (and the macro is
+    /// indexed nowhere): no tooling provider handles C (B5), so the name is
+    /// the named UNRESOLVED flag — never a picker, never the enclosing
+    /// function's picker.
+    #[test]
+    fn xref_c_quoted_include_header_absent_is_unresolved() {
+        let (mut s, _dir) = store_with_index(&[(
+            "main.c",
+            "#include \"sub/missing.h\"\nint main(void) { return MISSING_VALUE; }\n",
+        )]);
+        s.open_path("main.c");
+        // Line 1 (0-based): `MISSING_VALUE` at col 24.
+        s.set_point(1, 24, 24);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.c", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `MISSING_VALUE`"),
+            "the flagged name is the one at the point: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 04 (C, the angle-include limit). `#include
+    /// <sys/thing.h>` is a `system_lib_string` (a DIFFERENT node kind from
+    /// the quoted `string_literal`): its `-I` search path is unknown to
+    /// redline, so it is NOT resolvable here — the convention excludes it
+    /// (no tail), and the name (indexed nowhere) is the named UNRESOLVED
+    /// flag. Never a confident jump to a first same-named workspace file.
+    #[test]
+    fn xref_c_angle_include_is_unresolved_not_a_guess() {
+        let (mut s, _dir) = store_with_index(&[(
+            "main.c",
+            "#include <sys/thing.h>\nint main(void) { return THING_VALUE; }\n",
+        )]);
+        s.open_path("main.c");
+        // Line 1 (0-based): `THING_VALUE` at col 24. The include is an ANGLE
+        // form — the convention yields no tail, so there is no narrowing and
+        // the macro is indexed nowhere: B5 flags it, it never lands.
+        s.set_point(1, 24, 24);
+        s.xref_find_definitions();
+        assert!(!s.picker_open(), "no picker, no jump (msg: {})", s.message);
+        assert_eq!(s.view_name_display(), "main.c", "the view did not move");
+        assert!(
+            s.message.contains("unresolved: `THING_VALUE`"),
+            "the angle-include name is flagged, not guessed: `{}`",
+            s.message
+        );
+    }
+
+    /// plan-017 issue 04 (C++, direction: the landing). C++ shares the
+    /// quoted-include convention (the same `preproc_include` shapes; `.hpp`
+    /// maps to the C++ row). Two same-named functions in the project NARROW
+    /// to the included header — the decoy is out. (The C++ outline indexes
+    /// `function_definition`, not `preproc_def` — `cpp_fn` is a defined
+    /// function, as headers' `static inline` / small helpers are.)
+    #[test]
+    fn xref_cpp_quoted_include_narrows_to_convention_header_and_lands() {
+        let (mut s, _dir) = store_with_index(&[
+            ("sub/thing.hpp", "int cpp_fn(int x) { return x + 1; }\n"),
+            ("elsewhere/thing.hpp", "int cpp_fn(int x) { return x + 2; }\n"),
+            (
+                "main.cpp",
+                "#include \"sub/thing.hpp\"\nint main() { return cpp_fn(1); }\n",
+            ),
+        ]);
+        s.open_path("main.cpp");
+        // Line 1 (0-based): "int main() { return cpp_fn(1); }" —
+        // `cpp_fn` at col 20.
+        s.set_point(1, 20, 20);
+        s.xref_find_definitions();
+        assert!(s.picker_open(), "cross-file unique: picker (msg: {})", s.message);
+        assert_eq!(s.picker_kind(), Some(PickerKind::Xref));
+        assert_eq!(
+            s.picker_filtered().len(),
+            1,
+            "the quoted include narrows to sub/thing.hpp (the decoy is out): {:?}",
+            s.picker_filtered()
+        );
+        assert!(
+            s.picker_filtered()[0].0.name.starts_with("sub/thing.hpp:1"),
+            "the convention header is preselected: {:?}",
+            s.picker_filtered()[0].0.name
+        );
+        s.run_selected();
+        assert_eq!(s.view_name_display(), "sub/thing.hpp", "landed in the convention header");
+    }
+
     /// newlang-paths (e2e pin, C#): M-. on `o.P` in a C# buffer — the
     /// C# outline indexes properties (queries.rs): the whole path `o.P`
     /// has no indexed symbol, but the fall-through to the last segment

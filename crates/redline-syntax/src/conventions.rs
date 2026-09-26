@@ -18,7 +18,14 @@
 //!   `.clj` / `.cljc` / `.cljs`);
 //! - Java (plan-017 issue 03): the single-type import map
 //!   (`java::import_class_bindings`) + the JLS `a.b.C` → `a/b/C.java`
-//!   tails (`java::class_file_tails`).
+//!   tails (`java::class_file_tails`);
+//! - C / C++ (plan-017 issue 04): the QUOTED `#include "a/b.h"` → the
+//!   include's path as a tail (`c_cpp::convention_name` / `convention_tails`
+//!   — the ISO/GCC quoted-include search order; relative to the including
+//!   file / source roots). ANGLE `#include <a/b.h>` is the `-I` limit: a
+//!   different grammar node (`system_lib_string`), never a tail — the name
+//!   stays on the B5 named-`unresolved` flag (no tooling provider for
+//!   C/C++), never a confident same-named-file jump.
 //!
 //! Not wired (the audit's flag rows — a table row would be a guess):
 //! C# (no directory convention), Scheme (library layout
@@ -51,6 +58,14 @@ pub fn convention_name_for_reference(
     match lang {
         LanguageId::Clojure => clojure_reference_convention_name(source, path_token),
         LanguageId::Java => Ok(java_reference_convention_name(source, ident, path_token)),
+        // C / C++: the convention is the file's QUOTED includes (the path
+        // token is not a namespaced shape here — the include IS the
+        // reference; the narrowing set is the whole quoted-include set, so
+        // `ident` plays no part). The carrier is the newline-joined set;
+        // `None` when the file has no quoted include (the bare lookup
+        // stands). Angle includes are excluded in the module (the `-I`
+        // limit) — never a tail, never a guess.
+        LanguageId::C | LanguageId::Cpp => Ok(crate::c_cpp::convention_name(source, lang)),
         // No convention row yet: the bare name-keyed lookup stands.
         _ => Ok(None),
     }
@@ -64,6 +79,9 @@ pub fn convention_file_tails(lang: LanguageId, name: &str) -> Option<Vec<String>
     match lang {
         LanguageId::Clojure => Some(crate::clojure::namespace_file_tails(name)),
         LanguageId::Java => Some(crate::java::class_file_tails(name)),
+        // C / C++: one tail per quoted include (the include's path as
+        // written) — the carrier the pre-step built with `convention_name`.
+        LanguageId::C | LanguageId::Cpp => Some(crate::c_cpp::convention_tails(name)),
         _ => None,
     }
 }
@@ -242,6 +260,42 @@ mod tests {
             ),
             Ok(Some("a.b.c".to_string()))
         );
+        // C / C++ (plan-017 issue 04): the convention is the file's
+        // QUOTED includes. A quoted include yields the carrier; an
+        // angle-only (or include-free) file yields `None` (the `-I`
+        // limit: angle includes are never a tail — the name stays on the
+        // B5 `unresolved` flag, never a guess).
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::C,
+                "#include \"sub/thing.h\"\n#include <stdio.h>\n",
+                "bar_fn",
+                "bar_fn"
+            ),
+            Ok(Some("sub/thing.h".to_string())),
+            "the quoted include is the carrier; the angle include is excluded"
+        );
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::Cpp,
+                "#include <vector>\n#include \"local/a/b.h\"\n",
+                "bar_fn",
+                "bar_fn"
+            ),
+            Ok(Some("local/a/b.h".to_string())),
+            "Cpp shares the convention; the angle include is excluded"
+        );
+        // An angle-only C file declares no quoted include: `None`.
+        assert_eq!(
+            convention_name_for_reference(
+                LanguageId::C,
+                "#include <stdio.h>\n",
+                "bar_fn",
+                "bar_fn"
+            ),
+            Ok(None),
+            "angle only: no quoted include, the bare lookup stands"
+        );
         // The unwired rows (the audit's flag rows): they decline — the
         // bare name-keyed lookup stands byte-for-byte (Java-without-an
         // import is covered above; Java is wired, just not for THIS
@@ -252,7 +306,6 @@ mod tests {
             LanguageId::Scheme,
             LanguageId::Ruby,
             LanguageId::CSharp,
-            LanguageId::C,
         ]
         .into_iter()
         {
@@ -274,6 +327,11 @@ mod tests {
         assert_eq!(
             convention_file_tails(LanguageId::Java, "a.b.C"),
             Some(vec!["a/b/C.java".to_string()])
+        );
+        // C / C++: one tail per quoted include (the path as written).
+        assert_eq!(
+            convention_file_tails(LanguageId::C, "sub/thing.h\nx.h"),
+            Some(vec!["sub/thing.h".to_string(), "x.h".to_string()])
         );
         assert_eq!(convention_file_tails(LanguageId::Rust, "std"), None);
     }

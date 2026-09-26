@@ -600,7 +600,10 @@ impl AppStore {
         // the index's existing name-keyed candidates to the files the
         // convention places the definition in (the Clojure Part-2 shape,
         // generalized; never a second resolver engine).
-        if matches!(lang, LanguageId::Clojure | LanguageId::Java) {
+        if matches!(
+            lang,
+            LanguageId::Clojure | LanguageId::Java | LanguageId::C | LanguageId::Cpp
+        ) {
             // The full source materializes here — the pre-step's own
             // parse (the same lazy shape as the receiver
             // classifications above: only a convention-bearing
