@@ -731,14 +731,26 @@ async fn fetch_declined_refuses_pip_install() {
     s.key_event(key("n"));
     assert!(!s.fetch_confirm_active());
     // The resolve event is a MISS (the refusal bailed the provider); the
-    // stub pip never ran — that is the P1's safety property. (The
-    // refusal's own text — "install refused: `pip install …` was declined
-    // at the fetch confirmation" — is pinned at provider level in the
-    // redline-resolve suite; the app's miss report keeps the byte-for-
-    // byte generic shape the PTY pins rely on.)
+    // stub pip never ran — that is the P1's safety property.
     let ev = wait_resolve_event(&mut s, &mut resolve_rx, gen_tag);
     assert!(ev.source.is_none(), "a declined fetch must not land a source");
     assert!(ev.error.is_some(), "the miss reports a failure, got: {:?}", ev.error);
+    // F2 (plan 017 audit): the refusal's own text is no longer swallowed
+    // by the chain-level generic — the MINIBUFFER names the decision the
+    // operator just made (which command was NOT run), so a refusal is
+    // not indistinguishable from a bare "symbol not found".
+    assert!(
+        s.message.contains("install refused"),
+        "the refusal reaches the minibuffer: {}", s.message
+    );
+    assert!(
+        s.message.contains("declined at the fetch confirmation"),
+        "the refusal's reason (the gate's own text): {}", s.message
+    );
+    assert!(
+        s.message.contains("pip install redline_test_pkg"),
+        "the exact command that was NOT run: {}", s.message
+    );
     assert_eq!(stub.invocations(), Vec::<String>::new(), "no pip invocation on decline");
 }
 

@@ -2343,14 +2343,17 @@ fn land_resolved(
 }
 
 /// A provider-shaped MISS for the in-flight job: the store's graceful miss
-/// report path (the provider's own error text is the corpus's).
+/// report path (the provider's own error text is the corpus's). F2 (plan
+/// 017 audit): the EXACT single-attempt shape the real chain now reports —
+/// the provider's own reason LEADS (the status line clips the right edge),
+/// the generic `(tried 1 provider(s): rust)` tail follows byte-for-byte.
 fn miss_resolved(s: &mut AppStore, symbol: &str, detail: &str) {
     let event = ResolveEvent {
         generation: s.resolve_generation,
         symbol: symbol.to_string(),
         source: None,
         error: Some(format!(
-            "no tooling provider could resolve symbol `{symbol}` (tried 1 provider(s): rust): {detail}"
+            "{detail}; no tooling provider could resolve symbol `{symbol}` (tried 1 provider(s): rust)"
         )),
     };
     s.apply_resolve_event(&event);

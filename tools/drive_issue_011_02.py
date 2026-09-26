@@ -12,8 +12,12 @@ hint was empty for every non-Rust buffer and this probe bailed with
 "needs scope info".
 
 L2 (degradation pin): a prelude name (`print`, no import) gets NO hint —
-the exact existing no-hint bail, byte-for-byte (only the python provider
-is attempted, and it misses).
+the exact existing no-hint bail (only the python provider is attempted,
+and it misses). F2 (plan 017 audit) reshaped the miss report: the
+provider's OWN reason now LEADS ("needs scope info" — the python
+provider's exact no-hint bail — is what the leg asserts; the generic
+"(tried 1 provider(s): python)" tail follows it and now runs past the
+200-col right-edge clip).
 
 The drive owns /tmp/redline_011_02_py_repo and removes it on exit.
 Wrap the invocation in `timeout` (shared PTY flock scheme: if the lock
@@ -128,8 +132,12 @@ def main():
         ok, msg = poll_minibuffer(app, "no provider resolution", timeout=90.0)
         rec("L2: prelude name is NOT guessed (the miss lands)",
             ok, f"minibuffer={msg!r}")
+        # F2 (plan 017 audit): the miss now LEADS with the python
+        # provider's OWN no-hint bail ("needs scope info") — that exact
+        # wording is python-provider-specific, so the pin still says
+        # "python provider only"; the generic "(tried 1 provider(s):\n        # python)" tail follows it and no longer fits the 200-col clip.
         rec("L2: the miss is the EXACT no-hint bail (python provider only)",
-            ok and "tried 1 provider(s): python" in msg,
+            ok and "needs scope info" in msg,
             f"minibuffer={msg!r}")
     finally:
         if app is not None:

@@ -85,7 +85,10 @@ use super::*;
     #[tokio::test]
     async fn xref_resolver_miss_reports_graceful_message() {
         // All providers miss → the event carries the error; the message
-        // reports it and nothing else changes (no buffer, no jump, no panic).
+        // reports it and nothing else changes (no buffer, no jump, no
+        // panic). F2 (plan 017 audit): the single-attempt shape — the
+        // provider's own reason LEADS the report, the generic tail
+        // follows byte-for-byte.
         let (mut s, _dir) = store_with_index(&[
             ("src/main.rs", "tokio::spawn(f);\n"),
         ]);
@@ -97,12 +100,13 @@ use super::*;
             generation: 2,
             symbol: "tokio::spawn".into(),
             source: None,
-            error: Some("no tooling provider could resolve symbol `tokio::spawn` (tried 1 provider(s): rust): no crate `tokio`".into()),
+            error: Some("no crate `tokio`; no tooling provider could resolve symbol `tokio::spawn` (tried 1 provider(s): rust)".into()),
         };
         s.apply_resolve_event(&event);
         assert!(
-            s.message.starts_with("no provider resolution for `tokio::spawn`:"),
-            "got: {}", s.message
+            s.message.starts_with("no provider resolution for `tokio::spawn`: no crate `tokio`;"),
+            "the provider's own reason reaches the minibuffer: got: {}",
+            s.message
         );
         assert_eq!(s.buffers.current().map(String::from).unwrap(), before, "view unchanged on a miss");
         assert!(s.resolving_display().is_empty());
@@ -140,6 +144,14 @@ use super::*;
         assert!(
             s.message.contains("tried 1 provider(s): rust"),
             "provider chain named in the report: {}", s.message
+        );
+        // F2 (plan 017 audit): the REAL chain's event carries the cargo
+        // provider's OWN miss reason — it reaches the minibuffer (it used
+        // to be swallowed by the chain-level generic; a miss with a named
+        // reason must read differently from a bare miss).
+        assert!(
+            s.message.contains("not a cargo project"),
+            "the provider's own reason surfaces: {}", s.message
         );
         assert!(s.resolving_display().is_empty());
     }

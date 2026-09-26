@@ -149,6 +149,13 @@ SHARED_SUITES=(
                         # the package entry file (the two changed
                         # matrix cells); loud skip per runtime when
                         # absent; go stays unit-covered (no leg)
+  drive_issue_017_f2.py # plan-017 finding F2: the provider-miss detail
+                        # reaches the minibuffer — a DECLINED fetch names
+                        # the refusal (the gate's own reason + the exact
+                        # command NOT run), an ordinary miss leads with
+                        # the provider's own reason, and a no-refusal
+                        # multi-provider walk keeps the generic shape
+                        # (no unrelated-provider noise)
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.

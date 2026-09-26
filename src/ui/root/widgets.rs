@@ -19,11 +19,21 @@ pub(super) fn Minibuffer(props: &MinibufferProps, mut _hooks: Hooks) -> impl Int
         props.message.clone()
     };
     element! {
-        View(flex_shrink: 0.0) {
+        // The same one-row discipline as the status line: the minibuffer
+        // must occupy EXACTLY one row. A long message (the F2, plan-017
+        // resolve-miss report carries the provider's own reason and runs
+        // well past 80 cols) wrapped onto a second row and pushed the
+        // status line off the bottom (the U-J3 layout-shift class). The
+        // reason LEADS the report (the resolver puts it first, knowing
+        // the right edge is clipped), so the leftmost text — what the
+        // operator just decided or the provider's own bail — stays
+        // visible.
+        View(flex_shrink: 0.0, overflow: Overflow::Hidden) {
             Text(
                 content: format!(" {line}"),
                 color: face_color(t.minibuffer),
                 weight: face_weight(t.minibuffer),
+                wrap: TextWrap::NoWrap,
             )
         }
     }
@@ -129,6 +139,30 @@ pub(super) fn StatusLine(props: &StatusLineProps, mut _hooks: Hooks) -> impl Int
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The minibuffer must occupy EXACTLY one row even when its message
+    /// overflows the terminal width (the F2, plan-017 resolve-miss report
+    /// is the long-message case: it carries the provider's own reason
+    /// ahead of the generic tail). Before the `NoWrap` + hidden overflow,
+    /// a long message wrapped onto a second row and pushed the status
+    /// line off the bottom — the U-J3 layout-shift class this test pins
+    /// at the minibuffer (the status-line twin is below).
+    #[test]
+    fn minibuffer_long_text_stays_one_row() {
+        let long = "x".repeat(240);
+        let mut mb = element! {
+            Minibuffer(message: long.clone())
+        };
+        let canvas = mb.render(Some(80));
+        assert_eq!(
+            canvas.height(),
+            1,
+            "minibuffer wrapped onto a second row: {:?}",
+            canvas.get_text(0, 0, 80, canvas.height())
+        );
+        // The leftmost text (the reason) is present on that single row.
+        assert!(canvas.get_text(0, 0, 80, 1).contains('x'));
+    }
 
     /// The status line must occupy EXACTLY one row even when its text
     /// overflows the terminal width. A deep project path (the pooled

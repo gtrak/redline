@@ -372,6 +372,13 @@ impl Resolver {
     /// `languages()` do not contain it are NOT probed (they leave no
     /// trace entry — the trace only records real attempts). An unset
     /// language tries every provider in order, exactly as before.
+    ///
+    /// All-miss report (F2, plan 017 audit): the generic
+    /// `no tooling provider could resolve symbol … (tried N provider(s): …)`
+    /// tail stands, but the per-provider reasons are not swallowed — a
+    /// single attempt's own reason and every refusal lead the report
+    /// (the status line clips the right edge; a refusal is the operator's
+    /// own decision and must never be hidden by clipping).
     pub fn resolve_traced(&self, ctx: &SymbolContext) -> anyhow::Result<ResolveOutcome> {
         let language = ctx.language.as_deref();
         let eligible: Vec<&Box<dyn ToolingProvider>> = self
@@ -406,16 +413,51 @@ impl Resolver {
                 }
             }
         }
-        anyhow::bail!(
+        // F2 (plan 017 audit): the per-provider miss detail must not be
+        // swallowed by the chain-level bail. A DECLINED fetch is the
+        // operator's own decision — a refusal that arrives without its
+        // reason inverts the confirmation gate (the user cannot tell the
+        // gate was even involved), so a refusal is surfaced even in a
+        // multi-provider walk, named by its provider. A single-attempt
+        // chain surfaces its provider's own reason (the only reason there
+        // is — no such symbol anywhere, not an npm project, …). Several
+        // unrelated bails in a multi-provider walk (unknown language) stay
+        // noise: the generic shape stands byte-for-byte. The reason LEADS
+        // the report: the status line is a single clipped row (the
+        // prompt-overflow class), so right-edge clipping must never hide
+        // the decision the user just made.
+        let names = eligible
+            .iter()
+            .map(|p| p.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let base = format!(
             "no tooling provider could resolve symbol `{}` (tried {} provider(s): {})",
             ctx.symbol,
-            eligible.len(),
-            eligible
-                .iter()
-                .map(|p| p.name())
-                .collect::<Vec<_>>()
-                .join(", ")
+            trace.attempts.len(),
+            names
         );
+        let single = trace.attempts.len() == 1;
+        let mut details: Vec<String> = Vec::new();
+        for a in &trace.attempts {
+            if a.hit {
+                continue;
+            }
+            // The status line never wraps: flatten a multi-line provider
+            // error (e.g. an embedded `pip install` stderr) to one line.
+            let d: String = a.detail.split_whitespace().collect::<Vec<_>>().join(" ");
+            if single || d.starts_with("install refused") {
+                details.push(if single {
+                    d
+                } else {
+                    format!("{d} ({} provider)", a.provider)
+                });
+            }
+        }
+        if details.is_empty() {
+            anyhow::bail!("{base}");
+        }
+        anyhow::bail!("{}; {base}", details.join("; "));
     }
 }
 
@@ -720,7 +762,24 @@ mod tests {
         assert!(!python.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    /// (011-01) A provider whose `languages()` is EMPTY is skipped when a
+    /// A provider that always misses with a fixed, named reason.
+    struct DetailProvider {
+        name: &'static str,
+        detail: &'static str,
+    }
+    impl ToolingProvider for DetailProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn languages(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn resolve(&self, _ctx: &SymbolContext) -> anyhow::Result<ResolvedSource> {
+            anyhow::bail!(self.detail)
+        }
+    }
+
+    /// (F2, plan 017 audit) A provider whose `languages()` is EMPTY is skipped when a
     /// language is set (it claims no language) but still tried for an
     /// unset one (backward-compatible walk).
     #[test]
@@ -804,5 +863,83 @@ mod tests {
         assert!(msg.contains("rustonly"), "msg: {msg}");
         assert!(!msg.contains("miss"), "ineligible provider named: {msg}");
         assert!(msg.contains("tried 1 provider"), "msg: {msg}");
+    }
+
+    /// (F2, plan 017 audit) A single-attempt miss surfaces the provider's
+    /// OWN reason — it LEADS the report (the status line clips the right
+    /// edge), and the generic tail keeps its byte-for-byte shape (the
+    /// `(tried N provider(s): …)` pins).
+    #[test]
+    fn single_miss_error_leads_with_the_provider_reason() {
+        let mut r = Resolver::new();
+        r.add(DetailProvider {
+            name: "python",
+            detail: "install refused: `pip install x` was declined at the fetch confirmation (nothing was installed)",
+        });
+        let err = r.resolve_traced(&ctx()).unwrap_err().to_string();
+        assert!(
+            err.starts_with("install refused: `pip install x` was declined at the fetch confirmation (nothing was installed);"),
+            "err: {err}"
+        );
+        assert!(
+            err.contains("no tooling provider could resolve symbol `crate::sym` (tried 1 provider(s): python)"),
+            "err: {err}"
+        );
+    }
+
+    /// (F2, plan 017 audit) A multi-provider walk (unknown language) with
+    /// NO refusals keeps the generic shape byte-for-byte — several
+    /// unrelated bails are noise, not a report.
+    #[test]
+    fn multi_miss_without_refusal_keeps_the_generic_shape() {
+        let mut r = Resolver::new();
+        r.add(DetailProvider { name: "rust", detail: "no crate" });
+        r.add(DetailProvider {
+            name: "python",
+            detail: "bare symbol `x` has no module path; resolving it to a module needs scope info",
+        });
+        let err = r.resolve_traced(&ctx()).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "no tooling provider could resolve symbol `crate::sym` (tried 2 provider(s): rust, python)"
+        );
+    }
+
+    /// (F2, plan 017 audit) A REFUSAL in a multi-provider walk is never
+    /// noise: it leads the report, named by its provider — the operator's
+    /// decision is visible even though other providers also bailed.
+    #[test]
+    fn multi_miss_surfaces_refusals_named() {
+        let mut r = Resolver::new();
+        r.add(DetailProvider { name: "rust", detail: "no crate" });
+        r.add(DetailProvider {
+            name: "python",
+            detail: "install refused: `pip install x` was declined at the fetch confirmation (nothing was installed)",
+        });
+        let err = r.resolve_traced(&ctx()).unwrap_err().to_string();
+        assert!(
+            err.starts_with("install refused: `pip install x` was declined at the fetch confirmation (nothing was installed) (python provider);"),
+            "err: {err}"
+        );
+        assert!(
+            err.contains("no tooling provider could resolve symbol `crate::sym` (tried 2 provider(s): rust, python)"),
+            "err: {err}"
+        );
+        assert!(!err.contains("no crate"), "unrelated bails stay noise: {err}");
+    }
+
+    /// (F2, plan 017 audit) A multi-line provider error (an embedded
+    /// `pip install` stderr) flattens to one line — the status line is a
+    /// single clipped row and must not wrap (the prompt-overflow class).
+    #[test]
+    fn miss_detail_flattens_to_one_line() {
+        let mut r = Resolver::new();
+        r.add(DetailProvider {
+            name: "python",
+            detail: "`pip install x` failed: line one\nline two\tthree",
+        });
+        let err = r.resolve_traced(&ctx()).unwrap_err().to_string();
+        assert!(!err.contains('\n'), "the report wraps: {err:?}");
+        assert!(err.starts_with("`pip install x` failed: line one line two three;"), "err: {err}");
     }
 }
