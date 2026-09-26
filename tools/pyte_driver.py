@@ -318,6 +318,7 @@ class App:
     # protocol failure. Use it only on reads whose assertion IS the CUP
     # on a cursor-bearing view (Buffer frames) — picker/Home frames carry
     # no post-sync CUP, and gating those reads would wait the full cap.
+    _SYNC_START_RE = re.compile(rb"\x1b\[\?2026h")
     _SYNC_END_RE = re.compile(rb"\x1b\[\?2026l")
     _CUP_RE = re.compile(rb"\x1b\[(\d+);(\d+)[Hf]")
     # The only bytes that ever FOLLOW a frame's ?2026l sync-close (measured
@@ -331,18 +332,21 @@ class App:
         """True when the stream's last frame has fully closed.
 
         iocraft wraps every frame in a synchronized update
-        (`?2026h` … `?2026l`) and places the cursor AFTER the close. A
-        quiet window (the `_read` quiet-exit) can fire MID-FRAME when the
-        frame's bytes take longer than the window to flush (frame delivery
-        is tens of ms under load; stable_capture's window is 20 ms), and a
-        capture taken then reads a TORN screen — half the rows of the new
-        frame, half of the old, and sometimes a CUP split across the read
-        boundary that pyte renders as literal text. The app repaints only
-        on events, so a later "identical capture" cannot heal it: the torn
-        state is stable. This gate says "frame complete" only when the
-        bytes after the last sync-close are cursor-placement bytes (or
-        none) — content bytes after the close mean the frame is still in
-        flight and the caller must keep reading.
+        (`?2026h` … `?2026l`). Post 013-02 (vendored iocraft) the
+        cursor's Show + CUP ride INSIDE the frame (after the canvas park,
+        before the close), so nothing the app writes follows a
+        `?2026l` — except the next frame's `?2026h`. A quiet window (the
+        `_read` quiet-exit) can fire MID-FRAME when the frame's bytes take
+        longer than the window to flush (frame delivery is tens of ms
+        under load; stable_capture's window is 20 ms), and a capture taken
+        then reads a TORN screen — half the rows of the new frame, half of
+        the old, and sometimes a CUP split across the read boundary that
+        pyte renders as literal text. The app repaints only on events, so
+        a later "identical capture" cannot heal it: the torn state is
+        stable. This gate says "frame complete" only when the bytes after
+        the last sync-close are cursor-placement bytes (or none) — a new
+        frame's open (or content bytes) after the close means the frame is
+        still in flight and the caller must keep reading.
         """
         matches = list(self._SYNC_END_RE.finditer(self.raw_tail))
         if not matches:
@@ -351,27 +355,34 @@ class App:
         return bool(self._FRAME_TAIL_RE.match(self.raw_tail[matches[-1].end():]))
 
     def cup_after_sync(self, buf=None):
-        """(row, col) — 1-based terminal coordinates — of the last CUP
-        issued after the final `?2026l` of the raw tail, or (None, None).
+        """(row, col) — 1-based terminal coordinates — of the CUP that
+        survives to the end of the raw tail: the last CUP in it, i.e. the
+        cursor position the terminal ends in. 013-02: the surviving CUP is
+        the frame's own last cursor movement (after the park, inside
+        `?2026h … ?2026l`, emitted at the frame's close); frames that
+        rewrote no canvas carry no CUP of their own and inherit the
+        previous one. (Pre-013-02 this read the last CUP *after* the final
+        `?2026l` — the detached-task wire shape the fix deletes.)
         """
         buf = self.raw_tail if buf is None else buf
-        ends = [m.end() for m in self._SYNC_END_RE.finditer(buf)]
-        if not ends:
-            return (None, None)
-        cups = self._CUP_RE.findall(buf[ends[-1]:])
+        cups = self._CUP_RE.findall(buf)
         if not cups:
             return (None, None)
         return (int(cups[-1][0]), int(cups[-1][1]))
 
     def _cup_settled(self, buf):
-        ends = [m.end() for m in self._SYNC_END_RE.finditer(buf)]
-        if not ends:
-            return True
-        return bool(self._CUP_RE.search(buf[ends[-1]:]))
+        """013-02: protocol-complete = no synchronized frame left open. The
+        in-frame CUP (if any) arrives with the frame's bytes, so a closed
+        frame is cursor-complete. (Pre-013-02 this waited for a CUP AFTER
+        the final `?2026l` — the detached-task write — which the fix makes
+        impossible; that wait could never settle.)"""
+        opens = len(self._SYNC_START_RE.findall(buf))
+        closes = len(self._SYNC_END_RE.findall(buf))
+        return opens <= closes
 
     def cup_settle(self, cap=5.0):
-        """Keep reading until a CUP after the final `?2026l` is observed
-        (hard-deadline backstop), then return `cup_after_sync()`."""
+        """Keep reading until the raw tail's last synchronized frame is
+        closed (hard-deadline backstop), then return `cup_after_sync()`."""
         deadline = time.time() + cap
         while not self._cup_settled(self.raw_tail):
             remain = deadline - time.time()

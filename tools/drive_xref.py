@@ -151,9 +151,11 @@ def top_content(app):
 
 def cup(app):
     """The surviving CUP (1-based row, col) — the cursor position the user
-    sees. cup_settle keeps the read window open until a CUP after the
-    final ?2026l is observed (the CUP race), so a (None, ...) read under
-    load is a protocol finding, not a scheduling artifact."""
+    sees. cup_settle keeps the read window open until the chunk's last
+    synchronized frame is closed, so a (None, ...) read under load is a
+    protocol finding, not a scheduling artifact. 013-02: the CUP now
+    rides inside the frame (after the park, before the close) — see
+    pyte_driver.App.cup_after_sync for the re-derived contract."""
     return app.cup_settle()
 
 

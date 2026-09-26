@@ -5,10 +5,15 @@ Drives the real binary in a sized PTY (magit view, n/p navigation) in two
 color modes and asserts the raw terminal stream, not just the pyte
 reconstruction:
 
-  * `?25l` (cursor hide) fires once at startup and is COUNTERED: every frame is
-    followed by a `?25h` (show) so the hardware cursor is visible.
-  * The CUP that survives to the end of a frame (the last CUP after the last
-    `?2026l`) lands on the selected (blue-bar) row and tracks it across n/p.
+  * `?25l` (cursor hide) fires once at startup and is COUNTERED: every
+    cursor frame carries a `?25h` (show) + CUP inside the frame.
+  * The CUP that survives to the end of a frame lands on the selected
+    (blue-bar) row and tracks it across n/p. Post 013-02 (vendored iocraft
+    `use_cursor_position`) the CUP is the frame's LAST cursor movement:
+    emitted by iocraft's own writer after the canvas park, INSIDE
+    `?2026h … ?2026l` — program order, not the old detached `sleep(12ms)`
+    write that landed after the close (and mid-frame when the frame ran
+    long).
   * No lingering `?25l` after the first render.
   * Under `COLORTERM=truecolor` the selected-row bar is emitted as
     `48;2;0;0;255` (truecolor); without it the 256-color `48;5;12` is retained.
@@ -33,15 +38,18 @@ reconstruction:
     columns with a visible gutter at 80 cols (no two-cell collision) and
     falls back to one full-width column at narrow widths.
 
-Read-window policy (deflake-timing, item 2): a raw read whose assertion is
-the surviving CUP stays OPEN until a CUP after the final `?2026l` is
-observed (`Session.cup_settle`), with a hard deadline (`CUP_WAIT_CAP`) as
-backstop — a missing CUP is then a real protocol failure, not a scheduling
-artifact (the old behavior closed on a quiet window alone, so a CUP starved
-past the window read as `None` under load). Reads that assert nothing about
-the CUP (and views that emit no cursor — Home/picker frames carry only the
-frame's in-region park, never a post-`?2026l` CUP) keep the quiet close; the
-gate is applied at the assertion site, never by raising the sleep.
+Read-window policy (deflake-timing, item 2; re-derived for 013-02): a raw
+read whose assertion is the surviving CUP stays open until the chunk's last
+synchronized frame is CLOSED (`Session.cup_settle`), with a hard deadline
+(`CUP_WAIT_CAP`) as backstop. 013-02 made every frame a single-writer
+protocol unit — its in-frame CUP (Show + CUP after the park) arrives with
+the frame's bytes, so a closed frame is complete: a CUP that is owed to a
+cursor view is already in the chunk when its `?2026l` lands. (Pre-013-02
+the gate instead waited for a CUP AFTER the final `?2026l` — the
+detached-task wire shape the fix deletes; with the fix that wait can never
+settle, which is exactly the clobber reproduced on the wire.) Reads that
+assert nothing about the CUP keep the quiet close; the gate is applied at
+the assertion site, never by raising the sleep.
 
 Exit 0 = all assertions pass; 1 = any failed.
 """
@@ -61,19 +69,25 @@ COLS, ROWS = 80, 24
 # the CUP is still missing — the common path closes on quiet exactly as before.
 CUP_WAIT_CAP = 5.0
 
-# deflake-timing: the frame's synchronized-update close + a CUP (CUP/CHA: the
-# `ESC[r;c H`/`f` position report the drive's `last_cup_after_sync` matches).
+# deflake-timing: the frame's synchronized-update open/close.
 _SYNC_END_RE = re.compile(rb"\x1b\[\?2026l")
+_SYNC_START_RE = re.compile(rb"\x1b\[\?2026h")
 _CUP_RE = re.compile(rb"\x1b\[\d+;\d+[Hf]")
 
 
 def _cup_settled(buf):
-    """Protocol-complete: no synchronized frame in this chunk, or a CUP was
-    issued after its final `?2026l`."""
-    ends = [m.end() for m in _SYNC_END_RE.finditer(buf)]
-    if not ends:
-        return True
-    return bool(_CUP_RE.search(buf[ends[-1]:]))
+    """Protocol-complete: no synchronized frame in this chunk is left open.
+
+    013-02: the vendored iocraft emits the app's cursor CUP INSIDE the
+    frame (Show + CUP after the park, before `?2026l`), from the same
+    writer that flushes the frame — so a frame whose `?2026l` has landed
+    is complete, and its CUP (if any) is already in the chunk. Pre-013-02
+    the CUP was a second writer landing after the close, and the gate
+    waited for exactly that post-close CUP; that shape no longer exists.
+    """
+    opens = len(_SYNC_START_RE.findall(buf))
+    closes = len(_SYNC_END_RE.findall(buf))
+    return opens <= closes
 
 
 def _set_winsize(fd, rows, cols):
@@ -133,16 +147,14 @@ class Session:
         return buf
 
     def cup_settle(self, buf, cap=CUP_WAIT_CAP):
-        """deflake-timing item 2: keep the read window open until a CUP after
-        the final `?2026l` is observed (hard deadline as backstop), instead of
-        closing on quiet alone — so a missing CUP is a real protocol failure
-        (a finding), not a scheduling artifact. The quiet window alone used to
-        end the chunk at the frame's `?2026l` with a starved CUP still owed;
-        under load the deferred CUP then read as `None`. Only called on reads
-        whose assertion IS the CUP: frames of cursor-less views (Home/picker)
-        never emit a post-`?2026l` CUP, so gating every read would wait the
-        full cap for no reason. Common path: CUP already present → closes on
-        quiet exactly as before."""
+        """deflake-timing item 2: keep the read window open until the
+        chunk's last synchronized frame is closed (hard deadline as
+        backstop), instead of closing on quiet alone — so a frame cut off
+        mid-bytes is a real protocol failure (a finding), not a scheduling
+        artifact. 013-02: the CUP rides inside the frame's bytes (after
+        the park, before the close), so a closed frame is already
+        cursor-complete — the gate settles on the close, common path
+        included."""
         deadline = time.time() + cap
         last = time.time()
         while not _cup_settled(buf):
@@ -205,32 +217,36 @@ class Session:
 
 
 def last_cup_row_after_sync(buf):
-    """The row (1-based) of the last CUP issued after the final ?2026l, or None."""
-    ends = [m.end() for m in re.finditer(rb"\x1b\[\?2026l", buf)]
-    if not ends:
-        return None
-    after = buf[ends[-1]:]
-    cups = re.findall(rb"\x1b\[(\d+);(\d+)[Hf]", after)
+    """The row (1-based) of the CUP that survives to the end of this chunk —
+    the last CUP in it — or None. 013-02: the surviving CUP is the frame's
+    OWN last cursor movement (after the park, inside `?2026h … ?2026l`,
+    emitted at the frame's close); frames that rewrote no canvas carry no
+    CUP of their own and inherit the previous one. (Pre-013-02 this read the
+    last CUP *after* the final `?2026l` — the detached-task write the fix
+    deletes.)"""
+    cups = re.findall(rb"\x1b\[(\d+);(\d+)[Hf]", buf)
     return int(cups[-1][0]) if cups else None
 
 
 def last_cup_after_sync(buf):
-    """The (row, col) — 1-based terminal coordinates — of the last CUP issued
-    after the final ?2026l of this chunk, or (None, None) when absent."""
-    ends = [m.end() for m in re.finditer(rb"\x1b\[\?2026l", buf)]
-    if not ends:
-        return (None, None)
-    after = buf[ends[-1]:]
-    cups = re.findall(rb"\x1b\[(\d+);(\d+)[Hf]", after)
+    """The (row, col) — 1-based terminal coordinates — of the CUP that
+    survives to the end of this chunk (the last CUP in it; see
+    `last_cup_row_after_sync` for the 013-02 rationale), or (None, None)
+    when the chunk carries no CUP at all."""
+    cups = re.findall(rb"\x1b\[(\d+);(\d+)[Hf]", buf)
     if not cups:
         return (None, None)
     return (int(cups[-1][0]), int(cups[-1][1]))
 
 
 def show_after_sync(buf):
-    """Whether a ?25h (show) is issued after the final ?2026l of this chunk."""
-    ends = [m.end() for m in _SYNC_END_RE.finditer(buf)]
-    return any(b"\x1b[?25h" in buf[e:e + 64] for e in ends) if ends else False
+    """Whether a ?25h (show) is issued after the startup ?25l of this chunk.
+    013-02: the show rides INSIDE the cursor frame (before its ?2026l), not
+    after the close; the chunk's only ?25l (if captured at all) is the
+    one-shot startup hide, which precedes every frame."""
+    hides = [m.start() for m in re.finditer(rb"\x1b\[\?25l", buf)]
+    after = hides[-1] if hides else -1
+    return any(m.start() > after for m in re.finditer(rb"\x1b\[\?25h", buf))
 
 
 def check(colorterm):
@@ -1244,7 +1260,8 @@ def jump_highlight_checks():
       stream right after the landing and reconstructable in pyte (a
       `ffff00` bg on the landing row) — then CLEARS (no `48;5;11` / no
       yellow row after the ~200 ms fade), while the hardware cursor (the
-      CUP after the final `?2026l`) lands exactly on the landing row/col
+      frame's own CUP — after the park, inside the last
+      `?2026h … ?2026l`) lands exactly on the landing row/col
       BOTH during and after the animation (the extra animation frames
       must not widen the cursor race);
     * M-, back to the `alpha` reference (row 21, col 6): a second
@@ -1318,9 +1335,9 @@ def jump_highlight_checks():
                 len(fades) >= 2,
                 f"distinct yellow-family rgbs={sorted(fades)[:6]}")
         # The CUP survives the animation and lands on the landing row
-        # (cup_settle keeps the window open until the CUP after the final
-        # ?2026l is in the chunk — the landing frame's CUP or a later
-        # animation frame's; the point does not move during the fade).
+        # (cup_settle keeps the window open until the chunk's last frame is
+        # closed — the landing frame's in-frame CUP or a later animation
+        # frame's; the point does not move during the fade).
         r, c = last_cup_after_sync(s.cup_settle(buf))
         # jump-column-landings: the imenu landing is on the `beta` NAME
         # (`fn |beta` → 1-based col 4), not the line start — the CUP tracks

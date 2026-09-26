@@ -1,6 +1,18 @@
 # Plan 013 — the hardware-cursor race (write-up + decision)
 
-**Status:** analysis complete, decision OPEN (user). Nothing implemented.
+**Status:** analysis complete. **Option B (vendored patch) chosen and implemented**
+(013-02): iocraft 0.9.1 is vendored at `vendor/iocraft` and pinned via
+`[patch.crates-io]` in the workspace `Cargo.toml`; the patch adds
+`use_cursor_position` (backend emits Show + CUP at the end of every frame,
+after the canvas park, before `?2026l` — program order instead of the
+12 ms sleep race) and the redline-side 12 ms sleep race is deleted.
+Consequent wire-contract change (mechanical, recorded for future readers):
+the CUP now lives INSIDE the frame, so the probe (`probe_cursor_interleave`),
+the cursor suite (`check_cursor_stream`) and the shared driver
+(`pyte_driver.cup_settle`/`cup_after_sync`) re-derived their "surviving CUP" /
+"settled" rules to the new shape (a closed frame is cursor-complete; no
+post-close CUP can ever exist). 013-03 (harness pre-frame starvation) remains
+open.
 **Origin:** found during plan 012's deflake work (lane `deflake-cursor`, `b47e03c`),
 re-measured by its gate (`5d25dc0`), refined by the final 012 battery (`61ad9bd`).
 
@@ -176,6 +188,21 @@ Then the ordering is **program order**, not a timing bet.
 |---|---|---|---|---|
 | **A** | **Upstream PR** (recommended) | Propose `use_cursor_position(col, row)` — the app declares where the hardware cursor goes; the backend emits `Show` + `MoveTo` after the park, inside the sync region. Precedent: ratatui's `Frame::set_cursor_position`. | PR may sit; using it immediately needs B anyway | **Always worth doing** — cheap, the right API, defensible on its own merits |
 | **B** | **Vendored patch** | ~20-30 lines in `write_canvas`'s fullscreen branch (right after the park at `crossterm.rs:583-586`) reading a cursor position held on the backend, plus a public setter the hook calls. Pin via `[patch.crates-io]` / path dep. | You own a fork across **every** iocraft bump (the pin is 0.9.1; this cycle alone did tree-sitter 0.24.7→0.25.10 + 9 grammar bumps) | If you want the fix **now** and the PTY gate load-independent |
+
+> **CHOSEN — and the upgrade liability it carries (recorded per spec).**
+> iocraft 0.9.1 is vendored at `vendor/iocraft` (path dependency, committed)
+> and pinned by `[patch.crates-io] iocraft = { path = "vendor/iocraft" }`
+> in the workspace `Cargo.toml`. The vendor tree carries a ~30-line patch:
+> `TerminalBackend::set_cursor_position` (default no-op), the crossterm
+> backend storing the position and emitting `Show` + `MoveTo` after the
+> fullscreen park (full-write, resize-rewrite, and diff paths) via
+> `emit_cursor_position`, and the `use_cursor_position` hook that pushes it
+> during the render phase (before `write_canvas`). **Every future iocraft
+> bump must re-apply or drop this patch:** re-copy the new registry source
+> into `vendor/iocraft` and re-port the hunks (the emit points live in
+> `write_canvas`, the park's line moves with each release), or upstream the
+> API (option A) and delete the patch + the `[patch.crates-io]` section.
+> Until then, a plain crates.io version bump silently loses the fix.
 | **C** | **Accept** | Keep the harness gate loud; document that the cursor suite must run on a quiet box. | Cursor lags one frame on a busy machine; the PTY suite stays load-dependent | If the cursor is judged cosmetic and the gate is always run idle |
 | **D** | Widen the sleep / auto-retry | — | Guessing harder; retry hides a real failure | **Never** (recorded rule: a test failure is never retried; only a signal-kill is) |
 
@@ -202,7 +229,7 @@ reflowed"* rather than *"a cursor directive after it"*. So the proposal is an
 | Issue | Depends on | What |
 |---|---|---|
 | `01-upstream-pr.md` | — | Write and file the iocraft proposal (`use_cursor_position`) with a minimal repro. |
-| `02-vendored-patch.md` | 01 rejected/slow **and** user chooses B | The ~20-30-line patch + pinning + the redline-side call site that deletes the sleep. |
+| `02-vendored-patch.md` | 01 rejected/slow **and** user chooses B | The ~20-30-line patch + pinning + the redline-side call site that deletes the sleep. — **DONE (this branch, `vendored-cursor`): patch + pin + redline-side deletion; verification per §Verification.** |
 | `03-harness-preframe.md` | — | Cover the **pre-frame starvation** sub-class (`?25l=0`, stale-content reads) that `cup_settle` cannot: the gate guards the CUP only. Independent of the app fix. |
 
 ---

@@ -33,6 +33,15 @@ workspace = true
 [dependencies]
 # ── UI layer ────────────────────────────────────────────────────────────────
 iocraft = "0.9.1"          # declarative TUI (latest 0.9.1; re-exports crossterm events)
+# UPGRADE LIABILITY (plan 013-02): iocraft is VENDORED at vendor/iocraft and
+# pinned by the [patch.crates-io] section below. The vendor tree carries a
+# ~30-line patch (use_cursor_position: the app declares its hardware-cursor
+# cell and the backend emits Show + CUP after the canvas park, inside the
+# frame's synchronized region — program order instead of redline's old
+# detached 12 ms sleep race). The pin is 0.9.1: every future iocraft bump
+# must re-apply or drop this patch (re-copy the new registry source into
+# vendor/iocraft and re-port the hunks, or upstream the API and delete the
+# patch + this section).
 crossterm = "0.29"         # pinned to match iocraft's `^0.29` requirement exactly
 # Display-width (wide/CJK + combining) math at the render/input boundary
 # (plan 004 issue 05d). deps batch B bumped the direct dep 0.1.14 -> 0.2.2
@@ -100,3 +109,9 @@ insta = "1.48"
 # current table so the recorded 458-scalar delta is regeneratable from the
 # repo. Dev-only — never linked into the shipped binary.
 unicode-width-old = { package = "unicode-width", version = "=0.1.14" }
+
+# Plan 013-02: pin the vendored, patched iocraft 0.9.1 (see the upgrade
+# liability comment above). The patch adds `use_cursor_position`; until it
+# lands upstream, a plain crates.io bump would silently lose the fix.
+[patch.crates-io]
+iocraft = { path = "vendor/iocraft" }

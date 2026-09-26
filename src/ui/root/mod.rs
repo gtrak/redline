@@ -98,10 +98,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let snap: Snapshot = snapshot::build(store, tick, tw_raw);
 
-    let revision = tick.get();
     let cursor_cell_opt = cursor_cell(&snap);
     let cursor_live = tw_raw > 0 && !snap.quit;
-    install_cursor_effect(&mut hooks, revision, cursor_cell_opt, cursor_live);
+    install_cursor_effect(&mut hooks, cursor_cell_opt, cursor_live);
 
     if snap.quit {
         system.exit();

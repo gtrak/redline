@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
-"""probe_cursor_interleave — one-shot raw-stream monitor: does the app's
-DETACHED cursor write (plan 013: `sleep(12ms)` + tokio::spawn MoveTo,
-src/ui/root/hooks.rs install_cursor_effect) land INSIDE a synchronized
-frame region (`?2026h` … `?2026l`)?
+"""probe_cursor_interleave — one-shot raw-stream monitor: does a cursor
+write land MID-FRAME (plan 013: before 013-02 the app's DETACHED cursor
+write — `sleep(12ms)` + tokio::spawn MoveTo, src/ui/root/hooks.rs
+install_cursor_effect — raced the frame flush; after 013-02 iocraft
+itself emits the CUP, program-ordered)?
 
-A correct stream has ZERO cursor bytes (`ESC[?25h/l`, `ESC[r;cH/f`)
-between a `?2026h` open and its matching `?2026l`: the cursor write is
-meant to land AFTER the close (measured quiet: every post-close tail is
-empty or `?25h`+CUP only). An interleave — the cursor task firing while
-the frame's content bytes are still in flight (frame flush is ~5 ms at
-idle but exceeds the 12 ms deferral under load) — corrupts the on-wire
-stream: pyte then renders CUP params as text ('2;1H…README.md (2)'),
-truncates rows (r9 = 'let target_thre' in the 3-parallel probe run), or
-crashes on the mangled CSI (pyte `cursor_down() takes 1 to 2 but 3 were
-given`, same run).
+The legal shapes (013-02 onward):
+  * every `?25h` (cursor Show) inside a synchronized frame region
+    (`?2026h` … `?2026l`) is the VENDORED iocraft's program-order CUP: it
+    sits after the canvas park and is the frame's final cursor movement —
+    the bytes between it and the matching `?2026l` are EXACTLY one CUP
+    (`ESC[r;cH`) and nothing else;
+  * a `?25h` after a region's `?2026l` (a legacy/tail write) is also fine
+    — it is outside any region and never counted;
+  * a `?25l` inside a region is NEVER legal (upstream hides once at
+    startup, outside frames);
+  * plain CUPs `ESC[r;cH` are normal intra-frame row positioning.
+
+An INTERLEAVE — the bug — is a cursor write whose tail does not end the
+frame: a `?25h` with content (or the park, or another `?2026h`) still in
+flight before its `?2026l`, or any `?25l` inside a region. Pre-013-02 the
+probe counted every cursor byte inside a region (the old code never legally
+emitted in-region, only by racing); post-013-02 the count must be ZERO
+while the legal program-order CUPs keep flowing.
 
 Bounded by construction: MON_SECS seconds (default 90, cap 300), one App,
 one summary, then exit. It keeps a steady key stream going so cursor-
 bearing frames keep painting; the caller supplies the load (2-3 parallel
-probe_file_search instances in other shells), so run it as:
+probe_file_search instances in other shells, or `cargo test --workspace`),
+so run it as:
   (python3 tools/probe_cursor_interleave.py > /tmp/interleave.log 2>&1) &
-  ... two probe_file_search instances ...
-and read the verdict AFTER the load finishes.
+  ... load ... and read the verdict AFTER the load finishes.
 """
 import os
 import re
 import sys
 import time
+import bisect
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyte_driver import App
@@ -35,40 +45,54 @@ from fixture import repo, reset as _reset_fixture
 SECS = min(int(os.environ.get("MON_SECS", "90")), 300)
 OPEN = re.compile(rb"\x1b\[\?2026h")
 CLOSE = re.compile(rb"\x1b\[\?2026l")
-# The discriminating signature: `ESC[?25h` (cursor Show). The detached
-# cursor task writes Show + MoveTo; the ONLY legal ?25h is the one AFTER
-# a frame's ?2026l close. A ?25h INSIDE an open ?2026h…?2026l region is
-# the interleave. (Plain CUPs `ESC[r;cH` are normal intra-frame row
-# positioning — they are not evidence.)
+# The discriminating signatures: `ESC[?25h` (cursor Show) and `ESC[?25l`
+# (cursor Hide). Post-013-02 a ?25h INSIDE a region is legal ONLY as the
+# program-order CUP (Show + exactly one CUP, then the region's ?2026l);
+# anything else in-region — a Show with content still in flight, or any
+# Hide — is the interleave. (Plain CUPs `ESC[r;cH` are normal intra-frame
+# row positioning — they are not evidence.)
 CURSOR = re.compile(rb"\x1b\[\?25[hl]")
+CUP = re.compile(rb"\x1b\[\d+;\d+H")
 
 
 def scan(raw):
-    """One left-to-right pass: every cursor byte while inside an open
-    `?2026h` region is an interleave. Returns (count, spans)."""
+    """One left-to-right pass over every cursor write. A `?25h`/`?25l`
+    inside an open `?2026h` region is a mid-frame interleave unless it is
+    the program-order CUP: exactly one CUP between the Show and the
+    region's `?2026l`. Returns (count, spans)."""
     count = 0
     spans = []
-    in_sync = False
-    open_at = 0
-    events = []
-    for m in OPEN.finditer(raw):
-        events.append((m.start(), "o"))
-    for m in CLOSE.finditer(raw):
-        events.append((m.start(), "c"))
+    opens = [m.start() for m in OPEN.finditer(raw)]
+    closes = [m.start() for m in CLOSE.finditer(raw)]
     for m in CURSOR.finditer(raw):
-        events.append((m.start(), "u"))
-    events.sort(key=lambda e: e[0])
-    for pos, kind in events:
-        if kind == "o":
-            in_sync = True
-            open_at = pos
-        elif kind == "c":
-            in_sync = False
-        else:
-            if in_sync:
-                count += 1
-                if len(spans) < 5:
-                    spans.append(raw[pos - 40:pos + 10])
+        p = m.start()
+        # Inside a region iff the last OPEN before p postdates the last
+        # CLOSE before p.
+        i = bisect.bisect_left(opens, p)
+        j = bisect.bisect_left(closes, p)
+        last_open = opens[i - 1] if i > 0 else -1
+        last_close = closes[j - 1] if j > 0 else -1
+        if last_open <= last_close:
+            continue  # outside any synchronized region: never an interleave
+        if m.group(0) == b"\x1b[?25l":
+            # A Hide inside a region is never legal (upstream hides once
+            # at startup, outside frames).
+            count += 1
+            if len(spans) < 5:
+                spans.append(raw[p - 40:p + 10])
+            continue
+        # ?25h: legal only when the bytes between it and the matching
+        # ?2026l are exactly one CUP (the vendored iocraft emit: Show +
+        # MoveTo, after the park, the frame's last bytes).
+        k = bisect.bisect_right(closes, p)  # first close strictly after p
+        if k >= len(closes):
+            continue  # unterminated region; nothing after
+        tail = raw[p + len(m.group(0)):closes[k]]
+        if CUP.fullmatch(tail):
+            continue  # the program-order CUP (013-02): not an interleave
+        count += 1
+        if len(spans) < 5:
+            spans.append(raw[p - 40:p + 10])
     return count, spans
 
 
@@ -85,8 +109,8 @@ def main():
         ki += 1
     n, spans = scan(app.raw_tail)
     frames = len(OPEN.findall(app.raw_tail))
-    print("frames observed: %d; interleaved cursor bytes inside an open "
-          "sync region: %d" % (frames, n))
+    print("frames observed: %d; mid-frame cursor interleaves (cursor write "
+          "whose tail is not exactly CUP + ?2026l): %d" % (frames, n))
     for s in spans:
         print("span:", s)
     app.kill()

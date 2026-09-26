@@ -386,47 +386,31 @@ pub(super) fn drain_clipboard(hooks: &mut Hooks, store: Arc<Mutex<AppStore>>) {
     });
 }
 
-/// The `use_effect` that re-shows + repositions the hardware cursor after
-/// every frame.
+/// Declares the hardware cursor position for the frame (013-02, vendored
+/// iocraft `use_cursor_position`): iocraft shows and moves the cursor to
+/// this cell from its OWN writer — after the canvas's status-line park and
+/// before the frame's `?2026l` close — so the CUP is the last cursor
+/// movement of the frame by program order. This replaces the old detached
+/// `tokio::spawn` + `sleep(12ms)` race, which bet that 12 ms landed after
+/// the frame flush; when a frame ran longer (loaded box) the CUP landed
+/// mid-frame and the park clobbered it, and when the task was starved the
+/// CUP missed the read window entirely.
+///
+/// One unconditional hook call per render, mirroring the old effect's
+/// guards: `cursor_live` covers the live terminal only (the static render
+/// path reports size 0 and must not emit cursor escapes) and not-on-quit.
+/// When not live, `None` is declared and iocraft emits nothing after the
+/// park (stock behavior — the cursor stays where the park put it).
 pub(super) fn install_cursor_effect(
     hooks: &mut Hooks,
-    revision: u64,
     cursor_cell_opt: Option<(u16, u16)>,
     cursor_live: bool,
 ) {
-    // issue 004-05 (hardware cursor): iocraft hides the cursor ONCE at startup
-    // (?25l), never re-shows it, and re-parks it at the status line after every
-    // frame's synchronized output (?2026h ... ?2026l). This effect (which fires
-    // after every render) re-shows the cursor and repositions it on the current
-    // view's cursor row — the blue-bar (selected) row for list views, the top
-    // visible line for the buffer view (emacs -nw parity: the terminal cursor
-    // sits on point).
-    //
-    // The write is deferred to a short-lived task: iocraft's own effect hook
-    // fires mid-frame (after ?2026h, before the content draw), so a direct
-    // write here would be clobbered by the frame's status-line park (24;1).
-    // Deferring ~12 ms (the measured frame flush is ~5 ms) lands the ?25h + CUP
-    // AFTER the frame's ?2026l, making it the last cursor position for that
-    // frame. Because the effect fires on every render (key, watcher, index,
-    // search, or resize), the cursor is re-asserted after every frame. Guarded
-    // to the live terminal (and not on quit): the static render path reports
-    // size 0 and must not emit raw cursor escapes.
-    hooks.use_effect(
-        move || {
-            if !cursor_live {
-                return;
-            }
-            let cell = cursor_cell_opt;
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(12)).await;
-                if let Some((col, row)) = cell {
-                    use crossterm::cursor::{MoveTo, Show};
-                    let _ = crossterm::execute!(std::io::stdout(), Show, MoveTo(col, row));
-                }
-            });
-        },
-        (&revision,),
-    );
+    hooks.use_cursor_position(if cursor_live {
+        cursor_cell_opt
+    } else {
+        None
+    });
 }
 
 #[cfg(test)]
