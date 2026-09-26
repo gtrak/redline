@@ -476,17 +476,35 @@ impl AppStore {
             }
             return true;
         }
+        // Newline (issue-paste-newline-dropped): a typed RET arrives as
+        // `Enter` (0x0D); a PASTED newline arrives as C-j — the terminal LF
+        // byte (0x0A) decodes to `Char('j')`+CONTROL in raw mode, NOT to an
+        // `Enter` event (measured with tools/probe_keydump; the app requests
+        // no bracketed paste, so a paste is ordinary key bytes, and the LF
+        // byte is a control char, not a line key). The line-oriented document
+        // represents a newline as a real `'\n'` char, so BOTH forms insert it
+        // exactly as typing one by hand: at the point in `Accurate` mode,
+        // appended at the end in `Annotation` mode. (Previously both fell
+        // through to the engine, were unbound, and silently dropped the
+        // newline — a paste glued the lines together.)
+        if key.code == KeyCode::Enter || key == Key::ctrl_char('j') {
+            if accurate {
+                self.newline_at_point();
+            } else if self.notes_insert_char('\n') {
+                // plan 016 issue 04: a successful self-insert re-arms the
+                // typing-run marker (a newline is a self-inserted char).
+                self.self_insert_run = self.buffers.current().map(str::to_string);
+            }
+            return true;
+        }
         // Accurate-mode control keys (plan 015 issue 03). All are freed from
         // their previous Buffer-view roles: `C-d` was half-page scroll (now
-        // delete-char-forward, the emacs binding); `RET`/`C-k`/`C-o`/`C-t`/
-        // `M-d`/`M-DEL` were unbound. `C-u` STAYS half-page scroll (universal
+        // delete-char-forward, the emacs binding); `C-k`/`C-o`/`C-t`/
+        // `M-d`/`M-DEL` were unbound (`RET` is handled in the newline branch
+        // above, for both modes). `C-u` STAYS half-page scroll (universal
         // argument is 015 item 9, out of scope). Annotation mode falls through
         // every one of these to the engine (unchanged behaviour).
         if accurate {
-            if key.code == KeyCode::Enter {
-                self.newline_at_point();
-                return true;
-            }
             if key == Key::ctrl_char('k') {
                 self.kill_line();
                 return true;

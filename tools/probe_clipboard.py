@@ -179,26 +179,30 @@ def main():
         cup = app.cup_settle()
         rec("C1: pasted line tracks the editable cursor (last line, col 0)",
             cup == (3, 1), f"cup={cup} want (3,1) 1-based")
-        # C2: the multi-byte paste survives end-to-end: bytes in → file on
-        # disk (é byte-exact; the pre-fix build dropped it: 'probe--1').
+        # C2: the multi-byte paste survives end-to-end AND its newlines are
+        # preserved (issue-paste-newline-dropped): bytes in → file on disk,
+        # é/中 byte-exact, and the pasted LFs land as real '\n' — a pasted LF
+        # arrives as C-j (terminal 0x0A in raw mode), which the fix inserts as
+        # a newline. The pre-fix build DROPPED them, gluing the lines
+        # together; this probe used to assert that glued result with an `in`
+        # check (true of the concatenation) and so passed over the defect.
+        # Now asserted BYTE-EXACT on the whole file (an `in`/`contains` check
+        # cannot falsify a dropped newline).
         paste2 = "r-\u00e9-1\nsecond line\n"
         app.feed(paste2.encode("utf-8"), 0.8)
         app.key("C-x C-s", 1.2)
         notes = os.path.join(project, ".redline-notes.md")
         on_disk = open(notes, "rb").read() if os.path.exists(notes) else b""
-        # The pasted newlines are DROPPED: RET is unbound in Annotation-mode
-        # notes editing (src/app/store/keys.rs:461-512), so the two pastes
-        # concatenate without a separator. The exact bytes on disk are
-        # "p\u4e2dq" + "r-\u00e9-1" + "second line" (no newlines between them).
-        # This assertion pins the current behavior: if newlines are ever
-        # preserved (the filed defect is fixed), this probe reddens.
-        # Filed: .agents/tasks/issue-paste-newline-dropped.md
-        expected_concat = ("p\u4e2dq" + "r-\u00e9-1" + "second line").encode("utf-8")
-        rec("C2: pasted multi-byte bytes land in .redline-notes.md (save)",
-            expected_concat in on_disk,
+        # Full byte-exact file: the seeded `# Notes` header + both pastes with
+        # their newlines intact (`p中q` has no newline; the second paste
+        # carries two — one after `r-é-1`, one after `second line`).
+        expected_file = ("# Notes\n"
+                         + "p\u4e2dq" + "r-\u00e9-1\nsecond line\n").encode("utf-8")
+        rec("C2: pasted multi-byte bytes + newlines land byte-exact on disk",
+            on_disk == expected_file,
             f"file={'yes' if on_disk else 'MISSING'}, "
-            f"exact concat in file={expected_concat in on_disk}, "
-            f"want={expected_concat!r}")
+            f"byte-exact={on_disk == expected_file}, "
+            f"want={expected_file!r} got={on_disk!r}")
     finally:
         app.kill()
 

@@ -2440,3 +2440,126 @@ use super::*;
             "a control byte must not reach the buffer"
         );
     }
+
+    // ── issue-paste-newline-dropped: a pasted newline is a real '\n' ──────
+
+    /// issue-paste-newline-dropped: a terminal paste arrives as ordinary key
+    /// bytes (the app requests no bracketed paste). The MEASURED decode
+    /// (tools/probe_keydump, raw mode) of a pasted string is: printable chars
+    /// -> `Char(c)`, and the LF byte (0x0A) -> `Char('j')`+CONTROL (C-j) —
+    /// NOT an `Enter` event, NOT a literal `Char('\\n')`. This helper mirrors
+    /// that decode so the tests feed the buffer exactly what a real paste
+    /// would deliver.
+    fn paste_keys(paste: &str) -> Vec<crate::app::keymap::Key> {
+        paste
+            .chars()
+            .map(|c| {
+                if c == '\n' {
+                    crate::app::keymap::Key::ctrl_char('j')
+                } else {
+                    crate::app::keymap::Key::new(crate::app::keymap::KeyCode::Char(c))
+                }
+            })
+            .collect()
+    }
+
+    /// issue-paste-newline-dropped: pasting multi-line text into the notes
+    /// buffer (Annotation mode) must insert REAL newlines, byte-exactly, into
+    /// the file on disk. The pre-fix build dropped every LF (they arrived as
+    /// C-j, unbound), so the two lines concatenated with no separator. Asserted
+    /// byte-exact on disk in BOTH directions at once (a single full-content
+    /// equality that an `in`/`contains` check could not falsify): the newlines
+    /// are present (positive) AND the surrounding text (the seeded `# Notes`
+    /// header and the pasted words) is undisturbed (negative).
+    #[test]
+    fn pasted_newline_in_notes_buffer_lands_byte_exact_on_disk() {
+        let (dir, mut s) = notes_store();
+        for k in paste_keys("line1\nline2\n") {
+            s.key_event(k);
+        }
+        s.save_buffer();
+        let notes_path = dir.path().join(".redline-notes.md");
+        let on_disk = std::fs::read(&notes_path).expect("notes file on disk after save");
+        let want = b"# Notes\nline1\nline2\n";
+        assert_eq!(
+            &on_disk[..],
+            want,
+            "pasted newlines must land byte-exact on disk (no dropped LF, no glued lines)"
+        );
+    }
+
+    /// issue-paste-newline-dropped: typing a newline by hand (RET -> Enter)
+    /// and pasting one (LF -> C-j) must produce BYTE-IDENTICAL notes-buffer
+    /// text — the acceptance criterion is "a paste behaves the same as typing
+    /// the same characters by hand".
+    #[test]
+    fn typed_and_pasted_newline_are_byte_identical_in_notes_buffer() {
+        // Typed: "line1", RET (Enter), "line2".
+        let (_dir, mut typed) = notes_store();
+        for c in "line1".chars() {
+            typed.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        typed.key_event(crate::app::keymap::Key::enter());
+        for c in "line2".chars() {
+            typed.key_event(crate::app::keymap::Key::new(
+                crate::app::keymap::KeyCode::Char(c),
+            ));
+        }
+        let typed_text = typed
+            .buffers
+            .current()
+            .map(|k| typed.buffers.get(k).unwrap().rope.to_string())
+            .unwrap();
+
+        // Pasted: the same characters as a single paste (LF -> C-j).
+        let (_dir2, mut pasted) = notes_store();
+        for k in paste_keys("line1\nline2") {
+            pasted.key_event(k);
+        }
+        let pasted_text = pasted
+            .buffers
+            .current()
+            .map(|k| pasted.buffers.get(k).unwrap().rope.to_string())
+            .unwrap();
+
+        assert_eq!(
+            typed_text, pasted_text,
+            "a pasted newline must behave the same as typing it by hand"
+        );
+        assert_eq!(typed_text, "# Notes\nline1\nline2");
+    }
+
+    /// issue-paste-newline-dropped (the Accurate-mode half of the rule): in an
+    /// `Accurate` buffer a pasted newline (C-j) inserts a real '\n' at the
+    /// point — exactly as typing RET would. The asymmetry the format supports:
+    /// an Accurate buffer represents a newline, so a paste inserts it (at the
+    /// point) rather than dropping it.
+    #[test]
+    fn pasted_newline_in_accurate_mode_inserts_at_point() {
+        let (_dir, mut s) = notes_store();
+        // Enter Accurate mode on the notes buffer (baseline-editable, so the
+        // toggle takes no confirm — the notes baseline loses nothing).
+        s.toggle_read_only();
+        assert_eq!(
+            s.buffers.current().map(|k| s.buffers.get(k).unwrap().mode),
+            Some(BufferMode::Accurate),
+            "notes buffer must be in Accurate mode for this test"
+        );
+        // Park the point at the buffer start (line 0, col 0).
+        s.set_point(0, 0, 0);
+        // Paste a newline (C-j, the measured LF decode): it must land AT the
+        // point (before the existing `# Notes`), the Accurate point-accurate
+        // shape — and the existing text stays undisturbed after it.
+        for k in paste_keys("\n") {
+            s.key_event(k);
+        }
+        let key = s.buffers.current().unwrap().to_string();
+        let text = s.buffers.get(&key).unwrap().rope.to_string();
+        assert_eq!(
+            text, "\n# Notes\n",
+            "a pasted newline must insert at the point in Accurate mode"
+        );
+    }
+
