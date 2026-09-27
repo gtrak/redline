@@ -20,6 +20,24 @@ cargo build --release
 # binary at target/release/redline
 ```
 
+One dependency is **generated, not committed**: `vendor/iocraft` (iocraft
+0.9.1 + redline's `use_cursor_position` patch, plan 013-02) is
+re-materialized by the script from a sha256-pinned `.crate` and
+`patches/iocraft-0.9.1-use_cursor_position.patch` — the repo carries the
+patch, never the tree. On a fresh clone run it once before the first
+build:
+
+```sh
+tools/apply-iocraft-patch.sh
+```
+
+It verifies the pinned sha256, refuses to proceed loudly if the crate or
+patch no longer match (an iocraft version bump must update the pin and
+re-generate the patch), and `tools/apply-iocraft-patch.sh check` re-verifies
+an existing tree — the gate's build stage runs that check, so a missing
+or stale tree fails the gate before cargo dies cryptically inside
+`[patch.crates-io]` resolution.
+
 ## Development gate
 
 A pre-push hook (tracked at `.githooks/pre-push`) runs the fast gate

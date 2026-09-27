@@ -9,5 +9,13 @@ tools/__pycache__/
 # Convention + lifecycle in .agents/skills/plan-process/SKILL.md.
 /.agents/worktrees/
 
+# iocraft 0.9.1 + the redline patch (plan 013-02): the repo carries the
+# PATCH (patches/iocraft-0.9.1-use_cursor_position.patch) + a sha256 pin in
+# tools/apply-iocraft-patch.sh, never the tree. The tree is generated —
+# run tools/apply-iocraft-patch.sh on a fresh clone before the first build;
+# the gate's build stage re-verifies it (`check`) and fails loudly if it
+# is missing or stale.
+/vendor/iocraft/
+
 # Slot marker (local lane state, never committed).
 .lane

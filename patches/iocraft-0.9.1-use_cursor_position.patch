@@ -1,0 +1,302 @@
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2006-07-24 01:21:28.000000000 +0000
++++ b/Cargo.toml	2026-09-27 23:20:04.195323164 +0000
+@@ -24,6 +24,13 @@
+ license = "MIT OR Apache-2.0"
+ repository = "https://github.com/ccbrown/iocraft"
+ 
++# Empty [workspace] table: this crate is vendored (redline 013-02) and
++# pinned via the redline workspace's [patch.crates-io]. The empty table
++# keeps it a standalone workspace root so `cargo test` runs on the patch's
++# own tests without pulling it into the redline workspace (its
++# registry-era Cargo.lock is honored here and nowhere else).
++[workspace]
++
+ [features]
+ crossterm = ["dep:crossterm"]
+ default = ["crossterm"]
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/src/backend/crossterm.rs b/src/backend/crossterm.rs
+--- a/src/backend/crossterm.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/src/backend/crossterm.rs	2026-09-27 23:20:04.196792064 +0000
+@@ -353,6 +353,11 @@
+     /// there is only one physical cursor, so output from different hooks
+     /// interleaves the same way plain `print!`/`println!` calls would.
+     passthrough_appended_newline: Option<u16>,
++    /// The hardware cursor position declared by the app via
++    /// [`Self::set_cursor_position`]. While set, it is emitted at the end
++    /// of every frame (after the canvas's own cursor park, before the
++    /// `?2026l` close) — see `emit_cursor_position`.
++    cursor_position: Option<(u16, u16)>,
+ }
+ 
+ impl CrosstermBackend<'_> {
+@@ -511,6 +516,10 @@
+         Ok(())
+     }
+ 
++    fn set_cursor_position(&mut self, position: Option<(u16, u16)>) {
++        self.cursor_position = position;
++    }
++
+     fn clear_canvas(&mut self) -> io::Result<()> {
+         if self.prev_canvas_height == 0 {
+             return Ok(());
+@@ -675,6 +684,11 @@
+     }
+ 
+     fn end_frame(&mut self) -> io::Result<()> {
++        // The app-declared cursor (if any) rides at the end of EVERY frame —
++        // after the canvas write (including its own cursor park), before the
++        // close — even on frames that rewrote no canvas, so the CUP is the
++        // frame's final cursor movement by program order.
++        self.emit_cursor_position()?;
+         self.dest.execute(terminal::EndSynchronizedUpdate)?;
+         Ok(())
+     }
+@@ -763,11 +777,28 @@
+             size: None,
+             prev_size_on_write: None,
+             passthrough_appended_newline: None,
++            cursor_position: None,
+         };
+         term.dest.queue(cursor::Hide)?;
+         Ok(term)
+     }
+ 
++    /// Emits the app-declared hardware cursor position (show + move), if
++    /// one is set. Called from `end_frame` — after the canvas write (and its
++    /// own cursor park) and before the `?2026l` close — so the app's CUP is
++    /// the last cursor movement of the frame, from the same writer, by
++    /// program order. It runs on every frame, including frames that
++    /// rewrote no canvas at all (a point move in a view whose canvas is
++    /// visually unchanged): those frames have no park of their own, but the
++    /// cursor still has to follow the declared position. Nothing is
++    /// emitted when no position is set (stock 0.9.1 behavior).
++    fn emit_cursor_position(&mut self) -> io::Result<()> {
++        if let Some((col, row)) = self.cursor_position {
++            self.dest.queue(cursor::Show)?.queue(cursor::MoveTo(col, row))?;
++        }
++        Ok(())
++    }
++
+     fn set_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
+         if raw_mode_enabled != self.raw_mode_enabled {
+             if raw_mode_enabled {
+@@ -1366,6 +1397,7 @@
+             size: None,
+             prev_size_on_write: None,
+             passthrough_appended_newline: None,
++            cursor_position: None,
+         }
+     }
+ 
+@@ -1393,6 +1425,7 @@
+             size: Some(term_size),
+             prev_size_on_write: None,
+             passthrough_appended_newline: None,
++            cursor_position: None,
+         }
+     }
+ 
+@@ -2060,4 +2093,81 @@
+         assert_eq!(vt.line(3).text(), "row3      ");
+         assert_eq!(vt.line(4).text(), "FOOTER    ");
+     }
++
++    /// Vendored patch (redline 013-02): when no cursor position is set,
++    /// frames emit no cursor Show (`ESC[?25h`) at all — stock 0.9.1 bytes.
++    /// When a position IS set, the Show + CUP pair rides at the end of
++    /// EVERY frame (including frames that rewrote no canvas) — after the
++    /// canvas park, before the `?2026l` close — as the frame's last cursor
++    /// movement.
++    #[test]
++    fn cursor_position_unset_is_noop_and_set_emits_at_frame_end() {
++        let (prev, next) = make_fullscreen_diff_canvases(2);
++
++        // Unset: the full frame (write + close) carries no cursor Show, and
++        // the diff frame ends at the park, then the close — 5-row canvas →
++        // row 5, 1-based, column 1.
++        let (dest, buf) = new_test_writer();
++        let mut term = new_fullscreen_term(dest, 0, prev.height() as _);
++        term.write_canvas(Some(&prev), &next).unwrap();
++        term.end_frame().unwrap();
++        let unset = buf.lock().unwrap().clone();
++        assert!(
++            !unset.windows(6).any(|w| w == b"\x1b[?25h"),
++            "unset frame must contain no cursor Show: {unset:?}"
++        );
++        assert!(
++            unset.ends_with(b"\x1b[5;1H\x1b[?2026l"),
++            "unset frame ends at the park, then the close: {unset:?}"
++        );
++
++        // Set: identical frame bytes up to the park, then Show +
++        // MoveTo(3, 2) → 1-based `3;4H`, then the close.
++        let (dest, buf) = new_test_writer();
++        let mut term = new_fullscreen_term(dest, 0, prev.height() as _);
++        term.set_cursor_position(Some((3, 2)));
++        term.write_canvas(Some(&prev), &next).unwrap();
++        term.end_frame().unwrap();
++        let set = buf.lock().unwrap().clone();
++        let park = b"\x1b[5;1H";
++        let set_at_park = set
++            .windows(park.len())
++            .position(|w| w == park)
++            .expect("park present in the set frame");
++        assert_eq!(
++            &set[set_at_park + park.len()..],
++            b"\x1b[?25h\x1b[3;4H\x1b[?2026l",
++            "Show + CUP after the park, before the close"
++        );
++        // The emit (`?25h` + `3;4H`) is 12 bytes and the close (`?2026l`)
++        // 8: with the emit stripped from the set frame, every byte up to
++        // and including the park must be identical (the patch changes
++        // nothing else).
++        assert_eq!(
++            &set[..set_at_park + park.len()],
++            &unset[..unset.len() - 8],
++            "frame bytes up to and including the park are unchanged by the patch"
++        );
++
++        // A frame that rewrote NO canvas (point moved, canvas visually
++        // unchanged): the CUP still rides the close. This is exactly the
++        // case a write_canvas-only emit would miss.
++        let (dest, buf) = new_test_writer();
++        let mut term = new_fullscreen_term(dest, 0, prev.height() as _);
++        term.set_cursor_position(Some((1, 0)));
++        term.end_frame().unwrap();
++        let nochange = buf.lock().unwrap().clone();
++        assert_eq!(
++            nochange,
++            b"\x1b[?25h\x1b[1;2H\x1b[?2026l",
++            "no-change frame still ends Show + CUP + close: {nochange:?}"
++        );
++
++        // Unset + no-change: stock bytes (the close only).
++        let (dest, buf) = new_test_writer();
++        let mut term = new_fullscreen_term(dest, 0, prev.height() as _);
++        term.end_frame().unwrap();
++        let nochange_unset = buf.lock().unwrap().clone();
++        assert_eq!(nochange_unset, b"\x1b[?2026l");
++    }
+ }
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/src/backend/mod.rs b/src/backend/mod.rs
+--- a/src/backend/mod.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/src/backend/mod.rs	2026-09-27 23:20:04.196792064 +0000
+@@ -142,6 +142,22 @@
+         Ok(())
+     }
+ 
++    /// Stashes the hardware cursor position the app declares, or clears it.
++    ///
++    /// While set, the backend shows and moves the hardware cursor to that
++    /// position at the end of every frame — after the canvas's own cursor
++    /// park, before the frame close (including frames that rewrote no
++    /// canvas) — so the app's cursor position is the last cursor movement
++    /// of the frame, ordered by program, not by a timing bet between two
++    /// writers. When `None`, the backend emits nothing (its stock
++    /// behavior).
++    ///
++    /// The default implementation is a no-op, for backends without a
++    /// hardware cursor.
++    fn set_cursor_position(&mut self, position: Option<(u16, u16)>) {
++        let _ = position;
++    }
++
+     /// Brackets the start of a frame so partial updates aren't shown (e.g. a
+     /// DEC 2026 synchronized update on ANSI terminals).
+     ///
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/src/hooks/mod.rs b/src/hooks/mod.rs
+--- a/src/hooks/mod.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/src/hooks/mod.rs	2026-09-27 23:20:04.199533547 +0000
+@@ -64,3 +64,5 @@
+ pub use use_terminal_size::*;
+ mod use_component_rect;
+ pub use use_component_rect::*;
++mod use_cursor_position;
++pub use use_cursor_position::*;
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/src/hooks/use_cursor_position.rs b/src/hooks/use_cursor_position.rs
+--- a/src/hooks/use_cursor_position.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hooks/use_cursor_position.rs	2026-09-27 23:20:04.199597219 +0000
+@@ -0,0 +1,65 @@
++use crate::{ComponentUpdater, Hook, Hooks};
++
++mod private {
++    pub trait Sealed {}
++    impl Sealed for crate::Hooks<'_, '_> {}
++}
++
++/// `UseCursorPosition` is a hook that declares where the terminal's hardware
++/// cursor should sit at the end of each frame.
++///
++/// While a position is declared, the backend shows the cursor and moves it
++/// there at the end of the frame — after the canvas's own cursor park,
++/// before the frame's synchronized-update close — including on frames that
++/// rewrote no canvas (a point move that leaves the canvas visually
++/// unchanged). Passing `None` (or simply not calling this hook) restores the
++/// backend's stock behavior: the cursor stays where the canvas park left it.
++///
++/// # Example
++///
++/// ```
++/// # use iocraft::prelude::*;
++/// #[component]
++/// fn Example(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
++///     hooks.use_cursor_position(Some((3, 1)));
++///     element! {
++///         Text(content: "cursor sits at column 3, row 1")
++///     }
++/// }
++/// ```
++pub trait UseCursorPosition: private::Sealed {
++    /// Declares the hardware cursor position `(column, row)` (0-based,
++    /// `crossterm` `MoveTo` order) for subsequent frames, or `None` to
++    /// clear the declaration (the backend emits nothing after the canvas).
++    ///
++    /// The declaration takes effect on the next frame drawn; it never
++    /// forces a re-render by itself.
++    fn use_cursor_position(&mut self, position: Option<(u16, u16)>);
++}
++
++/// The hook state: the position declared by the most recent call. It is
++/// pushed to the terminal during `post_component_update`, which runs
++/// inside the render phase — after `?2026h`, before the frame's `?2026l`
++/// close (the backend holds it until its own `end_frame` emit).
++#[derive(Default)]
++struct UseCursorPositionState {
++    position: Option<(u16, u16)>,
++}
++
++impl Hook for UseCursorPositionState {
++    // The position is carried into the next frame write; the hook never
++    // causes a re-render on its own (default `poll_change` stays Pending).
++    fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
++        // Static render path: no terminal, nothing to push.
++        if let Some(terminal) = updater.terminal_mut() {
++            terminal.set_cursor_position(self.position);
++        }
++    }
++}
++
++impl UseCursorPosition for Hooks<'_, '_> {
++    fn use_cursor_position(&mut self, position: Option<(u16, u16)>) {
++        let state = self.use_hook(UseCursorPositionState::default);
++        state.position = position;
++    }
++}
+diff -ruN '--exclude=.gitignore' '--exclude=.cargo-ok' a/src/terminal.rs b/src/terminal.rs
+--- a/src/terminal.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/src/terminal.rs	2026-09-27 23:20:04.200411502 +0000
+@@ -262,6 +262,12 @@
+         self.inner.print_above(messages)
+     }
+ 
++    /// Stashes the hardware cursor position the app declares for subsequent
++    /// frames (see [`TerminalBackend::set_cursor_position`]).
++    pub fn set_cursor_position(&mut self, position: Option<(u16, u16)>) {
++        self.inner.set_cursor_position(position);
++    }
++
+     /// Wraps a series of terminal updates in a synchronized update block, making sure to end the
+     /// synchronized update even if there is an error or panic.
+     pub fn synchronized_update<F>(&mut self, f: F) -> io::Result<()>

@@ -192,10 +192,19 @@ run() {  # run <label> <cmd...>
 # entire `redline-resolve` crate (~92 tests + all its lints). Found
 # 2026-09-19 via 007-03 (the crate gained a public scope field while no gate
 # ever compiled its tests). Do not drop these flags.
-cargo_build()  { cargo build --workspace; }
+cargo_build()  { iocraft_tree_check; cargo build --workspace; }
 cargo_lint()   { cargo clippy --workspace --all-targets -- -D warnings; }
 cargo_tests()  { cargo test --workspace --quiet; }
 pty()          { timeout 900 python3 "tools/$1"; }
+
+# vendor/iocraft is GENERATED, not committed (plan 013-02 patch form): the
+# repo carries the sha256 pin + the patch, and the tree must equal
+# pristine iocraft-0.9.1 + that patch. Verify it before any build so a
+# missing or stale tree fails the gate loudly — a bare `cargo build` would
+# otherwise die cryptically in [patch.crates-io] resolution (tree absent)
+# or compile redline against an unpatched iocraft (tree stale), neither of
+# which names the actual problem. Cheap: one small tar extract + diff.
+iocraft_tree_check() { tools/apply-iocraft-patch.sh check; }
 pool_setup()   { python3 tools/pool.py setup "$1"; }
 pool_runall()  { timeout 900 python3 tools/pool.py runall --lanes "$1"; }
 
