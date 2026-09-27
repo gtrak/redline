@@ -734,6 +734,43 @@ clean; `gate.sh full` OK 15/15; zero deleted assertions.
    exact iocraft + redline anchors, what is NOT broken (position and content are correct;
    only the cursor *report* is late), the four options, and three issues — upstream PR
    (recommended) · vendored patch (contingent) · the pre-frame harness sub-class.
+   **013-03 OUTCOME (pre-frame sub-class, LANDED `130d8e5` on 2026-09-27):**
+   the observed pre-frame failures were enumerated from the deflake-cursor gate logs
+   and classified, then treated per class:
+   * **`?25l=0`** (in every run, idle AND loaded) — **reader-side observation gap, the
+     late side**: the one-shot startup hide precedes every frame, so it was on the wire
+     in every run; the ready wait consumed and DISCARDED the startup stream, so no
+     asserting read ever saw it. Not a missing frame — the app always emitted it.
+   * **Stale-content reads / `cup=None` steps** (Sep 19–21 logs: `cursor2/3`,
+     `cursor_stream_run`, `base_cursor_3`; plus the Sep 26 loaded run
+     `cursor_stream_loaded2`) — **late frame**: the key-owed frame had not landed when
+     the quiet window closed. In every instance the app kept emitting (later assertions
+     in the same session and re-runs were green). `cursor_stream_loaded2` carries a
+     stale-binary confound (pre-013-02 binary + pre-013-02 `show_after_sync`): its
+     "?25l=0 FAIL" is a wire-shape artifact, not a missing-frame datum.
+   * **No valid missing-frame instance was ever observed** (the app stopped emitting);
+     the only app-side death on record is the `oldbin` run's "app did not reach ready
+     state" (a startup failure — already loud via `_wait_ready`'s RuntimeError).
+   **Decision, per class (judgment call 2, decided from this evidence):** the
+   missing-frame side gets **assert-on-observation** — it is cheap and closes a real
+   blind spot: the startup `?25l` is now observed on the retained `Session.startup_buf`
+   (the old check passed on the `?25h` alone), and `_cup_settled` requires >= 1 closed
+   frame (a cursor-view keypress owes a frame; a chunk with no close is itself the
+   failure — previously a silent, class-less `cup=None`). The late-frame side is a
+   **documented precondition, not more harness**: under confirmed `cargo test
+   --workspace` load the frames are late but land (close latency measured 8–51 ms,
+   0/12 missing at 013-03 verification), so the honest statement is *"this suite is
+   load-sensitive; run it quiet"* — the 5 s `CUP_WAIT_CAP` is the backstop, and nothing
+   is retried. When a window does close with the frame not landed, `cup_settle` now
+   NAMES the class in the failure output (`[pre-frame] … no frame ever closed …
+   MISSING/STARVED FRAME, not a starved CUP` vs `[cup] … closed frame but NO CUP …
+   STARVED CUP`), so a diagnosis does not require re-reading the raw log. **Verified:**
+   idle 91/91 (zero diagnostic lines, exit 0); under confirmed concurrent build load
+   91/91; forced pre-frame failures under load name the class and the owed frame lands
+   in the next read (late, proven); an app-killed settle names the missing-frame class;
+   `tools/gate.sh full` OK (cursor suite 91/91 in battery, 83 s). Cost: +75 lines in
+   the one-off driver (it stays one-off — judgment call 4), one existing check
+   re-asserted, no new checks (91 stays 91).
 2. **`git::repo` assertion flake (environmental, correlated)** —
    `stage_file_then_unstage_matches_cli` fails under two concurrent full suites with swap
    exhausted, green in isolation; no timing/ordering assumption to pin. Swap is a

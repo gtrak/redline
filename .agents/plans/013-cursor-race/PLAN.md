@@ -230,7 +230,7 @@ reflowed"* rather than *"a cursor directive after it"*. So the proposal is an
 |---|---|---|
 | `01-upstream-pr.md` | — | Write and file the iocraft proposal (`use_cursor_position`) with a minimal repro. |
 | `02-vendored-patch.md` | 01 rejected/slow **and** user chooses B | The ~20-30-line patch + pinning + the redline-side call site that deletes the sleep. — **DONE (this branch, `vendored-cursor`): patch + pin + redline-side deletion; verification per §Verification.** |
-| `03-harness-preframe.md` | — | Cover the **pre-frame starvation** sub-class (`?25l=0`, stale-content reads) that `cup_settle` cannot: the gate guards the CUP only. Independent of the app fix. |
+| `03-harness-preframe.md` | — | Cover the **pre-frame starvation** sub-class (`?25l=0`, stale-content reads) that `cup_settle` cannot: the gate guards the CUP only. Independent of the app fix. — **DONE (lane `harness-preframe`, `130d8e5`)**: observed failures classified (late frame vs missing frame — no valid missing-frame instance: the app kept emitting in every observation); missing-frame side = assert-on-observation (retained startup `?25l`, `>= 1` closed-frame requirement), late-frame side = documented precondition (load-sensitive suite; run quiet) with the failure message naming the class. Outcome recorded in the 012 archive § Gate reliability class 1. |
 
 ---
 

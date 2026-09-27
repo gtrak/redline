@@ -51,6 +51,20 @@ settle, which is exactly the clobber reproduced on the wire.) Reads that
 assert nothing about the CUP keep the quiet close; the gate is applied at
 the assertion site, never by raising the sleep.
 
+Pre-frame class (013-03): a CUP-asserting read also OWES the keypress a
+frame — a chunk with no closed frame at all is *pre-frame starvation*
+(the frame had not landed when the quiet window closed), which is
+structurally invisible to a CUP-only gate: there is no CUP to wait for if
+the frame never arrived. So `_cup_settled` requires at least one closed
+frame (not merely "none left open"), `cup_settle` NAMES the class when the
+window closes (missing/late frame vs a closed frame carrying no CUP — a
+starved CUP), and the one-shot startup `?25l` is observed on the RETAINED
+startup stream (`Session.startup_buf`) instead of being discarded by the
+ready wait. No retries anywhere: a frame that still has not landed at the
+deadline is a loud, named failure. Late frames under load remain an
+environmental condition — this suite is load-sensitive; run it quiet
+(outcome recorded in the 012 archive, § Gate reliability, class 1).
+
 Exit 0 = all assertions pass; 1 = any failed.
 """
 import os, pty, fcntl, termios, struct, time, select, signal, re
@@ -76,7 +90,8 @@ _CUP_RE = re.compile(rb"\x1b\[\d+;\d+[Hf]")
 
 
 def _cup_settled(buf):
-    """Protocol-complete: no synchronized frame in this chunk is left open.
+    """Protocol-complete: this chunk holds at least one CLOSED synchronized
+    frame, and no frame is left open.
 
     013-02: the vendored iocraft emits the app's cursor CUP INSIDE the
     frame (Show + CUP after the park, before `?2026l`), from the same
@@ -84,10 +99,20 @@ def _cup_settled(buf):
     is complete, and its CUP (if any) is already in the chunk. Pre-013-02
     the CUP was a second writer landing after the close, and the gate
     waited for exactly that post-close CUP; that shape no longer exists.
+
+    013-03 (pre-frame class): every `cup_settle` call site in this suite
+    asserts a CUP on a cursor view, where the keypress owes a frame — so a
+    chunk with NO closed frame at all is itself the failure: the frame had
+    not landed when the quiet window closed (pre-frame starvation), which
+    a CUP-only wait is structurally blind to (there is no CUP to wait for
+    if the frame never arrived). Requiring >= 1 close keeps the read open
+    until the frame lands (the `CUP_WAIT_CAP` deadline is the backstop)
+    instead of closing silent and reading `cup=None`. On the passing path
+    the close is already in the chunk, so this changes nothing at rest.
     """
     opens = len(_SYNC_START_RE.findall(buf))
     closes = len(_SYNC_END_RE.findall(buf))
-    return opens <= closes
+    return closes >= 1 and opens <= closes
 
 
 def _set_winsize(fd, rows, cols):
@@ -121,6 +146,13 @@ class Session:
         os.close(slave)
         self.screen = pyte.Screen(self.cols, self.rows)
         self.stream = pyte.ByteStream(self.screen)
+        # 013-03: bytes read until the ready state, RETAINED. The one-shot
+        # startup `?25l` (cursor hide) precedes every frame, so it lands in
+        # this stream before "ready" is ever observed; discarding it (the
+        # old behavior) made a missing hide structurally invisible to every
+        # later assert.
+        self.startup_buf = b""
+        self._ready = False
         self._wait_ready()
 
     def _read(self, timeout, quiet=0.2):
@@ -142,6 +174,8 @@ class Session:
                 buf += data
                 last = time.time()
                 self.stream.feed(data)
+                if not self._ready:
+                    self.startup_buf += data
             if (time.time() - last) >= quiet:
                 break
         return buf
@@ -154,7 +188,13 @@ class Session:
         artifact. 013-02: the CUP rides inside the frame's bytes (after
         the park, before the close), so a closed frame is already
         cursor-complete — the gate settles on the close, common path
-        included."""
+        included. 013-03: the window also stays open until a frame has
+        CLOSED AT ALL (`_cup_settled` requires >= 1 close), and when it
+        finally closes with the frame still missing it names the class —
+        missing/late frame (the pre-frame sub-class, not a starved CUP) vs
+        a closed frame that carries no CUP — so the diagnosis does not
+        require re-reading the raw log.
+        """
         deadline = time.time() + cap
         last = time.time()
         while not _cup_settled(buf):
@@ -172,6 +212,22 @@ class Session:
                 buf += data
                 last = time.time()
                 self.stream.feed(data)
+        opens = len(_SYNC_START_RE.findall(buf))
+        closes = len(_SYNC_END_RE.findall(buf))
+        if closes == 0 or opens > closes:
+            shape = ("no frame ever closed" if closes == 0
+                     else f"a frame is still OPEN ({opens} opens, {closes} closes)")
+            print(f"  [pre-frame] read window closed ({cap:.1f}s) with the frame "
+                  f"not landed: {shape} (?2026h={opens} ?2026l={closes}) — "
+                  f"MISSING/STARVED FRAME, not a starved CUP: there is no closed "
+                  f"frame whose cursor write could be starved. The keypress owed "
+                  f"a frame and it had not landed when the window closed: a late "
+                  f"frame under load (this suite is load-sensitive — run it "
+                  f"quiet), or the app stopped emitting.")
+        elif not _CUP_RE.search(buf):
+            print(f"  [cup] read window closed with a closed frame but NO CUP in "
+                  f"the chunk (?2026h={opens} ?2026l={closes}) — STARVED "
+                  f"CUP: the frame landed, the cursor write did not.")
         return buf
 
     def _wait_ready(self):
@@ -180,6 +236,7 @@ class Session:
             self._read(0.5)
             text = self.text()
             if "ready" in text and "indexing" not in text:
+                self._ready = True
                 return
         raise RuntimeError("app did not reach ready state")
 
@@ -261,9 +318,17 @@ def check(colorterm):
 
     # Open magit and navigate; capture the raw stream for each step.
     open_buf = s.cup_settle(s.key("C-x g", 1.2))
-    # startup hide is countered + a show+reposition follows the first frame
-    rec("?25l countered (a ?25h follows the first frame)", show_after_sync(open_buf),
-        f"?25l={open_buf.count(b'\x1b[?25l')} ?25h={open_buf.count(b'\x1b[?25h')}")
+    # 013-03: the startup hide is asserted on the RETAINED startup stream —
+    # it precedes every frame, so it is in hand by the time the ready line
+    # lands (the ready wait keeps reading until observed; no extra sleep).
+    # Before 013-03 the hide was consumed and discarded by the ready wait,
+    # so a missing hide (the app failed to emit the one-shot ?25l — the
+    # missing-frame side of the pre-frame class) was structurally
+    # invisible: this check passed on the ?25h alone.
+    hides = s.startup_buf.count(b"\x1b[?25l")
+    rec("?25l countered (a ?25h follows the first frame)",
+        hides >= 1 and show_after_sync(open_buf),
+        f"?25l={hides} (startup stream) ?25h={open_buf.count(b'\x1b[?25h')}")
 
     # n/p navigation: CUP row must track the selected (blue-bar) row.
     track_ok = True
@@ -1163,8 +1228,13 @@ def annotation_gutter_checks():
     hidden_msg = "note rows: hidden" in s.row_text(s.rows - 2)
     code_unchanged_hidden = folded_row is not None and "fn target_one() {}" in folded_row
     folded_col = code_start_col(folded_row) if folded_row else None
-    s.key("C-c a h", 0.6)  # the SAME key toggles back (no separate C-c a s)
-    s.cup_settle(s._read(0.4, quiet=0.15))
+    # 013-03: settle on the TOGGLE's own key read (+ a short drain) — its
+    # frame is owed by that keypress, so the settle knows whether the close
+    # is already in hand (immediate) or still in flight (wait, cap-bounded).
+    # A bare `cup_settle(s._read(...))` here owes nothing (the frame was
+    # consumed by the key read) and would wait out the cap for nothing.
+    buf_t = s.key("C-c a h", 0.6)  # the SAME key toggles back (no separate C-c a s)
+    s.cup_settle(buf_t + s._read(0.4, quiet=0.15))
     shown_row = None
     note_row_back = False
     for r2 in range(1, s.rows - 2):
