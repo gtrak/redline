@@ -30,6 +30,32 @@
 use std::path::Path;
 use std::process::Command;
 
+/// **Bin-only — do NOT promote to `redline-testutil` (plan 014).** Unlike
+/// `git_cli`/`git_repo_init` above (deliberately app-type-free so the
+/// `redline-git` extraction lifts them as a move), this helper returns a
+/// `crate::app::keymap::Key` — an app type — so it cannot live in a
+/// git-only test-util crate. plan 014's promotion must leave it here.
+///
+/// issue-commit-editor-pasted-newline / issue-paste-newline-dropped: a
+/// terminal paste arrives as ordinary key bytes (the app requests no
+/// bracketed paste). The MEASURED decode (tools/probe_keydump, raw mode) of
+/// a pasted string is: printable chars -> `Char(c)`, and the LF byte (0x0A)
+/// -> `Char('j')`+CONTROL (C-j) — NOT an `Enter` event, NOT a literal
+/// `Char('\\n')`. This single source of truth mirrors that decode so the
+/// tests feed the modal/buffer exactly what a real paste would deliver.
+pub(crate) fn paste_keys(paste: &str) -> Vec<crate::app::keymap::Key> {
+    paste
+        .chars()
+        .map(|c| {
+            if c == '\n' {
+                crate::app::keymap::Key::ctrl_char('j')
+            } else {
+                crate::app::keymap::Key::new(crate::app::keymap::KeyCode::Char(c))
+            }
+        })
+        .collect()
+}
+
 /// Run `git <args>` in `dir` with the hermetic env block and the fixture
 /// identity, asserting success (the store-dedup helper's assertion text,
 /// kept verbatim), and return stdout.

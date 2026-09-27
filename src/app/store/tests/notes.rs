@@ -2467,23 +2467,12 @@ use super::*;
     // ── issue-paste-newline-dropped: a pasted newline is a real '\n' ──────
 
     /// issue-paste-newline-dropped: a terminal paste arrives as ordinary key
-    /// bytes (the app requests no bracketed paste). The MEASURED decode
-    /// (tools/probe_keydump, raw mode) of a pasted string is: printable chars
-    /// -> `Char(c)`, and the LF byte (0x0A) -> `Char('j')`+CONTROL (C-j) —
-    /// NOT an `Enter` event, NOT a literal `Char('\\n')`. This helper mirrors
-    /// that decode so the tests feed the buffer exactly what a real paste
-    /// would deliver.
+    /// bytes (the app requests no bracketed paste). Delegates to the shared
+    /// `crate::test_support::paste_keys` (single source of truth for the
+    /// measured paste decode — the LF byte arrives as C-j, not `Enter`, not
+    /// a literal `Char('\\n')`).
     fn paste_keys(paste: &str) -> Vec<crate::app::keymap::Key> {
-        paste
-            .chars()
-            .map(|c| {
-                if c == '\n' {
-                    crate::app::keymap::Key::ctrl_char('j')
-                } else {
-                    crate::app::keymap::Key::new(crate::app::keymap::KeyCode::Char(c))
-                }
-            })
-            .collect()
+        crate::test_support::paste_keys(paste)
     }
 
     /// issue-paste-newline-dropped: pasting multi-line text into the notes

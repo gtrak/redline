@@ -36,6 +36,12 @@
 //!   a 3-candidate list is a 5-row box, not a fixed 12-row one.
 //! - When the selected candidate's preview is empty the candidate rows take
 //!   the full width (no dead 2/3 preview split).
+//! - One blank GUTTER column separates the candidate column from the preview
+//!   (issue picker-preview-gutter): when a preview is active the candidate
+//!   column is `split - 1` wide (not `split`), so column `split` is always
+//!   blank between the candidate's right edge (at most `split - 1`) and the
+//!   preview's start (`split + 1`). The preview's own start and truncation
+//!   width are unchanged, so it stays pinned to the same column on every row.
 //!
 //! All truncation here is CELL-AWARE (wide/CJK chars are 2 cells,
 //! `model::text_width`), so a wide char in a fixed column can never overflow
@@ -78,6 +84,37 @@ struct PickerCanvas {
 fn canvas_height(candidates: usize, viewport: u32) -> u32 {
     let cap = (viewport as usize).saturating_sub(1).max(1);
     (candidates + 2).min(cap).max(3) as u32
+}
+
+/// The picker's column layout: `(cand_w, preview_x, preview_w)` — the
+/// candidate column width, the preview's start column, and the preview's
+/// truncation width (issue picker-preview-gutter).
+///
+/// The candidate column starts at column 1 and its exclusive right edge is
+/// `1 + cand_w`. With a preview active, the candidate column is `split - 1`
+/// wide (not `split`) so that column `split` is a guaranteed-blank gutter
+/// between the candidate's right edge (at most `split - 1`) and the preview,
+/// which starts at `split + 1` — the same column on every row. The preview's
+/// own start and truncation width are exactly the old values, so the preview
+/// stays consistent with its start and ends at the same right edge as before
+/// (only the candidate column shrank by one).
+///
+/// Without a preview (`has_preview == false`) the candidate rows take the
+/// full width — no split, no gutter, no preview column — so a 1-column
+/// gutter never reintroduces a dead preview strip in the narrow/suppressed
+/// case.
+fn picker_column_layout(w: usize, has_preview: bool) -> (usize, isize, usize) {
+    let split = (w as i32 * 2 / 3) as usize;
+    if has_preview {
+        let cand_w = split.saturating_sub(1);
+        let preview_x = (split + 1) as isize;
+        let preview_w = w.saturating_sub(split + 1);
+        (cand_w, preview_x, preview_w)
+    } else {
+        // No preview: the candidate rows own the full width; the preview is
+        // suppressed (width 0) so nothing is drawn into a dead strip.
+        (w, 0, 0)
+    }
 }
 
 impl PickerCanvas {
@@ -137,9 +174,11 @@ impl Component for PickerCanvas {
             let start = self.selected.saturating_sub(win.saturating_sub(1));
             // D: no dead preview space — when the selected candidate has no
             // preview the candidate rows take the full width (no 2/3 split).
+            // `picker_column_layout` keeps the candidate width, the preview
+            // start, and the preview truncation width consistent (one blank
+            // gutter column between the panes — issue picker-preview-gutter).
             let has_preview = !self.preview.is_empty();
-            let split = (w as i32 * 2 / 3) as usize;
-            let cand_w = if has_preview { split } else { w };
+            let (cand_w, preview_x, preview_w) = picker_column_layout(w, has_preview);
             for (row, i) in (start..start + win).enumerate() {
                 if let Some(candidate) = self.candidates.get(i) {
                     let selected = i == self.selected;
@@ -155,19 +194,15 @@ impl Component for PickerCanvas {
             // Preview pane: the selected candidate's preview text, one line
             // per row (clipped to the visible rows). Only when there is a
             // preview to show.
-            if has_preview {
-                let preview_x = (split + 1) as isize;
-                let preview_w = (w as i32 - split as i32).saturating_sub(1);
-                if preview_w > 1 {
+            if has_preview && preview_w > 1 {
                     for (row, line) in self.preview.lines().take(list_h).enumerate() {
                         canvas.set_text(
                             preview_x,
                             1 + row as isize,
-                            &truncate(line, preview_w as usize),
+                            &truncate(line, preview_w),
                             text_style(t.preview.foreground, false, false),
                         );
                     }
-                }
             }
         }
 
@@ -495,5 +530,83 @@ mod tests {
             .find(|&x| canvas.cell(x, 0).and_then(|c| c.text()) == Some("*"))
             .expect("the current branch's * marker is right-aligned");
         assert_eq!(marker, 1 + cand_w - 1, "the * sits on the column's right edge");
+    }
+
+    /// issue picker-preview-gutter: one blank gutter column separates the
+    /// candidate column from the preview. Pins the three properties the fix
+    /// must not lose: (1) a candidate whose label+detail reaches the column
+    /// edge still leaves the gutter blank, (2) the preview starts at the same
+    /// column on every row, (3) the narrow/suppressed case (no preview) still
+    /// collapses to full candidate width — a 1-column gutter must not
+    /// reintroduce a dead preview strip.
+    #[test]
+    fn preview_gutter_stays_blank_and_pinned() {
+        let w = 80;
+        let (cand_w, preview_x, preview_w) = picker_column_layout(w, true);
+        let split = (w as i32 * 2 / 3) as usize; // 53
+        // (2) The preview start and truncation width are EXACTLY the old
+        // values — only the candidate column shrank by one. So the preview
+        // is pinned to the same column on every row (a single per-draw value,
+        // not per-row) and ends at the same right edge as before.
+        assert_eq!(preview_x, (split + 1) as isize, "preview start unchanged");
+        assert_eq!(preview_w, w - split - 1, "preview truncation width unchanged");
+        // The candidate column shrank by one, so column `split` is the
+        // guaranteed-blank gutter: the candidate's exclusive right edge
+        // (1 + cand_w) abuts it, and the preview starts one past it.
+        assert_eq!(cand_w, split - 1, "candidate column shrinks by one");
+        assert_eq!(1 + cand_w, split, "candidate right edge abuts the gutter");
+        assert_eq!(preview_x, (split as isize) + 1, "preview starts just past the gutter");
+
+        // (1) A candidate whose label+detail reaches the column edge must
+        // still leave the gutter blank: reproduce draw_candidate_row's
+        // right-alignment and confirm no candidate cell reaches the gutter or
+        // the preview column.
+        let candidate = PickerCandidate {
+            name: String::new(),
+            display: String::new(),
+            label: "m".to_string(),
+            detail: "x".repeat(200), // long enough to hit the column edge
+            docs: String::new(),
+            category: String::new(),
+            ann_col: None,
+        };
+        let face = theme::current().list_item;
+        let mut canvas = iocraft::Canvas::new(w, 1);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, w, 1);
+            draw_candidate_row(&mut sv, 0, cand_w, &candidate, face, false);
+        }
+        let gutter = split; // usize: the gutter column index
+        assert_eq!(
+            canvas.cell(gutter, 0).and_then(|c| c.text()),
+            None,
+            "gutter column {gutter} must stay blank"
+        );
+        assert_eq!(
+            canvas.cell(preview_x as usize, 0).and_then(|c| c.text()),
+            None,
+            "no candidate content may share the preview's first column"
+        );
+        // The candidate's rightmost non-blank cell stays strictly left of the
+        // gutter (the detail right-aligns at 1 + cand_w = split, i.e. the
+        // last cell is split - 1).
+        let last_non_blank = (0..w).rev().find(|&x| {
+            matches!(
+                canvas.cell(x, 0).and_then(|c| c.text()),
+                Some(t) if !t.is_empty() && t != " "
+            )
+        })
+        .expect("the candidate row drew content");
+        assert!(
+            last_non_blank < gutter,
+            "candidate content (last cell {last_non_blank}) must not reach the gutter (col {gutter})"
+        );
+
+        // (3) The narrow/suppressed case still collapses sensibly: no
+        // preview means the candidate rows take the full width and the
+        // preview is suppressed (width 0) — no dead preview strip.
+        let (nw, _npx, npw) = picker_column_layout(w, false);
+        assert_eq!(nw, w, "no preview: candidate rows take the full width");
+        assert_eq!(npw, 0, "no preview: preview suppressed, no dead strip");
     }
 }
