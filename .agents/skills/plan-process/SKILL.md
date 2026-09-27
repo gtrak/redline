@@ -807,3 +807,26 @@ written:
 deadlock, or a wait on input, in the code under test — never "slowness". `ps` age plus cwd is what
 distinguishes it, and it is worth killing the chain (specific pids only) and asking the lane which test hung
 before letting it resume.
+
+## The stale-artifact trap has a narrower shape: `cargo test --bin X` does NOT build the app binary
+
+The rule above says a probe against a stale artifact measures the artifact. It has now bitten a **third** time,
+in exactly the way the rule names, and the mechanism is more specific than "remember to rebuild":
+
+- `cargo test --bin redline` builds the **test-harness** binary (`target/debug/deps/redline-<hash>`), **not**
+  `target/debug/redline`.
+- A PTY drive (`tools/drive_*.py`) launches **`target/debug/redline`**.
+
+So running a targeted `cargo test --bin … <filter>` and then a drive can measure the **pre-change** app while
+the tests you just ran were perfectly current. Observed: a lane's fix was correct and its own gate was green;
+a drive then reported its new assertion failing — `▴ col=28` where the expectation was `23` — and the entire
+difference was the stale binary. Even the *symptom* was misleading: the offset looked semantic (`28 − 23 = 5`,
+the tab-expansion delta), which invited a code diagnosis instead of an artifact check.
+
+**The bisect that settles it is BY ARTIFACT, not by code**: run the failing drive against the old binary and
+against a fresh `cargo build` and compare (stale → 28, fresh → 23). One line each way.
+
+**Therefore:** before concluding a *drive* failure is a defect, `cargo build` and re-run it. And when a drive
+fails while the **unit pins pass**, suspect the artifact first — those two are not always reading the same
+binary. Corollary for orchestrators: the same discipline you demand of lanes applies to your own verification,
+and a confident accusation of someone else's code is worth double-checking against a fresh build first.
