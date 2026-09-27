@@ -283,20 +283,27 @@ impl AppStore {
                                 let mut text_col = col.saturating_sub(code_start);
                                 for (k, &g) in insertions.iter().enumerate() {
                                     let g = g.saturating_sub(indent.min(t.len()));
-                                    let gap_col = code_start
-                                        + crate::model::text_width::char_index_to_display_col(
-                                            tail, g,
-                                        )
+                                    // issue-mid-line-tabs: the tail is the
+                                    // unexpanded source line, so its display
+                                    // columns must run the 8-stop tab rule
+                                    // from `code_start` (the plain
+                                    // `char_index_to_display_col` would count
+                                    // a mid-line tab as 1 cell, mis-mapping a
+                                    // click after the tab).
+                                    let gap_col = crate::model::text_width::
+                                        char_index_to_display_col_tabs(tail, code_start, g)
                                         + k;
                                     if gap_col < col {
                                         text_col = text_col.saturating_sub(1);
                                     }
                                 }
                                 indent
-                                    + crate::model::text_width::display_col_to_char_index(
-                                        tail,
-                                        text_col,
-                                    )
+                                    + crate::model::text_width::
+                                        display_col_to_char_index_tabs(
+                                            tail,
+                                            code_start,
+                                            text_col,
+                                        )
                             })
                     })
                     .unwrap_or(indent);
@@ -702,15 +709,6 @@ impl AppStore {
             // (stripped) row text.
             let (indent_chars, indent_width) =
                 if annotated { Self::leading_indent(&full_text) } else { (0, 0) };
-            // issue-annotation-marker-cell: re-base the inserted marker
-            // cells onto the stripped row text (by the leading run's CHAR
-            // count — spaces/tabs are single-char, and a symbol char can
-            // never sit inside the leading run, so every insertion index
-            // is at or past it).
-            let insertions = insertions_full
-                .iter()
-                .map(|c| c.saturating_sub(indent_chars))
-                .collect();
             let code_start = if !annotated {
                 0
             } else if indent_width > 0 {
@@ -770,6 +768,7 @@ impl AppStore {
                         // insertion: the ╭ sits at the marker's own
                         // column (the anchor relationship).
                         insertions: Vec::new(),
+                        tab_map: Vec::new(),
                         matches: Vec::new(),
                         highlight: None,
                         // The first slot's text (consumers reading the
@@ -809,13 +808,52 @@ impl AppStore {
             // column-0 indicators shift the whole line right by one when
             // present; mid-line indicators on a column-0 line overwrite
             // blank cells and the text stays at column 0.
-            let (text, spans, matches) = if annotated {
-                let stripped = full_text[indent_chars..].to_string();
+            //
+            // issue-mid-line-tabs: on top of that strip, the row text is
+            // expanded so it carries NO raw tab — each mid-line tab becomes
+            // spaces out to the next 8-column stop (the same arithmetic
+            // `record_anchor` already uses, running from `code_start`), so
+            // the rendered cells and the anchor (the display column of the
+            // source line) agree by construction. A raw tab would otherwise
+            // disagree three ways — the canvas (`width().unwrap_or(0)`), the
+            // width helpers (`char_display_width('\t') == 1`), and the
+            // terminal (the 8-stop) — and `char_display_width` then never
+            // sees a tab at all. Every span, match, and inserted marker
+            // cell is re-based through the expansion: a tab is 1 byte but up
+            // to 8 cells, so a one-byte error is silently mis-coloured text
+            // on exactly the tab-carrying lines (pinned by
+            // `draw_line_mid_line_tab_rebases_the_span_after_it`).
+            let (text, spans, matches, insertions, tab_map) = if annotated {
+                let stripped = &full_text[indent_chars..];
+                let (expanded, byte_map, char_map) = if stripped.contains('\t') {
+                    crate::model::text_width::expand_tabs(stripped, code_start)
+                } else {
+                    (stripped.to_string(), Vec::new(), Vec::new())
+                };
+                // Re-base byte offsets (spans / matches) and char indexes
+                // (the inserted marker cells) onto the expanded text; both
+                // are already stripped of the leading run, so the strip
+                // (by the run's byte / char count — exact, single-byte) and
+                // the expansion compose.
+                let rebase_byte = |i: usize| {
+                    if byte_map.is_empty() {
+                        i
+                    } else {
+                        byte_map[i.min(stripped.len())]
+                    }
+                };
+                let rebase_char = |i: usize| {
+                    if char_map.is_empty() {
+                        i
+                    } else {
+                        char_map[i.min(stripped.chars().count())]
+                    }
+                };
                 let rebase_spans = spans_full
                     .into_iter()
                     .map(|s| {
-                        let start = s.start.saturating_sub(indent_chars);
-                        let end = s.end.saturating_sub(indent_chars);
+                        let start = rebase_byte(s.start.saturating_sub(indent_chars));
+                        let end = rebase_byte(s.end.saturating_sub(indent_chars));
                         redline_syntax::highlight::LineSpan {
                             start,
                             end,
@@ -826,14 +864,31 @@ impl AppStore {
                 let rebase_matches = matches_full
                     .into_iter()
                     .map(|m| LineMatch {
-                        start: m.start.saturating_sub(indent_chars),
-                        end: m.end.saturating_sub(indent_chars),
+                        start: rebase_byte(m.start.saturating_sub(indent_chars)),
+                        end: rebase_byte(m.end.saturating_sub(indent_chars)),
                         selected: m.selected,
                     })
                     .collect();
-                (stripped, rebase_spans, rebase_matches)
+                // The inserted marker cells: char indexes into the EXPANDED
+                // row text (the renderer skips a cell at each, and the
+                // cursor / click mapping count them) — re-based first by the
+                // leading run's CHAR count (a symbol char can never sit
+                // inside the run, so every index is at or past it), then
+                // through the expansion (a marker after a mid-line tab sits
+                // further right in the expanded text).
+                let rebase_insertions = insertions_full
+                    .iter()
+                    .map(|c| rebase_char(c.saturating_sub(indent_chars)))
+                    .collect();
+                (expanded, rebase_spans, rebase_matches, rebase_insertions, char_map)
             } else {
-                (full_text.to_string(), spans_full, matches_full)
+                (
+                    full_text.to_string(),
+                    spans_full,
+                    matches_full,
+                    Vec::new(),
+                    Vec::new(),
+                )
             };
             out.push(FileViewRow {
                 line,
@@ -843,6 +898,7 @@ impl AppStore {
                 code_start,
                 indent_chars,
                 insertions,
+                tab_map,
                 matches,
                 // jump-highlight: the snapshot attaches the landing row's
                 // highlight (with the frame's fade intensity) after this.

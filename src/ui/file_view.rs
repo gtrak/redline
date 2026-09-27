@@ -1114,6 +1114,7 @@ mod tests {
             code_start: 1,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: format!("line {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -1128,6 +1129,7 @@ mod tests {
             code_start: 0,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: format!("  \u{25b8} note {line}"),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -2412,6 +2414,7 @@ mod tests {
             code_start: 0,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: String::new(),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -2437,6 +2440,7 @@ mod tests {
             code_start: 0,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: "code".to_string(),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -2535,6 +2539,7 @@ mod tests {
             code_start: 4,
             indent_chars: 4,
             insertions: vec![13],
+            tab_map: Vec::new(),
             text: "map: HashMap<String, u32>,".to_string(),
             spans: vec![redline_syntax::highlight::LineSpan {
                 start: 13, // the span STARTS after the marker (row-text byte 13)
@@ -2590,6 +2595,82 @@ mod tests {
         // cell 24 (plain position 23), the view face.
         assert_eq!(cell(24).text(), Some(","));
         assert_eq!(cell(24).text_style().and_then(|s| s.color), Some(view_fg));
+    }
+
+    /// issue-mid-line-tabs — the deliverable's SPINE: a syntax span that
+    /// starts AFTER a mid-line tab must be re-based through the tab
+    /// expansion (a tab is 1 byte but up to 8 cells) and colour the right
+    /// cell in the frame. A one-byte error in the store's re-base would
+    /// silently mis-colour exactly the tab-carrying line — no existing test
+    /// catches it. The row is built by the real store (so the expansion +
+    /// re-base run), then drawn, and the operator span (after the tab) is
+    /// asserted cell-for-cell.
+    #[test]
+    fn draw_line_mid_line_tab_rebases_the_span_after_it() {
+        // Line 1: `    let n = 5\t* m;` — a mid-line tab after `5` (frame
+        // col 13 runs to 16, 3 spaces). `*` (source byte 14) renders at
+        // frame col 16, NOT the canvas's 0/1-cell tab (which would put it
+        // at col 13/14). The record sits on `n` (char 8, before the tab);
+        // the span under test is the `*` operator, AFTER the tab.
+        let content = "fn main() {\n    let n = 5\t* m;\n}\n";
+        let (mut store, _) = annotated_store(content, &[(1, 8, "midtab")]);
+        let rows = store.file_view_rows();
+        let row = rows
+            .iter()
+            .find(|r| !r.is_note && r.annotated)
+            .expect("the annotated code row")
+            .clone();
+        // The row text carries NO raw tab (the expansion), and the `*`
+        // operator span (face 12) re-based to expanded byte 12..13 — past
+        // the tab's 3 expansion spaces. A one-byte error in the re-base
+        // shifts it to 11..12 or 13..14 and mis-colours the line.
+        assert!(!row.text.contains('\t'), "row text must be tab-free: {:?}", row.text);
+        let op_span = row
+            .spans
+            .iter()
+            .find(|s| s.face == Some(12))
+            .unwrap_or_else(|| panic!("the `*` operator span (face 12) after the tab is missing: {:?}", row.spans));
+        assert_eq!(
+            (op_span.start, op_span.end),
+            (12, 13),
+            "the `*` span must re-base to expanded byte 12..13 (past the tab's 3 spaces); a one-byte error shifts it: {:?}",
+            row.spans
+        );
+        let t = theme::current();
+        let view_fg = color(t.view.foreground);
+        let op_fg = color(t.syntax_face(12).foreground);
+        assert_ne!(
+            op_fg, view_fg,
+            "the operator face must differ from the view face (else the colour assertion is vacuous)"
+        );
+        let mut canvas = iocraft::Canvas::new(80, 1);
+        let mut sv = canvas.subview_mut(0, 0, 0, 0, 80, 1);
+        draw_line(&mut sv, 0, row.code_start, 80 - row.code_start, &row, &t);
+        let cell = |x: usize| canvas.cell(x, 0).unwrap();
+        // `*` renders at the 8-stop cell 16 with the operator face; a
+        // one-byte re-base error would put the face one cell either side.
+        assert_eq!(cell(16).text(), Some("*"), "`*` at the 8-stop cell 16, not the canvas's 0/1-cell tab: {:?}", row.text);
+        assert_eq!(
+            cell(16).text_style().and_then(|s| s.color),
+            Some(op_fg),
+            "the `*` span colours cell 16 — a one-byte re-base error mis-colours it"
+        );
+        // The cell before `*` (15, a tab-expansion space) keeps the view
+        // face — a one-byte re-base error would paint the operator here.
+        assert_eq!(
+            cell(15).text_style().and_then(|s| s.color),
+            Some(view_fg),
+            "cell 15 (a tab-expansion space) is the view face"
+        );
+        // The head before the tab is byte-identical at its source cells.
+        for (i, c) in "let n = 5".char_indices() {
+            assert_eq!(
+                cell(4 + i).text(),
+                Some(c.to_string().as_str()),
+                "cell {} — the head before the tab is byte-identical",
+                4 + i
+            );
+        }
     }
 
     /// issue-annotation-marker-cell — THE live reproduction, cell-for-cell:
@@ -2842,6 +2923,7 @@ mod tests {
             code_start: 0,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: text.to_string(),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -3071,6 +3153,7 @@ mod tests {
             code_start: 0,
             indent_chars: 0,
             insertions: Vec::new(),
+            tab_map: Vec::new(),
             text: String::new(),
             spans: Vec::new(),
             matches: Vec::new(),
@@ -3341,4 +3424,5 @@ mod tests {
             }
         }
     }
+
 }

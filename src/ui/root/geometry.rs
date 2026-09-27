@@ -102,14 +102,27 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                             let code_start = r.code_start;
                             let code_col =
                                 snap.file_view_point_col.saturating_sub(r.indent_chars);
+                            // issue-mid-line-tabs: the row text is EXPANDED
+                            // (each mid-line tab replaced by spaces out to
+                            // the next 8-column stop), so the point's char
+                            // index — measured on the source line — must be
+                            // re-based onto the expanded text before its
+                            // display column is measured. The char map is
+                            // empty (identity) when the line carries no
+                            // mid-line tab, so the common path is a no-op.
+                            let code_col_expanded = if r.tab_map.is_empty() {
+                                code_col
+                            } else {
+                                r.tab_map[code_col.min(r.tab_map.len() - 1)]
+                            };
                             let inserted = r
                                 .insertions
                                 .iter()
-                                .filter(|&&g| g <= code_col)
+                                .filter(|&&g| g <= code_col_expanded)
                                 .count();
                             code_start
                                 + crate::model::text_width::char_index_to_display_col(
-                                    &r.text, code_col,
+                                    &r.text, code_col_expanded,
                                 )
                                 + inserted
                         } else {
@@ -173,6 +186,7 @@ mod tests {
                 code_start: 0,
                 indent_chars: 0,
                 insertions: Vec::new(),
+                tab_map: Vec::new(),
                 text: (*t).to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -315,6 +329,7 @@ mod tests {
                         code_start: 0,
                         indent_chars: 0,
                         insertions: Vec::new(),
+                        tab_map: Vec::new(),
                         text: format!("note {l}"),
                         spans: Vec::new(),
                         matches: Vec::new(),
@@ -333,6 +348,7 @@ mod tests {
                     code_start: 1,
                     indent_chars: 0,
                     insertions: Vec::new(),
+                    tab_map: Vec::new(),
                     text: (*text).to_string(),
                     spans: Vec::new(),
                     matches: Vec::new(),
@@ -478,6 +494,7 @@ mod tests {
                 code_start: 0,
                 indent_chars: 0,
                 insertions: Vec::new(),
+                tab_map: Vec::new(),
                 text: "a note".to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -492,6 +509,7 @@ mod tests {
                 code_start: 4,
                 indent_chars: 4,
                 insertions: Vec::new(),
+                tab_map: Vec::new(),
                 text: "fn deep() {}".to_string(), // stripped of the 4 spaces
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -531,6 +549,7 @@ mod tests {
                 code_start: 0,
                 indent_chars: 0,
                 insertions: Vec::new(),
+                tab_map: Vec::new(),
                 text: "the key type".to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -545,6 +564,7 @@ mod tests {
                 code_start: 4,
                 indent_chars: 4,
                 insertions: vec![13],
+                tab_map: Vec::new(),
                 text: "map: HashMap<String, u32>,".to_string(),
                 spans: Vec::new(),
                 matches: Vec::new(),
@@ -576,6 +596,69 @@ mod tests {
         assert_eq!(cursor_cell(&snap), Some((31, 2)), "EOL counts the inserted cell too");
     }
 
+    /// issue-mid-line-tabs: the cursor re-bases the point's char index
+    /// through the row's tab-expansion map, so a point AFTER a mid-line tab
+    /// lands in the 8-stop cell the rendered line actually occupies — not
+    /// the under-counted column a raw tab (counted as 1 cell) would give.
+    #[test]
+    fn cursor_cell_mid_line_tab_rebases_through_the_expansion() {
+        // `    let n = 5\t* m;` — a mid-line tab (frame col 13 → 16, 3
+        // spaces). The row text is the EXPANDED text (no raw tab); the
+        // point's char index (on the source line) re-bases through
+        // tab_map before its display column is measured.
+        let rows = vec![
+            FileViewRow {
+                line: 0,
+                is_note: true,
+                annotated: false,
+                anchors: vec![7],
+                code_start: 0,
+                indent_chars: 0,
+                insertions: Vec::new(),
+                tab_map: Vec::new(),
+                text: "midtab".to_string(),
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+                note_slots: Vec::new(),
+            },
+            FileViewRow {
+                line: 0,
+                is_note: false,
+                annotated: true,
+                anchors: vec![7],
+                code_start: 4,
+                indent_chars: 4,
+                insertions: Vec::new(),
+                tab_map: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16],
+                text: "let n = 5   * m;".to_string(), // expanded: 3 spaces for the tab
+                spans: Vec::new(),
+                matches: Vec::new(),
+                highlight: None,
+                note_slots: Vec::new(),
+            },
+        ];
+        let mut snap = buffer_snapshot(&["    let n = 5\t* m;"], 0, 0);
+        snap.file_view_rows = rows;
+        // Point on `5` (char 12, before the tab) → stripped 8, tab_map 8 →
+        // 4 + 8 = 12 (the plain column — the re-base is a no-op before the
+        // tab).
+        snap.file_view_point_col = 12;
+        assert_eq!(cursor_cell(&snap), Some((12, 2)), "before the tab: the plain column (12)");
+        // Point on the tab (char 13) → stripped 9, tab_map 9 → 4 + 9 = 13
+        // (the tab's first expansion cell).
+        snap.file_view_point_col = 13;
+        assert_eq!(cursor_cell(&snap), Some((13, 2)), "on the tab: the first expansion cell (13)");
+        // Point on `*` (char 14, after the tab) → stripped 10, tab_map 12 →
+        // 4 + 12 = 16 (the 8-stop cell). WITHOUT the re-base this would be
+        // 4 + 10 = 14 (the tab under-counted by its 3 expansion spaces).
+        snap.file_view_point_col = 14;
+        assert_eq!(cursor_cell(&snap), Some((16, 2)), "after the tab: the 8-stop cell (16), not the under-counted 14");
+        // Point on `m` (char 16) → stripped 12, tab_map 14 → 4 + 14 = 18.
+        snap.file_view_point_col = 16;
+        assert_eq!(cursor_cell(&snap), Some((18, 2)), "`m` at the 8-stop cell (18)");
+    }
+
     /// plan 005 issue 02b regression: a note row above the point must not
     /// push the point's rendered row past the canvas. The rendered slice is
     /// capped so the point is always drawn, and the cursor row equals the
@@ -597,6 +680,7 @@ mod tests {
                 code_start: 0,
                 indent_chars: 0,
                 insertions: Vec::new(),
+                tab_map: Vec::new(),
                 text: format!("line {}", line),
                 spans: Vec::new(),
                 matches: Vec::new(),

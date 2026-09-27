@@ -100,6 +100,7 @@ def cleanup():
     for p in (os.path.join(REPO, "src", "symleg.rs"),
               os.path.join(REPO, "src", "symleg2.rs"),
               os.path.join(REPO, "src", "symleg3.rs"),
+              os.path.join(REPO, "src", "symleg4.rs"),
               os.path.join(REPO, ".redline-notes.md")):
         try:
             os.remove(p)
@@ -110,6 +111,12 @@ def cleanup():
 LEG1 = "fn main() {\n    let x = 1;\n  \u4e2d\u4e2d y = 2;\n\tlet z = 3;\n}\n"
 
 LEG3 = "fn main() {\n    a+b\n    // hi\n}\n"
+# issue-mid-line-tabs: a tab INSIDE the code (after `a,`), record on `b`
+# (char 19). The app expands the tab to 6 spaces out to the 8-column stop
+# (frame col 18 -> 24), so `b` renders at col 24 and the indicator sits
+# one cell left, at col 23 — the cell-for-cell fact the leading-tab legs
+# (a tab in the STRIPPED run) never exercise.
+LEG4 = "fn main() {\n    let r = foo(a,\tb);\n}\n"
 NOTES2 = """<!-- redline-annotations:begin -->
 [annotation]
 path: src/symleg2.rs
@@ -171,6 +178,9 @@ def main():
     # candidate index is built at startup.
     with open(os.path.join(REPO, "src", "symleg3.rs"), "w", encoding="utf-8") as f:
         f.write(LEG3)
+    # symleg4.rs (the mid-line-tab leg) must also exist before boot.
+    with open(os.path.join(REPO, "src", "symleg4.rs"), "w", encoding="utf-8") as f:
+        f.write(LEG4)
     app = App(REPO, rows=ROWS, cols=COLS)
     try:
         rec("L0: the app reached ready", "ready" in text(app))
@@ -250,6 +260,44 @@ def main():
                 col_of(row_cells(app, c3n), "\u256d") == 11,
                 f"\u256d col={col_of(row_cells(app, c3n), '\u256d')}")
             dump(app, [c3n, c3], "case 3: tab-indented symbol")
+
+        # ── Case 7: a MID-LINE tab (issue-mid-line-tabs) ──────────────
+        # The tab is INSIDE the code (after `a,`), not in the leading run
+        # that the store strips. The app expands it to 6 spaces out to the
+        # 8-column stop (frame col 18 -> 24), so `b` renders at col 24 and
+        # the indicator sits one cell left (col 23) — the cell-for-cell
+        # fact the leading-tab leg (C3) never exercises.
+        open_file(app, "symleg4.rs")
+        rec("L4: symleg4.rs is open", "let r = foo(a," in text(app),
+            f"row0={app.row_text(0)!r}")
+        # Line 1: `    let r = foo(a,\tb);` — record on `b` (char 19; the
+        # char before it is the tab — a blank cell, so the indicator
+        # overwrites it and the code does not move).
+        annotate(app, 1, 19, "midtab")
+        app.wait(0.8)
+        c7n = find_row(app, "midtab")
+        c7 = find_row(app, "b);")
+        ok = c7n is not None and c7 is not None and c7n == c7 - 1
+        rec("C7: note row directly above the code row", ok,
+            f"note_row={c7n} code_row={c7}")
+        if ok:
+            code_cells = row_cells(app, c7)
+            arrow = col_of(code_cells, "\u25b4")
+            rec("C7: \u25b4 at display col 23 — exactly one cell left of `b` (24)",
+                arrow == 23, f"\u25b4 col={arrow}")
+            rec("C7: `b` renders at col 24 (the 8-stop expansion, not the canvas's 0/1-cell tab)",
+                col_of(code_cells, "b") == 24,
+                f"b col={col_of(code_cells, 'b')}")
+            rec("C7: the indicator is one cell left of the symbol",
+                arrow == col_of(code_cells, "b") - 1,
+                f"arrow={arrow} b={col_of(code_cells, 'b')}")
+            rec("C7: `a,` keeps its source column (the tab is after it: `a` at 16)",
+                col_of(code_cells, "a") == 16,
+                f"a col={col_of(code_cells, 'a')}")
+            rec("C7: the note row's \u256d anchors at col 23",
+                col_of(row_cells(app, c7n), "\u256d") == 23,
+                f"\u256d col={col_of(row_cells(app, c7n), '\u256d')}")
+            dump(app, [c7n, c7], "case 7: mid-line tab")
 
         # ── Cases 4 + 6: the no-whitespace INSERT and the no-symbol
         # point (a clean file — the marker-cell rule's premise is the

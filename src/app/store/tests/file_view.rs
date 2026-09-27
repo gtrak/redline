@@ -402,6 +402,130 @@ use super::*;
     }
 
     #[test]
+    fn file_view_rows_mid_line_tab_expands_and_rebases() {
+        // issue-mid-line-tabs: a tab INSIDE the code. The row text the
+        // renderer draws must carry no raw tab (each mid-line tab becomes
+        // spaces to the next 8-column stop, running from code_start), the
+        // anchor (computed from the source line) agrees with the rendered
+        // cells, and the spans / marker cells re-base through the expansion
+        // — a tab is 1 byte but up to 8 cells, so a one-byte error is
+        // silently mis-coloured text on exactly this line.
+        let mut s = store_with_project();
+        // `    let n = 5\t* m;`: 4-space indent (code_start 4); the tab is
+        // at frame col 13 → stop 16 (3 spaces), so `*` (source byte 14)
+        // renders at frame col 16. Record on `n` (char 8, before the tab):
+        // the anchor is display col 7 (the cell before `n`).
+        open_ann_file(&mut s, "src/annmidtab.rs", "c0\n    let n = 5\t* m;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annmidtab.rs".to_string(),
+            line: 1,
+            col: 8,
+            anchor: "    let n = 5\t* m;".to_string(),
+            text: "midtab note".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+
+        let rows = s.file_view_rows();
+        let code: &FileViewRow = rows
+            .iter()
+            .find(|r| !r.is_note && r.line == 1)
+            .unwrap_or_else(|| panic!("annotated code row missing: {rows:?}"));
+        // The anchor agrees with the rendered cells (the 8-stop rule from
+        // the source line): display col 7, one cell left of `n` at col 8.
+        assert_eq!(code.anchors, vec![7], "the anchor is display col 7: {rows:?}");
+        assert_eq!(code.code_start, 4, "the code keeps its source column (4): {rows:?}");
+        // THE row text carries no raw tab — `5`'s tab becomes 3 spaces out
+        // to the 8-stop (frame col 13 → 16), so the tail shifts by 3.
+        assert_eq!(
+            code.text, "let n = 5   * m;",
+            "the tab is expanded to spaces to the 8-stop (running from code_start 4): {rows:?}"
+        );
+        assert!(!code.text.contains('\t'), "no raw tab reaches the renderer");
+        // The char re-base map: the tab (stripped char 9) maps to itself,
+        // and every char after it sits 3 further in the expanded text (the
+        // tab's 3 expansion spaces). A one-byte error here mis-places the
+        // cursor and any inserted marker cell.
+        assert_eq!(
+            code.tab_map,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16],
+            "the char re-base map (a tab is 1 char but 4 cells): {rows:?}"
+        );
+        // THE byte re-base, pinned with one-byte sensitivity: the `*`
+        // operator span (face 12) is source byte 14 (after the tab at 13);
+        // stripped (−4) → 10, then expanded (+2 past the tab's 3 spaces) →
+        // 12. A one-byte error lands it at 11 or 13 and mis-colours the line.
+        let op = code
+            .spans
+            .iter()
+            .find(|s| s.face == Some(12))
+            .unwrap_or_else(|| panic!("the `*` operator span (face 12) is missing: {:?}", code.spans));
+        assert_eq!(
+            (op.start, op.end),
+            (12, 13),
+            "the `*` span re-based through the tab expansion to expanded byte 12..13: {:?}",
+            code.spans
+        );
+        // The span BEFORE the tab is untouched (the strip only): `5` (face
+        // 16, source byte 12) → stripped byte 8 → expanded byte 8.
+        let num = code
+            .spans
+            .iter()
+            .find(|s| s.face == Some(16))
+            .unwrap_or_else(|| panic!("the `5` number span (face 16) is missing: {:?}", code.spans));
+        assert_eq!(
+            (num.start, num.end),
+            (8, 9),
+            "the span before the tab re-bases by the strip only: {:?}",
+            code.spans
+        );
+    }
+
+    #[test]
+    fn mouse_click_mid_line_tab_maps_to_the_rendered_cell() {
+        // issue-mid-line-tabs: a click in the CODE REGION of a line carrying
+        // a mid-line tab must map to the char the rendered (expanded) cell
+        // holds — the click-mapping runs the 8-stop tab rule from
+        // code_start on the unexpanded source line. Without it a click
+        // after the tab under-counts the tab (1 cell, not its 3/7-space run)
+        // and lands on the wrong char.
+        let mut s = store_with_project();
+        // `    let n = 5\t* m;`: rendered (expanded) cells — `5` at 12, the
+        // tab's 3 spaces at 13-15, `*` at 16, ` ` at 17, `m` at 18, `;` at 19.
+        open_ann_file(&mut s, "src/annmidtab2.rs", "c0\n    let n = 5\t* m;\nc2\n");
+        s.notes_doc.entries.push(NotesEntry::Record(Annotation {
+            syntax: None,
+            path: "src/annmidtab2.rs".to_string(),
+            line: 1,
+            col: 8,
+            anchor: "    let n = 5\t* m;".to_string(),
+            text: "midtab note".to_string(),
+            orphaned: false,
+        }));
+        s.sync_notes_from_doc();
+        s.set_viewport_lines(10);
+        s.set_scroll_top(0);
+        // Fold the note rows so a rendered row == a buffer line (screen row
+        // 1 is buffer line 1); the code row stays annotated (the record is
+        // still on the line).
+        s.annotate_toggle();
+        // `m`'s 8-stop cell (18) maps to char 16 — the old tab=1 mapping
+        // would give char 18 (EOL), two chars past `m`.
+        s.mouse_click_position(1, 18);
+        assert_eq!(s.point_col(), 16, "click on `m`'s 8-stop cell (18) → char 16");
+        // `*`'s cell (16) maps to char 14.
+        s.mouse_click_position(1, 16);
+        assert_eq!(s.point_col(), 14, "click on `*` (16) → char 14");
+        // `5` (12, before the tab) maps to char 12 (the re-base is a no-op
+        // before the tab).
+        s.mouse_click_position(1, 12);
+        assert_eq!(s.point_col(), 12, "click on `5` (12, before the tab) → char 12");
+    }
+
+    #[test]
     fn file_view_rows_two_records_two_distinct_anchors_two_indicators() {
         // issue-annotations-symbol-precise: one indicator PER ANNOTATION.
         // Two records on one line at TWO DIFFERENT symbols get two

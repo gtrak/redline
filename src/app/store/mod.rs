@@ -1033,6 +1033,19 @@ pub struct FileViewRow {
     /// rows, and annotated rows whose markers all overwrote blank cells
     /// or borrowed the line's indent).
     pub insertions: Vec<usize>,
+    /// Code rows only (issue-mid-line-tabs): for a line carrying a MID-LINE
+    /// tab, the map from the row text's ORIGINAL (pre-expansion) char index
+    /// to its EXPANDED char index — the row's `text` has each mid-line tab
+    /// replaced by spaces out to the next 8-column stop, so every char after
+    /// a tab sits further right in the expanded text than in the source. The
+    /// hardware cursor uses this to re-base the point's char index onto the
+    /// expanded text (the renderer and the click-mapping never need it: the
+    /// renderer draws the already-expanded `text` / `spans` / `matches` /
+    /// `insertions`, and the click-mapping works on the unexpanded source
+    /// line with the tab-aware width helpers). EMPTY when the line has no
+    /// mid-line tab (the identity — the row text equals its source), so no
+    /// allocation is carried on the common tab-free line.
+    pub tab_map: Vec<usize>,
     /// The row's text (without trailing newline; an orphaned note row's
     /// first slot carries an `(orphaned)` tag in its text — note rows are
     /// drawn from `note_slots`, `text` is the first slot's text). For an ANNOTATED code row
