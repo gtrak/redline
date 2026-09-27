@@ -786,3 +786,24 @@ thing, not just its first line?
 
 The general form, which is the through-line of this project's worst bugs AND its worst verifications: **a
 check aimed at the wrong subject passes silently, and a silent pass looks exactly like success.**
+
+## A pipeline can also HANG — not just lie about the exit status
+
+The rule above covers `cmd | tail` returning the wrong status. There is a second, worse failure: a consumer
+that **waits for N lines and never gets them** wedges the entire pipeline. Observed today:
+
+    cargo build --workspace 2>&1 | grep -E "^(error|warning: `redline`)" | head; cargo test --no-run 2>&1
+
+ran **27 minutes** with `head` still alive. `head` waits for ten matching lines; when they never come, `grep`
+and `cargo` block writing into a full pipe, and the whole chain stops. It looks *exactly* like a slow build —
+which is how it burned half an hour and surfaced only as "agent needs attention".
+
+**So redirect, then read the file** — the pipeline is then confined to something already finished being
+written:
+
+    cargo build --workspace > /tmp/build.log 2>&1; echo "BUILD_EXIT=$?"; grep -E "^(error|warning)" /tmp/build.log | head
+
+**And the triage corollary:** a **test binary** alive far beyond any legitimate duration is a *finding* — a
+deadlock, or a wait on input, in the code under test — never "slowness". `ps` age plus cwd is what
+distinguishes it, and it is worth killing the chain (specific pids only) and asking the lane which test hung
+before letting it resume.
