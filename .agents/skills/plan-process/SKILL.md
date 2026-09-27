@@ -830,3 +830,23 @@ against a fresh `cargo build` and compare (stale → 28, fresh → 23). One line
 fails while the **unit pins pass**, suspect the artifact first — those two are not always reading the same
 binary. Corollary for orchestrators: the same discipline you demand of lanes applies to your own verification,
 and a confident accusation of someone else's code is worth double-checking against a fresh build first.
+
+## A generated dependency is verified by REGENERATION, not by presence
+
+When a build input is *generated* rather than committed — a patched dependency, a codegen output, a vendored
+tree produced by a script — "the file is there" proves nothing about whether it is *right*. The check that
+means something is **delete it, regenerate it, and compare**:
+
+- the generator must be **idempotent**, so a fresh run and an existing tree are byte-identical;
+- it should carry a **pin on its inputs** (here: the `.crate`'s sha256) so a version bump fails loudly instead
+  of mis-applying, and — learned the hard way — a **pin on the patch itself**, because a *truncated* patch can
+  apply "successfully" and leave a half-patched tree (that hole was found by the lane's own tamper test);
+- and it needs a **loud cold-clone failure**. Cargo's error for a missing `[patch]` path is cryptic, so the
+  gate runs the check before any build, and the last backstop is the **type system**: redline calls
+  `hooks.use_cursor_position`, which does not exist in pristine 0.9.1, so an unpatched tree *cannot* compile
+  silently. A guard whose final layer is a compile error is the strongest form available.
+
+Observed live: landing the change left the main checkout without the generated tree, and the very next command
+failed with "vendor/iocraft is missing — the tree is generated, not committed. Run
+'tools/apply-iocraft-patch.sh' once". That is the guard working — on the orchestrator, in the cold-clone case
+it was designed for.
