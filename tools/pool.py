@@ -67,7 +67,8 @@ BATTERY = [
     "drive_windowing_panes.py", "check_cursor_stream.py", "ux_sweep.py",
     "probe_notes_dump.py", "drive_syntax_notes.py", "drive_symbol_precise.py",
     "drive_xref.py",
-    "drive_external_notes.py", "drive_external_crate.py", "sweep_flows.py",
+    "drive_external_notes.py", "drive_external_crate.py", "drive_redo_live.py",
+    "sweep_flows.py",
 ]
 
 

@@ -156,6 +156,13 @@ SHARED_SUITES=(
                         # the provider's own reason, and a no-refusal
                         # multi-provider walk keeps the generic shape
                         # (no unrelated-provider noise)
+  drive_redo_live.py # issue-redo-live-leg: the PTY leg for redo (C-x U /
+                     # C-M-7). Type a run, C-x u reverts, C-x U (and the
+                     # byte-based C-M-7, raw ESC 0x1F) restore it
+                     # byte-identically, and the point lands at the START of
+                     # the redone insertion (oracle-pinned, emacs 30.2).
+                     # Registered by the gate (016-04 item 3): before this
+                     # the new user-facing redo binding had no drive at all.
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.

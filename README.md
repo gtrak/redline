@@ -99,6 +99,7 @@ Generated from the command registry. The `M-x` palette lists all commands.
 | `C-x n` | open-notes | Open the per-project notes buffer |
 | `C-x C-s` | save-buffer | Save the current buffer to disk |
 | `C-x C-q` | toggle-read-only | Toggle a file buffer between edit and read-only |
+| `C-x U` / `C-M-7` | redo | Redo the last undone edit (the inverse of the `C-x u` / `C-/` / `C-7` undo). `C-x U` works on every terminal. `C-M-7` is a second binding that fires only where the terminal sends Alt as an ESC prefix; where Meta is not "send escape", Alt+Ctrl+_ arrives as bare `C-7` — which is **undo**, not redo (the CSI-u/kitty form `C-M-_` is deliberately unbound) |
 | `C-x C-c` | quit | Quit redline |
 | `C-x g` | magit-status | Show/refresh git status |
 | `C-c p p` | switch-project | Switch project (projectile) |
