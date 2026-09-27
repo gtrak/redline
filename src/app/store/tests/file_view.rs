@@ -999,6 +999,10 @@ use super::*;
                 kind: "type_identifier".to_string(),
                 name: "String".to_string(),
                 scope: None,
+                // A hand-built record with no ordinal keys: the legacy
+                // shape — the validated-ordinal rule does not apply to it.
+                ordinal: None,
+                count: None,
             }),
             path: "src/annins.rs".to_string(),
             line: 1,

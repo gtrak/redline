@@ -916,6 +916,11 @@ use super::*;
                 // (the scope walk includes the `function_item`'s name); a
                 // top-level definition has no outer container.
                 scope: Some(vec!["target_one".to_string()]),
+                // issue-annotation-stage-2b: the validated-ordinal pair —
+                // the fn name is the sole (identifier, target_one, [target_one])
+                // occurrence, so the group is a singleton.
+                ordinal: Some(0),
+                count: Some(1),
             }),
             "the fn name captures a syntax anchor (with its scope-aware identity)"
         );
@@ -1061,6 +1066,8 @@ use super::*;
                 // uniqueness rule applies — 3 `helper` nodes → not unique →
                 // falls through to the text rules.
                 scope: None,
+                ordinal: None,
+                count: None,
             }),
         }));
         // The signature line is reformatted (the anchor text is gone);
@@ -1093,6 +1100,8 @@ use super::*;
                 kind: "identifier".to_string(),
                 name: "x".to_string(),
                 scope: None,
+                ordinal: None,
+                count: None,
             }),
         };
         let doc = NotesDoc {
@@ -1128,6 +1137,11 @@ use super::*;
                 kind: "identifier".to_string(),
                 name: "foo".to_string(),
                 scope: Some(vec!["bar".to_string()]),
+                // A PRE-stage-2b record: no ordinal keys — the re-anchor
+                // keeps its len==1 rule, and the round trip must NOT emit
+                // the ordinal keys.
+                ordinal: None,
+                count: None,
             }),
         };
         let doc = NotesDoc {
@@ -1155,6 +1169,8 @@ use super::*;
                 kind: "identifier".to_string(),
                 name: "foo".to_string(),
                 scope: Some(vec!["mod".to_string(), "bar".to_string()]),
+                ordinal: None,
+                count: None,
             }),
         };
         let out = serialize_notes(&NotesDoc {
@@ -1238,6 +1254,11 @@ use super::*;
                 kind: "identifier".to_string(),
                 name: "f".to_string(),
                 scope: Some(vec!["f".to_string()]),
+                // issue-annotation-stage-2b: the capture stores the
+                // validated-ordinal pair (the `f` def is its group's only
+                // member).
+                ordinal: Some(0),
+                count: Some(1),
             }),
             "a non-Rust symbol now captures a syntax anchor (the Rust gate is gone)"
         );
@@ -2384,6 +2405,8 @@ use super::*;
                 kind: "identifier".to_string(),
                 name: "target".to_string(),
                 scope: None, // legacy / top-level: the scope-blind (kind, name) rule
+                ordinal: None,
+                count: None,
             }),
         }));
         // Reformat both defs so the anchor text `def target():` is GONE
@@ -2561,5 +2584,306 @@ use super::*;
             text, "\n# Notes\n",
             "a pasted newline must insert at the point in Accurate mode"
         );
+    }
+
+
+    // ── issue-annotation-stage-2b: the validated ordinal ──────────────────
+
+    /// A STAGE-2B record (scope + ordinal + count) round-trips exactly:
+    /// the `syntax_ordinal` / `syntax_count` keys are re-emitted and
+    /// re-parsed to an equal record; a HALF pair (`syntax_ordinal`
+    /// without `syntax_count`) degrades to absent — the record stays valid
+    /// and the validated-ordinal rule never half-fires.
+    #[test]
+    fn notes_stage_two_b_ordinal_round_trip() {
+        let rec = Annotation {
+            path: "src/rep.rs".to_string(),
+            line: 2,
+            col: 4,
+            anchor: "    foo();".to_string(),
+            text: "rt".to_string(),
+            orphaned: false,
+            syntax: Some(SyntaxAnchor {
+                kind: "identifier".to_string(),
+                name: "foo".to_string(),
+                scope: Some(vec!["bar".to_string()]),
+                ordinal: Some(1),
+                count: Some(3),
+            }),
+        };
+        let doc = NotesDoc {
+            before: Vec::new(),
+            entries: vec![NotesEntry::Record(rec.clone())],
+            after: Vec::new(),
+        };
+        let out = serialize_notes(&doc);
+        assert!(out.contains("syntax_ordinal: 1\n"), "{out}");
+        assert!(out.contains("syntax_count: 3\n"), "{out}");
+        let back = parse_notes(&out);
+        assert_eq!(back.entries, vec![NotesEntry::Record(rec)]);
+
+        // The half pair: the ordinal key without the count key.
+        let half = format!(
+            "{NOTES_BEGIN}\n\
+             [annotation]\n\
+             path: a.rs\n\
+             line: 0\n\
+             col: 0\n\
+             anchor: one\n\
+             note: half ordinal\n\
+             orphaned: false\n\
+             syntax_kind: identifier\n\
+             syntax_name: foo\n\
+             syntax_scope: bar\n\
+             syntax_ordinal: 1\n\
+             {NOTES_END}\n"
+        );
+        let d = parse_notes(&half);
+        let a = d
+            .entries[0]
+            .as_record()
+            .expect("a record with a half ordinal pair stays valid");
+        let sa = a.syntax.as_ref().expect("the syntax anchor parses");
+        assert_eq!(sa.ordinal, None, "a half pair degrades to absent: {sa:?}");
+        assert_eq!(sa.count, None);
+        // The unparsed half key is not re-emitted (no phantom migration).
+        assert!(!serialize_notes(&d).contains("syntax_ordinal"));
+    }
+
+    /// Acceptance: a same-scope repeat FOLLOWS ITS OWN OCCURRENCE across an
+    /// insertion above it. `fn bar() { foo(); foo(); foo(); }` — annotate
+    /// the middle `foo()`, insert 30 unrelated lines at the top (outside
+    /// the ±25 text window, and the anchor text now matches 3 lines — the
+    /// text rules alone cannot follow the note), and the re-anchor moves
+    /// the record to its own `foo`'s new line, orphan flag cleared.
+    #[test]
+    fn notes_stage_two_b_repeat_follows_its_own_occurrence_across_insertion() {
+        let original = "fn bar() {\n    foo();\n    foo();\n    foo();\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/repeat.rs", original);
+        s.set_point(2, 6, 6); // the 2nd `foo` (mid-symbol)
+        s.annotate();
+        s.note_prompt_char('r');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert_eq!((a.line, a.col), (2, 4), "the record sits on the middle `foo`");
+        let sa = a.syntax.clone().expect("the middle `foo` captures a scoped anchor");
+        assert_eq!(sa.scope, Some(vec!["bar".to_string()]));
+        assert_eq!(sa.ordinal, Some(1), "the 2nd same-scope `foo`");
+        assert_eq!(sa.count, Some(3), "three `foo` in `bar` at capture");
+        // The 30-line insertion (unrelated text: the sibling set is
+        // unchanged, so the validated-ordinal rule must fire, not orphan).
+        let filler: Vec<String> = (0..30).map(|i| format!("// filler {i}")).collect();
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&(filler.join("\n") + "\n" + original));
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 32, "the note follows its own `foo` across 30 lines");
+        assert!(!a.orphaned, "no shift: the sibling set is unchanged");
+        // Stable: a second pass changes nothing (idempotent).
+        s.reanchor_for_key(&key);
+        assert_eq!(ann_records(&s)[0].line, 32);
+        assert!(!ann_records(&s)[0].orphaned);
+    }
+
+    /// Acceptance pin (the spec's fixture): DELETING AN EARLIER SAME-SCOPE
+    /// OCCURRENCE ORPHANS THE NOTE WITH AN UNCHANGED LINE — it never
+    /// migrates to a sibling. `fn bar() { foo(); foo(); foo(); }`: annotate
+    /// the middle, delete the first `foo()`, and the re-anchor must set
+    /// `orphaned` and leave `line` untouched. The multi-line form is the
+    /// discriminating one: with the validation disabled (a fall-through to
+    /// the text rules instead of the shift verdict), the stored line still
+    /// reads the anchor text — `    foo();`, now the OLD 3RD's line — and
+    /// the note would be silently re-verified on a sibling.
+    #[test]
+    fn notes_stage_two_b_deleting_earlier_sibling_orphans_not_migrates() {
+        let original = "fn bar() {\n    foo();\n    foo();\n    foo();\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/repeat.rs", original);
+        s.set_point(2, 6, 6); // the middle `foo`
+        s.annotate();
+        s.note_prompt_char('d');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert_eq!((a.line, a.col), (2, 4));
+        assert_eq!(a.syntax.as_ref().unwrap().count, Some(3));
+        // Delete the 1st `foo()` line out-of-band.
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str("fn bar() {\n    foo();\n    foo();\n}\n");
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(
+            a.orphaned,
+            "the sibling set shrank (3 → 2): a shift — orphan, never migrate"
+        );
+        assert_eq!(a.line, 2, "the orphan keeps its stored line, unchanged");
+        // Stable: a second pass does not clear the flag (the group is still
+        // 2 against the captured 3).
+        s.reanchor_for_key(&key);
+        assert!(ann_records(&s)[0].orphaned);
+    }
+
+    /// The symmetric shift: inserting a same-scope sibling ABOVE also
+    /// changes the sibling set — the captured ordinal would now name a
+    /// DIFFERENT occurrence, so the note orphans rather than migrating to
+    /// the one above it.
+    #[test]
+    fn notes_stage_two_b_inserting_sibling_above_orphans_not_migrates() {
+        let original = "fn bar() {\n    foo();\n    foo();\n    foo();\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/repeat.rs", original);
+        s.set_point(2, 6, 6); // the middle `foo` (ordinal 1 of 3)
+        s.annotate();
+        s.note_prompt_char('s');
+        s.note_prompt_confirm();
+        // A 4th `foo()` joins the top of the body: ours is now the 3rd of
+        // 4 — the raw ordinal 1 would name the NEW 2nd (a sibling).
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str("fn bar() {\n    foo();\n    foo();\n    foo();\n    foo();\n}\n");
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert!(
+            a.orphaned,
+            "a same-scope sibling was added (3 → 4): a shift — orphan, never migrate"
+        );
+        assert_eq!(a.line, 2, "the orphan keeps its stored line, unchanged");
+    }
+
+    // ── issue-annotation-stage-2b addendum: struct scopes + ref types ───
+
+    /// Acceptance (addendum 1): a struct body contributes a scope element,
+    /// so two structs with the same field type resolve INDEPENDENTLY: both
+    /// `String`s are annotated, the file drifts more than the ±25-line
+    /// window, and each note follows its own struct's field (each
+    /// `(type_identifier, String, [A|B])` group is a singleton). Without
+    /// the struct-body scope element the captures would be scopeless,
+    /// the file-wide group would be 2, and both notes would orphan.
+    #[test]
+    fn notes_stage_two_b_struct_fields_resolve_independently() {
+        let original = "struct A {\n    name: String,\n}\n\nstruct B {\n    name: String,\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/two_structs.rs", original);
+        for line in [1usize, 5usize] {
+            s.set_point(line, 13, 13); // mid-`String` (it starts at col 10)
+            s.annotate();
+            s.note_prompt_char('t');
+            s.note_prompt_confirm();
+        }
+        let recs = ann_records(&s);
+        assert_eq!(recs.len(), 2);
+        let a = recs.iter().find(|r| r.line == 1).unwrap();
+        assert_eq!(
+            a.syntax,
+            Some(SyntaxAnchor {
+                kind: "type_identifier".to_string(),
+                name: "String".to_string(),
+                scope: Some(vec!["A".to_string()]),
+                ordinal: Some(0),
+                count: Some(1),
+            }),
+            "A's `String` is keyed under `A` (the struct body is a scope element)"
+        );
+        let b = recs.iter().find(|r| r.line == 5).unwrap();
+        assert_eq!(b.syntax.as_ref().unwrap().scope, Some(vec!["B".to_string()]));
+        // Drift: push B's struct 30 lines down (outside the ±25 text
+        // window — the text rules alone cannot follow either note).
+        let filler: Vec<String> = (0..30).map(|i| format!("// filler {i}")).collect();
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let head = format!("struct A {{\n    name: String,\n}}\n\n{}", filler.join("\n"));
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&(head + "\n\nstruct B {\n    name: String,\n}\n"));
+        }
+        s.reanchor_for_key(&key);
+        let recs = ann_records(&s);
+        let a = recs.iter().find(|r| r.line == 1).unwrap();
+        assert!(!a.orphaned, "A's `String` group is a singleton");
+        let b = recs.iter().find(|r| r.line > 10).unwrap();
+        assert_eq!(b.line, 36, "B's note follows B's field across the insertion");
+        assert!(!b.orphaned, "two structs with the same field type resolve independently");
+    }
+
+    /// Acceptance (addendum 2): a reference type ANCHORS LIKE ANY OTHER
+    /// TYPE — `&'a str` is not a silent `None` (line-tied) capture. The
+    /// responsible part is the reference prefix: the inner `str`
+    /// (`primitive_type`) already anchored on its own; the wrapper tokens
+    /// (`&`, the lifetime's quote) now anchor the wrapped type. `&mut T`,
+    /// `[T; N]`, and `dyn Trait` the same — and the note then follows its
+    /// field across a 30-line insertion (the text window alone cannot).
+    #[test]
+    fn notes_stage_two_b_reference_types_capture_anchors() {
+        let original =
+            "struct A {\n    r: &'a str,\n    m: &mut String,\n    arr: [u8; 3],\n    d: dyn Clone,\n}\n";
+        let mut s = store_with_project();
+        open_ann_file(&mut s, "src/refs.rs", original);
+        // The `&` of `&'a str` (col 7) — the silent-`None` point before
+        // the fix: line-tied with no syntax anchor at all.
+        s.set_point(1, 7, 7);
+        s.annotate();
+        s.note_prompt_char('r');
+        s.note_prompt_confirm();
+        let a = ann_records(&s)[0];
+        assert_eq!(
+            a.syntax,
+            Some(SyntaxAnchor {
+                kind: "primitive_type".to_string(),
+                name: "str".to_string(),
+                scope: Some(vec!["A".to_string()]),
+                ordinal: Some(0),
+                count: Some(1),
+            }),
+            "`&'a str` anchors the wrapped type (no silent line tie)"
+        );
+        // `&mut String`'s `&` (col 7).
+        s.set_point(2, 7, 7);
+        s.annotate();
+        s.note_prompt_char('m');
+        s.note_prompt_confirm();
+        assert_eq!(
+            ann_records(&s)[1].syntax.as_ref().unwrap().name,
+            "String",
+            "`&mut T` anchors `T`"
+        );
+        // `[u8; 3]`'s `[` (col 9).
+        s.set_point(3, 9, 9);
+        s.annotate();
+        s.note_prompt_char('a');
+        s.note_prompt_confirm();
+        assert_eq!(
+            ann_records(&s)[2].syntax.as_ref().unwrap().name,
+            "u8",
+            "`[T; N]` anchors `T`"
+        );
+        // `dyn Clone`'s `dyn` keyword (col 8).
+        s.set_point(4, 8, 8);
+        s.annotate();
+        s.note_prompt_char('c');
+        s.note_prompt_confirm();
+        assert_eq!(
+            ann_records(&s)[3].syntax.as_ref().unwrap().name,
+            "Clone",
+            "`dyn Trait` anchors `Trait`"
+        );
+        // The note on `&'a str` follows its field across 30 lines (the
+        // text window alone cannot: the anchor text is 30 lines away).
+        let filler: Vec<String> = (0..30).map(|i| format!("// filler {i}")).collect();
+        let key = s.buffers.current().unwrap().to_string();
+        {
+            let buf = s.buffers.get_mut(&key).unwrap();
+            buf.rope = Rope::from_str(&(filler.join("\n") + "\n" + original));
+        }
+        s.reanchor_for_key(&key);
+        let a = ann_records(&s)[0];
+        assert_eq!(a.line, 31, "the `&'a str` note follows its field across 30 lines");
+        assert!(!a.orphaned);
     }
 

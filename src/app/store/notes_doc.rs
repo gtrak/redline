@@ -94,6 +94,12 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
     let mut syntax_kind: Option<String> = None;
     let mut syntax_name: Option<String> = None;
     let mut syntax_scope: Vec<String> = Vec::new();
+    // The validated-ordinal keys (issue-annotation-stage-2b): both must be
+    // present (and well-formed) for the pair to count — a half pair is
+    // treated as absent, exactly like the kind/name pair (never half-
+    // fires); legacy records carry neither.
+    let mut syntax_ordinal: Option<usize> = None;
+    let mut syntax_count: Option<usize> = None;
     for line in &block[1..] {
         // Lines without a `:` (stray text, blank lines) are skipped, not
         // fatal: a record stays valid as long as the required fields are
@@ -143,6 +149,12 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
                 // (outermost → innermost, exactly as serialized).
                 syntax_scope.push(value.to_string());
             }
+            "syntax_ordinal" => {
+                syntax_ordinal = value.trim().parse::<usize>().ok();
+            }
+            "syntax_count" => {
+                syntax_count = value.trim().parse::<usize>().ok();
+            }
             // Unknown keys inside a record block: the block stays valid
             // (forward compatibility), they are simply not re-emitted.
             _ => {}
@@ -160,6 +172,12 @@ fn parse_record_block(block: &[&str]) -> Option<Annotation> {
                 kind,
                 name,
                 scope: if syntax_scope.is_empty() { None } else { Some(syntax_scope) },
+                // The ordinal pair: present only when BOTH keys parsed
+                // (a half pair / a malformed number degrades to absent —
+                // the record rides the pre-stage-2b rules, never a
+                // half-fired ordinal).
+                ordinal: syntax_ordinal.zip(syntax_count).map(|(o, _)| o),
+                count: syntax_ordinal.zip(syntax_count).map(|(_, c)| c),
             }),
             _ => None,
         };
@@ -204,6 +222,14 @@ pub fn serialize_notes(doc: &NotesDoc) -> String {
                         for name in scope {
                             out.push_str(&format!("syntax_scope: {}\n", name));
                         }
+                    }
+                    // The validated-ordinal pair (issue-annotation-stage-
+                    // 2b): emitted only when present, appended after the
+                    // scope keys (additive — a legacy record stays
+                    // byte-identical to the pre-stage-2b shape).
+                    if let (Some(ordinal), Some(count)) = (sa.ordinal, sa.count) {
+                        out.push_str(&format!("syntax_ordinal: {}\n", ordinal));
+                        out.push_str(&format!("syntax_count: {}\n", count));
                     }
                 }
             }

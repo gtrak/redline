@@ -155,15 +155,69 @@ fn innermost_at(root: Node, byte: usize) -> Option<Node> {
 fn nearest_identifier(leaf: Node, lang: LanguageId) -> Option<Node> {
     let mut cur = leaf;
     loop {
-        if !is_path_segment(cur, lang)
-            && cur.is_named()
-            && is_identifier_kind(lang, cur.kind())
-            && in_identifier_position(lang, cur)
-        {
+        if is_identifier_node(lang, cur) {
             return Some(cur);
         }
-        cur = cur.parent()?;
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None if lang == LanguageId::Rust => return rust_type_wrapper_target(leaf),
+            None => return None,
+        }
     }
+}
+
+/// (issue-annotation-stage-2b addendum) Rust composite-type wrappers:
+/// when a point lands on the WRAPPER itself — the `&` of a reference,
+/// the lifetime's quote, the `dyn` keyword, the `[` of an array type —
+/// neither the leaf nor any ancestor is identifier-ish, and the capture
+/// was `None`: a SILENT degradation to line-following (the failure mode
+/// the symbol-identity work exists to remove). Probe-verified against the
+/// pinned tree-sitter-rust 0.24.2: the wrapped type sits in the wrapper's
+/// `type` field (`element` for `array_type`, `trait` for `dynamic_type`)
+/// and IS an identifier-ish node, so it anchors like any other type. The
+/// lifetime is NOT the responsible part — `&'a str`'s inner `str`
+/// (primitive_type) already anchored on its own; it is the reference
+/// prefix (`&`, `'a`) that captured nothing. Only the three PREFIX
+/// wrappers are triggers: `generic_type` is an UNWRAP STEP ONLY (it has
+/// no non-identifier prefix of its own — a point on the whitespace inside
+/// `HashMap<String, u32>`'s arguments must stay `None`, the honest
+/// no-symbol answer), so the unwrap is bounded by construction (each step
+/// descends into the wrapper's inner field):
+/// `&'x mut Vec<u8>` → `Vec` (through the `generic_type`'s `type` field),
+/// `&[u8; 3]` → `u8`. A wrap whose inner field is not identifier-ish
+/// (`&self`'s self parameter) yields `None`, exactly as before.
+fn rust_type_wrapper_target(leaf: Node) -> Option<Node> {
+    const TRIGGERS: &[&str] = &["reference_type", "array_type", "dynamic_type"];
+    const INNER_FIELDS: &[(&str, &str)] = &[
+        ("reference_type", "type"),
+        ("array_type", "element"),
+        ("dynamic_type", "trait"),
+        ("generic_type", "type"),
+    ];
+    let mut cur = leaf;
+    while let Some(parent) = cur.parent() {
+        let field = TRIGGERS
+            .iter()
+            .find(|kind| **kind == parent.kind())
+            .and_then(|kind| INNER_FIELDS.iter().find(|(k, _)| *k == *kind))
+            .map(|(_, f)| *f);
+        if let Some(field_name) = field {
+            let mut inner = parent.child_by_field_name(field_name)?;
+            while let Some(step) = INNER_FIELDS
+                .iter()
+                .find(|(kind, _)| *kind == inner.kind())
+                .map(|(_, f)| *f)
+            {
+                inner = inner.child_by_field_name(step)?;
+            }
+            if is_identifier_node(LanguageId::Rust, inner) {
+                return Some(inner);
+            }
+            return None;
+        }
+        cur = parent;
+    }
+    None
 }
 
 /// Whether `node` may count as an identifier at its position: true for
@@ -202,6 +256,18 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
     crate::language::spec(lang).identifier_kinds.contains(&kind)
 }
 
+/// Whether `node` passes the identifier-ish gate as a WHOLE node (kind +
+/// position + not a path segment) — the same predicate `nearest_identifier`
+/// applies at each step, factored out so the Rust type-wrapper fallback
+/// (issue-annotation-stage-2b addendum) checks its candidate with the
+/// identical rule.
+fn is_identifier_node(lang: LanguageId, node: Node) -> bool {
+    !is_path_segment(node, lang)
+        && node.is_named()
+        && is_identifier_kind(lang, node.kind())
+        && in_identifier_position(lang, node)
+}
+
 // ── issue-annotations-symbol-identity: the scope-aware identity ──────────
 //
 // The annotation re-anchor (the store's `reanchor_for_key`) keys an
@@ -212,15 +278,24 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
 // disambiguated, and a name repeating WITHIN one scope stays ambiguous
 // and orphans rather than guessing.
 //
-// `SymbolIdentity` also carries an ORDINAL within the scope (a node's scope
+// `SymbolIdentity` carries the ORDINAL within the scope (a node's scope
 // is computed from the node itself in both places, and the ordinal is the
-// number of same-key nodes before it). **The ordinal has no production
-// consumer** — it exists for callers and for the proposed stage-2b, which
-// would key on it *only together with* a content/stability validation that
-// forces an orphan when a shift changes which occurrence it names. Keying on
-// the raw ordinal is unsafe: a check on the `unit_flow_ann_orphan` fixture
-// showed it migrating a note to a sibling line whose text no longer matches
-// the anchor when an earlier same-scope occurrence is deleted.
+// number of same-key nodes before it) and the COUNT — the total number of
+// same-key nodes in the buffer, the group size at capture. The store's
+// re-anchor (issue-annotation-stage-2b) is the production consumer:
+// it keys on the ordinal **only together with** the count invariant —
+// the group's size at re-anchor must equal the size at capture. A shift
+// (a same-scope sibling added or removed) changes the size, and the note
+// then ORPHANS at its unchanged line instead of migrating: keying on the
+// raw ordinal is unsafe — a check on the `unit_flow_ann_orphan` fixture
+// showed it migrating a note to a sibling line whose text no longer
+// matches the anchor when an earlier same-scope occurrence is deleted,
+// and the size invariant is what detects that shift. The literal
+// count-before-it comparison the stage-2b spec offers is uninformative
+// (the candidate at index k always has k predecessors — a tautology),
+// and an anchor-line check alone both misses deletions of identical-text
+// siblings and orphans on a re-indent; the size invariant catches every
+// single-edit shift, so it is the validation the ordinal rides on.
 //
 // `symbol_identity_at` reads the identity of the symbol under a byte offset;
 // `build_annotation_symbol_index` reads every occurrence's identity for a
@@ -232,9 +307,13 @@ fn is_identifier_kind(lang: LanguageId, kind: &str) -> bool {
 /// The scope-aware identity of the identifier-ish node at a byte offset:
 /// its (kind, name), its ENCLOSING-SCOPE chain (outermost → innermost, from
 /// the per-language scope walk), its ORDINAL within that (kind, name, scope)
-/// group in document order, and its start byte (for the store to turn into a
-/// column). `None` for out-of-range offsets, non-parseable languages, and
-/// offsets with no identifier-ish node (a keyword / whitespace / EOL).
+/// group in document order, the group's COUNT (the size invariant the
+/// store's validated-ordinal rule compares at re-anchor), and its start
+/// byte (for the store to turn into a column). `None` for out-of-range
+/// offsets, non-parseable languages, and offsets with no identifier-ish
+/// node (a keyword / whitespace / EOL — a Rust composite-type wrapper's
+/// own tokens aside, which anchor the wrapped type, see
+/// `rust_type_wrapper_target`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolIdentity {
     pub kind: String,
@@ -245,6 +324,13 @@ pub struct SymbolIdentity {
     /// The occurrence's position (0-based, document order) among every node
     /// of the same (kind, name, scope). Stable under an insertion above.
     pub ordinal: usize,
+    /// The TOTAL number of nodes of the same (kind, name, scope) in the
+    /// buffer (the group size at capture, this occurrence included — so
+    /// `count >= ordinal + 1`). issue-annotation-stage-2b: the store
+    /// re-anchors a record's ordinal ONLY while this count is unchanged at
+    /// re-anchor — a shift (a same-scope sibling added or removed) changes
+    /// it, and the note orphans rather than migrating to a sibling.
+    pub count: usize,
     pub start_byte: usize,
 }
 
@@ -309,46 +395,57 @@ pub fn symbol_identity_at(lang: LanguageId, source: &str, byte: usize) -> Option
     let name = node.utf8_text(bytes).ok()?.to_string();
     let scope = scope_path_for(lang, node, bytes);
     let target = node.start_byte();
-    // The ordinal: the number of SAME-KEY (kind, name, scope) nodes that
-    // start earlier in document order. The walk is a plain kind+name+scope
-    // filter (no position gate) — deliberately the same set the index
-    // counts, so the captured ordinal and the index's view agree.
-    let mut earlier = 0usize;
-    count_earlier_same_key(root, lang, (&kind, &name), &scope, target, bytes, &mut earlier);
+    // The ordinal + the group count: the number of SAME-KEY (kind, name,
+    // scope) nodes that start earlier in document order, and the total.
+    // The walk is a plain kind+name+scope filter (no position gate) —
+    // deliberately the same set the index counts, so the captured ordinal
+    // and the index's view agree.
+    let (earlier, total) =
+        count_same_key(root, lang, (&kind, &name), &scope, target, bytes);
     Some(SymbolIdentity {
         kind,
         name,
         scope,
         ordinal: earlier,
+        count: total,
         start_byte: target,
     })
 }
 
 /// Count, in document order, the named nodes with the same
-/// (kind, name, scope) that start strictly before `target_byte`.
-fn count_earlier_same_key(
+/// (kind, name, scope): how many start strictly before `target_byte`
+/// (the ordinal) and how many there are in total (the group size at
+/// capture — the size invariant the store's validated-ordinal rule
+/// compares at re-anchor, issue-annotation-stage-2b).
+fn count_same_key(
     node: Node,
     lang: LanguageId,
     key: (&str, &str),
     scope: &[String],
     target_byte: usize,
     bytes: &[u8],
-    count: &mut usize,
-) {
+) -> (usize, usize) {
+    let mut before = 0usize;
+    let mut total = 0usize;
     if node.is_named()
         && node.kind() == key.0
         && let Ok(text) = node.utf8_text(bytes)
         && text == key.1
         && scope_path_for(lang, node, bytes) == scope
-        && node.start_byte() < target_byte
     {
-        *count += 1;
+        total += 1;
+        if node.start_byte() < target_byte {
+            before += 1;
+        }
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            count_earlier_same_key(child, lang, key, scope, target_byte, bytes, count);
+            let (b, t) = count_same_key(child, lang, key, scope, target_byte, bytes);
+            before += b;
+            total += t;
         }
     }
+    (before, total)
 }
 
 /// Build the whole-buffer scope-aware symbol index (see
@@ -1721,7 +1818,9 @@ mod tests {
     /// Discriminating: a repeated name is identified by its ENCLOSING SCOPE
     /// and its ORDINAL within that scope — `foo` called twice in `bar` and
     /// once in `baz` gives distinct identities, stable under an insertion
-    /// above (the scope + ordinal are unchanged by it).
+    /// above (the scope + ordinal are unchanged by it). The COUNT (group
+    /// size) is the sibling-set invariant the store's validated-ordinal
+    /// rule compares at re-anchor (issue-annotation-stage-2b).
     #[test]
     fn symbol_identity_repeated_name_by_scope_and_ordinal() {
         let src = "fn bar() {\n    foo();\n    foo();\n}\nfn baz() {\n    foo();\n}\n";
@@ -1732,12 +1831,15 @@ mod tests {
         assert_eq!((a.kind.as_str(), a.name.as_str()), ("identifier", "foo"));
         assert_eq!(a.scope, vec![String::from("bar")]);
         assert_eq!(a.ordinal, 0, "first `foo` in `bar`");
+        assert_eq!(a.count, 2, "two `foo` in `bar`");
         let b = symbol_identity_at(LanguageId::Rust, src, p1).unwrap();
         assert_eq!(b.scope, vec![String::from("bar")]);
         assert_eq!(b.ordinal, 1, "second `foo` in `bar`");
+        assert_eq!(b.count, 2, "the same group as the first `foo`");
         let c = symbol_identity_at(LanguageId::Rust, src, p2).unwrap();
         assert_eq!(c.scope, vec![String::from("baz")], "a different enclosing scope");
         assert_eq!(c.ordinal, 0, "first `foo` in `baz`");
+        assert_eq!(c.count, 1, "a single-member group");
     }
 
     /// The index agrees with the per-point identity: `by_scope` groups the
@@ -1804,5 +1906,115 @@ mod tests {
     #[test]
     fn symbol_index_none_for_no_kind_language() {
         assert!(build_annotation_symbol_index(LanguageId::Yaml, "a: 1\n").is_none());
+    }
+
+    // ── issue-annotation-stage-2b: struct bodies are scopes ──────────
+
+    /// The addendum's four field-type shapes: a struct body (and an enum
+    /// variant body) contributes a scope element, so the field's type
+    /// identity carries the struct/enum name — `(type_identifier,
+    /// "String", ["A"])`, not the empty scope that made every common type
+    /// collide with itself across fields (probe-verified against the
+    /// pinned tree-sitter-rust 0.24.2).
+    #[test]
+    fn struct_field_types_carry_the_struct_scope() {
+        let src = "struct A { name: String, x: u32, p: std::string::String, r: &'a str }\n";
+        let at = |m: &str| src.find(m).expect("fixture");
+        // `String` — the spec's colliding case, now disambiguated by `A`.
+        let a = symbol_identity_at(LanguageId::Rust, src, at("String, x")).unwrap();
+        assert_eq!((a.kind.as_str(), a.name.as_str()), ("type_identifier", "String"));
+        assert_eq!(a.scope, vec![String::from("A")], "the struct body is a scope element");
+        // `u32` — the primitive field type, same rule.
+        let b = symbol_identity_at(LanguageId::Rust, src, at("u32")).unwrap();
+        assert_eq!((b.kind.as_str(), b.name.as_str()), ("primitive_type", "u32"));
+        assert_eq!(b.scope, vec![String::from("A")]);
+        // `std::string::String` — the scoped path comes back whole, with `A`.
+        let c = symbol_identity_at(LanguageId::Rust, src, at("std::string")).unwrap();
+        assert_eq!((c.kind.as_str(), c.name.as_str()), ("scoped_type_identifier", "std::string::String"));
+        assert_eq!(c.scope, vec![String::from("A")]);
+        // Two structs with the same field type resolve as DIFFERENT
+        // groups: the scope is what partitions them.
+        let src2 = "struct A { f: String }\nstruct B { f: String }\n";
+        let idx = build_annotation_symbol_index(LanguageId::Rust, src2).unwrap();
+        let a_key = ("type_identifier".to_string(), "String".to_string(), vec![String::from("A")]);
+        let b_key = ("type_identifier".to_string(), "String".to_string(), vec![String::from("B")]);
+        assert_eq!(idx.by_scope.get(&a_key).map(|o| o.len()), Some(1), "A's `String` is unique");
+        assert_eq!(idx.by_scope.get(&b_key).map(|o| o.len()), Some(1), "B's `String` is unique");
+    }
+
+    /// An enum ITEM and each of its VARIANTS contribute a scope element
+    /// (outermost → innermost: the enum, then the variant) — a variant
+    /// body's field types are keyed under both.
+    #[test]
+    fn enum_variant_bodies_carry_the_enum_and_variant_scope() {
+        let src = "enum E { V(String), W { x: u8 } }\n";
+        let idx = build_annotation_symbol_index(LanguageId::Rust, src).unwrap();
+        let ev = vec![String::from("E"), String::from("V")];
+        let ew = vec![String::from("E"), String::from("W")];
+        let k1 = ("type_identifier".to_string(), "String".to_string(), ev.clone());
+        let k2 = ("primitive_type".to_string(), "u8".to_string(), ew.clone());
+        assert_eq!(idx.by_scope.get(&k1).map(|o| o.len()), Some(1), "V's `String`");
+        assert_eq!(idx.by_scope.get(&k2).map(|o| o.len()), Some(1), "W's `u8`");
+        // The point-identity agrees with the index (same gate, same walk).
+        let at = src.find("V(").expect("fixture") + 2;
+        let id = symbol_identity_at(LanguageId::Rust, src, at).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("type_identifier", "String"));
+        assert_eq!(id.scope, ev);
+    }
+
+    // ── issue-annotation-stage-2b: composite type wrappers anchor ────
+
+    /// A point on the wrapper itself of a composite type (`&`, the
+    /// lifetime's quote, `dyn`, `[`) anchors the WRAPPED type — the silent
+    /// `None` (degradation to line-following) is gone. Probe-verified
+    /// against the pinned tree-sitter-rust 0.24.2: the responsible part is
+    /// the reference prefix, not the inner type (`str` in `&'a str`
+    /// already anchored on its own as a `primitive_type`).
+    #[test]
+    fn rust_composite_type_wrappers_anchor_the_wrapped_type() {
+        // `&'a str` on the `&`: the wrapped `str` (primitive_type).
+        let src = "struct A { r: &'a str, m: &mut String, a: [u8; 3], d: dyn Clone, g: &'x mut Vec<u8> }\n";
+        let at = |m: &str| src.find(m).expect("fixture");
+        let ref_at = src.find("&'").expect("the reference");
+        let id = symbol_identity_at(LanguageId::Rust, src, ref_at).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("primitive_type", "str"));
+        assert_eq!(id.scope, vec![String::from("A")], "the struct scope applies too");
+        // The lifetime's quote anchors the same wrapped type.
+        let id = symbol_identity_at(LanguageId::Rust, src, ref_at + 1).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("primitive_type", "str"));
+        // `&mut String` on the `&` (and on the `mut`): the wrapped `String`.
+        for m in ["mut", "&mut"] {
+            let id = symbol_identity_at(LanguageId::Rust, src, at(m)).unwrap();
+            assert_eq!((id.kind.as_str(), id.name.as_str()), ("type_identifier", "String"), "on `{m}`");
+        }
+        // `[u8; 3]` on the `[`: the element `u8`.
+        let id = symbol_identity_at(LanguageId::Rust, src, at("[u8")).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("primitive_type", "u8"));
+        // `dyn Clone` on the `dyn` keyword: the trait `Clone`.
+        let id = symbol_identity_at(LanguageId::Rust, src, at("dyn")).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("type_identifier", "Clone"));
+        // `&'x mut Vec<u8>` on the `&`: the generic unwraps to the bare
+        // path `Vec`.
+        let id = symbol_identity_at(LanguageId::Rust, src, at("&'x")).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("type_identifier", "Vec"));
+        // The inner type still anchors on its own, exactly as before.
+        let id = symbol_identity_at(LanguageId::Rust, src, at("str,")).unwrap();
+        assert_eq!((id.kind.as_str(), id.name.as_str()), ("primitive_type", "str"));
+        // `node_at` agrees (the wrapper answer is the wrapped type).
+        let info = node_at(LanguageId::Rust, src, ref_at).unwrap();
+        assert_eq!(info.text, "str");
+    }
+
+    /// A wrapper whose inner field is not identifier-ish (`&self`'s self
+    /// parameter) stays `None` — the honest answer, never a guess.
+    #[test]
+    fn rust_wrapper_around_non_identifier_stays_none() {
+        let src = "fn f(&self) {}\n";
+        let amp = src.find('&').expect("fixture");
+        assert!(symbol_identity_at(LanguageId::Rust, src, amp).is_none());
+        // EOL / keyword points stay `None` too (the pre-addendum behavior).
+        let src2 = "struct A { r: &'a str, }\n";
+        let eol = src2.find('\n').expect("fixture");
+        assert!(symbol_identity_at(LanguageId::Rust, src2, eol).is_none());
     }
 }

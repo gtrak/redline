@@ -185,6 +185,18 @@ impl AppStore {
     ///    parsed at most once per pass, and only when at least one record
     ///    for this file HAS a syntax anchor (the common legacy case pays
     ///    no parse).
+    ///
+    ///    Validated-ordinal records (issue-annotation-stage-2b) add the
+    ///    shift invariant on top: a record that carries its captured
+    ///    ordinal + sibling-set count and whose scope group has MORE than
+    ///    one member resolves the ordinal — but only while the group's
+    ///    size is unchanged: size unchanged → the captured occurrence is
+    ///    `group[ordinal]` and the note follows it; size changed (a
+    ///    same-scope sibling added or removed since capture) → the record
+    ///    ORPHANS at its unchanged line, and the text rules are NOT run
+    ///    (they would re-tie the note to a same-text sibling line — the
+    ///    silent migration the raw ordinal made, which is why the ordinal
+    ///    is never used without the size invariant).
     /// 2. **exact-line text**: the content at the stored line still matches
     ///    `anchor` exactly (the record stays; an orphan flag clears).
     /// 3. **±25-line text search**: a UNIQUE match re-anchors (updates
@@ -227,14 +239,25 @@ impl AppStore {
             // to exactly one node it falls through to the text rules (never
             // guess — a wrong tie is worse than no tie).
             //
-            // Two rules, by the record's stored identity (issue-annotations-
-            // symbol-identity):
+            // Three rules, by the record's stored identity:
             // - stage 2 (the record carries an enclosing scope): the name is
             //   UNIQUE within that scope → this is the occurrence. This is
             //   what makes a repeated name follow its own scope — a `foo` in
             //   `bar` never collides with a `foo` in `baz`, or with `bar`
             //   repeated in a sibling scope (the full scope chain disambiguates
             //   same-named definitions in different modules too).
+            // - the VALIDATED ordinal (issue-annotation-stage-2b): a scoped
+            //   record that ALSO carries its captured ordinal + sibling-set
+            //   count resolves a same-scope repeat to its OWN occurrence —
+            //   the group's `ordinal`th member — while the group's size is
+            //   unchanged (the size invariant IS the shift detection: adding
+            //   or removing a same-scope sibling changes it, and the note
+            //   then orphans at its unchanged line instead of migrating to a
+            //   sibling — the raw ordinal's failure mode, reproduced in the
+            //   `fn bar() { foo(); foo(); foo(); }` fixture and why the
+            //   ordinal is never used without the invariant). A legacy
+            //   scoped record (no ordinal keys) keeps the len==1 rule
+            //   exactly as before.
             // - the scope-blind `(kind, name)` uniqueness rule (exactly ONE
             //   occurrence file-wide): the answer for a UNIQUE symbol — it
             //   follows across a 100-line insertion AND across a scope move
@@ -242,49 +265,48 @@ impl AppStore {
             //   indented/moved unique symbol still follows) — and for LEGACY
             //   and top-level records (absent scope key → `None`), exactly as
             //   before.
-            //
-            // Same-scope name repeats are deliberately NOT resolved here: the
-            // name is ambiguous within its scope, so it falls through to the
-            // text rules (orphan, never a guess). An ordinal tie would be
-            // worse — an ordinal shifts when a sibling is added or deleted,
-            // migrating the note to a sibling (a wrong tie, which is worse
-            // than no tie).
-            let resolved = syntax_index.as_ref().and_then(|idx| {
-                let sa = a.syntax.as_ref()?;
-                if let Some(scope) = &sa.scope {
-                    let scope_key = (sa.kind.clone(), sa.name.clone(), scope.clone());
-                    if let Some(occ) = idx
-                        .by_scope
-                        .get(&scope_key)
-                        .filter(|occ| occ.len() == 1)
-                        .map(|occ| occ[0])
-                    {
-                        return Some(occ);
+            let verdict = match (syntax_index.as_ref(), a.syntax.as_ref()) {
+                (Some(idx), Some(sa)) => Self::syntax_reanchor(idx, sa),
+                _ => SyntaxVerdict::FallThrough,
+            };
+            match verdict {
+                SyntaxVerdict::Follow(occ) => {
+                    if a.line != occ.line {
+                        a.line = occ.line;
+                        changed = true;
                     }
+                    // The marker rides the symbol: refresh the record's col to
+                    // the symbol's START column in its (possibly new) line. A
+                    // plain insertion above leaves the column unchanged (a no-op
+                    // here); a re-indent / wrap / moved block moves the symbol's
+                    // cell and the marker follows it (issue-annotations-
+                    // symbol-identity, the col-on-symbol requirement).
+                    if a.col != occ.col {
+                        a.col = occ.col;
+                        changed = true;
+                    }
+                    if a.orphaned {
+                        a.orphaned = false;
+                        changed = true;
+                    }
+                    continue;
                 }
-                let key = (sa.kind.clone(), sa.name.clone());
-                idx.by_name.get(&key).filter(|occ| occ.len() == 1).map(|occ| occ[0])
-            });
-            if let Some(occ) = resolved {
-                if a.line != occ.line {
-                    a.line = occ.line;
-                    changed = true;
+                // A shift was detected on a validated-ordinal record (the
+                // sibling-set size changed since capture, or the captured
+                // ordinal no longer fits the group): ORPHAN now, line
+                // unchanged, and do NOT run the text rules below — the text
+                // rules would re-verify a same-text sibling line (the stored
+                // line's content still reads `anchor`) and silently keep the
+                // note tied to a sibling (issue-annotation-stage-2b: a shift
+                // orphans rather than migrates).
+                SyntaxVerdict::OrphanOnShift => {
+                    if !a.orphaned {
+                        a.orphaned = true;
+                        changed = true;
+                    }
+                    continue;
                 }
-                // The marker rides the symbol: refresh the record's col to
-                // the symbol's START column in its (possibly new) line. A
-                // plain insertion above leaves the column unchanged (a no-op
-                // here); a re-indent / wrap / moved block moves the symbol's
-                // cell and the marker follows it (issue-annotations-
-                // symbol-identity, the col-on-symbol requirement).
-                if a.col != occ.col {
-                    a.col = occ.col;
-                    changed = true;
-                }
-                if a.orphaned {
-                    a.orphaned = false;
-                    changed = true;
-                }
-                continue;
+                SyntaxVerdict::FallThrough => {}
             }
             let held = a.line < total
                 && buf
@@ -366,6 +388,83 @@ impl AppStore {
         // not this one's). A language with no identifier-ish kind returns
         // `None` (nothing to anchor; the text rules run, no parse).
         redline_syntax::node::build_annotation_symbol_index(lang, &source)
+    }
+
+    /// The SYNTAX verdict for one record (plan 007 issue 02 + issue-
+    /// annotations-symbol-identity + issue-annotation-stage-2b):
+    ///
+    /// - `Follow(occ)`: re-anchor the record at this occurrence (line +
+    ///   start column, orphan flag clears).
+    /// - `OrphanOnShift`: the record's VALIDATED-ORDINAL identity shifted —
+    ///   its captured sibling-set size differs from the group's current
+    ///   size (a same-scope sibling was added or removed since capture), or
+    ///   the captured ordinal no longer fits the group. Orphan at the
+    ///   record's UNCHANGED line, and do NOT fall through to the text rules
+    ///   (they would re-tie the note to a same-text sibling line — the
+    ///   silent migration the raw ordinal's failure mode is about).
+    /// - `FallThrough`: no syntax verdict (the group is absent, the record
+    ///   is legacy / top-level and its `(kind, name)` is not unique
+    ///   file-wide, or a legacy scoped record's group is ambiguous) — the
+    ///   text rules run, exactly as before stage-2b.
+    ///
+    /// The size invariant is the shift detection the ordinal rides on
+    /// (issue-annotation-stage-2b): a single insertion above (not a
+    /// same-scope sibling) leaves every group size unchanged, so a repeat
+    /// keeps following its own occurrence; a deletion of an earlier
+    /// sibling — the fixture that made the raw ordinal migrate a note to a
+    /// sibling — shrinks the group, the sizes disagree, and the note
+    /// orphans at its unchanged line instead.
+    /// pure function of the index and the record's stored identity (no
+    /// store state — the caller runs it mid-pass over `notes_doc`).
+    fn syntax_reanchor(
+        idx: &redline_syntax::node::AnnotationSymbolIndex,
+        sa: &SyntaxAnchor,
+    ) -> SyntaxVerdict {
+        let by_name_unique = || {
+            idx.by_name
+                .get(&(sa.kind.clone(), sa.name.clone()))
+                .filter(|occ| occ.len() == 1)
+                .map(|occ| occ[0])
+        };
+        match &sa.scope {
+            Some(scope) => {
+                let scope_key = (sa.kind.clone(), sa.name.clone(), scope.clone());
+                match idx.by_scope.get(&scope_key) {
+                    // The group is absent (the symbol's enclosing definition
+                    // changed, or the name disappeared from that scope):
+                    // today's scope-blind rule — unique file-wide, follow.
+                    None => {
+                        by_name_unique().map_or(SyntaxVerdict::FallThrough, SyntaxVerdict::Follow)
+                    }
+                    Some(occs) => match (sa.ordinal, sa.count) {
+                        // The validated-ordinal record (stage-2b): follow
+                        // the captured occurrence ONLY while the sibling set
+                        // is unchanged.
+                        (Some(ordinal), Some(count))
+                            if occs.len() == count && ordinal < occs.len() => {
+                            SyntaxVerdict::Follow(occs[ordinal])
+                        }
+                        (Some(_), Some(_)) => SyntaxVerdict::OrphanOnShift,
+                        // A legacy scoped record (no ordinal keys): the
+                        // len==1 rule, exactly as before stage-2b.
+                        _ => {
+                            if occs.len() == 1 {
+                                SyntaxVerdict::Follow(occs[0])
+                            } else {
+                                SyntaxVerdict::FallThrough
+                            }
+                        }
+                    },
+                }
+            }
+            // A top-level / legacy record: the scope-blind `(kind, name)`
+            // uniqueness rule, exactly as before (its captured ordinal keys
+            // the EMPTY scope's group, not the file-wide one — using it
+            // here would under-count, so the rule stays scope-blind).
+            None => {
+                by_name_unique().map_or(SyntaxVerdict::FallThrough, SyntaxVerdict::Follow)
+            }
+        }
     }
 
     /// Re-anchor every open file buffer's annotations (the "on load"
@@ -744,6 +843,16 @@ impl AppStore {
                 // (an empty scope): it stores the scope-blind identity,
                 // exactly the legacy shape. A scoped symbol stores the chain.
                 scope: if info.scope.is_empty() { None } else { Some(info.scope) },
+                // issue-annotation-stage-2b: the validated-ordinal pair —
+                // the occurrence's position among its same-key siblings AND
+                // the sibling-set size at capture. The re-anchor follows the
+                // ordinal only while the size is unchanged (a shift orphans
+                // rather than migrates — the raw ordinal is never used
+                // alone). Stored even for top-level records (where the
+                // scope-blind rule ignores them) — the capture is one
+                // shape, and the data is true.
+                ordinal: Some(info.ordinal),
+                count: Some(info.count),
             },
             col,
         ))

@@ -1978,6 +1978,8 @@ mod tests {
                 kind: "type_identifier".to_string(),
                 name: "sym".to_string(),
                 scope: None,
+                ordinal: None,
+                count: None,
             }),
             ..Default::default()
         }

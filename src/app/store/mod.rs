@@ -1165,13 +1165,47 @@ pub struct SyntaxAnchor {
     ///
     /// `None` for LEGACY records (no `syntax_scope` keys) AND for a top-level
     /// symbol (no enclosing definition to key on) — both ride the scope-blind
-    /// `(kind, name)` uniqueness rule exactly as before. Same-scope name
-    /// repeats are deliberately treated as AMBIGUOUS (the text rules run,
-    /// then `orphaned`) rather than tracked by an ordinal: an ordinal is
-    /// unstable under edits (adding/removing a sibling shifts it), so an
-    /// ordinal tie would migrate a note to a sibling — a wrong tie, which is
-    /// worse than no tie.
+    /// `(kind, name)` uniqueness rule exactly as before.
     pub scope: Option<Vec<String>>,
+    /// The occurrence's position (0-based, document order) among every node
+    /// of the same (kind, name, scope) at capture
+    /// (issue-annotation-stage-2b). The re-anchor keys on it ONLY together
+    /// with [`SyntaxAnchor::count`] — the sibling-set size must be unchanged
+    /// at re-anchor (a shift — a same-scope sibling added or removed —
+    /// orphans the note at its unchanged line rather than migrating it to a
+    /// sibling, which is the raw ordinal's failure mode and why it is never
+    /// used alone). `None` for legacy records and hand-edited records that
+    /// carry no `syntax_ordinal` key: those ride the len==1 rule exactly as
+    /// before (a half pair — ordinal without count, or vice versa — is
+    /// treated as absent, never half-fired).
+    pub ordinal: Option<usize>,
+    /// The sibling-set size at capture: the TOTAL number of nodes of the
+    /// same (kind, name, scope) in the buffer (this occurrence included).
+    /// The re-anchor's size invariant (issue-annotation-stage-2b): a note
+    /// follows its captured occurrence while this count is unchanged, and
+    /// orphans — never migrates — when a shift has changed it. Pairs with
+    /// [`SyntaxAnchor::ordinal`] (both keys present or neither is used).
+    pub count: Option<usize>,
+}
+
+/// The syntax re-anchor's verdict for one record
+/// (issue-annotation-stage-2b — the validated-ordinal rule lives on it,
+/// see `AppStore::syntax_reanchor`):
+///
+/// - `Follow(occ)`: the record's symbol identity resolves to exactly one
+///   occurrence — re-anchor there (line + start column, orphan clears).
+/// - `OrphanOnShift`: a VALIDATED-ORDINAL record's sibling-set size changed
+///   since capture (or the captured ordinal no longer fits the group): a
+///   shift — orphan at the record's UNCHANGED line and skip the text rules
+///   (they would re-tie the note to a same-text sibling line — the silent
+///   migration the raw ordinal is unsafe for).
+/// - `FallThrough`: no syntax verdict — the text rules run, exactly as
+///   before stage-2b.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyntaxVerdict {
+    Follow(redline_syntax::node::SymbolOccurrence),
+    OrphanOnShift,
+    FallThrough,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

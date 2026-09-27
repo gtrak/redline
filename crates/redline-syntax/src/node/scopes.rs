@@ -9,7 +9,15 @@ use crate::registry::LanguageId;
 /// Walk ancestors of `leaf` and capture each enclosing scope item's name
 /// child, outermost → innermost. Scope items: `mod_item`, `impl_item`
 /// (name child in the `type` field), `trait_item`, `function_item` (name
-/// child in the `name` field). Blocks, loops, and closures are
+/// child in the `name` field), and — issue-annotation-stage-2b addendum —
+/// `struct_item` / `enum_item` / `enum_variant` / `struct_variant` (name
+/// child in the `name` field, probe-verified against the pinned
+/// tree-sitter-rust 0.24.2: a struct body and an enum variant body were
+/// invisible to the walk, so a field's type identity carried NO struct
+/// name and every common type (`String`, `Vec`, …) collided with itself
+/// across fields). With the bodies as scope elements, `(type_identifier,
+/// "String", ["A"])` disambiguates fields of different structs, the way
+/// impls and functions already do. Blocks, loops, and closures are
 /// intentionally not scope items — keep it simple and honest; an empty vec
 /// is the valid answer for top-level code.
 fn rust_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
@@ -17,7 +25,8 @@ fn rust_scope_path(leaf: Node, source: &[u8]) -> Vec<String> {
     let mut cur = Some(leaf);
     while let Some(node) = cur {
         let field = match node.kind() {
-            "mod_item" | "trait_item" | "function_item" | "function_signature_item" => {
+            "mod_item" | "trait_item" | "function_item" | "function_signature_item"
+            | "struct_item" | "enum_item" | "enum_variant" | "struct_variant" => {
                 Some("name")
             }
             // `impl Foo` / `impl Trait for Foo` put the self type in `type`.
