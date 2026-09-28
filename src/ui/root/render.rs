@@ -16,6 +16,7 @@ use crate::ui::blame_view::BlameView;
 use crate::ui::commit_editor::CommitEditorView;
 use crate::ui::file_view::FileView;
 use crate::ui::home_view::HomeView;
+use crate::ui::isearch_list::IsearchList;
 use crate::ui::log_view::LogView;
 use crate::ui::magit_status::MagitStatusView;
 use crate::ui::picker::Picker;
@@ -163,6 +164,28 @@ pub(super) fn render_frame(
                                 candidates: snap.candidates.clone(),
                                 total: snap.total,
                                 preview: snap.preview,
+                                viewport: snap.file_view_viewport_lines as u32,
+                            )
+                        })
+                    } else {
+                        None
+                    })
+                    // plan 018 issue 02: the isearch list — an overlay in
+                    // place of the buffer content (the picker-overlay
+                    // precedent, NOT a new ViewId: isearch keeps living
+                    // inside the Buffer-view modal). Rendered only while
+                    // the session is active AND the result set is
+                    // non-empty — an empty query or a no-match query has
+                    // no rows, so the list disappears with the result
+                    // set (and with the session on C-g/RET). The buffer
+                    // view behind keeps its own scroll (the store's
+                    // `isearch_jump_to_current`) and its match
+                    // highlights (`match_context`).
+                    #(if snap.isearch_active && !snap.isearch_rows.is_empty() {
+                        Some(element! {
+                            IsearchList(
+                                rows: snap.isearch_rows.clone(),
+                                selected: snap.isearch_selected,
                                 viewport: snap.file_view_viewport_lines as u32,
                             )
                         })

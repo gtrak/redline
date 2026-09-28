@@ -326,6 +326,17 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       works; on `*scratch*` does not crash (known edge).
 - [ ] **U-E7 Rapid re-search**: start search, immediately start another —
       old job cancelled, no interleaved results, generation semantics hold.
+- [ ] **U-E8 Isearch list (018-02)**: `C-s`/`C-r` renders the buffer's live
+      match rows as a list (line number + line text + the match's column)
+      in place of the buffer content; typing narrows it (the query IS the
+      search — the list is its result set in search order); C-s/C-r move
+      the selection and the highlight band follows behind the list; RET
+      confirms the SELECTED match (lands on its column — multibyte); C-g
+      restores the pre-search line AND column and the highlight vanishes.
+      PTY drive: `tools/drive_isearch_list.py`. Store pins: the
+      `isearch_list_*` / `isearch_recompute_rederives_*` / 
+      `isearch_ret_lands_on_the_selected_*` twins in
+      `src/app/store/tests/search.rs`.
 
 ## U-F · Git surface
 

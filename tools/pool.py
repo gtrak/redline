@@ -78,6 +78,7 @@ BATTERY = [
     "drive_issue_011_04.py", "drive_issue_011_05.py", "drive_issue_011_06.py",
     "drive_issue_017_f2.py",
     "drive_log.py", "drive_tree.py", "drive_search.py", "drive_magit.py",
+    "drive_isearch_list.py",
     "sweep_flows.py",
 ]
 

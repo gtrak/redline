@@ -860,6 +860,312 @@ use super::*;
             "C-r must move the match position");
     }
 
+    // ── plan 018 issue 02: the isearch list (helm-occur shape) ─────────
+
+    /// The list rows are 1:1 with the match set, in search order: each row
+    /// carries the match's line number (0-based), the line's text (the row's
+    /// display projection), and the match's CHAR column (not byte, not
+    /// display cell — the point's `col` unit; on "café omega" the 'o' of
+    /// "omega" is CHAR 5, byte 6). A forward search lists ascending, a
+    /// backward one descending (search order IS list order — FilterOnly,
+    /// no re-ranking).
+    #[test]
+    fn isearch_list_rows_follow_the_matches_in_search_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "café omega\nalpha\ncafé omyga\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+
+        // Forward: the rows run ascending (line 0 before line 2).
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o');
+        s.isearch_query_char('m');
+        assert_eq!(s.isearch.matches.len(), 2, "one match per line");
+        assert_eq!(
+            s.isearch.rows,
+            vec![
+                crate::app::store::IsearchMatchRow {
+                    line_no: 0,
+                    line_text: "café omega".to_string(),
+                    match_col: 5, // char index, not byte 6 (the é is 2 bytes)
+                },
+                crate::app::store::IsearchMatchRow {
+                    line_no: 2,
+                    line_text: "café omyga".to_string(),
+                    match_col: 5,
+                },
+            ],
+            "forward search order IS the list order"
+        );
+        s.isearch_cancel();
+
+        // Backward: the same rows, reversed (the search runs backward from
+        // the pre-search point, so the farthest match leads the list).
+        s.isearch_start(IsearchDirection::Backward);
+        s.isearch_query_char('o');
+        s.isearch_query_char('m');
+        assert_eq!(
+            s.isearch.rows,
+            vec![
+                crate::app::store::IsearchMatchRow {
+                    line_no: 2,
+                    line_text: "café omyga".to_string(),
+                    match_col: 5,
+                },
+                crate::app::store::IsearchMatchRow {
+                    line_no: 0,
+                    line_text: "café omega".to_string(),
+                    match_col: 5,
+                },
+            ],
+            "backward search order IS the list order (reversed matches)"
+        );
+        // The selection indexes both lists: row[current] is the match
+        // the point sits on.
+        let sel = s.isearch.current;
+        assert_eq!(s.isearch.rows[sel].line_no, s.point_line());
+    }
+
+    /// On every recompute the selection RE-DERIVES to the first match in
+    /// the search direction from the point (today's `isearch_recompute`
+    /// rule, `search.rs` — the session's "re-derive" policy; for a fresh
+    /// query the point is the pre-search point, so this IS the
+    /// first-in-direction-from-the-pre-search-point rule). It does NOT keep
+    /// the old index across recomputes — the picker's clamp is the wrong
+    /// rule here. The discriminating step places the selection AWAY from
+    /// the point (an index the point's re-derivation does not pick), then
+    /// extends the query: a "keep old index" mutation reddens this, the
+    /// re-derive rule lands the point's own match line.
+    #[test]
+    fn isearch_recompute_rederives_forward_selection_from_pre_search_point() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // Four "aa" lines with a no-hit line at 1: the pre-search point
+        // sits BETWEEN the first and last match lines, so the fresh
+        // query's first-in-direction match is not the first or last row.
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "aa zero\nno hit\naa two\naa three\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.set_point(1, 0, 0); // pre-search point: line 1 (the no-hit line)
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('a'); // 6 matches: 2 on each of lines 0, 2, 3
+        assert_eq!(s.isearch.matches.len(), 6);
+        // Fresh query: the first match in the search direction from the
+        // pre-search point — line 2's first 'a' (index 2), NOT the list's
+        // head (line 0) and not the tail.
+        assert_eq!(s.isearch.current, 2, "fresh query: first-in-direction from the pre-search point");
+        assert_eq!(s.point_line(), 2, "the buffer view follows the fresh selection");
+        // Walk the selection to the LAST match (line 3's second 'a'); the
+        // point follows to line 3.
+        for _ in 0..3 {
+            s.isearch_next();
+        }
+        assert_eq!(s.isearch.current, 5, "C-s moved the selection to the end");
+        assert_eq!(s.point_line(), 3);
+        // The discriminating step: place the selection on the FIRST match
+        // (line 0) while the point stays on line 3 — a state the recompute
+        // must re-derive out of, because the point, not the old index,
+        // drives the rule.
+        s.isearch.current = 0;
+        // Extend the query: "aa" narrows to 3 matches (one per "aa" line).
+        s.isearch_query_char('a');
+        assert_eq!(s.isearch.matches.len(), 3);
+        assert_eq!(
+            s.isearch.current,
+            2,
+            "the selection re-derives to the point's own match (line 3) — it does not keep the old index (line 0)"
+        );
+        assert_eq!(s.point_line(), 3, "the buffer view follows the re-derived selection");
+    }
+
+    /// The backward mirror: the selection re-derives to the
+    /// backward-direction match at or before the point on every recompute
+    /// (today's `isearch_recompute` rule — the re-derive policy, not the
+    /// picker's clamp). A "keep old index" mutation reddens this: the
+    /// discriminating step places the selection past the point, then the
+    /// extension must re-derive to the point's own match, not clamp.
+    #[test]
+    fn isearch_recompute_rederives_backward_selection_from_pre_search_point() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        // "aa" lines at 0 and 1 (before the point) and at 3 (after it);
+        // the pre-search point is line 2.
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "aa zero\naa one\nno hit\naa two\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.set_point(2, 0, 0); // pre-search point: line 2
+        s.isearch_start(IsearchDirection::Backward);
+        s.isearch_query_char('a'); // matches on lines 0, 1, 3
+        // Fresh backward query: the FAR-EST match at or before the point —
+        // line 0's earliest 'a' (the tail of the reversed match list).
+        assert_eq!(s.isearch.matches.len(), 6);
+        assert_eq!(
+            s.isearch.rows[s.isearch.current].line_no,
+            0,
+            "fresh backward query selects the farthest-back match at or before the point"
+        );
+        // C-r moves the selection through the list (toward the point):
+        // line 1's first match; the point follows.
+        for _ in 0..3 {
+            s.isearch_prev();
+        }
+        assert_eq!(
+            s.isearch.rows[s.isearch.current].line_no,
+            1,
+            "C-r moved the selection through the list (to line 1)"
+        );
+        assert_eq!(s.point_line(), 1);
+        // The discriminating step: place the selection PAST the point
+        // (line 3's first match) while the point stays on line 1 — the
+        // recompute must re-derive out of it from the point, not keep it.
+        s.isearch.current = 0;
+        // Extend the query: "aa" narrows to 3 matches (lines 0, 1, 3).
+        s.isearch_query_char('a');
+        assert_eq!(s.isearch.matches.len(), 3);
+        assert_eq!(
+            s.isearch.rows[s.isearch.current].line_no,
+            0,
+            "the selection re-derives to the backward match at or before the point (line 0) — it does not keep the old index (line 3)"
+        );
+        assert_eq!(s.point_line(), 0, "the buffer view follows the re-derived selection");
+    }
+
+    /// RET confirms the SELECTED match (the list's selection, moved by
+    /// C-s) and the point lands ON the match's column — pinned on a
+    /// multibyte line: in "café omyga" the 'o' of "omyga" is at BYTE 6
+    /// (the é is 2 bytes) but CHAR 5; a byte-based landing would put the
+    /// point at col 6 (the 'm'), the issue-isearch-column class.
+    #[test]
+    fn isearch_ret_lands_on_the_selected_multibyte_match_column() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/t.rs"),
+            "café omega\ncafé omyga\n",
+        )
+        .unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o');
+        s.isearch_query_char('m');
+        assert_eq!(s.isearch.matches.len(), 2);
+        // The fresh selection is the first match (line 0); C-s moves the
+        // list's selection to the SECOND match (line 1).
+        assert_eq!(s.isearch.current, 0);
+        s.isearch_next();
+        assert_eq!(s.isearch.current, 1, "C-s selects the second match in the list");
+        s.isearch_confirm();
+        assert!(!s.isearch.active);
+        assert_eq!(s.point_line(), 1, "RET lands the point on the SELECTED match's line");
+        assert_eq!(
+            s.point_col(),
+            5,
+            "the match's CHAR column — not byte 6 (the multibyte é before it)"
+        );
+        assert_eq!(
+            s.file_point().goal_col,
+            5,
+            "the landing column becomes the goal column"
+        );
+    }
+
+    /// Backspacing the query to empty clears the LIST (the rows go with
+    /// the result set) and keeps the empty-query echo byte-for-byte (the
+    /// existing `I-search: ` prompt — this surface keeps its prompt in
+    /// the minibuffer); a no-match query keeps the `[no matches]` echo
+    /// byte-for-byte with an empty list.
+    #[test]
+    fn isearch_backspace_to_empty_clears_the_list_and_keeps_the_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "foo a\nfoo b\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch.rows.len(), 2, "two matches: the list has two rows");
+        assert_eq!(s.message, "I-search: fo [1/2]");
+        s.isearch_backspace();
+        assert_eq!(s.isearch.rows.len(), 2, "one match per line survives 'f'");
+        assert_eq!(s.message, "I-search: f [1/2]");
+        s.isearch_backspace();
+        assert!(s.isearch.matches.is_empty(), "the empty query has no matches");
+        assert!(s.isearch.rows.is_empty(), "the list disappears with the result set");
+        assert_eq!(s.isearch.current, 0);
+        assert_eq!(s.message, "I-search: ", "the empty-query echo, byte-for-byte");
+        // A no-match query: the echo keeps its `[no matches]` shape and the
+        // list stays empty.
+        s.isearch_query_char('q');
+        assert!(s.isearch.matches.is_empty());
+        assert!(s.isearch.rows.is_empty(), "a no-match query has no list");
+        assert_eq!(s.message, "I-search: q [no matches]");
+        s.isearch_backspace();
+        assert_eq!(s.message, "I-search: ", "back to the empty echo, byte-for-byte");
+    }
+
+    /// C-g makes the list disappear with the session (the rows and the
+    /// match set both clear; the pre-search line AND column restore and
+    /// the highlight-lifetime rule are pinned by the existing isearch
+    /// cancel pins, unmodified).
+    #[test]
+    fn isearch_cancel_disappears_the_list_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "foo a\nfoo b\nfoo c\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch.rows.len(), 3, "the list is live");
+        s.isearch_cancel();
+        assert!(!s.isearch.active);
+        assert!(s.isearch.matches.is_empty());
+        assert!(s.isearch.rows.is_empty(), "the list disappears with the session");
+        assert!(s.isearch.query.is_empty());
+        assert_eq!(s.message, "cancel");
+        // Confirm (RET) likewise leaves no list behind: the overlay
+        // renders only while active.
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert_eq!(s.isearch.rows.len(), 3);
+        s.isearch_confirm();
+        assert!(!s.isearch.active);
+        let (_, _, session_live) = s.isearch_list();
+        assert!(
+            !session_live,
+            "the accessor reports the session closed — the overlay does not render"
+        );
+    }
+
 
     // ── issue match-highlight: the store's match context ─────────────
 

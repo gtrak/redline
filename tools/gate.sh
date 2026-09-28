@@ -176,6 +176,14 @@ SHARED_SUITES=(
   drive_search.py     # search results view (search.selected): exactly ONE
                      # blue hit row at every n/p step; exits non-zero if the
                      # search never finishes (no match count).
+  drive_isearch_list.py # plan 018 issue 02: isearch as a list (helm-occur
+                     # shape): C-s opens the match rows (line number + line
+                     # text + the match's column) in place of the buffer
+                     # content, typing narrows (the query IS the search),
+                     # C-s/C-r move the selection (the highlight band follows
+                     # behind the list), RET confirms the SELECTED match's
+                     # column (CUP, multibyte fixture), and C-g restores the
+                     # pre-search line AND column with the highlight gone.
   drive_magit.py      # magit status view cursor trajectory: exactly ONE
                      # full-bar blue row per step; n/p advance/retreat the
                      # cursor one row through the sections.

@@ -8,7 +8,7 @@ use iocraft::hooks::State;
 
 use crate::app::store::AppStore;
 use crate::app::store::jump_highlight_intensity;
-use crate::app::store::{BufferRow, DirtyCounts, FileViewRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
+use crate::app::store::{BufferRow, DirtyCounts, FileViewRow, IsearchMatchRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
 use crate::model::sections::MagitRow;
 /// One render's worth of store state, extracted as owned values so the
 /// `Mutex` guard can be dropped before the element tree is built.
@@ -103,6 +103,13 @@ pub(super) struct Snapshot {
     pub(super) search_running: bool,
     pub(super) search_error: Option<String>,
     pub(super) searching: String,
+    // plan 018 issue 02: the isearch list overlay (the match rows in
+    // search order + the selection; rendered in place of the buffer
+    // content while isearch is active — the picker-overlay precedent, NOT
+    // a new ViewId).
+    pub(super) isearch_active: bool,
+    pub(super) isearch_rows: Vec<IsearchMatchRow>,
+    pub(super) isearch_selected: usize,
     // Plan 004 row 11: file-view position display (Top/Bot/L{n},{pct}%).
     pub(super) position: String,
     // plan 005 issue 02: the current file's annotation count ("1 note" /
@@ -132,6 +139,10 @@ pub(super) fn build(
     let (search_rows, search_top_row, search_total_rows, search_selected_row) =
         s.search_view_info();
     let (magit_rows, magit_top_row, magit_total_rows) = s.magit_view_info();
+    // plan 018 issue 02: the isearch list overlay's state (rows in search
+    // order + the selection + activity) — one read, owned out with the
+    // snapshot like every other list surface.
+    let (isearch_rows, isearch_selected, isearch_active) = s.isearch_list();
     // Issue 003-02 shared windowing: the log / blame / commit-diff panes
     // render their pre-computed visible window (the store keeps the
     // cursor row in view; paging resets the log window).
@@ -234,6 +245,9 @@ pub(super) fn build(
         search_running: s.search_running(),
         search_error: s.search_error(),
         searching: s.search_display(),
+        isearch_active,
+        isearch_rows,
+        isearch_selected,
         position: s.file_view_position_display(),
         annotations: s.annotation_count_display(),
         region_lines: s.region_line_range(),

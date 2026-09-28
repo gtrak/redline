@@ -19,6 +19,7 @@ impl AppStore {
             direction,
             matches: Vec::new(),
             current: 0,
+            rows: Vec::new(),
             pre_search_line: self.point_line(),
             // A CHAR column (point_col's unit, consumed directly by
             // set_point) — NOT a byte: a byte stored here would land
@@ -51,6 +52,9 @@ impl AppStore {
         if query.is_empty() {
             self.isearch.matches.clear();
             self.isearch.current = 0;
+            // 018-02: the list disappears with the result set — an empty
+            // query has no matches, so it has no rows.
+            self.isearch.rows.clear();
             self.minibuffer_message("I-search: ");
             return;
         }
@@ -61,6 +65,11 @@ impl AppStore {
             .map(|b| b.text())
             .unwrap_or_default();
         self.isearch.matches = Self::find_all_matches(&text, &query, self.isearch.direction);
+        // 018-02: the list is the search's result set — re-derive its rows
+        // (line number + line text + the match's column) on every
+        // recompute, in search order (FilterOnly: the match order IS the
+        // search; nothing is re-ranked).
+        self.isearch_derive_rows();
         if self.isearch.matches.is_empty() {            self.isearch.current = 0;
             self.minibuffer_message(&format!("I-search: {query} [no matches]"));
         } else {
@@ -98,6 +107,45 @@ impl AppStore {
         // (the current one prominently) — sync the context with the live
         // state on every query change (cleared on no matches).
         self.isearch_sync_match_context();
+    }
+
+    /// 018-02: re-derive the list rows from `matches` — one row per match,
+    /// in search order (`line_no`, the line's text as the display
+    /// projection, the match's CHAR column via `try_byte_to_line_col` —
+    /// the RET landing's unit). `matches` are byte offsets into the very
+    /// buffer text they were found in, so every offset converts: the rows
+    /// stay 1:1 with `matches` (the selection `current` indexes both).
+    fn isearch_derive_rows(&mut self) {
+        let Some(buffer) = self.buffers.current_buffer() else {
+            self.isearch.rows.clear();
+            return;
+        };
+        let mut rows = Vec::with_capacity(self.isearch.matches.len());
+        for &match_byte in &self.isearch.matches {
+            if let Some((line, col)) = buffer.try_byte_to_line_col(match_byte) {
+                let text = buffer.line_text(line).unwrap_or_default();
+                rows.push(IsearchMatchRow {
+                    line_no: line,
+                    line_text: text.into_owned(),
+                    match_col: col,
+                });
+            }
+        }
+        self.isearch.rows = rows;
+    }
+
+    /// 018-02: the isearch list for the overlay (the store owns the
+    /// recompute — plan 018 §5.1 — the renderer only draws): the rows in
+    /// search order, the selection (index into the rows, `current`), and
+    /// whether the session is active. The overlay renders only while
+    /// active AND non-empty: an empty query or a no-match query clears the
+    /// rows, so the list disappears with the result set.
+    pub fn isearch_list(&self) -> (Vec<IsearchMatchRow>, usize, bool) {
+        (
+            self.isearch.rows.clone(),
+            self.isearch.current,
+            self.isearch.active,
+        )
     }
 
     /// Navigate to the next match (C-s) with wrap-around.
@@ -225,6 +273,8 @@ impl AppStore {
         self.isearch.active = false;
         self.isearch.matches.clear();
         self.isearch.query.clear();
+        // 018-02: the list disappears with the session.
+        self.isearch.rows.clear();
         self.match_context = MatchContext::default();
         self.set_point(
             self.isearch.pre_search_line,

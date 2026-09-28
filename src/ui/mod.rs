@@ -8,6 +8,7 @@ pub mod commit_editor;
 pub mod diff_view;
 pub mod file_view;
 pub mod home_view;
+pub mod isearch_list;
 pub mod log_view;
 pub mod magit_status;
 pub mod picker;

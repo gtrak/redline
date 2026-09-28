@@ -1541,6 +1541,27 @@ pub fn jump_highlight_intensity(elapsed: std::time::Duration, truecolor: bool) -
     }
 }
 
+/// One row of the isearch list (plan 018 issue 02 — helm-occur shape):
+/// the match's line, the line's text, and the match's column within it.
+/// The list is 1:1 with `IsearchState.matches` (one row per match, in
+/// search order) — the search order IS the list order (FilterOnly, no
+/// reordering; the literal `find_all_matches` is the search).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsearchMatchRow {
+    /// The buffer line (0-based) carrying the match.
+    pub line_no: usize,
+    /// The line's text — the row's display projection (what a deferred
+    /// second, in-list filter dimension would score — plan 018 §3 names
+    /// it; the v1 list has no such dimension, the search itself IS the
+    /// filter).
+    pub line_text: String,
+    /// The match's CHAR column within the line — `try_byte_to_line_col`
+    ///'s unit, the point's `col` unit (the RET landing reuses it; a byte
+    /// or display cell stored here would land off-by-N on a multibyte
+    /// line, the issue-isearch-column class).
+    pub match_col: usize,
+}
+
 /// Incremental in-buffer search state. The store owns this; the UI
 /// only renders it (query, match count, current position).
 #[derive(Debug)]
@@ -1550,8 +1571,15 @@ pub struct IsearchState {
     pub direction: IsearchDirection,
     /// All match byte offsets in the current buffer (in search order).
     pub matches: Vec<usize>,
-    /// Index into `matches` of the current match.
+    /// Index into `matches` of the current match (the list's selection —
+    /// `rows` is 1:1 with `matches`, so it indexes both).
     pub current: usize,
+    /// The isearch list rows (plan 018 issue 02): one row per match in
+    /// `matches`, in search order, re-derived on every recompute. The
+    /// overlay (`src/ui/isearch_list.rs`) renders it in place of the
+    /// buffer content while `active`; an empty query or a no-match query
+    /// leaves it empty (the list disappears with the result set).
+    pub rows: Vec<IsearchMatchRow>,
     /// The line to restore to when isearch exits without a confirmed
     /// match (C-g cancel).
     pub pre_search_line: usize,
@@ -1569,6 +1597,7 @@ impl Default for IsearchState {
             direction: IsearchDirection::Forward,
             matches: Vec::new(),
             current: 0,
+            rows: Vec::new(),
             pre_search_line: 0,
             pre_search_col: 0,
         }
