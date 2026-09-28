@@ -1097,6 +1097,40 @@ use super::*;
     /// the minibuffer); a no-match query keeps the `[no matches]` echo
     /// byte-for-byte with an empty list.
     #[test]
+    /// 018-02 measured-but-not-fixed: `isearch_recompute`'s EMPTY-query early
+    /// return skipped `isearch_sync_match_context()`, so backspacing a query to
+    /// empty left the previous query's highlight painted on the buffer — a
+    /// highlight for text that is no longer being searched. The existing
+    /// backspace-to-empty pin asserts the rows/matches/echo and never looked at
+    /// `match_context`, which is why this survived.
+    #[test]
+    fn isearch_backspace_to_empty_clears_the_match_highlight() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "foo a\nfoo b\n").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert!(
+            !s.match_context.ranges.is_empty(),
+            "precondition: a live query paints the match highlight"
+        );
+        assert_eq!(s.match_context.query, "fo");
+        s.isearch_backspace();
+        s.isearch_backspace();
+        assert!(s.isearch.matches.is_empty(), "the empty query has no matches");
+        assert!(
+            s.match_context.ranges.is_empty() && s.match_context.query.is_empty(),
+            "the highlight must NOT survive the empty query (a stale paint for text that is no longer searched); got query={:?} ranges={:?}",
+            s.match_context.query,
+            s.match_context.ranges
+        );
+    }
+
     fn isearch_backspace_to_empty_clears_the_list_and_keeps_the_echo() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();

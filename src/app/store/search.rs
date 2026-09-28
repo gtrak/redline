@@ -55,6 +55,16 @@ impl AppStore {
             // 018-02: the list disappears with the result set — an empty
             // query has no matches, so it has no rows.
             self.isearch.rows.clear();
+            // Clear the highlight too: it is derived state, and this early
+            // return used to skip the `isearch_sync_match_context()` call at
+            // the end of the non-empty path, so backspacing to empty left the
+            // PREVIOUS query's ranges painted (measured: query "fo" -> "f" ->
+            // "", `match_context` still held query="f" with its ranges — a
+            // highlight for text no longer being searched). The other routes
+            // out (C-g cancel, a confirmed match, isearch exit) already clear
+            // it; this is the one path that reached the empty state without
+            // passing through them.
+            self.match_context = MatchContext::default();
             self.minibuffer_message("I-search: ");
             return;
         }
