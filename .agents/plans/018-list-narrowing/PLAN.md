@@ -472,8 +472,22 @@ Reasons (not "either is fine"):
 
 ### Success criteria (plan level)
 
-- ONE store-side narrowing core; the picker's 13 kinds, isearch, the results
-  view, and the buffer list all recompute through it (cross-checked, §5.5).
+- ONE store-side narrowing core (§5.5), **with isearch as a measured, argued
+  exception rather than a silent one.** The picker's 13 kinds, the buffer list
+  and the results view recompute through it; **isearch does NOT** — it keeps
+  `find_all_matches` (a literal byte search), because `narrow` is a nucleo
+  score-and-REORDER over display strings and (i) isearch rows are a literal
+  byte-search result where several rows can share one line's text, so scoring
+  cannot recover row identity, and (ii) reordering would violate "match order
+  IS the search". Isearch takes the seam's *shape* (source-ordered rows + one
+  selection index + a display projection per row). **CORRECTED 2026-09-28**:
+  this criterion originally read "13 kinds, isearch, the results view, and the
+  buffer list all recompute through it", which was FALSE once 018-02 landed
+  the mismatch finding — a criterion that cannot be met must be corrected, not
+  quietly ticked. When 018-05 writes the inventory cross-check, isearch's row
+  must be `narrows=true, mechanism=own (literal search)`, and the test must
+  describe it that way rather than asserting a shared-core path it does not
+  have.
 - Isearch is a browsable, live list with today's confirm/cancel/highlight/
   restore semantics intact (each pinned; §3).
 - Results and buffer lists narrow at a keys-leading one-row prompt; RET/n/p
