@@ -2,9 +2,9 @@
 //! (issue 08); the UI and store consume the plain `LogEntry` / `CommitDiff`
 //! structs returned here.
 
-use crate::git::diff::extract_commit;
-use crate::git::error::GitError;
-use crate::git::repo::GitRepo;
+use crate::diff::extract_commit;
+use crate::error::GitError;
+use crate::repo::GitRepo;
 
 /// One line of a magit-style log: short hash, subject, author, and a
 /// relative age. `time` is the committer unix time (seconds); `date` is a
@@ -26,7 +26,7 @@ pub struct CommitDiff {
     pub subject: String,
     pub insertions: u32,
     pub deletions: u32,
-    pub files: Vec<crate::git::diff::FileDiff>,
+    pub files: Vec<crate::diff::FileDiff>,
 }
 
 impl GitRepo {
@@ -171,13 +171,13 @@ mod tests {
     use std::path::Path;
 
     /// The standard fixture identity ("Test"/"test@example.com"); the
-    /// hermetic env block lives once in `crate::test_support`.
+    /// hermetic env block lives once in `redline_testutil`.
     fn git(dir: &Path, args: &[&str]) -> String {
-        crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com")
     }
 
     fn init_repo(dir: &Path) -> GitRepo {
-        crate::test_support::git_repo_init(dir, "Test", "test@example.com", true);
+        redline_testutil::git_repo_init(dir, "Test", "test@example.com", true);
         GitRepo::discover(dir).expect("discover the repo")
     }
 

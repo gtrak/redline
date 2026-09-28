@@ -10,7 +10,6 @@
 //! iocraft components; this file only starts/stops the render loop.
 
 mod app;
-mod git;
 mod index_profile;
 mod model;
 mod nav;
@@ -30,9 +29,13 @@ pub(crate) mod test_support;
 /// mutates process state, and other threads reading env vars
 /// concurrently is UB per the Rust docs (any variable — a reader of
 /// `COLORTERM` races a writer of `HOME`) — so env-mutating tests
-/// serialize on this shared crate-level mutex (separate per-module
-/// locks would not exclude each other). Users: `git::commit`'s
-/// `EnvScope` (+ its tests' per-body `TZ`/`GIT_AUTHOR_*` pins),
+/// serialize on this shared test-util mutex (separate per-module
+/// locks would not exclude each other). The definition moved to
+/// `redline-testutil` (plan 014 stage 2) when `redline_git`'s
+/// `commit.rs` `EnvScope` tests left the bin: re-exported here so
+/// every `crate::ENV_LOCK` call site keeps compiling. Users:
+/// `redline_git` `commit.rs`'s `EnvScope` (+ its tests' per-body
+/// `TZ`/`GIT_AUTHOR_*` pins),
 /// `model::files`'s `EnvGuard` (+ `model::project`'s usage), and the
 /// `ui::file_view` tint tests' `COLORTERM` pins. Known residual (P1
 /// finding, issue-guardrails): the `app::store` fetch tests read/mutate
@@ -42,7 +45,7 @@ pub(crate) mod test_support;
 /// was not. The recommendation below is therefore already done.
 /// this lock (issue-git-test-harness lane owns that file).
 #[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use redline_testutil::ENV_LOCK;
 
 use app::config;
 use app::store::AppStore;

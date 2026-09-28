@@ -581,8 +581,8 @@ impl AppStore {
                 });
                 for l in &h.lines {
                     let role = match l.origin {
-                        crate::git::diff::DiffOrigin::Addition => RowRole::DiffAdd,
-                        crate::git::diff::DiffOrigin::Deletion => RowRole::DiffDelete,
+                        redline_git::diff::DiffOrigin::Addition => RowRole::DiffAdd,
+                        redline_git::diff::DiffOrigin::Deletion => RowRole::DiffDelete,
                         _ => RowRole::DiffContext,
                     };
                     rows.push(MagitRow {

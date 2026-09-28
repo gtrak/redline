@@ -1,25 +1,25 @@
 use super::*;
 use crate::app::keymap::parse_key;
-use crate::git::blame::BlameLine;
-use crate::git::log::LogEntry;
+use redline_git::blame::BlameLine;
+use redline_git::log::LogEntry;
 
     /// Shared git CLI for the store tests — delegates to
-    /// `crate::test_support::git_cli` (the single implementation; the
+    /// `redline_testutil::git_cli` (the single implementation; the
     /// hermetic env block is stated there, once). The author identity is
     /// parameterized: the standard fixture is "Test"/"test@example.com"; the
     /// magit windowing test historically used the short "T"/"t@e.com" (it only
     /// sets commit metadata, so it is kept verbatim rather than collapsed), and
     /// the windowing fixture the mixed "Test"/"t@e.com".
     fn git_cli(dir: &std::path::Path, args: &[&str], name: &str, email: &str) {
-        crate::test_support::git_cli(dir, args, name, email);
+        redline_testutil::git_cli(dir, args, name, email);
     }
 
     /// Shared repo-priming sequence (delegates to
-    /// `crate::test_support::git_repo_init`). `gpgsign_false` mirrors which
+    /// `redline_testutil::git_repo_init`). `gpgsign_false` mirrors which
     /// tests configured `commit.gpgsign` — the magit windowing test never did,
     /// so it stays honest to its original body.
     fn git_repo_init(dir: &std::path::Path, name: &str, email: &str, gpgsign_false: bool) {
-        crate::test_support::git_repo_init(dir, name, email, gpgsign_false);
+        redline_testutil::git_repo_init(dir, name, email, gpgsign_false);
     }
 
     /// A store rooted in `dir` as the project start, with persistence

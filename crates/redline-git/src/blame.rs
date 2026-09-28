@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use crate::git::error::GitError;
-use crate::git::repo::GitRepo;
+use crate::error::GitError;
+use crate::repo::GitRepo;
 
 /// One blamed line: its (1-based) number, the commit that last touched it,
 /// the author, the committer time, and the line text.
@@ -79,13 +79,13 @@ mod tests {
     use super::*;
 
     /// The standard fixture identity ("Test"/"test@example.com"); the
-    /// hermetic env block lives once in `crate::test_support`.
+    /// hermetic env block lives once in `redline_testutil`.
     fn git(dir: &Path, args: &[&str]) -> String {
-        crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com")
     }
 
     fn init_repo(dir: &Path) -> GitRepo {
-        crate::test_support::git_repo_init(dir, "Test", "test@example.com", true);
+        redline_testutil::git_repo_init(dir, "Test", "test@example.com", true);
         GitRepo::discover(dir).expect("discover the repo")
     }
 

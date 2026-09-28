@@ -1,0 +1,16 @@
+[package]
+name = "redline-testutil"
+version = "0.1.0"
+edition = "2024"
+description = "Shared test utilities for redline: the hermetic git CLI harness. Dev-dependency only — never linked into a shipped binary (plain std, no app types)"
+
+# issue-guardrails: workspace lints (undocumented_unsafe_blocks deny —
+# every `unsafe` block needs a `// SAFETY:` comment; see the root
+# Cargo.toml's [workspace.lints] for the rationale).
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately NONE: the harness is `std::path::Path` +
+# `std::process::Command` only (kept app-type-free on purpose so every
+# workspace crate can take it as a dev-dependency).

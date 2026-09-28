@@ -92,14 +92,14 @@ fn rows_containing(frame: &str, token: &str) -> Vec<usize> {
 /// crate-wide harness: the standard "Test"/"test@example.com" fixture
 /// identity plus the hermetic env block. Note this file's two former copies
 /// set NO env at all, so they inherited the developer's `~/.gitconfig` —
-/// routing them through `crate::test_support` is what fixes that.
+/// routing them through `redline_testutil` is what fixes that.
 fn git(dir: &std::path::Path, args: &[&str]) {
-    crate::test_support::git_cli(dir, args, "Test", "test@example.com");
+    redline_testutil::git_cli(dir, args, "Test", "test@example.com");
 }
 
 /// Git stdout (read-only fixture checks: diff/log/status).
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
-    crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+    redline_testutil::git_cli(dir, args, "Test", "test@example.com")
 }
 
 /// `src/main.rs` content mirroring the PTY fixture's expectations: the

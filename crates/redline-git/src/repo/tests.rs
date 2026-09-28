@@ -3,16 +3,14 @@
 //! `mod.rs`) because the tests read `GitRepo`'s private state.
 
 use super::*;
-use crate::git::diff::DiffOrigin;
-use crate::git::status::Side;
-use crate::model::sections::StatusTree;
-use std::collections::HashMap;
+use crate::diff::DiffOrigin;
+use crate::status::Side;
 use std::path::Path;
 
 /// The standard fixture identity ("Test"/"test@example.com"); the hermetic
-/// env block lives once in `crate::test_support`.
+/// env block lives once in `redline_testutil`.
 fn git(dir: &Path, args: &[&str]) -> String {
-    crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+    redline_testutil::git_cli(dir, args, "Test", "test@example.com")
 }
 
 /// Back-date `path`'s mtime/ctime 5 s into the past (GNU `touch`). This puts
@@ -33,25 +31,8 @@ fn backdate(path: &Path) {
 }
 
 fn init_repo(dir: &Path) -> GitRepo {
-    crate::test_support::git_repo_init(dir, "Test", "test@example.com", true);
+    redline_testutil::git_repo_init(dir, "Test", "test@example.com", true);
     GitRepo::discover(dir).expect("discover the repo")
-}
-
-/// Build a `StatusTree` the same way the store does (status + per-file
-/// diffs).
-fn build_tree(g: &GitRepo) -> StatusTree {
-    let status = g.status().unwrap();
-    let mut staged = HashMap::new();
-    let mut unstaged = HashMap::new();
-    for f in &status.files {
-        if f.is_staged() && let Ok(d) = g.diff(DiffSide::Staged, &f.path) {
-            staged.insert(f.path.clone(), d);
-        }
-        if f.is_unstaged() && let Ok(d) = g.diff(DiffSide::Unstaged, &f.path) {
-            unstaged.insert(f.path.clone(), d);
-        }
-    }
-    StatusTree::build(&status, &staged, &unstaged, None)
 }
 
 #[test]
@@ -842,35 +823,4 @@ fn discard_staged_hunk_at_eof_no_trailing_newline() {
         after, b"a\nb\nend",
         "workdir must be byte-exact after staged-hunk discard at EOF"
     );
-}
-
-#[test]
-fn snapshot_real_repo_status_tree() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let g = init_repo(root);
-    std::fs::write(root.join("app.rs"), "fn main() {}\n").unwrap();
-    git(root, &["add", "app.rs"]);
-    git(root, &["commit", "-q", "-m", "init"]);
-    // staged change…
-    std::fs::write(root.join("app.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
-    g.stage_file("app.rs").unwrap();
-    // …and a further unstaged change, plus an untracked file.
-    std::fs::write(
-        root.join("app.rs"),
-        "fn main() {\n    println!(\"hello\");\n    println!(\"world\");\n}\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("scratch.txt"), "untracked\n").unwrap();
-
-    let mut tree = build_tree(&g);
-    // Open the first file so its hunk body appears in the snapshot.
-    tree.move_down();
-    tree.toggle_fold();
-    let rows: Vec<String> = tree
-        .visible_rows()
-        .iter()
-        .map(|r| format!("{:?} | {}", r.role, r.text))
-        .collect();
-    insta::assert_debug_snapshot!(rows);
 }

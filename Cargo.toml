@@ -78,6 +78,11 @@ tree-sitter = "=0.25.10"
 # Workspace crate (plan 014 stage 1): the moved src/syntax/ — grammar
 # registry, highlight pipeline, cache. Path dep, reviewed separately.
 redline-syntax = { path = "crates/redline-syntax" }
+# Workspace crate (plan 014 stage 2): the moved src/git/ — the magit subset
+# (libgit2 via git2). Production leaf: its only test edges are a dev-dep on
+# redline-testutil and (after stage 3) redline-model; production direction is
+# one-way, bin -> redline-git. Path dep, reviewed separately.
+redline-git = { path = "crates/redline-git" }
 
 # ── fuzzy matching (helm-style pickers) ────────────────────────────────────
 nucleo-matcher = "0.3.1"   # add `nucleo = "0.5"` later if streaming sources needed
@@ -87,8 +92,8 @@ ignore = "0.4.33"          # gitignore-aware parallel walk
 grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
 
-# ── git (magit subset) ──────────────────────────────────────────────────────
-git2 = "0.21"
+# `git2` moved to crates/redline-git (plan 014 stage 2) — nothing else in the
+# bin uses it.
 
 # ── file watching (live repo) ───────────────────────────────────────────────
 notify = "8.2"
@@ -112,6 +117,11 @@ redline-resolve = { path = "crates/redline-resolve" }
 [dev-dependencies]
 tempfile = "3.27"
 insta = "1.48"
+# The shared hermetic git test harness (plan 014 stage 2), promoted from
+# `src/test_support.rs` together with the env-mutation lock the
+# env-serializing tests share. Dev-only: never linked into the shipped binary
+# (verified by the stage-2 lane: a non-test build does not compile it).
+redline-testutil = { path = "crates/redline-testutil" }
 # The OLD unicode-width table, dev-only: the full-domain sweep example
 # (examples/unicode_width_sweep.rs, deps batch B) diffs 0.1.14 against the
 # current table so the recorded 458-scalar delta is regeneratable from the

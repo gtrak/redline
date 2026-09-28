@@ -2,8 +2,8 @@
 //! the store consumes the plain `Branch` / `StashEntry` structs and drives
 //! the branch/stash pickers.
 
-use crate::git::error::GitError;
-use crate::git::repo::GitRepo;
+use crate::error::GitError;
+use crate::repo::GitRepo;
 
 /// A local branch, with a marker for the current (HEAD) one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,13 +109,13 @@ mod tests {
     use std::path::Path;
 
     /// The standard fixture identity ("Test"/"test@example.com"); the
-    /// hermetic env block lives once in `crate::test_support`.
+    /// hermetic env block lives once in `redline_testutil`.
     fn git(dir: &Path, args: &[&str]) -> String {
-        crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com")
     }
 
     fn init_repo(dir: &Path) -> GitRepo {
-        crate::test_support::git_repo_init(dir, "Test", "test@example.com", true);
+        redline_testutil::git_repo_init(dir, "Test", "test@example.com", true);
         std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
         git(dir, &["add", "f.txt"]);
         git(dir, &["commit", "-q", "-m", "init"]);

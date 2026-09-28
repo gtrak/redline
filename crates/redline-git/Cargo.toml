@@ -1,0 +1,27 @@
+[package]
+name = "redline-git"
+version = "0.1.0"
+edition = "2024"
+description = "Git wrappers (libgit2 via `git2`) for redline: the magit subset as plain data structs + a thiserror error enum (git2 types never leak past this crate — plan layering rule)"
+
+# issue-guardrails: workspace lints (undocumented_unsafe_blocks deny —
+# every `unsafe` block needs a `// SAFETY:` comment; see the root
+# Cargo.toml's [workspace.lints] for the rationale).
+[lints]
+workspace = true
+
+[dependencies]
+# ── git (magit subset) ──────────────────────────────────────────────────────
+# Moved from the bin (plan 014 stage 2): nothing else in the bin uses git2.
+git2 = "0.21"
+# Thiserror error enum (src/error.rs). Same pin as the bin keeps the lock.
+thiserror = "2.0.20"
+
+[dev-dependencies]
+# Test fixtures (the git CLI harness runs in tempdirs; the status-tree
+# snapshot test uses insta). Same pins as the bin's dev-dependencies.
+tempfile = "3.27"
+insta = "1.48"
+# The shared hermetic git test harness (promoted from the bin's
+# `src/test_support.rs`, plan 014 stage 2).
+redline-testutil = { path = "../redline-testutil" }

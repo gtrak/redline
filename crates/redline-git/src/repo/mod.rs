@@ -14,9 +14,9 @@
 
 use std::path::Path;
 
-use crate::git::diff::{DiffSide, FileDiff, extract};
-use crate::git::error::GitError;
-use crate::git::status::{BranchInfo, FileStatus, RepoStatus, StatusKind};
+use crate::diff::{DiffSide, FileDiff, extract};
+use crate::error::GitError;
+use crate::status::{BranchInfo, FileStatus, RepoStatus, StatusKind};
 
 mod hunk;
 mod index_ops;

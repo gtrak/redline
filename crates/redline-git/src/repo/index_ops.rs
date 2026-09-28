@@ -5,9 +5,9 @@
 
 use std::path::Path;
 
-use crate::git::diff::{DiffHunk, DiffSide, extract};
-use crate::git::error::GitError;
-use crate::git::status::Side;
+use crate::diff::{DiffHunk, DiffSide, extract};
+use crate::error::GitError;
+use crate::status::Side;
 
 use super::GitRepo;
 use super::hunk::{

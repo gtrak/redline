@@ -3,8 +3,8 @@
 //! `GitRepo` state; `pub(super)` only where the sibling `index_ops`
 //! submodule calls them.
 
-use crate::git::diff::{DiffHunk, DiffLine, DiffOrigin};
-use crate::git::error::GitError;
+use crate::diff::{DiffHunk, DiffLine, DiffOrigin};
+use crate::error::GitError;
 
 /// Rebuild a file's content (bytes) with one hunk's new-side line span
 /// replaced by the hunk's old-side lines (context + deletion, in order),

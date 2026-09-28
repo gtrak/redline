@@ -23,6 +23,8 @@ stage and for reviewers.
 crates/
   redline-resolve/        1,426  background M-. workspace fall-through (cargo metadata, lockfile)
   redline-syntax/         6,663  tree-sitter grammar registry, highlight pipeline, cache (moved from src/syntax/, plan 014 stage 1)
+  redline-git/            3,806  git wrappers (libgit2 via git2), the magit subset (moved from src/git/, plan 014 stage 2; 50 lines of it — the StatusTree snapshot test — live in src/model/sections.rs until redline-model exists)
+  redline-testutil/         83  hermetic git test harness + the env-mutation lock, dev-dependency only (promoted from src/test_support.rs, plan 014 stage 2)
 
 src/
   main.rs                  363  entrypoint: config, watcher startup, bus drain tasks, event loop

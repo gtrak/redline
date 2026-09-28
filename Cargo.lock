@@ -879,7 +879,6 @@ dependencies = [
  "anyhow",
  "crossterm",
  "dirs",
- "git2",
  "grep-regex",
  "grep-searcher",
  "ignore",
@@ -889,8 +888,10 @@ dependencies = [
  "notify-debouncer-full",
  "nucleo-matcher",
  "rayon",
+ "redline-git",
  "redline-resolve",
  "redline-syntax",
+ "redline-testutil",
  "ropey",
  "serde",
  "serde_json",
@@ -903,6 +904,17 @@ dependencies = [
  "tree-sitter",
  "unicode-width 0.1.14",
  "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "redline-git"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "insta",
+ "redline-testutil",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -943,6 +955,10 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
 ]
+
+[[package]]
+name = "redline-testutil"
+version = "0.1.0"
 
 [[package]]
 name = "redox_syscall"

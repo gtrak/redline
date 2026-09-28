@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use crate::git::error::GitError;
-use crate::git::repo::GitRepo;
+use crate::error::GitError;
+use crate::repo::GitRepo;
 
 impl GitRepo {
     /// Create a commit of the current index (the staged changes) with
@@ -261,7 +261,7 @@ mod tests {
     /// the test's EnvScope pins in the PROCESS env, which a per-child
     /// `Command::env` never reaches.
     fn git(dir: &Path, args: &[&str]) -> String {
-        crate::test_support::git_cli(dir, args, "Test", "test@example.com")
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com")
     }
 
     fn init_repo(dir: &Path, with_author: bool) -> GitRepo {
@@ -325,7 +325,7 @@ mod tests {
         // The wrapper's identity subprocesses inherit the process env, so
         // pin it (ENV_LOCK + EnvScope): local `user.*` = the only identity
         // level in play, exactly as this test has always meant.
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -368,7 +368,7 @@ mod tests {
     /// scratch dir (whose `.gitconfig` the test writes), empties the system
     /// config, and removes every identity-relevant var, so each scenario's
     /// environment is exactly what the test says it is. Every touched var
-    /// is saved and restored. Must be held under `crate::ENV_LOCK` (other
+    /// is saved and restored. Must be held under `redline_testutil::ENV_LOCK` (other
     /// threads reading env vars concurrently is UB; the same lock is held
     /// by `model::files`'s `EnvGuard`). In every user, the `ENV_LOCK`
     /// guard is acquired BEFORE the `EnvScope`, so the `Drop` restore
@@ -403,7 +403,7 @@ mod tests {
             // because they race with ANY concurrent `env::var`/`var_os`
             // reader on another thread (the race is process-wide, not
             // per-variable). This block runs only while the caller's
-            // `crate::ENV_LOCK` guard is live (acquired before the
+            // `redline_testutil::ENV_LOCK` guard is live (acquired before the
             // `EnvScope` in all eight tests), and every env-mutating test
             // in the crate takes that same lock — so no concurrent
             // environment access can interleave.
@@ -443,7 +443,7 @@ mod tests {
     /// environment.
     #[test]
     fn commit_global_only_identity_equals_git_var() {
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         std::fs::write(
             std::path::Path::new(&std::env::var_os("HOME").expect("HOME pinned by EnvScope"))
@@ -498,10 +498,10 @@ mod tests {
         // test must set TZ itself, and must assert it is non-UTC (a UTC
         // fixture would pass against the broken code).
         // Asia/Kolkata is deliberate: +0530 catches "hh*60 + mm" vs "hhmm".
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         for tz in ["America/New_York", "Asia/Kolkata"] {
-            // SAFETY: the test holds `crate::ENV_LOCK` for its whole body,
+            // SAFETY: the test holds `redline_testutil::ENV_LOCK` for its whole body,
             // and every env-mutating test in the crate takes that lock —
             // no concurrent environment access can interleave.
             unsafe { std::env::set_var("TZ", tz) };
@@ -547,7 +547,7 @@ mod tests {
         // resolution is what made the reporter's identity invisible. Memoizing
         // it (per (ident, cwd), process lifetime) left all 953 tests green, so
         // the fix's headline property had no pin at all.
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -574,7 +574,7 @@ mod tests {
         );
         // The env layer too — a level the old code never read at all — and it
         // must move the AUTHOR only (independence).
-        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // SAFETY: the test holds `redline_testutil::ENV_LOCK` for its whole body;
         // every env-mutating test in the crate takes that same lock.
         unsafe { std::env::set_var("GIT_AUTHOR_NAME", "Env Three") };
         // SAFETY: same as the line above (the lock guard is unchanged).
@@ -590,9 +590,9 @@ mod tests {
 
     #[test]
     fn commit_env_identities_equal_git_var() {
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
-        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // SAFETY: the test holds `redline_testutil::ENV_LOCK` for its whole body;
         // every env-mutating test in the crate takes that same lock.
         unsafe {
             std::env::set_var("GIT_AUTHOR_NAME", "Env Author");
@@ -641,9 +641,9 @@ mod tests {
     /// SAME invented identity git resolves — not refuse it.
     #[test]
     fn commit_invented_identity_equals_git_var() {
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
-        // SAFETY: the test holds `crate::ENV_LOCK` for its whole body;
+        // SAFETY: the test holds `redline_testutil::ENV_LOCK` for its whole body;
         // every env-mutating test in the crate takes that same lock.
         unsafe {
             std::env::set_var("EMAIL", "invented@example.com");
@@ -679,7 +679,7 @@ mod tests {
     /// that names the config files consulted.
     #[test]
     fn commit_identity_agrees_with_git_when_nothing_configured() {
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply(); // no .gitconfig in the pinned HOME
 
         let dir = tempfile::tempdir().unwrap();
@@ -723,7 +723,7 @@ mod tests {
     /// longer an error in git — this is now the honest-failure pin.)
     #[test]
     fn commit_fails_when_use_config_only() {
-        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _scope = EnvScope::apply();
         std::fs::write(
             std::path::Path::new(&std::env::var_os("HOME").expect("HOME pinned by EnvScope"))

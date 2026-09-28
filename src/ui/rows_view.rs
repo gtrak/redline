@@ -41,9 +41,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// The standard fixture identity ("Test"/"test@example.com"); the
-    /// hermetic env block lives once in `crate::test_support`.
+    /// hermetic env block lives once in `redline_testutil`.
     fn git_cli(dir: &std::path::Path, args: &[&str]) {
-        crate::test_support::git_cli(dir, args, "Test", "test@example.com");
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com");
     }
 
     /// Structural regression: the MagitRowsView title and first row must

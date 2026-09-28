@@ -27,9 +27,9 @@ use crate::app::config::Config;
 use crate::app::events::{ChangeBus, ProjectChange};
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, load_bindings, parse_sequence};
 use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
-use crate::git::diff::{DiffSide, FileDiff};
-use crate::git::status::{RepoStatus, Side};
-use crate::git::{GitError, GitRepo};
+use redline_git::diff::{DiffSide, FileDiff};
+use redline_git::status::{RepoStatus, Side};
+use redline_git::{GitError, GitRepo};
 use crate::model::buffer::{
     is_word_char, load_file, BufferMode, BufferTable, SCRATCH_NAME, UndoStack, UndoStep,
 };
@@ -1763,7 +1763,7 @@ pub struct LogState {
     pub offset: usize,
     pub limit: usize,
     pub total: usize,
-    pub entries: Vec<crate::git::log::LogEntry>,
+    pub entries: Vec<redline_git::log::LogEntry>,
     pub selected: usize,
 }
 
@@ -1780,14 +1780,14 @@ impl LogState {
 /// is fine for v1; the set exists for future fold support).
 #[derive(Debug)]
 pub struct CommitDiffState {
-    pub diff: crate::git::log::CommitDiff,
+    pub diff: redline_git::log::CommitDiff,
 }
 
 /// The blame buffer for the current file (issue 08).
 #[derive(Debug)]
 pub struct BlameState {
     pub path: String,
-    pub lines: Vec<crate::git::blame::BlameLine>,
+    pub lines: Vec<redline_git::blame::BlameLine>,
     pub selected: usize,
 }
 

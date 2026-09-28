@@ -1,8 +1,8 @@
 use super::{CommitEditorState, PickerCandidate};
 use ropey::Rope;
 
-use crate::git::blame::BlameLine;
-use crate::git::log::{relative_time_from, LogEntry};
+use redline_git::blame::BlameLine;
+use redline_git::log::{relative_time_from, LogEntry};
 
 
 /// Pure scroll-anchor math for a buffer reload (issue 04).

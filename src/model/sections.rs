@@ -9,8 +9,8 @@
 
 use std::collections::HashMap;
 
-use crate::git::diff::{DiffLine, DiffOrigin, FileDiff};
-use crate::git::status::{BranchInfo, FileStatus, RepoStatus, Side, StatusKind};
+use redline_git::diff::{DiffLine, DiffOrigin, FileDiff};
+use redline_git::status::{BranchInfo, FileStatus, RepoStatus, Side, StatusKind};
 
 /// The kind of a section.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -444,7 +444,7 @@ fn file_section(
     }
 }
 
-fn hunk_section(file_id: &str, side: Side, path: &str, h: &crate::git::diff::DiffHunk) -> Section {
+fn hunk_section(file_id: &str, side: Side, path: &str, h: &redline_git::diff::DiffHunk) -> Section {
     let mut body = Vec::new();
     for line in &h.lines {
         body.push(DiffLine::clone(line));
@@ -466,7 +466,7 @@ fn hunk_section(file_id: &str, side: Side, path: &str, h: &crate::git::diff::Dif
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::diff::DiffHunk;
+    use redline_git::diff::{DiffHunk, DiffSide};
     use std::collections::HashMap;
 
     fn line(origin: DiffOrigin, content: &str) -> DiffLine {
@@ -846,5 +846,69 @@ mod tests {
         // Open the staged a.rs file so its hunk body is visible.
         tree.toggle_fold();
         insta::assert_debug_snapshot!(rows_text(&tree));
+    }
+
+    // ── Real-repo snapshot (moved from redline-git's repo/tests.rs, plan 014
+    // stage 2): StatusTree lives here (bin's model), so its oracle test
+    // lives here too — the crate cannot dev-dep on the bin (bin-only
+    // package), and redline-model does not exist yet (stage 3).
+
+    /// The standard fixture identity ("Test"/"test@example.com"); the hermetic
+    /// env block lives once in `redline_testutil`.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        redline_testutil::git_cli(dir, args, "Test", "test@example.com")
+    }
+
+    fn init_repo(dir: &std::path::Path) -> redline_git::GitRepo {
+        redline_testutil::git_repo_init(dir, "Test", "test@example.com", true);
+        redline_git::GitRepo::discover(dir).expect("discover the repo")
+    }
+
+    /// Build a `StatusTree` the same way the store does (status + per-file
+    /// diffs).
+    fn build_tree(g: &redline_git::GitRepo) -> StatusTree {
+        let status = g.status().unwrap();
+        let mut staged = HashMap::new();
+        let mut unstaged = HashMap::new();
+        for f in &status.files {
+            if f.is_staged() && let Ok(d) = g.diff(DiffSide::Staged, &f.path) {
+                staged.insert(f.path.clone(), d);
+            }
+            if f.is_unstaged() && let Ok(d) = g.diff(DiffSide::Unstaged, &f.path) {
+                unstaged.insert(f.path.clone(), d);
+            }
+        }
+        StatusTree::build(&status, &staged, &unstaged, None)
+    }
+
+    #[test]
+    fn snapshot_real_repo_status_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        std::fs::write(root.join("app.rs"), "fn main() {}\n").unwrap();
+        git(root, &["add", "app.rs"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        // staged change…
+        std::fs::write(root.join("app.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        g.stage_file("app.rs").unwrap();
+        // …and a further unstaged change, plus an untracked file.
+        std::fs::write(
+            root.join("app.rs"),
+            "fn main() {\n    println!(\"hello\");\n    println!(\"world\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("scratch.txt"), "untracked\n").unwrap();
+
+        let mut tree = build_tree(&g);
+        // Open the first file so its hunk body appears in the snapshot.
+        tree.move_down();
+        tree.toggle_fold();
+        let rows: Vec<String> = tree
+            .visible_rows()
+            .iter()
+            .map(|r| format!("{:?} | {}", r.role, r.text))
+            .collect();
+        insta::assert_debug_snapshot!(rows);
     }
 }

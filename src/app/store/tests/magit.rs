@@ -208,7 +208,7 @@ use super::*;
         // An untracked file.
         std::fs::write(root.join("untracked.txt"), "y\n").unwrap();
         // Use the git repo directly.
-        let repo = crate::git::GitRepo::discover(root).unwrap();
+        let repo = redline_git::GitRepo::discover(root).unwrap();
         let tracked = vec![root.join("tracked.txt")];
         let untracked = vec![root.join("untracked.txt")];
         assert!(repo.any_tracked(&tracked, root), "tracked file must be detected");
@@ -227,7 +227,7 @@ use super::*;
         std::fs::write(root.join("newfile.txt"), "line1\nline2\nline3\n").unwrap();
         git_cli(root, &["add", "newfile.txt"], "Test", "test@example.com");
         // The hunk new_start for a new file is 1 (first line).
-        let repo = crate::git::GitRepo::discover(root).unwrap();
+        let repo = redline_git::GitRepo::discover(root).unwrap();
         repo.unstage_hunk("newfile.txt", 1).unwrap();
         // After unstaging a fully-staged addition, the index entry is
         // removed (the file is back to untracked, not an empty blob).
@@ -237,7 +237,7 @@ use super::*;
         // It must be untracked (not staged).
         let entry = newfile_entry.unwrap();
         assert!(entry.untracked, "fully-staged addition after unstage must be untracked");
-        assert_eq!(entry.staged, crate::git::status::StatusKind::None,
+        assert_eq!(entry.staged, redline_git::status::StatusKind::None,
             "staged kind must be None after unstage");
     }
 
