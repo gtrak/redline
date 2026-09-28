@@ -1,7 +1,12 @@
 # 04 — Narrowing on the buffer list (`C-x C-b`) + one shared display source
 
-**Status:** OPEN (depends on 01; file-disjoint from 02/03 — may run after 01
-independently)
+**Status:** OPEN (depends on 01). **CORRECTION (2026-09-28): the "file-disjoint from
+02/03" claim in the original status line was FALSE** — measured, 04 and 02 both edit
+`src/app/store/mod.rs` and `src/app/store/keys.rs`. They are independent in *substance*
+(no shared logic) but NOT in *files*, so they must not land concurrently: land 02 first,
+then rebase 04 onto it, and verify both sides survived. The original claim is left visible
+here rather than deleted because it is the kind of design assertion a lane would otherwise
+trust without measuring — which is how a silent revert happens.)
 
 ## Objective
 
