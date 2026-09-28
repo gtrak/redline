@@ -14,29 +14,37 @@ built in Rust with iocraft.
 ## Install
 
 ```sh
-cargo install --path .
-# or for development:
-cargo build --release
-# binary at target/release/redline
+# straight from the repo — no local steps, the patched dependency resolves itself:
+cargo install --git https://github.com/gtrak/redline
+
+# or from a clone (identical result):
+git clone https://github.com/gtrak/redline && cd redline && cargo install --path .
+
+# for development only (no install):
+cargo build --release     # binary at target/release/redline
 ```
 
-One dependency is **generated, not committed**: `vendor/iocraft` (iocraft
-0.9.1 + redline's `use_cursor_position` patch, plan 013-02) is
-re-materialized by the script from a sha256-pinned `.crate` and
-`patches/iocraft-0.9.1-use_cursor_position.patch` — the repo carries the
-patch, never the tree. On a fresh clone run it once before the first
-build:
+One dependency is **patched**: iocraft 0.9.1 plus redline's
+`use_cursor_position` seam (plan 013-02). The patched crate is carried in a
+fork — [`gtrak/iocraft`](https://github.com/gtrak/iocraft), branch
+`redline-cursor-seam` — and pinned by commit in redline's
+`[patch.crates-io]`, so **no local setup step is required**: cargo fetches
+the fork and builds it exactly like any other dependency.
 
-```sh
-tools/apply-iocraft-patch.sh
-```
+Why a fork rather than a local patch file: `[patch]` *replaces* a package's
+source — it cannot merge files into another crate — and a local path cannot
+serve `cargo install --git` at all, because `[patch]` paths are resolved
+during manifest loading, before any build step or script could materialize
+them. Redline still keeps its own copy of the diff at
+`patches/iocraft-0.9.1-use_cursor_position.patch` for reference and
+upstreaming; if the API lands upstream, the fork and the `[patch]` section
+both go away.
 
-It verifies the pinned sha256, refuses to proceed loudly if the crate or
-patch no longer match (an iocraft version bump must update the pin and
-re-generate the patch), and `tools/apply-iocraft-patch.sh check` re-verifies
-an existing tree — the gate's build stage runs that check, so a missing
-or stale tree fails the gate before cargo dies cryptically inside
-`[patch.crates-io]` resolution.
+`tools/apply-iocraft-patch.sh` is the **local-development** path only: it
+materializes an equivalent `vendor/iocraft` from the sha256-pinned `.crate`
+plus that patch, verifies it with `check`, and is what the gate's build stage
+runs. It is not needed to install or build from a clone unless that tree is
+absent.
 
 ## Development gate
 
