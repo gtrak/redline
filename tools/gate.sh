@@ -221,16 +221,27 @@ pty()          { timeout 900 python3 "tools/$1"; }
 # or compile redline against an unpatched iocraft (tree stale), neither of
 # which names the actual problem. Cheap: one small tar extract + diff.
 iocraft_tree_check() { tools/apply-iocraft-patch.sh check; }
+
+# The tracker is the single authoritative "what is open?" record. A task id
+# carrying BOTH an OPEN row and a LANDED row makes every audit wrong in both
+# directions (it lists landed work as open AND hides real gaps behind a stale
+# row). Observed 2026-09-27: seven ids did, because landing rows were appended
+# instead of flipping the queue row. Cheap python, no cargo. NOTE: this was
+# itself silently reverted once, by landing a branch cut before it existed -
+# a guard on STATUS.md's CONTENT cannot see that the gate stopped RUNNING it.
+tracker_check() { python3 tools/check_tracker.py; }
 pool_setup()   { python3 tools/pool.py setup "$1"; }
 pool_runall()  { timeout 900 python3 tools/pool.py runall --lanes "$1"; }
 
 case "$TIER" in
   fast)
+    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
     ;;
   smoke)
+    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
@@ -264,6 +275,7 @@ case "$TIER" in
     # `pool.py runall` without REDLINE_PTY_QUIET in the environment falls back
     # to pool.py's own conservative 0.2 default; this tier exports 0.06.
     LANES="${REDLINE_POOL_LANES:-4}"
+    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
@@ -271,6 +283,7 @@ case "$TIER" in
     run "pool-runall (lanes=$LANES)" pool_runall "$LANES"
     ;;
   full)
+    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
