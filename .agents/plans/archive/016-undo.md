@@ -1,5 +1,29 @@
 # Plan 016 — undo (a subsystem, not a command)
 
+**COMPLETION RECORD (added 2026-09-27, correcting an overstatement).** Three of the four
+issues landed: **01** the undo stack + guard (`ff84669`), **02** edit coverage + `M-y`
+coalescing (`f6082a9`), **04** redo + the self-insert-run coalescing rule (`8431cca`,
+plan complete). **03 (the saved-state marker / dirty-flag-and-reload) did NOT land**, and
+the commit that archived this plan (`862f172` "all four issues landed") **overstated it**.
+
+**What actually exists for 03**: only a notes-buffer `dirty` BOOLEAN (`notes_buffer_dirty`,
+`src/app/store/notes.rs`). The plan's own requirement — *where in the edit HISTORY the
+saved/loaded state sits*, so an edit-then-undo-back-to-saved reports clean — does not exist:
+there is no `saved_undo_depth` and no marker-identity anywhere in the code. This is a
+**data-loss-adjacent gap**, and the plan's own risk list puts it first: a false "clean" while
+holding unsaved edits stops the quit prompt asking, whereas a false "modified" is only an
+annoyance — so the tie-break must always favour *modified*. Tracked as an OPEN row in
+`.agents/plans/STATUS.md` (`016-03`).
+
+**Also incomplete as an archive**: this file is a bare rename of the plan's `PLAN.md` (git
+records the move as 0 changed lines) — the four issue files were deleted rather than copied
+in, so unlike plans 012/015/016-after-this-fix it is NOT the verbatim full record the
+plan-process skill requires. The issue texts remain recoverable from `.agents/tasks/`
+(`issue-016-0*.md`) and git history. Do not treat this file as the evidence store for 03.
+
+---
+
+
 **Status:** design only; no issues specced. Deliberately separate from plan 015.
 
 **Settled since (user directive, 2026-09-21):** undo is bound to **both `C-x u` and
