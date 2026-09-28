@@ -25,8 +25,9 @@
 //!    verdict claims** (the observable form: a discriminating query
 //!    produces exactly the ordering the claimed mechanism produces —
 //!    the 018-01 Pin C shape generalized). Picker kinds, results, and
-//!    buffer list route through the shared core; isearch does NOT —
-//!    see below.
+//!    buffer list route through the shared core; isearch's FIRST
+//!    dimension does NOT — see below (its second dimension DOES, since
+//!    U-E13 landed).
 //! 3. **every DIFFER verdict that is a *named follow-up* (not a silent
 //!    omission) still carries its doc marker**: magit status → U-E10,
 //!    log → U-E11, tree → U-E12, isearch's second query dimension →
@@ -34,26 +35,38 @@
 //!    `docs/ux-testing-plan.md` (§ U-E · Search & references). Comment
 //!    → doc, never comment → memory.
 //!
-//! **Why isearch is `narrows=true, mechanism=own (literal search)` —
-//! NOT a shared-core path.** The plan's success criterion was CORRECTED
-//! (2026-09-28, after 018-02 measurably disproved the original
-//! "everything recompute through the core" reading): `narrow` is a
-//! nucleo score-and-REORDER over display strings, and (i) isearch rows
-//! are a literal byte-search result in which SEVERAL rows can share one
-//! line's text, so scoring the line text cannot recover row identity,
-//! and (ii) the match order IS the search (forward/backward from the
-//! pre-search point) — a re-rank would corrupt it. Isearch keeps
-//! `find_all_matches` (`src/app/store/search.rs`); the list is narrowed
-//! BY the search itself — every keystroke re-runs the search, and the
-//! list is its result set in search order. It takes the seam's *shape*
+//! **Why isearch's FIRST dimension is `narrows=true, mechanism=own
+//! (literal search)` — NOT a shared-core path.** The plan's success
+//! criterion was CORRECTED (2026-09-28, after 018-02 measurably
+//! disproved the original "everything recompute through the core"
+//! reading): `narrow` is a nucleo score-and-REORDER over display
+//! strings, and (i) isearch rows are a literal byte-search result in
+//! which SEVERAL rows can share one line's text, so scoring the line
+//! text cannot recover row identity, and (ii) the match order IS the
+//! search (forward/backward from the pre-search point) — a re-rank
+//! would corrupt it. Isearch keeps `find_all_matches`
+//! (`src/app/store/search.rs`); the list is narrowed BY the search
+//! itself — every keystroke re-runs the search, and the list is its
+//! result set in search order. It takes the seam's *shape*
 //! (source-ordered rows + one selection index + a display projection
-//! per row), not the seam's path. Asserting a shared-core path for
-//! isearch would be exactly the false assurance this repo has been
-//! bitten by — a pin reading a copy of a fact.
-//! `check_isearch_narrows_by_the_search_itself` self-verifies the
-//! fixture: it asserts the shared core WOULD rank the fixture's line
-//! texts differently, so the literal-order assertion discriminates
-//! instead of passing silently.
+//! per row), not the seam's path for this dimension. Asserting a
+//! shared-core path for the first dimension would be exactly the false
+//! assurance this repo has been bitten by — a pin reading a copy of a
+//! fact. `check_isearch_narrows_by_the_search_itself` self-verifies
+//! the fixture: it asserts the shared core WOULD rank the fixture's
+//! line texts differently, so the literal-order assertion
+//! discriminates instead of passing silently.
+//!
+//! **The second dimension (U-E13, landed): a nucleo filter INSIDE the
+//! list.** Once the literal search has produced its match rows, `C-o`
+//! arms a second, optional query — a `NarrowSession` run FilterOnly
+//! through the shared core over the rows' line-text projection (the
+//! display projection 018-02 built exactly for this): the core scores
+//! and filters, the surface keeps SOURCE order (match order IS the
+//! search — the first dimension's pinned contract). This dimension
+//! USES the seam; the first does NOT. Both are checked:
+//! `check_isearch_narrows_by_the_search_itself` (dim 1, own) and
+//! `check_isearch_second_dimension_is_the_shared_core` (dim 2, core).
 //!
 //! **Mutation evidence (this issue's verification — measured on this
 //! tree, each captured red, then restored and re-verified green):**
@@ -90,12 +103,16 @@ enum Mechanism {
     /// picker's 13 kinds (Reorder), the results view and the buffer list
     /// (FilterOnly — the core ranks, the surface keeps source order).
     SharedCore,
-    /// isearch's measured exception (PLAN §6, CORRECTED 2026-09-28):
-    /// narrows=true, mechanism=own — the list is the result set of its
-    /// own literal byte search (`find_all_matches`), in search order,
-    /// with no nucleo scoring. See the module doc for why a shared-core
-    /// path is impossible here, not merely declined.
-    OwnLiteral,
+    /// isearch's TWO-dimension state (U-E13 landed): the FIRST dimension
+    /// is the measured exception (PLAN §6, CORRECTED 2026-09-28) — the
+    /// list is the result set of its own literal byte search
+    /// (`find_all_matches`), in search order, with no nucleo scoring; see
+    /// the module doc for why a shared-core path is impossible there,
+    /// not merely declined. The SECOND (optional, `C-o`-armed) filters
+    /// those matches through the shared core, FilterOnly over the rows'
+    /// line-text projection (source order preserved — match order IS the
+    /// search).
+    OwnLiteralAndSharedCoreFilter,
 }
 
 /// One row of the inventory: a surface, the plan's verdict for it, and
@@ -141,16 +158,17 @@ const INVENTORY: &[Row] = &[
     Row { id: "Branch", narrows: true, mechanism: Some(Mechanism::SharedCore), reason: "picker kind; recompute routes through the shared core (018-01, Pin C)", follow_up: None },
     Row { id: "Stash", narrows: true, mechanism: Some(Mechanism::SharedCore), reason: "picker kind; recompute routes through the shared core (018-01, Pin C)", follow_up: None },
     Row { id: "Annotations", narrows: true, mechanism: Some(Mechanism::SharedCore), reason: "picker kind; recompute routes through the shared core (018-01, Pin C)", follow_up: None },
-    // — narrows=true, mechanism=OWN: isearch. The measured exception —
-    // see the module doc for the why; do not "unify" this row back onto
-    // the shared core without re-running the mismatch that corrected
-    // the plan's criterion.
+    // — narrows=true, mechanism=OWN (first dim) + SHARED CORE (second
+    // dim): isearch. Two query dimensions — see the module doc for the
+    // why of each; do not "unify" the first dimension back onto the
+    // shared core without re-running the mismatch that corrected the
+    // plan's criterion.
     Row {
         id: "isearch",
         narrows: true,
-        mechanism: Some(Mechanism::OwnLiteral),
-        reason: "narrows=true, mechanism=own (literal search): every keystroke re-runs find_all_matches and the list is its result set, search order (PLAN §6 criterion, CORRECTED 2026-09-28; PLAN §3); the nucleo filter-inside-the-list second dimension is the U-E13 follow-up",
-        follow_up: Some("U-E13"),
+        mechanism: Some(Mechanism::OwnLiteralAndSharedCoreFilter),
+        reason: "TWO query dimensions. FIRST (mechanism=own, PLAN §6 criterion CORRECTED 2026-09-28; PLAN §3): every keystroke re-runs find_all_matches and the list is its result set in search order — scoring cannot recover row identity (several rows share one line's text) and re-ordering would corrupt the search. SECOND (U-E13, landed): C-o arms a nucleo filter INSIDE that list — a NarrowSession run FilterOnly through the shared core over the rows' line-text projection; the literal match set stays the source, the filter's set re-derives with the search, and C-g is layered (clear the filter, then cancel)",
+        follow_up: None,
     },
     // — narrows=true, mechanism=shared core (FilterOnly).
     Row { id: "search results", narrows: true, mechanism: Some(Mechanism::SharedCore), reason: "018-03: FilterOnly projection at view time through the shared core over the hits' display projection; the canonical hits/rows stay untouched (streaming + generation guard)", follow_up: None },
@@ -321,7 +339,10 @@ fn narrowing_inventory_declares_a_verdict_for_every_row_list_surface() {
             continue;
         }
         match row.id {
-            "isearch" => check_isearch_narrows_by_the_search_itself(),
+            "isearch" => {
+                check_isearch_narrows_by_the_search_itself();
+                check_isearch_second_dimension_is_the_shared_core();
+            }
             "search results" => check_results_recompute_is_the_shared_core(),
             "buffer list" => check_buffer_list_recompute_is_the_shared_core(),
             id if kind_ids.contains(id) => {
@@ -566,6 +587,80 @@ fn check_isearch_narrows_by_the_search_itself() {
     );
 }
 
+/// Isearch's second dimension (U-E13, landed): a C-o-armed filter
+/// routes through the ONE shared core. Arming the filter on the guard's
+/// own path (`key_event`, not a field poke) and typing a discriminating
+/// query must leave exactly the core's survivor set over the match
+/// rows' line-text projection — the production projection
+/// (`IsearchState.rows`, 1:1 with `matches`), never a copied display
+/// string. The query "g m" is a SUBSEQUENCE of exactly one row —
+/// `foo gamma` (g@4 … m@6) — and a contiguous substring of none:
+/// a hand-rolled contains-filter recompute keeps zero rows, the core
+/// keeps row 1.
+fn check_isearch_second_dimension_is_the_shared_core() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    // Three literal "foo" matches (lines 0, 1, 3); the row on line 2 is
+    // a NON-match ("bar delta") and must never enter the projection.
+    std::fs::write(
+        dir.path().join("src/t.rs"),
+        "foo alpha\nfoo gamma\nbar delta\nfoo epsilon\n",
+    )
+    .unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+    s.open_path("src/t.rs");
+
+    s.isearch_start(IsearchDirection::Forward);
+    s.isearch_query_char('f');
+    s.isearch_query_char('o');
+    s.isearch_query_char('o');
+    let displays: Vec<String> = s
+        .isearch
+        .rows
+        .iter()
+        .map(|r| r.line_text.clone())
+        .collect();
+    assert_eq!(
+        displays.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec!["foo alpha", "foo gamma", "foo epsilon"],
+        "the fixture must hold 3 match rows (one per literal 'foo') — the bar line is not a match"
+    );
+
+    // Arm the second dimension on the guard's own path and type the
+    // discriminating query (the pre-U-E13 tree swallowed C-o and
+    // extended the literal query — the asserts below redden).
+    s.key_event(crate::app::keymap::Key::ctrl_char('o'));
+    for c in "g m".chars() {
+        s.key_event(crate::app::keymap::Key::char(c));
+    }
+    let refs: Vec<&str> = displays.iter().map(|d| d.as_str()).collect();
+    let mut expected = narrow("g m", &refs, &mut s.matcher);
+    expected.sort_by_key(|&(i, _)| i); // FilterOnly: source order (U-E13)
+    assert!(!expected.is_empty(), "non-vacuous: `g m` must keep >=1 row through the core");
+    assert!(
+        expected.len() < displays.len(),
+        "discriminating: the query must NARROW (fewer survivors than the full set)"
+    );
+    let (rows, _selected, active) = s.isearch_list();
+    assert!(active, "isearch stays active with the filter armed");
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "surface `isearch` (second dimension): the filtered row count ({}) is not the shared core's survivor count ({:?}) — a divergence means the filter bypassed narrowing::narrow",
+        rows.len(),
+        expected.iter().map(|&(i, _)| i).collect::<Vec<_>>()
+    );
+    for (i, &(src_idx, _)) in expected.iter().enumerate() {
+        assert_eq!(
+            rows[i].line_no,
+            s.isearch.rows[src_idx].line_no,
+            "surface `isearch` (second dimension): filtered row {i} must be the core's source row {src_idx} (search order kept)"
+        );
+    }
+}
+
 /// The DIFFER verdicts are NAMED FOLLOW-UPS, not silent omissions
 /// (PLAN §4): every row that declares a follow-up marker must still
 /// carry it in `docs/ux-testing-plan.md` — the decision is greppable
@@ -592,7 +687,7 @@ fn declared_differ_surfaces_carry_named_follow_ups_in_the_doc() {
     }
     assert_eq!(
         markers.len(),
-        4,
-        "the plan names exactly four follow-ups (magit status U-E10, log U-E11, tree U-E12, isearch second dimension U-E13); the table declares {markers:?}"
+        3,
+        "the plan names exactly three OPEN follow-ups (magit status U-E10, log U-E11, tree U-E12; U-E13 — isearch's second dimension — LANDED, its doc checkbox flipped); the table declares {markers:?}"
     );
 }

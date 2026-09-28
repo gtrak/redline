@@ -379,7 +379,7 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       re-homing its windowing to the store (a refactor with no user value by
       itself). Note its actual job — find a file fast — is already served by
       the narrowing FindFile picker (`C-c p f`), which narrows.
-- [ ] **U-E13 · Named follow-up: isearch's second query dimension (018
+- [x] **U-E13 · Named follow-up: isearch's second query dimension (018
       deferral)**: the isearch list narrows BY the search itself — a literal
       byte search whose match order IS the search (plan 018 §3; the corrected
       success criterion pins it as `narrows=true, mechanism=own`, not a
@@ -388,7 +388,22 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       nucleo filter-inside-the-list (typing `foo`, then filtering the 200
       `foo` matches further) is a SECOND query dimension, explicitly deferred
       there — the session's display projection (each row's line text) already
-      exists for it to plug into.
+      exists for it to plug into. **LANDED (branch `isearch-second-dim`):**
+      `C-o` toggles the filter input (the literal search stays the FIRST
+      dimension, `mechanism=own` — untouched); the filter runs the shared
+      core FilterOnly over the rows' line-text projection (source order
+      preserved, the seam's selection clamp — never a reset); the filter
+      survives a further literal-search character (the set it filters
+      re-derives); a filter matching nothing is an honest empty state (no
+      rows, no highlight, `[no matches]`, RET = `[not found]`); C-g is
+      layered (first clears the filter, second cancels). Pins:
+      `isearch_filter_*` / `isearch_c_s_c_r_wrap_within_the_filtered_set` /
+      `isearch_first_dimension_rederives_when_the_filter_is_active` /
+      `isearch_backspace_to_empty_with_a_filter_*` /
+      `isearch_ret_lands_on_the_selected_filtered_match_column` in
+      `src/app/store/tests/search.rs`, the inventory's second-dimension
+      check in `src/app/store/tests/narrowing.rs`, and the new legs in
+      `tools/drive_isearch_list.py` (L-4..L-7).
 
 ## U-F · Git surface
 

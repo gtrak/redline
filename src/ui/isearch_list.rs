@@ -6,7 +6,12 @@
 //! `pre_search_line/col` and the view stack untouched).
 //!
 //! The store owns the list (`AppStore::isearch_list`: the rows in search
-//! order + the selection + activity); this component only renders. The
+//! order + the selection + activity); this component only renders. U-E13's
+//! second dimension (the C-o-armed nucleo filter) is a store-side
+//! projection: with a filter active `isearch_list` returns the session's
+//! SURVIVING rows (still in search order — FilterOnly), so this component
+//! renders the filtered set without knowing the filter exists; with none,
+//! it renders the full match rows, byte-for-byte the 018-02 shape. The
 //! prompt stays in the MINIBUFFER (`I-search: {query} [{idx}/{count}]` —
 //! this surface keeps its existing prompt, plan 018 §3), so the rows are
 //! prompt-less: `line number + line text + the match's column`, one row

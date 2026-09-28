@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Plan 018 issue 02 — isearch is a browsable list (the helm-occur shape).
+U-E13 — isearch's second query dimension: a nucleo FILTER inside the
+literal-search list (the shared-core seam, FilterOnly over the rows' line
+projections). `C-o` toggles the filter input; the filter survives a
+further literal-search character (the set it filters re-derives); C-g is
+layered (first clears the filter, second cancels isearch).
 
 The user's verbatim complaint: "the i-search results could be more
 interactive and helm-like UX." `C-s`/`C-r` used to arm an invisible
@@ -31,6 +36,19 @@ L-3  C-g RESTORE: a fresh `C-s` + `om` from the landed point re-opens
      restores the pre-search line AND column (the CUP returns to the
      exact cell it held before the search — not the line start), the
      list disappears, and the highlight band vanishes.
+L-4  U-E13 FILTER: C-o arms the filter (echo `(filter: )`, full set
+     still shown); typing `my` narrows to the "café omyga" row alone
+     (`[1/1]`, the surviving match keeps the selection, CUP (5,6)); RET
+     confirms the SELECTED filtered row — the L-2 landing outcome holds.
+L-5  U-E13 FILTER SURVIVAL: C-o off keeps the filter; a further
+     literal-search char (`y` → "omy") re-derives the match set AND the
+     filter survives (`I-search: omy (filter: my) [1/1]`).
+L-6  U-E13 HONEST EMPTY: a filter matching nothing (`myz`) shows NO
+     rows, NO highlight, the `[no matches]` echo with the clause, and
+     RET is an honest `[not found]` (no silent jump).
+L-7  U-E13 LAYERED C-g: the FIRST C-g clears the filter (the full set
+     comes back, the selection follows its match); the SECOND cancels
+     (echo `cancel`, pre-search point restored).
 
 Color mode: COLORTERM=truecolor (the match-highlight band's blue renders
 as a BAR_BGS hex — pyte's 256 palette maps blue to 5c5cff, truecolor to
@@ -237,6 +255,103 @@ def main():
         r, c = cup(app)
         rec("L-3: the pre-search LINE AND COLUMN are restored (line 3, char 5 → CUP (5,6) — not the line start (col 1), not where the selection sat ((3,6)))",
             (r, c) == (5, 6), f"cup=({r},{c}) want (5,6); pre-search=(5,6), selection=(3,6)")
+
+        print("=== L-4: C-o arms the filter; typing narrows the matches (FilterOnly) ===")
+        # Pre-search point: line 3, char 5 (the L-2/L-4 landing) — forward
+        # from it, the first match is line 3 itself → [2/2].
+        app.key("C-s", 0.8)
+        app.key("o", 0.4)
+        app.key("m", 0.4)
+        rec("L-4: the list re-opens at [2/2] (both rows, selection on line 3)",
+            mini(app) == "I-search: om [2/2]" and len(list_rows(app)) == 2,
+            f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
+        app.key("C-o", 0.4)
+        rec("L-4: C-o arms the filter input (clause shown, the full set is still the list)",
+            mini(app) == "I-search: om (filter: ) [2/2]" and len(list_rows(app)) == 2,
+            f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
+        app.key("m", 0.4)
+        app.key("y", 0.4)
+        rows = list_rows(app)
+        rec("L-4: the filter narrows to the one surviving row (line 4: 'café omyga')",
+            len(rows) == 1 and any(r.startswith(ROW_OMYGA) for r in rows)
+            and not any(r.startswith(ROW_OMEGA) for r in rows),
+            f"rows={rows!r}")
+        rec("L-4: the echo carries the filter clause and the FILTERED count (byte-for-byte)",
+            mini(app) == "I-search: om (filter: my) [1/1]", f"minibuffer={mini(app)!r}")
+        r, c = cup(app)
+        rec("L-4: the selection stays on the surviving match (CUP (5,6))",
+            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+        app.key("RET", 0.8)
+        rec("L-4: RET confirms the SELECTED filtered row — the old outcome holds (list gone, CUP on line 3 col 5, no highlight)",
+            "(col " not in app.screen_text() and cup(app) == (5, 6)
+            and app.blue_rows() == [] and app.reverse_rows() == [],
+            f"cup={cup(app)} blue={app.blue_rows()}")
+
+        print("=== L-5: the filter SURVIVES a further literal-search character ===")
+        app.key("C-s", 0.8)
+        app.key("o", 0.4)
+        app.key("m", 0.4)
+        app.key("C-o", 0.4)
+        app.key("m", 0.4)
+        app.key("y", 0.4)   # filter 'my' → one row
+        app.key("C-o", 0.4)  # toggle the filter input OFF — the filter survives
+        rec("L-5: C-o off keeps the filter (clause + narrowed set)",
+            mini(app) == "I-search: om (filter: my) [1/1]"
+            and len(list_rows(app)) == 1,
+            f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
+        app.key("y", 0.4)   # literal 'omy' — re-derives the match set
+        rows = list_rows(app)
+        rec("L-5: the literal extension re-derives the set AND the filter survives",
+            mini(app) == "I-search: omy (filter: my) [1/1]"
+            and len(rows) == 1 and any(r.startswith(ROW_OMYGA) for r in rows),
+            f"minibuffer={mini(app)!r} rows={rows!r}")
+        r, c = cup(app)
+        rec("L-5: the point stays on the surviving match (line 3 → CUP (5,6))",
+            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+
+        print("=== L-6: a filter matching nothing shows an honest empty state ===")
+        app.key("C-h", 0.4)  # literal back to 'om' (2 matches; the filter keeps line 3)
+        rec("L-6: backspacing the literal re-derives the set, the filter survives",
+            mini(app) == "I-search: om (filter: my) [1/1]"
+            and len(list_rows(app)) == 1,
+            f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
+        app.key("C-o", 0.4)  # re-arm the filter input (L-5 parked it)
+        app.key("z", 0.4)    # filter 'myz' — no survivor
+        rows = list_rows(app)
+        rec("L-6: the list goes away (no stale rows)", rows == [], f"rows={rows!r}")
+        rec("L-6: the echo says [no matches] with the filter clause (byte-for-byte)",
+            mini(app) == "I-search: om (filter: myz) [no matches]",
+            f"minibuffer={mini(app)!r}")
+        rec("L-6: the highlight vanishes (no stale band, no list bar)",
+            app.blue_rows() == [] and app.reverse_rows() == [],
+            f"blue={app.blue_rows()} reverse={app.reverse_rows()}")
+        app.key("RET", 0.8)
+        rec("L-6: RET on an empty filtered set is an honest not-found (no silent jump)",
+            mini(app) == "I-search: om [not found]" and cup(app) == (5, 6),
+            f"minibuffer={mini(app)!r} cup={cup(app)}")
+
+        print("=== L-7: layered C-g — first clears the filter, second cancels ===")
+        app.key("C-s", 0.8)
+        app.key("o", 0.4)
+        app.key("m", 0.4)
+        app.key("C-o", 0.4)
+        app.key("m", 0.4)
+        app.key("y", 0.4)   # [1/1] on line 3
+        rec("L-7: precondition — the filter is active ([1/1] on line 3)",
+            mini(app) == "I-search: om (filter: my) [1/1]",
+            f"minibuffer={mini(app)!r}")
+        app.key("C-g", 0.8)
+        rec("L-7: the FIRST C-g clears the filter (full set back, isearch still active)",
+            mini(app) == "I-search: om [2/2]" and len(list_rows(app)) == 2,
+            f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
+        r, c = cup(app)
+        rec("L-7: the selection follows its match (line 3 → CUP (5,6), not reset to line 1)",
+            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+        app.key("C-g", 0.8)
+        rec("L-7: the SECOND C-g cancels (echo 'cancel', list gone, pre-search point restored)",
+            mini(app) == "cancel" and list_rows(app) == [] and cup(app) == (5, 6)
+            and app.blue_rows() == [] and app.reverse_rows() == [],
+            f"minibuffer={mini(app)!r} cup={cup(app)}")
     finally:
         if app is not None:
             try:

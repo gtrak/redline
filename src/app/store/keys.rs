@@ -149,8 +149,10 @@ impl AppStore {
             self.branch_create_key_event(key);
             return;
         }
-        // Isearch: printable self-inserts, C-s/C-r navigate, RET/C-g;
-        // other keys are swallowed.
+        // Isearch: printable self-inserts, C-s/C-r navigate (within the
+        // filtered set while a filter is active — U-E13), C-o toggles
+        // the filter input, RET ends, C-g is the layered cancel (clear
+        // the filter, then cancel); other keys are swallowed.
         if self.isearch.active {
             self.self_insert_run = None;
             self.isearch_key_event(key);
@@ -391,8 +393,26 @@ impl AppStore {
     /// (run before any keymap dispatch, the isearch analogue of the notes
     /// editable branch in plan-002 issue 05). Chords keep their isearch
     /// semantics: C-s next, C-r reverse, RET end, C-g cancel, DEL rubout.
+    ///
+    /// U-E13 (isearch's second query dimension): `C-o` toggles the
+    /// FILTER input — while it is armed, printables/Backspace/C-h feed
+    /// the filter query (the shared core's FilterOnly over the match
+    /// rows) instead of the literal search query, and the filter
+    /// SURVIVES a toggle-off (the toggle moves the input target, not the
+    /// filter's lifetime). C-g is the LAYERED cancel (the emacs-ish
+    /// precedent): a non-empty filter — or an armed filter input, even
+    /// an empty one — is the innermost active layer, so the FIRST C-g
+    /// clears it (`isearch_filter_clear`) and the second cancels
+    /// isearch (`isearch_cancel`, the pinned path).
     fn isearch_key_event(&mut self, key: Key) {
         if key == Key::ctrl_char('g') {
+            // U-E13: the layered cancel — the second dimension (armed
+            // input OR a surviving filter query) clears FIRST; with it
+            // dropped, C-g is today's cancel, byte-for-byte.
+            if self.isearch.filter_mode || !self.isearch.filter.query.is_empty() {
+                self.isearch_filter_clear();
+                return;
+            }
             self.isearch_cancel();
             return;
         }
@@ -402,12 +422,33 @@ impl AppStore {
         }
         // PART A fix (item 5): C-s / C-r while isearch is active repeat
         // the search (next / previous match) instead of being swallowed.
+        // U-E13: with a filter active they step within the FILTERED set.
         if key == Key::ctrl_char('s') {
             self.isearch_next();
             return;
         }
         if key == Key::ctrl_char('r') {
             self.isearch_prev();
+            return;
+        }
+        // U-E13: C-o toggles the filter dimension's input.
+        if key == Key::ctrl_char('o') {
+            self.isearch_filter_toggle();
+            return;
+        }
+        // U-E13: while the filter input is armed, the printable keys and
+        // the editor keys feed the FILTER query (never the literal
+        // search query) — the first dimension's input target is parked
+        // for the toggle's duration, not cleared.
+        if self.isearch.filter_mode {
+            if let Some(c) = key.char_value() {
+                self.isearch_filter_char(c);
+                return;
+            }
+            if key.code == KeyCode::Backspace || key == Key::ctrl_char('h') {
+                self.isearch_filter_backspace();
+            }
+            // Other keys: swallow (no "unbound key" echo mid-prompt).
             return;
         }
         if let Some(c) = key.char_value() {

@@ -1567,10 +1567,9 @@ pub fn jump_highlight_intensity(elapsed: std::time::Duration, truecolor: bool) -
 pub struct IsearchMatchRow {
     /// The buffer line (0-based) carrying the match.
     pub line_no: usize,
-    /// The line's text — the row's display projection (what a deferred
-    /// second, in-list filter dimension would score — plan 018 §3 names
-    /// it; the v1 list has no such dimension, the search itself IS the
-    /// filter).
+    /// The line's text — the row's display projection (the second,
+    /// filter dimension's (U-E13) shared-core filter scores these
+    /// strings; 018-02 built this projection for exactly that plug-in).
     pub line_text: String,
     /// The match's CHAR column within the line — `try_byte_to_line_col`
     ///'s unit, the point's `col` unit (the RET landing reuses it; a byte
@@ -1597,6 +1596,23 @@ pub struct IsearchState {
     /// buffer content while `active`; an empty query or a no-match query
     /// leaves it empty (the list disappears with the result set).
     pub rows: Vec<IsearchMatchRow>,
+    /// U-E13 (isearch's second query dimension): the optional nucleo
+    /// FILTER over the literal search's match set — the shared-core
+    /// session (plan 018 §2.2's `NarrowSession`) run FilterOnly: the
+    /// core scores the rows' line-text projection, and the surface keeps
+    /// SOURCE order (match order IS the search — the first dimension's
+    /// pinned contract). The FIRST dimension stays mechanism=own (the
+    /// plan's corrected criterion); only this second dimension routes
+    /// through the seam. `filtered` is only meaningful while
+    /// `query` is non-empty (it is re-derived on every change to the
+    /// filter query, the match set, or the canonical selection).
+    pub filter: NarrowSession,
+    /// U-E13: while true, printable keys feed `filter.query` instead of
+    /// the literal search query (`C-o` toggles it; the guard's branch —
+    /// `isearch_key_event`). The filter SURVIVES a toggle-off: only C-g
+    /// (the layered cancel), a backspace to an empty literal query, or
+    /// the session's exit (confirm/cancel) clears it.
+    pub filter_mode: bool,
     /// The line to restore to when isearch exits without a confirmed
     /// match (C-g cancel).
     pub pre_search_line: usize,
@@ -1615,6 +1631,8 @@ impl Default for IsearchState {
             matches: Vec::new(),
             current: 0,
             rows: Vec::new(),
+            filter: NarrowSession::default(),
+            filter_mode: false,
             pre_search_line: 0,
             pre_search_col: 0,
         }

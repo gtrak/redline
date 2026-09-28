@@ -20,6 +20,8 @@ impl AppStore {
             matches: Vec::new(),
             current: 0,
             rows: Vec::new(),
+            filter: NarrowSession::default(),
+            filter_mode: false,
             pre_search_line: self.point_line(),
             // A CHAR column (point_col's unit, consumed directly by
             // set_point) — NOT a byte: a byte stored here would land
@@ -65,6 +67,9 @@ impl AppStore {
             // it; this is the one path that reached the empty state without
             // passing through them.
             self.match_context = MatchContext::default();
+            // U-E13: the source set is gone — the second dimension goes
+            // with it (a filter with nothing to filter is a stale one).
+            self.isearch_filter_reset();
             self.minibuffer_message("I-search: ");
             return;
         }
@@ -80,8 +85,15 @@ impl AppStore {
         // recompute, in search order (FilterOnly: the match order IS the
         // search; nothing is re-ranked).
         self.isearch_derive_rows();
-        if self.isearch.matches.is_empty() {            self.isearch.current = 0;
-            self.minibuffer_message(&format!("I-search: {query} [no matches]"));
+        if self.isearch.matches.is_empty() {
+            self.isearch.current = 0;
+            // U-E13: no source set — the second dimension goes with it
+            // (the empty-literal-query rule, extended: a filter with
+            // nothing to filter is a stale one, and a stale session
+            // read against zero rows would panic the highlight sync)
+            // and keep a false `[1/1]` echo alive).
+            self.isearch_filter_reset();
+            self.minibuffer_message(&self.isearch_position_echo());
         } else {
             // Jump to the first match in the search direction.
             let start_line = self.point_line();
@@ -108,15 +120,196 @@ impl AppStore {
                         .unwrap_or(self.isearch.matches.len().saturating_sub(1))
                 }
             };
-            self.isearch_jump_to_current();
-            let count = self.isearch.matches.len();
-            let idx = self.isearch.current + 1;
-            self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+            // U-E13: a live filter re-projects onto the re-derived match
+            // set — the filter SURVIVES the literal extension (or
+            // backspace); the set it filters is the new one.
+            if !self.isearch.filter.query.is_empty() {
+                self.isearch_filter_recompute();
+            }
+            // The point follows the LIST selection: with a filter active
+            // that is the filter's selection (the canonical re-derived
+            // match, when it survives, or the clamped survivor). When the
+            // filter matches nothing the point STAYS — jumping onto a
+            // match the list does not show would be a silent one.
+            if self.isearch.filter.query.is_empty()
+                || !self.isearch.filter.filtered.is_empty()
+            {
+                self.isearch_jump_to_current();
+            }
+            self.minibuffer_message(&self.isearch_position_echo());
         }
         // Issue match-highlight: the buffer view highlights all matches
         // (the current one prominently) — sync the context with the live
         // state on every query change (cleared on no matches).
         self.isearch_sync_match_context();
+    }
+
+    /// U-E13: the second dimension's filter state, cleared (the layered
+    /// C-g's first layer, and the empty-literal-query path's rule: the
+    /// source set is gone or the user dropped the layer, so the filter —
+    /// query, mode, and session — goes with it). The canonical selection
+    /// and match set are untouched: the full match set comes back, and
+    /// the selection follows its match (clamped, never lost).
+    pub fn isearch_filter_clear(&mut self) {
+        self.isearch.filter_mode = false;
+        self.isearch.filter.query.clear();
+        self.isearch_filter_recompute();
+        if !self.isearch.filter.filtered.is_empty() {
+            self.isearch_jump_to_current();
+        }
+        self.isearch_sync_match_context();
+        self.minibuffer_message(&self.isearch_position_echo());
+    }
+
+    /// U-E13: the filter state reset (no recompute, no echo, no jump):
+    /// the caller is leaving a state that is already settled (the
+    /// empty-query early return clears the echo itself; the cancel
+    /// path restores the pre-search point itself).
+    fn isearch_filter_reset(&mut self) {
+        self.isearch.filter_mode = false;
+        self.isearch.filter = NarrowSession::default();
+    }
+
+    /// U-E13: C-o toggles the filter input. Armed, printable keys feed
+    /// `filter.query` (the guard's branch); off, they extend the
+    /// literal search query. The toggle moves the INPUT TARGET only —
+    /// a non-empty filter survives the toggle-off (the list stays
+    /// narrowed). The recompute keeps the session CURRENT for the live
+    /// rows — in particular, arming with an empty filter query places
+    /// the cursor's position at its match's full-set index, so a later
+    /// narrow-out clamps from the cursor's real position (never from
+    /// the session's default 0).
+    pub fn isearch_filter_toggle(&mut self) {
+        self.isearch.filter_mode = !self.isearch.filter_mode;
+        self.isearch_filter_recompute();
+        self.minibuffer_message(&self.isearch_position_echo());
+    }
+
+    /// U-E13: one printable char into the filter query (the guard's
+    /// filter branch) — re-project, keep the selection, and follow.
+    pub(super) fn isearch_filter_char(&mut self, c: char) {
+        self.isearch.filter.query.push(c);
+        self.isearch_filter_apply();
+    }
+
+    /// U-E13: pop the filter query's last character.
+    pub(super) fn isearch_filter_backspace(&mut self) {
+        self.isearch.filter.query.pop();
+        self.isearch_filter_apply();
+    }
+
+    /// U-E13: after a filter-query change: re-project, jump when the
+    /// filtered set is non-empty (the point follows the list's
+    /// selection), sync the highlight, and echo.
+    fn isearch_filter_apply(&mut self) {
+        self.isearch_filter_recompute();
+        if !self.isearch.filter.filtered.is_empty() {
+            self.isearch_jump_to_current();
+        }
+        self.isearch_sync_match_context();
+        self.minibuffer_message(&self.isearch_position_echo());
+    }
+
+    /// U-E13: re-score the LIVE match rows against the filter query
+    /// through the ONE shared core (plan 018 issue 01's seam — the
+    /// display projection is the rows' `line_text`, built by
+    /// `isearch_derive_rows` for exactly this plug-in) and run the
+    /// session's selection rule (issue 01's clamp, refined by
+    /// 018-03's "the cursor's identity is the row it is on": when the
+    /// cursor's match survives the re-projection, the position follows
+    /// the match; only when it is narrowed OUT does the cursor's old
+    /// POSITION clamp into the surviving set — never a reset to 0).
+    ///
+    /// FilterOnly (the results view's 018-03 policy, mirrored here):
+    /// the core ranks best-first, and the surface keeps SOURCE order —
+    /// match order IS the search (the first dimension's pinned
+    /// contract), so a re-order would corrupt it.
+    fn isearch_filter_recompute(&mut self) {
+        let old_pos = self.isearch.filter.selected;
+        let displays: Vec<&str> = self
+            .isearch
+            .rows
+            .iter()
+            .map(|r| r.line_text.as_str())
+            .collect();
+        self.isearch.filter.recompute(&displays, &mut self.matcher);
+        // FilterOnly: the core ranks best-first; the surface keeps
+        // SOURCE (search) order.
+        self.isearch
+            .filter
+            .filtered
+            .sort_by_key(|&(i, _)| i);
+        if self.isearch.filter.filtered.is_empty() {
+            // The seam's clamp parked the cursor at 0 of the empty set;
+            // the canonical selection is left alone (no narrowed row
+            // under the cursor — the selection is neither lost nor
+            // reset; the highlight and the echo report the empty set).
+            return;
+        }
+        match self
+            .isearch
+            .filter
+            .filtered
+            .iter()
+            .position(|&(i, _)| i == self.isearch.current)
+        {
+            Some(pos) => {
+                // The cursor's match survives: the position follows it.
+                self.isearch.filter.selected = pos;
+            }
+            None => {
+                // The match was narrowed out: issue 01's rule — the
+                // cursor's old position clamps into the surviving set
+                // (and the canonical selection mirrors it).
+                let pos = old_pos.min(self.isearch.filter.filtered.len() - 1);
+                self.isearch.filter.selected = pos;
+                self.isearch.current = self.isearch.filter.filtered[pos].0;
+            }
+        }
+    }
+
+    /// U-E13: the minibuffer echo's filter clause — ` (filter: {fq})`
+    /// while the second dimension is in play (the input is armed, or a
+    /// filter query survives a toggle-off); empty otherwise (the
+    /// pre-U-E13 echoes stay byte-for-byte).
+    fn isearch_filter_clause(&self) -> String {
+        if self.isearch.filter_mode || !self.isearch.filter.query.is_empty() {
+            format!(" (filter: {})", self.isearch.filter.query)
+        } else {
+            String::new()
+        }
+    }
+
+    /// U-E13: the isearch position echo for the LIVE state. Without the
+    /// second dimension this is today's byte-for-byte format
+    /// (`I-search: {query} [{idx}/{count}]` / `[no matches]`); with it,
+    /// the clause names the filter and the count is the FILTERED one
+    /// (the list on screen is the filtered set — an honest echo).
+    fn isearch_position_echo(&self) -> String {
+        let query = self.isearch.query.clone();
+        if !self.isearch.filter.query.is_empty() && self.isearch.filter.filtered.is_empty() {
+            return format!(
+                "I-search: {query} (filter: {}) [no matches]",
+                self.isearch.filter.query
+            );
+        }
+        // The unfiltered empty match set keeps today's byte-for-byte
+        // `[no matches]` shape (the pre-U-E13 echo, pinned).
+        if self.isearch.matches.is_empty() {
+            return format!("I-search: {query} [no matches]");
+        }
+        let (idx, count) = if self.isearch.filter.query.is_empty() {
+            (self.isearch.current + 1, self.isearch.matches.len())
+        } else {
+            (
+                self.isearch.filter.selected + 1,
+                self.isearch.filter.filtered.len(),
+            )
+        };
+        format!(
+            "I-search: {query}{} [{idx}/{count}]",
+            self.isearch_filter_clause()
+        )
     }
 
     /// 018-02: re-derive the list rows from `matches` — one row per match,
@@ -150,42 +343,81 @@ impl AppStore {
     /// whether the session is active. The overlay renders only while
     /// active AND non-empty: an empty query or a no-match query clears the
     /// rows, so the list disappears with the result set.
+    ///
+    /// U-E13: with a filter active the list is the FILTERED projection —
+    /// the session's surviving rows (source order) and its position;
+    /// with none, the full match rows and `current` (the pre-U-E13
+    /// shape, byte-for-byte). A filter matching nothing yields zero
+    /// rows (the honest empty state — the overlay skips itself).
     pub fn isearch_list(&self) -> (Vec<IsearchMatchRow>, usize, bool) {
-        (
-            self.isearch.rows.clone(),
-            self.isearch.current,
-            self.isearch.active,
-        )
+        if self.isearch.active && !self.isearch.filter.query.is_empty() {
+            let rows = self
+                .isearch
+                .filter
+                .filtered
+                .iter()
+                .map(|&(i, _)| self.isearch.rows[i].clone())
+                .collect();
+            (rows, self.isearch.filter.selected, true)
+        } else {
+            (
+                self.isearch.rows.clone(),
+                self.isearch.current,
+                self.isearch.active,
+            )
+        }
     }
 
-    /// Navigate to the next match (C-s) with wrap-around.
+    /// Navigate to the next match (C-s) with wrap-around. U-E13: while
+    /// a filter is active the step wraps WITHIN the filtered set (the
+    /// list on screen); with no filter it is today's exact behaviour
+    /// over the full match set. The canonical `current` mirrors the
+    /// list's selection either way.
     pub fn isearch_next(&mut self) {
         if !self.isearch.active || self.isearch.matches.is_empty() {
             return;
         }
-        let n = self.isearch.matches.len();
-        self.isearch.current = (self.isearch.current + 1) % n;
+        if !self.isearch.filter.query.is_empty() {
+            let n = self.isearch.filter.filtered.len();
+            if n == 0 {
+                // Honest empty state: the list is empty; the echo says so.
+                self.minibuffer_message(&self.isearch_position_echo());
+                return;
+            }
+            self.isearch.filter.selected = (self.isearch.filter.selected + 1) % n;
+            self.isearch.current =
+                self.isearch.filter.filtered[self.isearch.filter.selected].0;
+        } else {
+            let n = self.isearch.matches.len();
+            self.isearch.current = (self.isearch.current + 1) % n;
+        }
         self.isearch_jump_to_current();
         self.isearch_sync_match_context();
-        let count = n;
-        let idx = self.isearch.current + 1;
-        let query = self.isearch.query.clone();
-        self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+        self.minibuffer_message(&self.isearch_position_echo());
     }
 
-    /// Navigate to the previous match (C-r) with wrap-around.
+    /// Navigate to the previous match (C-r) with wrap-around. The
+    /// filtered-set mirror of `isearch_next` (U-E13).
     pub fn isearch_prev(&mut self) {
         if !self.isearch.active || self.isearch.matches.is_empty() {
             return;
         }
-        let n = self.isearch.matches.len();
-        self.isearch.current = (self.isearch.current + n - 1) % n;
+        if !self.isearch.filter.query.is_empty() {
+            let n = self.isearch.filter.filtered.len();
+            if n == 0 {
+                self.minibuffer_message(&self.isearch_position_echo());
+                return;
+            }
+            let next = (self.isearch.filter.selected + n - 1) % n;
+            self.isearch.filter.selected = next;
+            self.isearch.current = self.isearch.filter.filtered[next].0;
+        } else {
+            let n = self.isearch.matches.len();
+            self.isearch.current = (self.isearch.current + n - 1) % n;
+        }
         self.isearch_jump_to_current();
         self.isearch_sync_match_context();
-        let count = n;
-        let idx = self.isearch.current + 1;
-        let query = self.isearch.query.clone();
-        self.minibuffer_message(&format!("I-search: {query} [{idx}/{count}]"));
+        self.minibuffer_message(&self.isearch_position_echo());
     }
 
     /// Sync the match-highlight context with the LIVE isearch state
@@ -195,11 +427,30 @@ impl AppStore {
     /// ascending order (a backward isearch's `matches` run descending) so
     /// the per-line clipping can binary-search. Cleared on an empty query
     /// or when no match is current.
+    ///
+    /// U-E13: while a filter is active the ranges are the SURVIVING
+    /// matches' — the highlight mirrors the list (the first dimension's
+    /// highlight for rows the list does not show would be a stale one),
+    /// and a filter that matches nothing clears it (the honest empty
+    /// state, same as a no-match literal query).
     fn isearch_sync_match_context(&mut self) {
         let query = self.isearch.query.clone();
-        let matches = self.isearch.matches.clone();
+        let all = self.isearch.matches.clone();
+        // The surviving set: the full match set, or the filter's
+        // survivors (in source order — the session's FilterOnly
+        // projection) when the second dimension is in play.
+        let matches: Vec<usize> = if !self.isearch.filter.query.is_empty() {
+            self.isearch
+                .filter
+                .filtered
+                .iter()
+                .map(|&(i, _)| all[i])
+                .collect()
+        } else {
+            all.clone()
+        };
         let current = self.isearch.current;
-        if query.is_empty() || matches.is_empty() || current >= matches.len() {
+        if query.is_empty() || matches.is_empty() || current >= all.len() {
             self.match_context = MatchContext::default();
             return;
         }
@@ -207,11 +458,17 @@ impl AppStore {
         let mut ranges: Vec<(usize, usize)> =
             matches.iter().map(|&m| (m, m + len)).collect();
         ranges.sort_by_key(|&(s, _)| s);
-        let sel_start = matches[current];
-        let selected = ranges
+        let sel_start = all[current];
+        let Some(selected) = ranges
             .iter()
             .position(|&(s, _)| s == sel_start)
-            .unwrap_or(0);
+        else {
+            // The current match is not in the surviving set (a filter
+            // that matches nothing, or a stale selection): no range may
+            // wear the prominent face.
+            self.match_context = MatchContext::default();
+            return;
+        };
         self.match_context = MatchContext {
             buffer_key: self.buffers.current().map(String::from).unwrap_or_default(),
             query,
@@ -251,20 +508,27 @@ impl AppStore {
     /// its own context and is unaffected by this. The isearch STATE
     /// (query / matches / current) is kept as-is: repeating `C-s` re-runs
     /// the same search (the highlight lifetime, not the search state,
-    /// changes here).
+    /// changes here). U-E13: the second dimension goes with the session
+    /// (its list disappears on confirm), and RET with a filter that
+    /// matches NOTHING is an honest `[not found]` — the user has no
+    /// visible selection, and confirming a match the list does not show
+    /// would be a silent jump.
     pub fn isearch_confirm(&mut self) {
         if !self.isearch.active {
             return;
         }
         let query = self.isearch.query.clone();
+        let filtered_empty = !self.isearch.filter.query.is_empty()
+            && self.isearch.filter.filtered.is_empty();
         self.isearch.active = false;
         // The highlight lifetime rule: isearch confirm CLEARS the match
         // context (matching `isearch_cancel` above and emacs
         // `isearch-exit`) — the faces vanish when the search ends.
         self.match_context = MatchContext::default();
+        self.isearch_filter_reset();
         if query.is_empty() {
             self.minibuffer_message("");
-        } else if self.isearch.matches.is_empty() {
+        } else if self.isearch.matches.is_empty() || filtered_empty {
             self.minibuffer_message(&format!("I-search: {query} [not found]"));
         } else {
             self.minibuffer_message("");
@@ -276,6 +540,13 @@ impl AppStore {
     /// start). The landing column becomes the goal column. The match
     /// highlight goes with the session (issue match-highlight's lifetime
     /// rule: cancel clears).
+    ///
+    /// U-E13: `C-g` is layered (the emacs-ish layered cancel, the guard's
+    /// decision — a non-empty filter or an armed filter input is the
+    /// innermost active layer, so `isearch_filter_clear` runs BEFORE
+    /// this path): this method is the OUTER layer, reached only with the
+    /// second dimension dropped. It resets the second dimension's state
+    /// outright (the session goes with the list).
     pub fn isearch_cancel(&mut self) {
         if !self.isearch.active {
             return;
@@ -285,6 +556,8 @@ impl AppStore {
         self.isearch.query.clear();
         // 018-02: the list disappears with the session.
         self.isearch.rows.clear();
+        // U-E13: the second dimension goes with the session.
+        self.isearch_filter_reset();
         self.match_context = MatchContext::default();
         self.set_point(
             self.isearch.pre_search_line,

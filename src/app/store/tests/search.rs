@@ -1586,6 +1586,379 @@ use super::*;
         );
     }
 
+    // ── U-E13: isearch's second query dimension ─────────────────────────────
+    //
+    // The literal search is the FIRST dimension (mechanism=own, the plan's
+    // corrected criterion — untouched by this section). The SECOND is a
+    // nucleo filter inside the match list: C-o toggles the filter input,
+    // the shared core filters the rows' line-text projection FilterOnly
+    // (source order — match order IS the search), and C-g is layered
+    // (first C-g clears the filter, second cancels isearch). Every pin
+    // here REDS on the pre-U-E13 tree: C-o was swallowed there (the
+    // guard had no filter branch), so the "filter" chars extended the
+    // literal query and the echoed/row state diverged at the first
+    // C-o-dependent assert.
+
+    fn isearch_store_with(text: &str) -> (tempfile::TempDir, AppStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), text).unwrap();
+        // A throwaway sibling base (the store helper's rule: never the
+        // project dir itself — the walk must not see the persistence
+        // files). Both tempdirs stay alive for the caller's duration.
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+        s.open_path("src/t.rs");
+        (dir, s)
+    }
+
+    /// C-o arms the filter input; the filter narrows the match rows
+    /// FilterOnly (the shared core's survivor set, SOURCE order) and the
+    /// selection CLAMPS (the seam's rule) rather than resetting: the
+    /// cursor's match is narrowed out, its old POSITION clamps into the
+    /// surviving set. The query "l a" is a SUBSEQUENCE of "foo alpha"
+    /// (l@5 … a@7) and "foo delta" (l@6 … a@8) and a contiguous substring
+    /// of NONE of the rows: a contains-filter recompute keeps zero rows,
+    /// the core keeps rows 0 and 2.
+    #[test]
+    fn isearch_filter_narrows_the_rows_and_clamps_the_selection() {
+        let (_dir, mut s) = isearch_store_with(
+            "foo alpha\nfoo gamma\nfoo delta\nfoo gamma\nfoo theta\n",
+        );
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        s.isearch_query_char('o');
+        assert_eq!(s.message, "I-search: foo [1/5]");
+        // Walk the canonical selection AWAY from the head (line 3).
+        for _ in 0..3 {
+            s.isearch_next();
+        }
+        assert_eq!(s.message, "I-search: foo [4/5]");
+        // C-o arms the filter input (the guard's new branch — a
+        // pre-U-E13 tree swallows the key here).
+        s.key_event(key("C-o"));
+        assert_eq!(
+            s.message,
+            "I-search: foo (filter: ) [4/5]",
+            "armed empty filter: the clause shows, the full set is still the list (the count is the list's)"
+        );
+        // The filter is typed in the guard's filter branch.
+        s.key_event(key("l"));
+        s.key_event(Key::space());
+        s.key_event(key("a"));
+        assert_eq!(
+            s.message,
+            "I-search: foo (filter: l a) [2/2]",
+            "the filter clause + the FILTERED count, byte-for-byte"
+        );
+        let (rows, selected, active) = s.isearch_list();
+        assert!(active);
+        let order: Vec<usize> = rows.iter().map(|r| r.line_no).collect();
+        assert_eq!(
+            order,
+            vec![0, 2],
+            "FilterOnly: the core's survivors stay in SOURCE (search) order"
+        );
+        assert_eq!(
+            selected,
+            1,
+            "the cursor's match (line 3) is NARROWED OUT: the old position 4 clamps to 1 — never a reset"
+        );
+        assert_eq!(
+            s.isearch.current, 2,
+            "the canonical selection follows the clamped position (line 2's match)"
+        );
+        assert_eq!(s.point_line(), 2, "the buffer view follows the clamped selection");
+    }
+
+    /// The filter SURVIVES further literal-search characters (and
+    /// backspaces): the literal extension re-derives the match set and
+    /// the set the filter projects re-derives with it. C-o off keeps the
+    /// filter too (the toggle is the INPUT TARGET, not the filter's
+    /// lifetime). C-g is layered: the first clears the filter (the
+    /// selection follows its match — clamped, not lost), the second
+    /// cancels isearch.
+    #[test]
+    fn isearch_filter_survives_a_literal_extension() {
+        let (_dir, mut s) = isearch_store_with("foo alpha\nfoo gamma\nfoxtrot delta\n");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert_eq!(s.message, "I-search: fo [1/3]");
+        s.isearch_next();
+        s.isearch_next();
+        assert_eq!(s.message, "I-search: fo [3/3]");
+        s.key_event(key("C-o"));
+        // "d e": a subsequence of "foxtrot delta" (d@8 … e@9), a
+        // substring of none — only line 2 survives.
+        s.key_event(key("d"));
+        s.key_event(Key::space());
+        s.key_event(key("e"));
+        assert_eq!(
+            s.message,
+            "I-search: fo (filter: d e) [1/1]",
+            "the filter narrows to line 2's row; the cursor's match survives"
+        );
+        // C-o off: the filter SURVIVES (only the input target moves).
+        s.key_event(key("C-o"));
+        assert_eq!(
+            s.message,
+            "I-search: fo (filter: d e) [1/1]",
+            "C-o off keeps the filter (the list stays narrowed)"
+        );
+        // A further literal character: the match set re-derives, the
+        // filter survives, and projects onto the new set.
+        s.key_event(key("x"));
+        assert_eq!(s.isearch_match_count(), 1, "'fox' matches only line 2");
+        assert_eq!(
+            s.message,
+            "I-search: fox (filter: d e) [1/1]",
+            "the filter clause survives the literal extension"
+        );
+        let (rows, _, _) = s.isearch_list();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line_no, 2);
+        // Backspace: the re-derived set is re-filtered again; the
+        // re-derived selection (line 0) is narrowed out and the
+        // position clamps to the survivor (line 2).
+        s.key_event(key("C-h"));
+        assert_eq!(
+            s.message,
+            "I-search: fo (filter: d e) [1/1]",
+            "the backspace re-derives the set, the filter survives"
+        );
+        assert_eq!(s.point_line(), 2, "the clamped selection (line 2) is where the point sits");
+        // Layered C-g: FIRST clears the filter (the selection follows
+        // its match — line 2, clamped into the full set), SECOND cancels.
+        s.key_event(key("C-g"));
+        assert_eq!(
+            s.message,
+            "I-search: fo [3/3]",
+            "the first C-g clears the filter; the selection followed its match (line 2), not a reset to line 0"
+        );
+        assert_eq!(s.point_line(), 2);
+        s.key_event(key("C-g"));
+        assert_eq!(s.message, "cancel");
+        assert!(!s.isearch_active(), "the second C-g cancels isearch");
+        assert_eq!(s.point_line(), 0, "the pre-search line restores");
+        assert!(s.isearch.rows.is_empty(), "the list disappears with the session");
+    }
+
+    /// A filter matching NOTHING shows an honest empty state: no rows,
+    /// no stale highlight, the `[no matches]` echo with the clause, and
+    /// RET is an honest `[not found]` (the point does not teleport onto
+    /// a match the list does not show).
+    #[test]
+    fn isearch_filter_matching_nothing_is_an_honest_empty_state() {
+        let (_dir, mut s) = isearch_store_with("bar b\nfoo a\n");
+        s.set_point(1, 1, 1); // pre-search point: line 1, char 1
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        assert_eq!(s.message, "I-search: f [1/1]");
+        s.key_event(key("C-o"));
+        s.key_event(key("z"));
+        s.key_event(key("z"));
+        assert_eq!(
+            s.message,
+            "I-search: f (filter: zz) [no matches]",
+            "the clause stays, the count is the honest [no matches]"
+        );
+        let (rows, _, active) = s.isearch_list();
+        assert!(active);
+        assert!(rows.is_empty(), "no stale rows");
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "no stale highlight for a match the list does not show"
+        );
+        assert_eq!(
+            (s.point_line(), s.point_col()),
+            (1, 0),
+            "the point stays where it was (no jump onto the unlisted match)"
+        );
+        s.isearch_confirm();
+        assert!(!s.isearch_active());
+        assert_eq!(
+            s.message,
+            "I-search: f [not found]",
+            "RET on an empty filtered set is an honest not-found"
+        );
+    }
+
+    /// C-s / C-r wrap WITHIN the filtered set (never over the full
+    /// match set) while the filter is active.
+    #[test]
+    fn isearch_c_s_c_r_wrap_within_the_filtered_set() {
+        let (_dir, mut s) = isearch_store_with("foo beta\nfoo beta\nfoo gamma\n");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        assert_eq!(s.isearch_match_count(), 3);
+        s.key_event(key("C-o"));
+        s.key_event(key("b"));
+        s.key_event(key("e"));
+        assert_eq!(
+            s.message,
+            "I-search: f (filter: be) [1/2]",
+            "lines 0 and 1 survive 'be'; line 2 drops out"
+        );
+        s.key_event(key("C-s"));
+        assert_eq!(s.message, "I-search: f (filter: be) [2/2]");
+        assert_eq!(s.isearch_match_index(), 2, "C-s moved to line 1's match (source index 1)");
+        s.key_event(key("C-s"));
+        assert_eq!(
+            s.message,
+            "I-search: f (filter: be) [1/2]",
+            "C-s wraps WITHIN the filtered set (not to line 2, which is filtered out)"
+        );
+        assert_eq!(s.isearch_match_index(), 1, "back to line 0's match (source index 0)");
+        s.key_event(key("C-r"));
+        assert_eq!(s.message, "I-search: f (filter: be) [2/2]");
+        assert_eq!(s.isearch_match_index(), 2, "C-r wraps back to line 1's match");
+    }
+
+    /// With a filter active, a literal extension still re-derives the
+    /// FIRST-dimension selection from the pre-search point (the pinned
+    /// re-derive rule — `isearch_recompute_rederives_*`'s regime) and
+    /// then re-projects the surviving filter onto the new set.
+    #[test]
+    fn isearch_first_dimension_rederives_when_the_filter_is_active() {
+        let (_dir, mut s) = isearch_store_with("aa zero\nno hit\naa two\naa three\n");
+        s.set_point(1, 0, 0); // pre-search point: line 1 (the no-hit line)
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('a');
+        assert_eq!(s.isearch_match_count(), 6);
+        assert_eq!(s.message, "I-search: a [3/6]");
+        s.key_event(key("C-o"));
+        // 'h': only line 3's text ("aa three") holds it.
+        s.key_event(key("h"));
+        assert_eq!(
+            s.message,
+            "I-search: a (filter: h) [2/2]",
+            "the filter keeps line 3's two matches; the re-derived selection (line 2) is narrowed out and clamps to them"
+        );
+        assert_eq!(s.point_line(), 3);
+        // Toggle the filter input OFF, then extend the literal query:
+        // "aa" — the first dimension re-derives to the point's own match
+        // (line 3), and the filter re-projects (the set it filters is
+        // the new one).
+        s.key_event(key("C-o"));
+        s.key_event(key("a"));
+        assert_eq!(s.isearch_match_count(), 3, "'aa': one match per 'aa' line");
+        assert_eq!(
+            s.message,
+            "I-search: aa (filter: h) [1/1]",
+            "the re-derived selection (line 3) survives the re-projection"
+        );
+        assert_eq!(
+            s.isearch.current, 2,
+            "the re-derive rule still drives the canonical selection (line 3's match)"
+        );
+        assert_eq!(s.point_line(), 3);
+    }
+
+    /// Backspacing the literal query to empty with a filter active:
+    /// the filter goes with the source set (there is nothing left to
+    /// filter), the empty-query echo stays byte-for-byte, and the
+    /// highlight clears (the `isearch_backspace_to_empty_*` regime
+    /// extended to the filter state).
+    #[test]
+    fn isearch_backspace_to_empty_with_a_filter_clears_both_and_keeps_the_echo() {
+        let (_dir, mut s) = isearch_store_with("foo a\nfoo b\n");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        assert_eq!(s.message, "I-search: fo [1/2]");
+        s.key_event(key("C-o"));
+        s.key_event(key("a"));
+        assert_eq!(
+            s.message,
+            "I-search: fo (filter: a) [1/1]",
+            "only 'foo a' holds 'a'"
+        );
+        s.isearch_backspace();
+        assert_eq!(
+            s.message,
+            "I-search: f (filter: a) [1/1]",
+            "'f' re-derives the set (2 matches); the filter survives and the count is the filtered one"
+        );
+        s.isearch_backspace();
+        assert!(s.isearch.matches.is_empty(), "the empty query has no matches");
+        assert!(s.isearch.rows.is_empty(), "the list disappears with the result set");
+        assert!(
+            s.match_context.ranges.is_empty(),
+            "the highlight clears (the pre-existing regime)"
+        );
+        assert_eq!(s.message, "I-search: ", "the empty-query echo, byte-for-byte");
+        // The filter went with the source set: the next char is a
+        // LITERAL char, not a filter char.
+        s.key_event(key("q"));
+        assert_eq!(s.message, "I-search: q [no matches]");
+        assert_eq!(s.isearch.query, "q", "the char extended the literal query");
+    }
+
+    /// RET confirms the SELECTED filtered match — the landing column is
+    /// the match's CHAR column on a multibyte line (the
+    /// `issue-isearch-column` regime through the second dimension):
+    /// in "café omyga" the 'o' of "omyga" is at BYTE 6 but CHAR 5.
+    #[test]
+    fn isearch_ret_lands_on_the_selected_filtered_match_column() {
+        let (_dir, mut s) = isearch_store_with("café omega\ncafé omyga\n");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('o');
+        s.isearch_query_char('m');
+        assert_eq!(s.isearch_match_count(), 2);
+        s.key_event(key("C-o"));
+        // 'yg': only "café omyga" holds it — the filter narrows to line
+        // 1, whose match (the cursor's, line 0) is narrowed out: the
+        // position clamps and the canonical selection follows to line 1.
+        s.key_event(key("y"));
+        s.key_event(key("g"));
+        assert_eq!(s.message, "I-search: om (filter: yg) [1/1]");
+        assert_eq!(s.isearch.current, 1, "the clamped selection is line 1's match");
+        s.isearch_confirm();
+        assert!(!s.isearch_active());
+        assert_eq!(s.point_line(), 1, "RET lands the point on the SELECTED filtered match's line");
+        assert_eq!(
+            s.point_col(),
+            5,
+            "the match's CHAR column — not byte 6 (the multibyte é before it)"
+        );
+        assert_eq!(s.file_point().goal_col, 5, "the landing column becomes the goal column");
+    }
+
+    /// A literal extension that leaves ZERO matches drops the filter
+    /// (no source set — the filter goes with it, the empty-literal-
+    /// query rule extended): the echo is the plain `[no matches]` (no
+    /// stale clause), the highlight clears, and nothing panics (a stale
+    /// filtered session read against zero rows panicked the highlight
+    /// sync — measured, and this is the pin that caught it).
+    #[test]
+    fn isearch_zero_matches_drops_the_filter() {
+        let (_dir, mut s) = isearch_store_with("foo a\nfoo b\n");
+        s.isearch_start(IsearchDirection::Forward);
+        s.isearch_query_char('f');
+        s.isearch_query_char('o');
+        s.key_event(key("C-o"));
+        s.key_event(key("a"));
+        assert_eq!(s.message, "I-search: fo (filter: a) [1/1]");
+        s.key_event(key("C-o")); // off — the filter survives
+        s.key_event(key("z")); // literal "foz": zero matches, filter in play
+        assert!(s.isearch.matches.is_empty(), "'foz' matches nothing");
+        assert!(s.isearch.rows.is_empty());
+        assert!(
+            s.isearch.filter.query.is_empty(),
+            "the filter went with the source set (no stale session)"
+        );
+        assert!(!s.isearch.filter_mode);
+        assert!(s.match_context.ranges.is_empty(), "no stale highlight");
+        assert_eq!(
+            s.message,
+            "I-search: foz [no matches]",
+            "the plain [no matches] echo — no stale filter clause"
+        );
+    }
+
     // ── plan 018 issue 03: results-view narrowing ────────────────────
 
     /// Narrow to a file subset through the prompt (the user's typing
