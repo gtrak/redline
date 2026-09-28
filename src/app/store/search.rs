@@ -713,7 +713,11 @@ impl AppStore {
     /// {line}"` (plan 018 issue 03) — file name and line number are
     /// scored, so narrowing by file name works (the fzf property the
     /// results view lacks without it).
-    fn hit_display(hit: &crate::search::rg::Hit) -> String {
+    ///
+    /// `pub(crate)`: the 018-05 inventory cross-check
+    /// (`src/app/store/tests/narrowing.rs`) reads the recompute through
+    /// the SAME production projection — never a copied display string.
+    pub(crate) fn hit_display(hit: &crate::search::rg::Hit) -> String {
         format!("{}:{} {}", hit.file, hit.line_no, hit.line)
     }
 

@@ -442,3 +442,4 @@ mod project;
 mod minibuffer;
 mod keys;
 mod core;
+mod narrowing;

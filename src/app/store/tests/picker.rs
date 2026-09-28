@@ -1059,7 +1059,7 @@ use crate::nav::index::build_index;
     /// `candidates_for` is non-empty so the per-kind "picker output == shared
     /// core" comparison is exercised, not vacuous. The tempdirs are leaked
     /// (OS-cleaned on exit) so the paths the store holds stay valid.
-    fn rich_picker_store() -> AppStore {
+    pub(super) fn rich_picker_store() -> AppStore {
         let dir = tempfile::tempdir().unwrap();
         // A git project (committed files) — the walk + index root.
         git_repo_init(dir.path(), "Test", "test@example.com", true);

@@ -358,6 +358,37 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       set). PTY drive: `tools/drive_results_narrow.py`. Store pins: the
       `results_narrow_*` / `results_rerun_clears_the_query` /
       `results_prompt_*` pins in `src/app/store/tests/search.rs`.
+- [ ] **U-E10 · Named follow-up: magit section narrowing (018 deferral, NOT plan 018)**:
+      magit status stays DIFFER (PLAN 018 §4) because its rows carry diff
+      payload (context/add/delete lines are one document) — a score-reorder
+      destroys the diff, and even a filter must keep context lines glued to
+      their hunk headers (PLAN §2.3-2). The right primitive is magit's own
+      *section* narrowing: filter children, keep the section structure
+      (headings survive iff a child does). Recorded as a candidate plan of
+      its own — not a silent omission, not an extension of plan 018.
+- [ ] **U-E11 · Named follow-up: log query-level narrowing (018 deferral)**:
+      the log view is server-paged (git log range fetch); a client-side
+      filter of one page hides commits and breaks `n`/`p` paging
+      (PLAN §2.3-4). Real log narrowing is a `git log` query change
+      (`--grep` / `-G` / author / commit filters) — a SERVER-side mechanism,
+      a different design, recorded as a named follow-up.
+- [ ] **U-E12 · Named follow-up: tree narrowing (018 deferral)**: the tree
+      sidebar stays DIFFER — it is hierarchical (narrowing means
+      filter-children-keep-parents in the 34-col sidebar) AND it is the one
+      renderer-windowed surface (PLAN §1 row 4), so unifying it starts with
+      re-homing its windowing to the store (a refactor with no user value by
+      itself). Note its actual job — find a file fast — is already served by
+      the narrowing FindFile picker (`C-c p f`), which narrows.
+- [ ] **U-E13 · Named follow-up: isearch's second query dimension (018
+      deferral)**: the isearch list narrows BY the search itself — a literal
+      byte search whose match order IS the search (plan 018 §3; the corrected
+      success criterion pins it as `narrows=true, mechanism=own`, not a
+      shared-core path: several rows share one line's text, so scoring cannot
+      recover row identity, and re-ordering would corrupt the search). A
+      nucleo filter-inside-the-list (typing `foo`, then filtering the 200
+      `foo` matches further) is a SECOND query dimension, explicitly deferred
+      there — the session's display projection (each row's line text) already
+      exists for it to plug into.
 
 ## U-F · Git surface
 

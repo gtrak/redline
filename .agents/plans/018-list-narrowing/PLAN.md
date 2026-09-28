@@ -1,7 +1,6 @@
 # Plan 018 — unified list narrowing (helm/fzf-style narrowing on every list surface)
 
-**Status:** DESIGN ONLY. No implementation. Five issues specced below, none
-started. Base: main `20e0162`.
+**Status:** COMPLETE (all five issues landed: 01 `7e60917`, 02 `43ad828`, 03 `14ec169`, 04 `ec134af`, 05 `d7c35f6` — see `.agents/plans/STATUS.md`, Plan 018). The §4 verdicts are cross-checked by `src/app/store/tests/narrowing.rs` (018-05), and the four named follow-ups (magit section-narrow, log git-query narrow, tree filter, isearch second dimension) live at `docs/ux-testing-plan.md` U-E10..U-E13.
 
 **Origin (user, verbatim):** *"I also think the i-search results could be more
 interactive and helm-like UX, same with the symbol-search. Every list result
