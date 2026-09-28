@@ -1591,6 +1591,50 @@ use super::*;
         assert_eq!(format_notes_dump(&[], "/p", true), "");
     }
 
+    /// Same-line records disambiguate in the dump's headers, mirroring the
+    /// annotations picker's identity: a (path, line) hosting several records
+    /// prints `path:line:col` (block) / `path:line:col: text` (plain) so the
+    /// blocks read apart; a SINGLE-record line keeps the plain `path:line`
+    /// shape (the existing exact-byte pins above stay green).
+    #[test]
+    fn notes_dump_same_line_records_carry_the_cell_column() {
+        let items = vec![
+            DumpAnnotation {
+                path: "src/perc.rs".to_string(),
+                line: 2,
+                col: 8,
+                code: "    let a = b;".to_string(),
+                text: "note a".to_string(),
+                orphaned: false,
+            },
+            DumpAnnotation {
+                path: "src/perc.rs".to_string(),
+                line: 2,
+                col: 12,
+                code: "    let a = b;".to_string(),
+                text: "note b".to_string(),
+                orphaned: false,
+            },
+            dump_item("README.md", 1, "# readme", "top", false),
+        ];
+        let block = format_notes_dump(&items, "/p", false);
+        assert!(block.contains("src/perc.rs:2:8\n"), "block: {block:?}");
+        assert!(block.contains("src/perc.rs:2:12\n"), "block: {block:?}");
+        assert!(
+            block.contains("README.md:1\n"),
+            "single-record line keeps the plain header: {block:?}"
+        );
+        assert!(!block.contains("README.md:1:"), "no stray col on a lone record: {block:?}");
+        let plain = format_notes_dump(&items, "/p", true);
+        assert_eq!(
+            plain,
+            "README.md:1: top\n".to_owned()
+                + "src/perc.rs:2:8: note a\n"
+                + "src/perc.rs:2:12: note b\n",
+            "plain: {plain:?}"
+        );
+    }
+
     /// The accessor resolves the dump shape from the store: 1-based lines,
     /// `code` = the open buffer's current content when the anchor holds, the
     /// STORED anchor for orphaned records (never the line's current text),

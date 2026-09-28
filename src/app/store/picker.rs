@@ -106,30 +106,57 @@ impl AppStore {
     }
 
     /// Candidates for the annotations picker (015-01): every annotation
-    /// record in the notes document, in document order (file, then line —
-    /// the notes document's own order, NOT recency). `NotesEntry::Raw`
-    /// blocks are verbatim non-annotation content (malformed records,
-    /// stray lines — kept verbatim, never interpreted) and are NEVER
-    /// candidates: the list is annotations only. Row shape (name-first):
-    /// name/label = the annotation text, detail = `path:line` (1-based
-    /// line, the location pickers' display convention).
+    /// record in the notes document, in document order (file, then line,
+    /// then col — left-to-right on a line that hosts several records — NOT
+    /// recency). `NotesEntry::Raw` blocks are verbatim non-annotation
+    /// content (malformed records, stray lines — kept verbatim, never
+    /// interpreted) and are NEVER candidates: the list is annotations only.
+    /// Row shape (name-first): name = `path:line` (1-based line — the
+    /// machine key the landing and the deletion parse, the location
+    /// pickers' convention), label = the annotation text, detail = the
+    /// location, right-aligned (picker-density). A line that hosts several
+    /// records disambiguates its rows ON SCREEN: the detail gains the
+    /// record's own cell column (the `:col` suffix — the same key the
+    /// deletion/landing address by, so even two records of the SAME symbol
+    /// on a line stay distinguishable) and, when the record carries a
+    /// syntax anchor, the anchored symbol name in parentheses after it.
+    /// Both ride the detail's TAIL, so the detail's left-truncation drops
+    /// the repetitive path prefix first, never the disambiguator. A line
+    /// with a single record keeps the plain `path:line` display, unchanged.
     fn annotations_candidates(&mut self) -> Vec<PickerCandidate> {
         // The notes document (disk or open buffer) is the source of truth
         // for the records, so load/re-parse it before building (plan 005
         // issue 02).
         self.ensure_notes_doc();
-        let mut rows: Vec<(String, usize, PickerCandidate)> = self
+        let records: Vec<&Annotation> = self
             .notes_doc
             .entries
             .iter()
             .filter_map(|e| e.as_record())
+            .collect();
+        let mut rows: Vec<(String, usize, usize, PickerCandidate)> = records
+            .iter()
             .map(|a| {
-                let detail = format!("{}:{}", a.path, a.line + 1);
+                let location = format!("{}:{}", a.path, a.line + 1);
+                // (annotations-picker same-line identity) a (path, line)
+                // can host SEVERAL records (per-symbol creation):
+                // `path:line` alone is shared by every sibling, so only
+                // then does the row carry the record's own cell — the
+                // deletion/landing key — plus the anchored symbol name
+                // when the record has one.
+                let mut detail = location.clone();
+                if records.iter().filter(|r| r.path == a.path && r.line == a.line).count() > 1 {
+                    detail.push_str(&format!(":{}", a.col));
+                    if let Some(name) = a.syntax.as_ref().map(|sa| sa.name.clone()) {
+                        detail.push_str(&format!(" ({name})"));
+                    }
+                }
                 (
                     a.path.clone(),
                     a.line,
+                    a.col,
                     PickerCandidate {
-                        name: a.text.clone(),
+                        name: location,
                         display: format!("{}  {}", a.text, detail),
                         // picker-density: name-first — the annotation text
                         // left, the location right-aligned.
@@ -142,8 +169,10 @@ impl AppStore {
                 )
             })
             .collect();
-        rows.sort_by(|(p1, l1, _), (p2, l2, _)| p1.cmp(p2).then(l1.cmp(l2)));
-        rows.into_iter().map(|(_, _, c)| c).collect()
+        rows.sort_by(|(p1, l1, c1, _), (p2, l2, c2, _)| {
+            p1.cmp(p2).then(l1.cmp(l2)).then(c1.cmp(c2))
+        });
+        rows.into_iter().map(|(_, _, _, c)| c).collect()
     }
 
     /// `C-c n a` (015-01): open the annotations picker — a temporary,
@@ -168,7 +197,7 @@ impl AppStore {
     /// the buffer view's `d` reached from the picker (the Stash list's
     /// `x` drop is the sibling precedent).
     pub(super) fn annotations_picker_delete(&mut self) {
-        let Some((detail, ann_col, query)) = self
+        let Some((location, ann_col, query)) = self
             .picker
             .as_ref()
             .and_then(|p| {
@@ -177,7 +206,7 @@ impl AppStore {
                         p.filtered
                             .get(p.selected)
                             .map(|(cand, _)| {
-                                (cand.detail.clone(), cand.ann_col, p.query.clone())
+                                (cand.name.clone(), cand.ann_col, p.query.clone())
                             })
                     })
                     .flatten()
@@ -185,11 +214,13 @@ impl AppStore {
         else {
             return;
         };
-        // detail is "path:line" (1-based line number, as displayed);
-        // ann_col is the record's own cell column — the key that
-        // distinguishes the several records a line can host (the
-        // line-only key deleted the FIRST record, not the selected one).
-        if let Some((path, line_str)) = detail.rsplit_once(':')
+        // name is "path:line" (1-based line number — the row's machine
+        // key; the displayed detail may add the same-line disambiguator
+        // `:col (symbol)`, but the address is the name). ann_col is the
+        // record's own cell column — the key that distinguishes the
+        // several records a line can host (the line-only key deleted the
+        // FIRST record, not the selected one).
+        if let Some((path, line_str)) = location.rsplit_once(':')
             && let Ok(line) = line_str.parse::<usize>()
             && let Some(col) = ann_col
         {
@@ -676,9 +707,9 @@ impl AppStore {
             .and_then(|p| {
                 p.filtered
                     .get(p.selected)
-                    .map(|(c, _)| (p.kind, c.name.clone(), c.docs.clone(), c.detail.clone()))
+                    .map(|(c, _)| (p.kind, c.name.clone(), c.docs.clone()))
             });
-        let (kind, name, docs, detail) = match choice {
+        let (kind, name, docs) = match choice {
             Some(choice) => choice,
             None => {
                 if let Some(p) = self.picker.as_mut() {
@@ -691,10 +722,14 @@ impl AppStore {
             PickerKind::Palette | PickerKind::Projects => docs,
             PickerKind::FindFile | PickerKind::RecentFiles => self.file_preview(&name),
             PickerKind::Buffers | PickerKind::KillBuffer => self.buffer_preview(&name),
-            // Xref and Symbols: preview the file at the definition location.
-            // The name is "file:line" (1-based). Show a window around the
-            // definition line, not the file's first page.
-            PickerKind::Xref | PickerKind::Symbols | PickerKind::Impls => {
+            // Xref, Symbols, Impls, and Annotations: preview the file at
+            // the definition/annotation location. The name is "file:line"
+            // (1-based) — for the annotations rows the machine key the
+            // landing and the deletion parse (their detail may add the
+            // same-line disambiguator, never the address). Show a window
+            // around that line, not the file's first page.
+            PickerKind::Xref | PickerKind::Symbols | PickerKind::Impls
+            | PickerKind::Annotations => {
                 if let Some((file, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
@@ -705,17 +740,6 @@ impl AppStore {
             }
             // Imenu: preview the current file (the name is "symbol:line").
             PickerKind::Imenu => self.file_preview_current(),
-            // Annotations: preview the file at the annotation's line
-            // (like Xref — the detail is "path:line", 1-based).
-            PickerKind::Annotations => {
-                if let Some((file, line_str)) = detail.rsplit_once(':')
-                    && let Ok(line) = line_str.parse::<usize>()
-                {
-                    self.file_preview_at_line(file, line - 1)
-                } else {
-                    String::new()
-                }
-            }
             // Branch / Stash: no preview pane (the candidate display is
             // already self-describing).
             PickerKind::Branch | PickerKind::Stash => String::new(),
@@ -845,7 +869,6 @@ impl AppStore {
                         (
                             p.kind,
                             c.name.clone(),
-                            c.detail.clone(),
                             c.label.clone(),
                             c.ann_col,
                         )
@@ -857,7 +880,7 @@ impl AppStore {
         let tooling = self.xref_tooling_pending.clone();
         self.picker = None;
         self.xref_tooling_pending = None;
-        let Some((kind, name, detail, label, ann_col)) = choice else {
+        let Some((kind, name, label, ann_col)) = choice else {
             self.minibuffer_message("no candidate selected");
             return;
         };
@@ -986,7 +1009,9 @@ impl AppStore {
             // — the same project-relative landing sequence as the Xref
             // picker (open, point to the line, recenter, record the jump).
             PickerKind::Annotations => {
-                // detail is "path:line" (1-based line number, as shown).
+                // name is "path:line" (1-based line number — the row's
+                // machine key; the detail's `:col (symbol)` same-line
+                // disambiguator is display-only, never the address).
                 // (jump-column-landings P2-1) the annotation record DOES
                 // carry a column — `Annotation.col`, the point's column at
                 // creation, written to the notes file. It travels with the
@@ -996,7 +1021,7 @@ impl AppStore {
                 // without a recorded column degrades to col 0, and
                 // `set_point` clamps a stale column to the line's end
                 // (never OOB).
-                if let Some((file, line_str)) = detail.rsplit_once(':')
+                if let Some((file, line_str)) = name.rsplit_once(':')
                     && let Ok(line) = line_str.parse::<usize>()
                 {
                     let origin = self.current_jump_entry();

@@ -103,7 +103,7 @@ fn canvas_height(candidates: usize, viewport: u32) -> u32 {
 /// full width — no split, no gutter, no preview column — so a 1-column
 /// gutter never reintroduces a dead preview strip in the narrow/suppressed
 /// case.
-fn picker_column_layout(w: usize, has_preview: bool) -> (usize, isize, usize) {
+pub(crate) fn picker_column_layout(w: usize, has_preview: bool) -> (usize, isize, usize) {
     let split = (w as i32 * 2 / 3) as usize;
     if has_preview {
         let cand_w = split.saturating_sub(1);
@@ -224,7 +224,9 @@ impl Component for PickerCanvas {
 /// rows' `display` keeps the `*` marker slot's leading space for matching
 /// — otherwise `display`); otherwise it is a name-first row (label left,
 /// detail right-aligned at the column's right edge).
-fn draw_candidate_row(
+/// `pub(crate)`: the store-tier pins quote the same-line annotation rows
+/// AS RENDERED (the store builds the candidates; this draws them).
+pub(crate) fn draw_candidate_row(
     canvas: &mut CanvasSubviewMut,
     y: isize,
     cand_w: usize,

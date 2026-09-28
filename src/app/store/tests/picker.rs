@@ -508,7 +508,11 @@ use super::*;
         assert_eq!(store.picker_count(), (2, 2));
         // Row shape + document order: README.md:1, then src/main.rs:2
         // (file, then line — not recency, not the notes doc's append
-        // order, which puts src/main.rs first).
+        // order, which puts src/main.rs first). name is the machine key
+        // (path:line, the location pickers' convention — landing and
+        // deletion parse it); detail is the display location (identical
+        // here: both lines host a single record, so no same-line
+        // disambiguator rides it).
         let rows: Vec<_> = store
             .picker_filtered()
             .iter()
@@ -517,46 +521,53 @@ use super::*;
         assert_eq!(
             rows,
             vec![
-                ("top of the docs", "README.md:1"),
-                ("fix the off-by-one", "src/main.rs:2"),
+                ("README.md:1", "README.md:1"),
+                ("src/main.rs:2", "src/main.rs:2"),
             ]
         );
         // Raw exclusion: neither the stray line nor the malformed block
-        // may surface as a candidate — in name, label, or detail.
+        // may surface as a candidate — in display (the match target =
+        // note text + location), label, or detail.
         for (c, _) in store.picker_filtered() {
-            assert!(!c.name.contains("stray"), "raw stray line surfaced: {c:?}");
+            assert!(!c.display.contains("stray"), "raw stray line surfaced: {c:?}");
             assert!(
-                !c.name.contains("not a record"),
+                !c.label.contains("not a record"),
                 "malformed record surfaced: {c:?}"
             );
             assert!(!c.detail.contains("src/main.rs:10"), "the malformed record's line surfaced: {c:?}");
             assert!(!c.label.contains("stray"), "raw stray line surfaced in the label: {c:?}");
         }
-        // Row shape: name/label = the annotation text, detail = path:line
-        // (1-based, the location pickers' display convention), display
-        // carries both (the nucleo match target).
+        // Row shape: name = path:line (the machine key — NOT the note
+        // text), label = the annotation text, detail = path:line (1-based,
+        // the location pickers' display convention; these legacy records
+        // carry no col key → col 0, and their lines host a single record,
+        // so the detail stays the plain form), display carries both (the
+        // nucleo match target), ann_col = the record's own col.
         let fix = store
             .picker_filtered()
             .iter()
-            .find(|(c, _)| c.name == "fix the off-by-one")
+            .find(|(c, _)| c.label == "fix the off-by-one")
             .map(|(c, _)| c.clone())
             .unwrap();
+        assert_eq!(fix.name, "src/main.rs:2");
         assert_eq!(fix.label, "fix the off-by-one");
         assert_eq!(fix.detail, "src/main.rs:2");
         assert_eq!(fix.display, "fix the off-by-one  src/main.rs:2");
+        assert_eq!(fix.ann_col, Some(0), "no col key in the record → col 0");
         assert_eq!(fix.category, "annotation");
-        // Inherited filtering: the query narrows the list, the total
-        // stays the unfiltered count.
+        // Inherited filtering: the query narrows the list (the match
+        // target is the display — note text + location), the total stays
+        // the unfiltered count.
         store.key_event(key("o"));
         store.key_event(key("f"));
         store.key_event(key("f"));
         assert_eq!(store.picker_count(), (1, 2));
-        let names: Vec<_> = store
+        let labels: Vec<_> = store
             .picker_filtered()
             .iter()
-            .map(|(c, _)| c.name.as_str())
+            .map(|(c, _)| c.label.as_str())
             .collect();
-        assert_eq!(names, vec!["fix the off-by-one"], "{names:?}");
+        assert_eq!(labels, vec!["fix the off-by-one"], "{labels:?}");
     }
 
     #[test]
@@ -569,7 +580,8 @@ use super::*;
         // (A bare `j` would extend the filter query; C-n is the nav key.)
         store.key_event(key("C-n"));
         assert_eq!(store.picker_selected(), 1);
-        // The preview shows the file around the annotation line.
+        // The preview shows the file around the annotation line (parsed
+        // from the name machine key — path:line).
         assert!(
             store.picker_preview().contains("println!"),
             "preview: {}",
@@ -601,12 +613,12 @@ use super::*;
         assert!(store.picker_open(), "d must not close the picker");
         // The list recomputes on the same (empty) query: 1 of 1.
         assert_eq!(store.picker_count(), (1, 1));
-        let names: Vec<_> = store
+        let labels: Vec<_> = store
             .picker_filtered()
             .iter()
-            .map(|(c, _)| c.name.as_str())
+            .map(|(c, _)| c.label.as_str())
             .collect();
-        assert_eq!(names, vec!["top of the docs"], "{names:?}");
+        assert_eq!(labels, vec!["top of the docs"], "{labels:?}");
         assert!(
             store.message.contains("deleted annotation"),
             "{}",
@@ -627,15 +639,35 @@ use super::*;
     /// Fixture: TWO annotation records on the SAME (path, line) at two
     /// different columns (record 1 on `a` at char col 8, record 2 on `b` at
     /// char col 12 of `    let a = b;`). This is the shape the `A` key path
-    /// now produces (per-symbol, not per-line), so the two rows share the
-    /// detail `src/perc.rs:2` and are distinguishable ONLY by the record's
-    /// own `col` — the identity the picker used to drop.
+    /// now produces (per-symbol, not per-line): the two rows share the
+    /// name machine key `src/perc.rs:2`, and the record's own `col` is the
+    /// identity the detail renders so the rows read apart on screen.
     fn project_with_two_annotations_on_one_line(dir: &std::path::Path) {
         project_with_files(dir);
         std::fs::write(dir.join("src/perc.rs"), "fn f() {\n    let a = b;\n}\n").unwrap();
         std::fs::write(
             dir.join(".redline-notes.md"),
             "# Notes\n\n<!-- redline-annotations:begin -->\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 8\nanchor:     let a = b;\nnote: note a\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 12\nanchor:     let a = b;\nnote: note b\n<!-- redline-annotations:end -->\n",
+        )
+        .unwrap();
+    }
+
+    /// Fixture: FIVE records across TWO same-line sibling groups, covering
+    /// the row shapes the disambiguation must handle: (1) records WITH a
+    /// syntax anchor (the symbol name rides the detail), (2) records with
+    /// `syntax_name` ABSENT (text-rule anchors — only the col rides), (3)
+    /// a (path, line) hosting SEVERAL records (the case that read apart
+    /// pre-fix), and (4) a sibling record at col 0 (a pin that only covers
+    /// column-0 would leave the indented siblings unexercised). Line 0
+    /// (`fn f() {`): col 0 = `fn` (keyword — no identifier-ish answer →
+    /// text rule), col 3 = the function name `f`. Line 1 (`    let a = b;`):
+    /// col 4 = `let` (keyword → text rule), col 8 = `a`, col 12 = `b`.
+    fn project_with_mixed_same_line_annotations(dir: &std::path::Path) {
+        project_with_files(dir);
+        std::fs::write(dir.join("src/perc.rs"), "fn f() {\n    let a = b;\n}\n").unwrap();
+        std::fs::write(
+            dir.join(".redline-notes.md"),
+            "# Notes\n\n<!-- redline-annotations:begin -->\n[annotation]\npath: src/perc.rs\nline: 0\ncol: 0\nanchor: fn f() {\nnote: n0\n[annotation]\npath: src/perc.rs\nline: 0\ncol: 3\nanchor: fn f() {\nnote: n3\nsyntax_kind: identifier\nsyntax_name: f\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 4\nanchor:     let a = b;\nnote: n4\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 8\nanchor:     let a = b;\nnote: n8\nsyntax_kind: identifier\nsyntax_name: a\n[annotation]\npath: src/perc.rs\nline: 1\ncol: 12\nanchor:     let a = b;\nnote: n12\nsyntax_kind: identifier\nsyntax_name: b\n<!-- redline-annotations:end -->\n",
         )
         .unwrap();
     }
@@ -647,8 +679,9 @@ use super::*;
         let mut store = store(dir.path());
         store.open_annotations_picker();
         assert_eq!(store.picker_count(), (2, 2));
-        // Both rows carry the SAME detail; only the record's own `col`
-        // distinguishes them (this is what the picker used to lose).
+        // Both rows share the name machine key (path:line); the DETAIL
+        // now carries the record's own cell so the rows read apart on
+        // screen — pre-fix the details were both `src/perc.rs:2`.
         let rows: Vec<_> = store
             .picker_filtered()
             .iter()
@@ -657,8 +690,8 @@ use super::*;
         assert_eq!(
             rows,
             vec![
-                ("note a", "src/perc.rs:2", Some(8)),
-                ("note b", "src/perc.rs:2", Some(12)),
+                ("src/perc.rs:2", "src/perc.rs:2:8", Some(8)),
+                ("src/perc.rs:2", "src/perc.rs:2:12", Some(12)),
             ]
         );
         // Select the SECOND row (note b, col 12) and delete it.
@@ -670,12 +703,16 @@ use super::*;
         // line-keyed delete resolved the FIRST record, so this deleted
         // "note a" and left "note b" behind (the gate's FAIL).
         assert_eq!(store.picker_count(), (1, 1));
-        let names: Vec<_> = store
+        let labels: Vec<_> = store
             .picker_filtered()
             .iter()
-            .map(|(c, _)| c.name.as_str())
+            .map(|(c, _)| c.label.as_str())
             .collect();
-        assert_eq!(names, vec!["note a"], "the sibling must survive: {names:?}");
+        assert_eq!(labels, vec!["note a"], "the sibling must survive: {labels:?}");
+        // The survivor's detail drops back to the plain `path:line` form
+        // (a lone record on its line needs no disambiguator).
+        let survivor = store.picker_filtered().first().map(|(c, _)| c.clone()).unwrap();
+        assert_eq!(survivor.detail, "src/perc.rs:2", "lone record: plain detail: {survivor:?}");
         // The echo NAMES the second record, not the first.
         assert!(
             store.message.contains("deleted annotation: note b"),
@@ -685,6 +722,209 @@ use super::*;
         let content = std::fs::read_to_string(dir.path().join(".redline-notes.md")).unwrap();
         assert!(content.contains("note a"), "the sibling record must survive: {content}");
         assert!(!content.contains("note b"), "the second record must be gone: {content}");
+    }
+
+    /// The acceptance pin: TWO records on the same line must render
+    /// DISTINCT location cells on screen. Fails on the pre-fix code, where
+    /// both rows' detail was the shared `src/perc.rs:2` (the rows read
+    /// apart only through the note text — exactly the residual the user
+    /// reported). The name machine key stays the shared `path:line` — the
+    /// landing address does not move.
+    #[test]
+    fn annotations_picker_same_line_rows_carry_the_record_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_two_annotations_on_one_line(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect();
+        let details: Vec<_> = rows.iter().map(|c| c.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            vec!["src/perc.rs:2:8", "src/perc.rs:2:12"],
+            "the two rows must read apart: {rows:?}"
+        );
+        assert_ne!(details[0], details[1], "same-line rows share no location cell");
+        // The disambiguator rides the DISPLAY too (the nucleo match
+        // target): a query can filter by the record's cell.
+        assert_eq!(rows[0].display, "note a  src/perc.rs:2:8");
+        assert_eq!(rows[1].display, "note b  src/perc.rs:2:12");
+        // The machine key is still the shared path:line (landing
+        // unchanged — the address never learned the display's suffix).
+        assert_eq!(rows[0].name, "src/perc.rs:2");
+        assert_eq!(rows[1].name, "src/perc.rs:2");
+    }
+
+    /// The row shapes the same-line disambiguator must cover: the symbol
+    /// name rides the detail when the record has a syntax anchor, the bare
+    /// `:col` when it does not (text-rule anchor — the keyword cells), and
+    /// col 0 renders like any other cell (a pin that only covers column-0
+    /// leaves the indented siblings unexercised — this fixture spans both
+    /// line 0 and line 1, col 0 and indented cols).
+    #[test]
+    fn annotations_picker_same_line_shapes_cover_symbol_text_rule_and_col_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_mixed_same_line_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        assert_eq!(store.picker_count(), (5, 5));
+        // (path, line, col) order: left-to-right on each line.
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.label.as_str(), c.detail.as_str(), c.ann_col))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("n0", "src/perc.rs:1:0", Some(0)), // text rule, col 0
+                ("n3", "src/perc.rs:1:3 (f)", Some(3)), // symbol anchor
+                ("n4", "src/perc.rs:2:4", Some(4)), // text rule
+                ("n8", "src/perc.rs:2:8 (a)", Some(8)), // symbol anchor
+                ("n12", "src/perc.rs:2:12 (b)", Some(12)), // symbol anchor
+            ]
+        );
+        // Every same-line sibling group reads apart: the five details
+        // are pairwise distinct.
+        let details: Vec<&str> = rows.iter().map(|r| r.1).collect();
+        for d in &details {
+            assert_eq!(
+                details.iter().filter(|o| *o == d).count(),
+                1,
+                "detail {d:?} must be unique among the rows: {rows:?}"
+            );
+        }
+        // The col-0 sibling (n0) and its col-3 sibling (n3) read apart:
+        // the col-0 cell renders `:0`, never dropped as "no column".
+        assert!(rows[0].1.ends_with(":1:0"));
+    }
+
+    /// Landing stays EXACT on the new detail shapes: RET on the symbol row
+    /// (`src/perc.rs:2:8 (a)`) lands on THAT record's cell (line 1, col 8 —
+    // the detail's `:8 (a)` is display-only, never part of the address),
+    /// and RET on the col-0 text-rule row lands at (line 0, col 0). A
+    /// following `A` pre-fills the selected record's note, not the
+    /// sibling's.
+    #[test]
+    fn annotations_picker_ret_lands_exact_on_each_same_line_row() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_mixed_same_line_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        // Row 3 = `n8` (`src/perc.rs:2:8 (a)`): land on (line 1, col 8).
+        for _ in 0..3 {
+            store.key_event(key("C-n"));
+        }
+        assert_eq!(store.picker_selected(), 3);
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
+        assert_eq!(store.view_name_display(), "src/perc.rs");
+        assert_eq!(store.point_line(), 1, "the point must land on line 1 (0-based)");
+        assert_eq!(store.point_col(), 8, "the point must land on the SELECTED record's col");
+        // `A` pre-fills the record at point (the col-8 record, `n8`).
+        store.key_event(key("A"));
+        assert!(store.note_prompt_active());
+        assert_eq!(store.note_prompt_input(), "n8", "A must pre-fill the second record, not a sibling");
+        store.key_event(key("ESC"));
+        // Re-open; row 0 = `n0` (`src/perc.rs:1:0`): the col-0 landing.
+        store.key_event(key("C-c"));
+        store.key_event(key("n"));
+        store.key_event(key("a"));
+        assert!(store.picker_open());
+        store.key_event(key("RET"));
+        assert!(!store.picker_open());
+        assert_eq!(store.point_line(), 0, "the col-0 row must land on line 0");
+        assert_eq!(store.point_col(), 0, "the col-0 row must land at col 0, not the line's next record");
+    }
+
+    /// `d` on a SYMBOL row (the detail's ` (a)` suffix must not leak into
+    /// the deletion's (path, line) parse) removes the SELECTED record and
+    /// recomputes: the line's other siblings survive, and the survivor's
+    /// detail keeps its own cell.
+    #[test]
+    fn annotations_picker_d_deletes_the_selected_symbol_row_not_its_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_mixed_same_line_annotations(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        // Row 3 = `n8` (`src/perc.rs:2:8 (a)`); delete it.
+        for _ in 0..3 {
+            store.key_event(key("C-n"));
+        }
+        store.key_event(key("d"));
+        assert!(store.picker_open(), "d must not close the picker");
+        assert_eq!(store.picker_count(), (4, 4));
+        assert!(
+            store.message.contains("deleted annotation: n8"),
+            "the echo must name the deleted (symbol) record: {}",
+            store.message
+        );
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| (c.label.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("n0", "src/perc.rs:1:0"),
+                ("n3", "src/perc.rs:1:3 (f)"),
+                ("n4", "src/perc.rs:2:4"),
+                ("n12", "src/perc.rs:2:12 (b)"),
+            ],
+            "the sibling records must survive with their own cells: {rows:?}"
+        );
+        let content = std::fs::read_to_string(dir.path().join(".redline-notes.md")).unwrap();
+        assert!(!content.contains("note: n8"), "the selected record must be gone: {content}");
+        assert!(content.contains("note: n12"), "the col-12 sibling must survive: {content}");
+    }
+
+    /// Rendered-canvas quote of the same-line rows AS THEY APPEAR (the
+    /// claim is about the screen, not the struct): the two rows are drawn
+    /// by the picker's own row renderer at the real 80-col layout (52-col
+    /// candidate column with preview) and read back cell by cell. The
+    /// disambiguator rides the detail's tail, right-aligned at the column
+    /// edge — pre-fix both rows quoted as `… src/perc.rs:2 …`.
+    #[test]
+    fn annotations_picker_same_line_rows_render_distinguishably() {
+        use crate::theme;
+        use crate::ui::picker::{draw_candidate_row, picker_column_layout};
+        let dir = tempfile::tempdir().unwrap();
+        project_with_two_annotations_on_one_line(dir.path());
+        let mut store = store(dir.path());
+        store.open_annotations_picker();
+        let rows: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let w = 80usize;
+        let (cand_w, _, _) = picker_column_layout(w, true); // preview active: 52
+        let face = theme::current().list_item;
+        let mut canvas = iocraft::Canvas::new(w, 2);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, w, 2);
+            draw_candidate_row(&mut sv, 0, cand_w, &rows[0], face, false);
+            draw_candidate_row(&mut sv, 1, cand_w, &rows[1], face, false);
+        }
+        let quote = |y: usize| {
+            (0..w)
+                .map(|x| canvas.cell(x, y).unwrap().text().unwrap_or(" "))
+                .collect::<String>()
+        };
+        let row0 = quote(0);
+        let row1 = quote(1);
+        // The rows AS THEY APPEAR: label left, the record's own cell
+        // right-aligned at the candidate column's right edge (col 52).
+        let expected0 = format!(" note a{}src/perc.rs:2:8{}", " ".repeat(31), " ".repeat(27));
+        let expected1 = format!(" note b{}src/perc.rs:2:12{}", " ".repeat(30), " ".repeat(27));
+        assert_eq!(row0, expected0, "row 0 as rendered: {row0:?}");
+        assert_eq!(row1, expected1, "row 1 as rendered: {row1:?}");
+        assert_ne!(row0, row1, "the same-line rows must read apart on screen");
     }
 
     #[test]

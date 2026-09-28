@@ -506,6 +506,7 @@ impl AppStore {
                 Some(DumpAnnotation {
                     path: a.path.clone(),
                     line: a.line + 1, // 0-based record line -> 1-based dump line
+                    col: a.col, // the record's own cell (the same-line disambiguator)
                     code,
                     text: a.text.clone(),
                     orphaned: a.orphaned,

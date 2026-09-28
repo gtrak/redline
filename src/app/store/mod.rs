@@ -847,9 +847,14 @@ pub struct PickerCandidate {
     pub docs: String,
     pub category: String,
     /// (annotations-picker identity) the annotation record's own `col` —
-    /// present ONLY on the Annotations picker's rows, so a line that hosts
-    /// several records stays distinguishable (the `detail` `path:line` is
-    /// shared by every record on that line). `None` for every other picker.
+    /// present ONLY on the Annotations picker's rows, the key that keeps a
+    /// line hosting several records addressable: the landing (RET) and the
+    /// deletion (`d`) key on (path, line, col), never on the line alone.
+    /// The display side of the same identity rides `detail`: when the line
+    /// hosts several records its `path:line` gains the record's own `:col`
+    /// (and the anchored symbol name, when the record carries a syntax
+    /// anchor) so the siblings read apart on screen. `None` for every
+    /// other picker.
     /// Rendering caveat (wording, not a defect): a pre-marker-cell legacy
     /// record with a raw mid-token `col` can render sharing its marker cell
     /// with a new sibling on the same line (2 note rows, 1 marker); both
@@ -1273,6 +1278,12 @@ pub struct DumpAnnotation {
     pub path: String,
     /// 1-based anchored line.
     pub line: usize,
+    /// The record's own cell column (0-based, `Annotation::col`). Printed
+    /// in the header ONLY when the (path, line) hosts several records —
+    /// the shared `path:line` header must not leave the sibling blocks
+    /// unreadable apart; a single-record line keeps the plain `path:line`
+    /// shape (the dump's historical output, byte-stable for diffing).
+    pub col: usize,
     /// The anchored code line (see above).
     pub code: String,
     /// The note text (the record's `text`; may span lines).
@@ -1282,18 +1293,24 @@ pub struct DumpAnnotation {
 
 /// Format the quit-dump (plan 005 issue 03). Both modes order by path
 /// asc, then line asc (stable for diffing); an empty set yields ZERO
-/// bytes (pipes stay clean).
+/// bytes (pipes stay clean). A (path, line) hosting SEVERAL records
+/// disambiguates its headers with the record's own cell column
+/// (`path:line:col` — block header, `path:line:col: text` plain), the
+/// same identity the annotations picker's rows carry; a single-record
+/// line keeps the plain `path:line` shape.
 ///
 /// Block mode (default, `plain = false`) — the agent brief:
 /// `# redline annotations — <root>` + a blank line, then per record:
-/// `path:line`, the anchored line indented +4 as code, and `NOTE:` with
-/// the text (subsequent note lines aligned under the first). Orphaned
-/// records carry an explicit `  ORPHANED (anchor text not found)` line so
-/// the agent never trusts a stale line number silently.
+/// `path:line` (or `path:line:col` on a same-line sibling), the anchored
+/// line indented +4 as code, and `NOTE:` with the text (subsequent note
+/// lines aligned under the first). Orphaned records carry an explicit
+/// `  ORPHANED (anchor text not found)` line so the agent never trusts a
+/// stale line number silently.
 ///
 /// Plain mode (`--notes=plain`, the grep/pipe shape): one `path:line:
-/// text` per record (subsequent note lines aligned under the first),
-/// no header and no code/orphan lines.
+/// text` per record (a same-line sibling reads `path:line:col: text`;
+/// subsequent note lines aligned under the first), no header and no
+/// code/orphan lines.
 pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> String {
     if items.is_empty() {
         return String::new();
@@ -1302,6 +1319,22 @@ pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> S
     // lives here, not in the accessor.
     let mut items: Vec<&DumpAnnotation> = items.iter().collect();
     items.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    // Same-line disambiguation (the annotations picker's identity, mirrored
+    // here): which (path, line) keys host more than one record.
+    let mut counts: std::collections::HashMap<(String, usize), usize> =
+        std::collections::HashMap::new();
+    for item in &items {
+        *counts
+            .entry((item.path.clone(), item.line))
+            .or_insert(0) += 1;
+    }
+    let siblings_of = |item: &DumpAnnotation| {
+        counts
+            .get(&(item.path.clone(), item.line))
+            .copied()
+            .unwrap_or(0)
+            > 1
+    };
     let mut out = String::new();
     if !plain {
         out.push_str("# redline annotations \u{2014} ");
@@ -1309,8 +1342,14 @@ pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> S
         out.push_str("\n\n");
     }
     for item in items {
+        // The shared header's disambiguator: the record's own cell column.
+        let col_suffix = if siblings_of(item) {
+            format!(":{}", item.col)
+        } else {
+            String::new()
+        };
         if !plain {
-            out.push_str(&format!("{}:{}\n", item.path, item.line));
+            out.push_str(&format!("{}:{}{}\n", item.path, item.line, col_suffix));
             if item.orphaned {
                 out.push_str("  ORPHANED (anchor text not found)\n");
             }
@@ -1331,7 +1370,7 @@ pub fn format_notes_dump(items: &[DumpAnnotation], root: &str, plain: bool) -> S
             }
             out.push('\n');
         } else {
-            let prefix = format!("{}:{}: ", item.path, item.line);
+            let prefix = format!("{}:{}{}: ", item.path, item.line, col_suffix);
             let lines: Vec<&str> = item.text.split('\n').collect();
             let (first, rest) = match lines.split_first() {
                 Some((f, r)) => (*f, r),

@@ -412,6 +412,9 @@ use crate::git::log::LogEntry;
         DumpAnnotation {
             path: path.to_string(),
             line,
+            // 0 (the default): every pre-same-line-disambiguation fixture
+            // line hosts a single record, so the header never renders it.
+            col: 0,
             code: code.to_string(),
             text: text.to_string(),
             orphaned,
