@@ -70,8 +70,9 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
         .into()),
         ViewId::BufferList => Some(element! {
             BufferListView(
-                rows: snap.buffer_rows.clone(),
-                selected: snap.buffer_list_selected,
+                rows: snap.buffer_list_rows.clone(),
+                query: snap.buffer_list_query.clone(),
+                selected_row: snap.buffer_list_selected_row,
             )
         }
         .into()),

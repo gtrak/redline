@@ -12,7 +12,12 @@ impl AppStore {
     pub fn close_view(&mut self) {
         if self.view_stack.len() > 1 {
             self.view_stack.pop();
+            // A fresh session every time the list is entered again:
+            // the narrow query and the scroll offset reset with the
+            // selection (plan 018 issue 04).
             self.buffer_list_selected = 0;
+            self.buffer_list_query.clear();
+            self.buffer_list_scroll = 0;
             self.normalize_top_view();
         }
     }
@@ -29,6 +34,8 @@ impl AppStore {
         }
         self.view_stack = vec![ViewId::Buffer];
         self.buffer_list_selected = 0;
+        self.buffer_list_query.clear();
+        self.buffer_list_scroll = 0;
         self.normalize_top_view();
     }
 

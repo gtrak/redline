@@ -22,8 +22,9 @@ pub(super) struct Snapshot {
     pub(super) message: String,
     pub(super) home_title: String,
     pub(super) home_rows: Vec<TransientMenuRow>,
-    pub(super) buffer_rows: Vec<BufferRow>,
-    pub(super) buffer_list_selected: usize,
+    pub(super) buffer_list_rows: Vec<BufferRow>,
+    pub(super) buffer_list_query: String,
+    pub(super) buffer_list_selected_row: Option<usize>,
     pub(super) picker: bool,
     pub(super) prompt: String,
     pub(super) query: String,
@@ -143,6 +144,11 @@ pub(super) fn build(
     // order + the selection + activity) — one read, owned out with the
     // snapshot like every other list surface.
     let (isearch_rows, isearch_selected, isearch_active) = s.isearch_list();
+    // plan 018 issue 04: the buffer list's pre-computed window (narrowed +
+    // windowed by the store) and the selected in-window row.
+    let (buffer_list_rows, _buffer_list_scroll, _buffer_list_total,
+        buffer_list_selected_row) =
+        s.buffer_list_view_info();
     // Issue 003-02 shared windowing: the log / blame / commit-diff panes
     // render their pre-computed visible window (the store keeps the
     // cursor row in view; paging resets the log window).
@@ -186,8 +192,11 @@ pub(super) fn build(
         message: s.message.clone(),
         home_title: s.home_title(),
         home_rows: s.home_body_rows(),
-        buffer_rows: s.buffer_rows(),
-        buffer_list_selected: s.buffer_list_selected(),
+        // Buffer-list window (plan 018 issue 04): store-owned windowing +
+        // narrowing.
+        buffer_list_rows,
+        buffer_list_query: s.buffer_list_query().to_string(),
+        buffer_list_selected_row,
         picker: s.picker_open(),
         prompt: s.picker_prompt().to_string(),
         query: s.picker_query().to_string(),

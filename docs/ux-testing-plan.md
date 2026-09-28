@@ -268,9 +268,15 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       appear in candidates.
 - [ ] **U-B3 Backspace edits the query**; empty query lists everything;
       no match shows a clean empty state (not a crash).
-- [ ] **U-B4 `C-x C-b` buffer list**: open buffers listed, `*scratch*`
-      present; `n/p` move; `RET` switches; `d`… (kill via `C-x k` on a
-      buffer: gone from list; killing the last file buffer lands sanely).
+- [ ] **U-B4 `C-x C-b` buffer list**: open buffers listed (MRU, current
+      buffer `*`-marked); typing on the list's own prompt narrows the set
+      live (FilterOnly — MRU order, no re-rank; the prompt row is one NoWrap
+      row, decision keys lead: `open RET · kill d · close q`); `n/p` move
+      within the narrowed set; `RET` switches; `d` kills the SELECTED
+      narrowed row's buffer (list stays open, narrowed set re-derives);
+      `C-g` clears the query (does NOT close); `q` closes; at 50 buffers the
+      list is store-windowed and the selection stays in view. (018-04: PTY
+      leg `tools/drive_buffer_list_narrow.py`.)
 - [ ] **U-B5 `C-c p e` recents** populate as files are visited and survive a
       restart (with isolated cache: survive a clean restart, not across
       XDG changes).

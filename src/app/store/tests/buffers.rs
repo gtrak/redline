@@ -709,7 +709,11 @@ use super::*;
         store.open_path("src/lib.rs");
         assert_eq!(store.buffers.len(), 2); // 06a: no scratch
 
-        // C-x b: switch to src/lib.rs.
+        // C-x b: switch to src/lib.rs. lib.rs is CURRENT (opened last,
+        // MRU-top) so its display carries the `*` marker (plan 018
+        // issue 04: the display now carries the shared marker
+        // convention — `*` current, ` ` leading space for the rest); the
+        // label/detail split is unchanged (name-first, plain name).
         store.key_event(key("C-x"));
         store.key_event(key("b"));
         assert_eq!(store.picker_kind(), Some(PickerKind::Buffers));
@@ -718,20 +722,21 @@ use super::*;
             .iter()
             .map(|(c, _)| c.display.as_str())
             .collect();
-        assert!(names.contains(&"src/lib.rs"), "{names:?}");
+        assert!(names.contains(&"*src/lib.rs"), "{names:?}");
         // picker-density: the buffer row is name-first — label = the
-        // (marked) display name, detail = the absolute path (the buffer
-        // key); display (the match target) is pinned above.
+        // plain display name (the marker lives in `display` only),
+        // detail = the absolute path (the buffer key); display (the
+        // match target) is pinned above.
         let c = store
             .picker_filtered()
             .iter()
-            .find(|(c, _)| c.display == "src/lib.rs")
+            .find(|(c, _)| c.display == "*src/lib.rs")
             .map(|(c, _)| c.clone())
             .unwrap();
         assert_eq!(c.label, "src/lib.rs", "the buffer name is the label: {c:?}");
         assert_eq!(c.detail, c.name, "the absolute path is the detail: {c:?}");
         // Select the lib.rs row (find its index, drive selection there).
-        let idx = names.iter().position(|n| *n == "src/lib.rs").unwrap();
+        let idx = names.iter().position(|n| *n == "*src/lib.rs").unwrap();
         for _ in 0..idx {
             store.picker_select_next();
         }
@@ -741,13 +746,15 @@ use super::*;
 
         // C-x k: kill it; the killed buffer disappears. 06a: no scratch
         // fallback — with main.rs still current the view stays on it.
+        // (lib.rs is CURRENT now — just switched to — so its display
+        // carries the `*` marker, plan 018 issue 04.)
         store.key_event(key("C-x"));
         store.key_event(key("k"));
         assert_eq!(store.picker_kind(), Some(PickerKind::KillBuffer));
         let idx = store
             .picker_filtered()
             .iter()
-            .position(|(c, _)| c.display == "src/lib.rs")
+            .position(|(c, _)| c.display == "*src/lib.rs")
             .unwrap();
         for _ in 0..idx {
             store.picker_select_next();
@@ -769,7 +776,9 @@ use super::*;
         assert_eq!(store.top_view(), ViewId::BufferList);
         let rows = store.buffer_rows();
         assert_eq!(rows.len(), 1, "06a: only the opened buffer, no scratch");
-        assert!(rows.iter().any(|r| r.name == "src/main.rs" && r.current));
+        // Plan 018 issue 04: `name` carries the shared display source
+        // (marker slot included) — the current buffer reads `*name`.
+        assert!(rows.iter().any(|r| r.name == "*src/main.rs" && r.current));
         assert!(!rows.iter().any(|r| r.name == "*scratch*"));
 
         // q closes the view back to the buffer view (main.rs replaced home
@@ -802,7 +811,10 @@ use super::*;
         assert_eq!(store.top_view(), ViewId::BufferList);
         let rows = store.buffer_rows();
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src/main.rs", "src/lib.rs"], "{names:?}");
+        // Plan 018 issue 04: the names carry the shared marker convention
+        // (`*src/main.rs` is current; ` src/lib.rs` has the leading
+        // space-for-`*`).
+        assert_eq!(names, vec!["*src/main.rs", " src/lib.rs"], "{names:?}");
         assert!(rows[0].current);
 
         // n/p move identically to C-n/C-p, with no unbound-key echo.
@@ -824,7 +836,7 @@ use super::*;
         assert!(!store.quit);
         let rows = store.buffer_rows();
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src/main.rs"], "{names:?}");
+        assert_eq!(names, vec!["*src/main.rs"], "{names:?}");
         assert!(store.message.contains("killed"), "{:?}", store.message);
         assert_eq!(store.buffer_list_selected(), 0, "selection clamps to a valid row");
 
@@ -843,6 +855,367 @@ use super::*;
         store.key_event(key("q"));
         assert_eq!(store.top_view(), ViewId::Home);
         assert_eq!(store.render_view(), ViewId::Home, "empty table renders home");
+    }
+
+    /// Plan 018 issue 04 (pin 1 — narrow by name): typing on the buffer
+    /// list's prompt narrows the set LIVE, and FilterOnly keeps MRU
+    /// (source) order — non-matches drop out, the survivors are never
+    /// re-ranked. On the unfixed tree this pin fails: there is no query
+    /// (printables echo "unbound key" and `buffer_list_query` does not
+    /// exist), so the narrowed set can never shrink.
+    #[test]
+    fn buffer_list_query_narrows_by_name_preserving_mru_order() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_path("src/main.rs");
+        store.open_path("src/lib.rs");
+        std::fs::write(dir.path().join("src/alpha.rs"), "// a\n").unwrap();
+        store.open_path("src/alpha.rs");
+        std::fs::write(dir.path().join("src/omega.rs"), "// w\n").unwrap();
+        store.open_path("src/omega.rs");
+        // MRU order (newest first): omega, alpha, main, lib.
+        store.dispatch("list-buffers", None).unwrap();
+        assert_eq!(
+            store.buffer_list_query(),
+            "",
+            "a fresh list has an empty query"
+        );
+
+        // Type "a" on the prompt (printable -> query, no unbound echo).
+        store.key_event(key("a"));
+        assert_eq!(store.buffer_list_query(), "a");
+        assert!(
+            !store.message.contains("unbound key"),
+            "a printable must feed the query, not echo: {:?}",
+            store.message
+        );
+        let (_, _, total, _) = store.buffer_list_view_info();
+        assert_eq!(total, 3, "omega/alpha/main match 'a'; lib.rs does not");
+
+        // FilterOnly: the survivors keep MRU order (omega, alpha, main),
+        // not score order. The window holds all 3 (viewport 24 >> 3
+        // rows), so the view window IS the narrowed set in source order.
+        // Names are asserted by CONTAINMENT (the display string embeds
+        // the full name after the marker slot), so this pin checks the
+        // SET AND ORDER, not the display convention — a display drift
+        // must not redden the behaviour pins; it must redden the
+        // cross-check (the 0829ddd failure mode).
+        let (rows, _, total2, _) = store.buffer_list_view_info();
+        let expected_order = ["src/omega.rs", "src/alpha.rs", "src/main.rs"];
+        for (i, exp) in expected_order.iter().enumerate() {
+            assert!(
+                rows[i].name.contains(exp),
+                "narrowed row {i} must be {exp:?} in MRU order (no re-rank): {:?}",
+                rows[i].name
+            );
+        }
+        assert_eq!(total2, 3);
+
+        // n/p move within the NARROWED set (3 rows, not the full 4).
+        store.key_event(key("n"));
+        assert_eq!(store.buffer_list_selected(), 1);
+        store.key_event(key("n"));
+        assert_eq!(store.buffer_list_selected(), 2);
+        store.key_event(key("n")); // wraps within the narrowed set
+        assert_eq!(store.buffer_list_selected(), 0);
+
+        // A query that matches nothing: the set is empty, the selection
+        // clamps to 0, and the list stays open.
+        for c in "zzzz".chars() {
+            store.key_event(key(&c.to_string()));
+        }
+        assert_eq!(store.buffer_list_query(), "azzzz");
+        let (rows, _, total3, sel_row) = store.buffer_list_view_info();
+        assert_eq!(total3, 0, "no display string matches 'azzzz'");
+        assert!(rows.is_empty());
+        assert!(sel_row.is_none());
+        assert_eq!(store.buffer_list_selected(), 0, "the selection clamps into the empty set");
+        assert_eq!(store.top_view(), ViewId::BufferList, "narrowing to empty must not close");
+    }
+
+    /// Plan 018 issue 04 (pin 2 — the `*` marker): the current-buffer
+    /// marker lives INSIDE the display string (the shared display source,
+    /// marker slot included), so it IS scoreable — a query of `*` matches
+    /// exactly the current buffer's row on both surfaces (same rule the
+    /// Buffers picker scores under today via the same shared string).
+    /// On the unfixed tree this pin fails: there is no query at all, so
+    /// `buffer_list_query()` does not compile / the narrowed set cannot
+    /// be driven by the marker.
+    #[test]
+    fn buffer_list_marker_slot_is_scoreable() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_path("src/main.rs");
+        store.open_path("src/lib.rs");
+        // MRU: lib (current), main.
+        store.dispatch("list-buffers", None).unwrap();
+        // The current buffer's row carries `*`; the other's the
+        // leading space-for-`*` (the shared marker convention).
+        let rows = store.buffer_rows();
+        assert_eq!(rows[0].name, "*src/lib.rs", "current buffer marked: {rows:?}");
+        assert_eq!(rows[1].name, " src/main.rs", "non-current has the leading space: {rows:?}");
+
+        // Query `*`: only the current buffer's display string contains
+        // the marker, so exactly its row survives.
+        store.key_event(key("*"));
+        let (rows, _, total, sel_row) = store.buffer_list_view_info();
+        assert_eq!(total, 1, "the `*` query matches the marker slot only");
+        assert_eq!(rows[0].name, "*src/lib.rs");
+        assert_eq!(sel_row, Some(0));
+
+        // The Buffers picker scores the SAME string (shared source, pin
+        // 4's cross-check pins the identity directly): `*` narrows the
+        // picker to the current buffer too.
+        store.key_event(key("C-g")); // clear (v1: C-g clears, does not close)
+        assert_eq!(store.buffer_list_query(), "", "C-g cleared the query");
+        assert_eq!(store.top_view(), ViewId::BufferList, "C-g must NOT close the list");
+    }
+
+    /// Plan 018 issue 04 (pin 3 — `d` on a narrowed row): `d` kills the
+    /// buffer the SELECTED ROW identifies — addressed through the
+    /// narrowed set's source index, never by a first-match over the
+    /// names (the issue-annotation-per-symbol-creation lesson, where a
+    /// first-match `.position()` made `A` edit the wrong record). The
+    /// fixture has TWO buffers matching the query; the selected row is
+    /// the SECOND match in source order, and a first-match implementation
+    /// would kill the first one instead. On the unfixed tree this pin
+    /// fails: no query exists, so the narrowed set cannot be set up at
+    /// all (the selection would address the full list's rows).
+    #[test]
+    fn buffer_list_d_kills_the_selected_narrowed_row_not_the_first_match() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        // Open order: one, two, three -> MRU [three (current), two, one].
+        for f in ["src/one.rs", "src/two.rs", "src/three.rs"] {
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "// x\n").unwrap();
+            store.open_path(f);
+        }
+        store.dispatch("list-buffers", None).unwrap();
+        // Query "t": matches three and two (NOT one). FilterOnly keeps
+        // MRU order -> narrowed set [three, two]; the selection starts at
+        // row 0 (three). Move to row 1 (two) and kill THERE.
+        for c in "t".chars() {
+            store.key_event(key(&c.to_string()));
+        }
+        let (_, _, total, _) = store.buffer_list_view_info();
+        assert_eq!(total, 2, "'t' matches exactly three.rs and two.rs");
+        store.key_event(key("n")); // row 1: two.rs (the SECOND match)
+        assert_eq!(store.buffer_list_selected(), 1);
+        store.key_event(key("d"));
+
+        // two.rs (the SELECTED row) is gone; three.rs (the FIRST match,
+        // a smaller source index) survives — a first-match implementation
+        // would have killed three.rs instead. Asserted on the SOURCE
+        // keys, not the display strings (drift-proof: this pin is about
+        // WHICH buffer died, not how the row reads).
+        let keys: Vec<String> = store
+            .buffers
+            .list()
+            .iter()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        assert!(
+            keys.iter().any(|k| k.ends_with("three.rs")),
+            "three.rs (the first match, smaller source index) must survive: {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.ends_with("two.rs")),
+            "two.rs (the selected narrowed row) must be the one killed: {keys:?}"
+        );
+        // The narrowed set re-derives: 't' still matches three.rs — the
+        // narrowed set is [three], and the selection clamps into it from
+        // row 1 to row 0.
+        let (nrows, _, ntotal, _) = store.buffer_list_view_info();
+        assert_eq!(ntotal, 1, "three.rs still matches 't'");
+        assert_eq!(store.buffer_list_selected(), 0, "the selection clamps into the re-derived set");
+        assert!(nrows[0].current, "the surviving row is the current buffer (three)");
+        assert_eq!(store.top_view(), ViewId::BufferList, "d keeps the list open");
+    }
+
+    /// Plan 018 issue 04 (pin 4 — C-g vs q): C-g CLEARS THE QUERY (v1
+    /// decision — closing stays on q), and the full MRU list comes back
+    /// un-narrowed; q closes the list. On the unfixed tree this pin
+    /// fails: C-g is the global cancel (it would close/abort), and there
+    /// is no query to clear in the first place.
+    #[test]
+    fn buffer_list_cg_clears_the_query_but_q_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_path("src/main.rs");
+        store.open_path("src/lib.rs");
+        store.dispatch("list-buffers", None).unwrap();
+
+        store.key_event(key("l")); // narrows to lib only
+        assert_eq!(store.buffer_list_query(), "l");
+        let (_, _, total, _) = store.buffer_list_view_info();
+        assert_eq!(total, 1);
+
+        // Backspace pops one char (the query is back to empty: full list).
+        store.key_event(key("Backspace"));
+        assert_eq!(store.buffer_list_query(), "", "Backspace pops the last char");
+        let (_, _, total, _) = store.buffer_list_view_info();
+        assert_eq!(total, 2, "the full MRU list is back after the pop");
+
+        store.key_event(key("l"));
+        store.key_event(key("i")); // "li" -> narrows again
+        store.key_event(key("C-g"));
+        assert_eq!(store.buffer_list_query(), "", "C-g cleared the query");
+        assert_eq!(store.top_view(), ViewId::BufferList, "C-g must NOT close the list (v1: clear, not close)");
+        let (_, _, total, _) = store.buffer_list_view_info();
+        assert_eq!(total, 2, "the full MRU list is back after C-g");
+
+        // C-g on an empty query is a no-op (the list stays open too).
+        store.key_event(key("C-g"));
+        assert_eq!(store.top_view(), ViewId::BufferList);
+
+        // q closes the list (closing stays on q).
+        store.key_event(key("q"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+    }
+
+    /// Plan 018 issue 04 (pin 5 — windowing): with 50 open buffers the
+    /// list is WINDOWED STORE-SIDE (the renderer no longer lists all
+    /// rows), and the selection stays inside the window on every step of
+    /// a long `n` walk. On the unfixed tree this pin fails: there is no
+    /// `buffer_list_view_info` (no store windowing — the renderer listed
+    /// all 50 rows, and a 50-row list scrolls past the 24-row viewport).
+    #[test]
+    fn buffer_list_windowing_keeps_selection_visible_at_50_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        for i in 0..50 {
+            let rel = format!("src/b{i:02}.rs");
+            let p = dir.path().join(&rel);
+            std::fs::write(&p, "// x\n").unwrap();
+            store.open_path(&rel);
+        }
+        store.set_viewport_lines(24);
+        store.dispatch("list-buffers", None).unwrap();
+
+        let window = 24u32.saturating_sub(2) as usize; // pane_window(24)
+        assert_eq!(window, 22);
+        let mut max_scroll = 0usize;
+        for step in 0..60 {
+            let (rows, scroll, total, sel_row) = store.buffer_list_view_info();
+            assert_eq!(total, 50, "all 50 buffers are in the narrowed (empty-query) set");
+            assert_eq!(rows.len(), 22, "the store window is pane_window(24) = 22 rows, step {step}");
+            assert!(
+                sel_row.is_some(),
+                "the selection must stay in view at step {step} (scroll {scroll}, total {total})"
+            );
+            let sel = sel_row.unwrap();
+            assert!(sel < 22, "selected row index must be inside the window, step {step}");
+            max_scroll = max_scroll.max(scroll);
+            store.key_event(key("n"));
+        }
+        // The walk (60 steps over 50 rows) must have scrolled the window
+        // well past the top (it reaches row 49, scroll 28) — an unwindowed
+        // list has no scroll to advance. The selection wraps at 50 rows.
+        assert!(max_scroll >= 20, "the walk must scroll the window (max scroll {max_scroll})");
+        let (_, _, _, sel_row) = store.buffer_list_view_info();
+        assert!(sel_row.is_some(), "the selection is still in view at the end");
+    }
+
+    /// Plan 018 issue 04 (pin 5b — selection position vs source index):
+    /// the selection is a POSITION in the narrowed array, and the window
+    /// follows it by POSITION. When narrowing drops the earlier source
+    /// rows, the position and the source index diverge — the selected row
+    /// must stay inside the window and read as in-window row 0 (a
+    /// source-index-as-position implementation loses it: the drive
+    /// `drive_buffer_list_narrow.py` caught exactly this on the PTY leg).
+    /// On the unfixed tree this pin fails: there is no narrowing at all
+    /// (no `buffer_list_view_info`), and before the windowing fix the
+    /// in-window row was computed from the source index (None).
+    #[test]
+    fn buffer_list_narrowed_position_differs_from_source_index_stays_in_window() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        // MRU: ccc (current, newest), bbb, aaa — 'a' matches ONLY the
+        // last source row (aaa, source index 2).
+        for f in ["src/aaa.rs", "src/bbb.rs", "src/ccc.rs"] {
+            std::fs::write(dir.path().join(f), "// x\n").unwrap();
+            store.open_path(f);
+        }
+        store.dispatch("list-buffers", None).unwrap();
+        store.key_event(key("a"));
+        let (rows, scroll, total, sel_row) = store.buffer_list_view_info();
+        assert_eq!(total, 1, "only aaa matches 'a'");
+        assert_eq!(store.buffer_list_selected(), 0, "the selection is narrowed-array position 0");
+        assert_eq!(rows.len(), 1, "the window must hold the one narrowed row: {rows:?}");
+        assert!(rows[0].name.contains("aaa.rs"), "the surviving row is the LAST source row: {rows:?}");
+        assert_eq!(sel_row, Some(0), "the selection is in-window row 0 (not a source index)");
+        assert_eq!(scroll, 0);
+    }
+
+    /// Plan 018 issue 04 (pin 6 — ONE display source, the 0829ddd
+    /// cross-check): the buffer list's rows and the Buffers picker's
+    /// candidates must derive their display strings from the SAME
+    /// source, pairwise-identical, for the same fixture. The failure
+    /// names the diverging buffer. PROVEN load-bearing by mutation: give
+    /// the list its own display string again (bypass
+    /// `buffer_row_display` in `buffer_rows`/`buffer_row_at`) and this
+    /// test reddens WHILE every behaviour pin above stays green — the
+    /// 0829ddd failure mode (behaviour tests cannot see a display drift
+    /// the scoring does; the shared string is what both surfaces
+    /// score).
+    #[test]
+    fn buffer_list_and_buffers_picker_share_one_display_source() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        // A mixed fixture: three file buffers (one current) plus the
+        // notes buffer (path-less-of-project, current-switch target).
+        store.open_path("src/main.rs");
+        store.open_path("src/lib.rs");
+        store.open_notes();
+
+        let rows = store.buffer_rows();
+        let cands = store.candidates_for(PickerKind::Buffers);
+        assert_eq!(
+            rows.len(),
+            cands.len(),
+            "both surfaces must list the same buffers ({} vs {})",
+            rows.len(),
+            cands.len()
+        );
+        // Pairwise identity, SOURCE order (both derive from the same
+        // MRU list): the failure names the diverging buffer.
+        for (i, (row, cand)) in rows.iter().zip(cands.iter()).enumerate() {
+            assert_eq!(
+                row.name, cand.display,
+                "display drift on buffer #{} ({}): list row {:?} vs picker candidate display {:?} — the two surfaces must score the same string",
+                i,
+                cand.name,
+                row.name,
+                cand.display
+            );
+        }
+        // The label keeps the plain name (name-first split): the marker
+        // slot lives in `display` only.
+        for (row, cand) in rows.iter().zip(cands.iter()) {
+            assert!(
+                row.name.ends_with(&cand.label),
+                "the list display must end in the plain name (marker slot leads): list={:?} label={:?} ({})",
+                row.name, cand.label, cand.name
+            );
+            assert!(
+                row.name.starts_with('*') || row.name.starts_with(' '),
+                "the marker slot must lead the display string: {:?} ({})",
+                row.name, cand.name
+            );
+        }
+        // Spot the two marker cases on the fixture: the notes buffer is
+        // current -> `*`; a file buffer is not -> leading space.
+        assert!(rows.iter().any(|r| r.name.starts_with('*')));
+        assert!(rows.iter().any(|r| r.name.starts_with(' ')));
     }
 
     #[test]

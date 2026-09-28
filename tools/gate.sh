@@ -100,6 +100,9 @@ fi
 SHARED_SUITES=(
   sweep.py
   drive_all.py          # 8 scenarios incl. the per-repo external children
+  drive_buffer_list_narrow.py # 018-04: C-x C-b narrowing (prompt keys lead,
+                              # live narrow, RET opens, d kills the selected
+                              # narrowed row, C-g clears not closes, q closes)
   drive_windowing.py
   drive_windowing_panes.py
   check_cursor_stream.py

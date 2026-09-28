@@ -63,7 +63,8 @@ DEFAULT_LANES = 4
 # The gate battery (tools/gate.sh full), cheapest-heavyweight ordering aside --
 # order does not matter here because lanes, not a shared fixture, serialize.
 BATTERY = [
-    "sweep.py", "drive_all.py", "drive_windowing.py",
+    "sweep.py", "drive_all.py", "drive_buffer_list_narrow.py",
+    "drive_windowing.py",
     "drive_windowing_panes.py", "check_cursor_stream.py", "ux_sweep.py",
     "probe_notes_dump.py", "drive_syntax_notes.py", "drive_symbol_precise.py",
     "drive_xref.py",

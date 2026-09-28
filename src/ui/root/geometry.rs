@@ -28,9 +28,14 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
         // 06a: home has no selectable row — the cursor stays where the
         // frame park put it (the status line).
         ViewId::Home => None,
-        ViewId::BufferList => Some(cell(
-            snap.buffer_list_selected.min(snap.buffer_rows.len().saturating_sub(1)),
-        )),
+        ViewId::BufferList => {
+            // Plan 018 issue 04: the content window now starts TWO rows
+            // into the pane (the title row and the narrow-prompt row
+            // above it); the selection is a row inside the store window.
+            snap.buffer_list_selected_row
+                .map(|row| (0u16, 2 + row as u16))
+                .or(Some((0, 2)))
+        }
         ViewId::Search => snap.search_selected_row.map(cell).or_else(|| Some(cell(0))),
         ViewId::MagitStatus => Some(cell(
             snap.magit_rows.iter().position(|r| r.selected).unwrap_or(0),
@@ -216,8 +221,9 @@ mod tests {
             message: String::new(),
             home_title: String::new(),
             home_rows: Vec::new(),
-            buffer_rows: Vec::new(),
-            buffer_list_selected: 0,
+            buffer_list_rows: Vec::new(),
+            buffer_list_query: String::new(),
+            buffer_list_selected_row: None,
             picker: false,
             prompt: String::new(),
             query: String::new(),
@@ -383,8 +389,9 @@ mod tests {
             message: String::new(),
             home_title: String::new(),
             home_rows: Vec::new(),
-            buffer_rows: Vec::new(),
-            buffer_list_selected: 0,
+            buffer_list_rows: Vec::new(),
+            buffer_list_query: String::new(),
+            buffer_list_selected_row: None,
             picker: false,
             prompt: String::new(),
             query: String::new(),
@@ -716,8 +723,9 @@ mod tests {
             message: String::new(),
             home_title: String::new(),
             home_rows: Vec::new(),
-            buffer_rows: Vec::new(),
-            buffer_list_selected: 0,
+            buffer_list_rows: Vec::new(),
+            buffer_list_query: String::new(),
+            buffer_list_selected_row: None,
             picker: false,
             prompt: String::new(),
             query: String::new(),

@@ -973,7 +973,24 @@ pub struct DiscardTarget {
     pub hunk_new_start: Option<u32>,
 }
 
-/// One row of the buffer-list view.
+/// The ONE shared display source for a buffer row (plan 018 issue 04,
+/// PLAN §5.5 / the 0829ddd rule): the marker slot — `*` for the current
+/// buffer, ` ` (the leading space for `*`) otherwise, the branch picker's
+/// convention — followed by the buffer's display name.
+///
+/// Both scoring surfaces derive their display string from this ONE
+/// helper so the two cannot drift: the buffer list's rows (the narrow
+/// query scores them) and the Buffers/KillBuffer picker's candidates
+/// (`buffer_candidates`). The marker lives INSIDE the display string, so
+/// it IS scoreable on both surfaces (query `*` matches the current
+/// buffer only).
+pub(crate) fn buffer_display(name: &str, current: bool) -> String {
+    format!("{}{}", if current { "*" } else { " " }, name)
+}
+
+/// One row of the buffer-list view. `name` carries the shared display
+/// source string (`buffer_display` above, marker slot included) — the
+/// narrow query scores exactly this string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferRow {
     pub name: String,
@@ -1840,8 +1857,19 @@ pub struct AppStore {
     pub view_stack: Vec<ViewId>,
     /// Open buffers + the current buffer (ropey-backed).
     pub buffers: BufferTable,
-    /// Selection cursor of the buffer-list view.
+    /// Selection cursor of the buffer-list view: an index into the
+    /// NARROWED set (plan 018 issue 04); with an empty narrow query the
+    /// narrowed set IS the full MRU list, so the index reads the same as
+    /// before.
     buffer_list_selected: usize,
+    /// Buffer-list narrow query (plan 018 issue 04): typed on the
+    /// list's own prompt row (keys leading, one NoWrap row). Empty = no
+    /// narrowing — FilterOnly policy: non-matches drop out, MRU source
+    /// order is never re-ranked.
+    buffer_list_query: String,
+    /// Buffer-list scroll offset: store-owned windowing (the renderer no
+    /// longer lists all rows — plan 018 §5.1).
+    buffer_list_scroll: usize,
     /// The current project (canonical root), when redline runs inside
     /// one (or after a `C-c p p` switch); otherwise `None`.
     pub project: Option<Project>,
@@ -2282,6 +2310,8 @@ impl AppStore {
             view_stack: vec![ViewId::Home],
             buffers: BufferTable::new(),
             buffer_list_selected: 0,
+            buffer_list_query: String::new(),
+            buffer_list_scroll: 0,
             project,
             project_store,
             files: HashMap::new(),
@@ -2513,6 +2543,17 @@ impl AppStore {
         }
     }
 
+    /// The buffer row's display string (plan 018 issue 04, the ONE shared
+    /// display source): the shared marker convention (`buffer_display`
+    /// free function — `*` current buffer, ` ` otherwise) over this
+    /// buffer's display name. The buffer list's rows and the
+    /// Buffers/KillBuffer picker's candidates both call this, so the two
+    /// surfaces score the same strings and cannot drift apart (the
+    /// cross-check in `tests::buffers` pins the identity).
+    pub(crate) fn buffer_row_display(&self, key: &str) -> String {
+        buffer_display(&self.buffer_display(key), self.buffers.current() == Some(key))
+    }
+
     pub fn pending_display(&self) -> String {
         self.pending
             .iter()
@@ -2534,16 +2575,32 @@ impl AppStore {
             .unwrap_or_default()
     }
 
-    /// Rows for the buffer-list view (MRU order).
+    /// One buffer-list row (the shared display source in `name`).
+    fn buffer_row_at(&self, key: &str) -> BufferRow {
+        let current = self.buffers.current() == Some(key);
+        let lines = self
+            .buffers
+            .get(key)
+            .map(|b| b.line_count() as u64)
+            .unwrap_or(0);
+        BufferRow {
+            name: self.buffer_row_display(key),
+            current,
+            lines,
+        }
+    }
+
+    /// The store-level read of the buffer-list rows (MRU order; each
+    /// `name` is the shared display source string, marker slot included,
+    /// plan 018 issue 04). The renderer gets its window from
+    /// `buffer_list_view_info`; this accessor serves the store tests and
+    /// the flow tests.
+    #[allow(dead_code)] // test-only accessor (the renderer reads buffer_list_view_info)
     pub fn buffer_rows(&self) -> Vec<BufferRow> {
         self.buffers
             .list()
             .into_iter()
-            .map(|(key, buf)| BufferRow {
-                name: self.buffer_display(key),
-                current: self.buffers.current() == Some(key),
-                lines: buf.line_count() as u64,
-            })
+            .map(|(key, _)| self.buffer_row_at(key))
             .collect()
     }
 

@@ -1,9 +1,91 @@
 use super::*;
 
 impl AppStore {
-    /// Selection cursor of the buffer-list view.
+    /// The store-level read of the buffer-list selection: an index into
+    /// the NARROWED set (plan 018 issue 04 — with an empty narrow query
+    /// the narrowed set is the full MRU list, so this reads the same as
+    /// before). The renderer reads `buffer_list_view_info`'s
+    /// selected-row field; this accessor serves the store tests and the
+    /// flow tests.
+    #[allow(dead_code)] // test-only accessor (the renderer reads buffer_list_view_info)
     pub fn buffer_list_selected(&self) -> usize {
         self.buffer_list_selected
+    }
+
+    /// The buffer-list narrow query (plan 018 issue 04): the text typed
+    /// on the list's prompt row; empty = no narrowing.
+    pub fn buffer_list_query(&self) -> &str {
+        &self.buffer_list_query
+    }
+
+    /// The buffer-list rows the narrow query keeps, as SOURCE indices
+    /// into the MRU list, in SOURCE order (FilterOnly: non-matches drop
+    /// out, MRU order is never re-ranked — the user's muscle memory for
+    /// a buffer list is MRU, not rank). Scored through the ONE shared
+    /// narrowing core (plan 018 issue 01) over the shared display-source
+    /// strings, with the general picker matcher (the same instance the
+    /// Buffers picker kind scores with, so both surfaces score the same
+    /// strings with the same matcher).
+    fn buffer_list_narrowed(&mut self) -> Vec<usize> {
+        let displays: Vec<String> = self
+            .buffers
+            .list()
+            .iter()
+            .map(|(key, _)| self.buffer_row_display(key))
+            .collect();
+        let refs: Vec<&str> = displays.iter().map(|s| s.as_str()).collect();
+        let ranked = super::narrowing::narrow(&self.buffer_list_query, &refs, &mut self.matcher);
+        // The core ranks best-first; FilterOnly re-sorts back into
+        // (stable) MRU source order. An empty query already returns
+        // 0..len in order, so the sort is a no-op there.
+        let mut out: Vec<usize> = ranked.into_iter().map(|(i, _)| i).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// The one selection rule of the seam (the picker's clamp, plan 018
+    /// §2.2): after the narrowed set re-derives, the selection clamps
+    /// into it.
+    ///
+    /// `pub(super)`: the prompt guard in `keys.rs` (a sibling submodule)
+    /// re-clamps the selection after every query keystroke.
+    pub(super) fn buffer_list_recompute_selection(&mut self) {
+        let n = self.buffer_list_narrowed().len();
+        self.buffer_list_selected = self.buffer_list_selected.min(n.saturating_sub(1));
+    }
+
+    /// Buffer-list view window (plan 018 issue 04): the NARROWED rows
+    /// (MRU order — FilterOnly), windowed store-side before render
+    /// (`window_slice` / `keep_cursor_visible`, the shared windowing
+    /// seam), with the selected source row kept in view. Mirrors
+    /// `search_view_info`'s shape: (rows window, scroll, total narrowed,
+    /// selected row inside the window — None when the selection is
+    /// outside the window or the list is empty).
+    pub fn buffer_list_view_info(&mut self) -> (Vec<BufferRow>, usize, usize, Option<usize>) {
+        let narrowed = self.buffer_list_narrowed();
+        let total = narrowed.len();
+        if total == 0 {
+            self.buffer_list_scroll = 0;
+            return (Vec::new(), 0, 0, None);
+        }
+        let window = pane_window(self.viewport_lines);
+        // The selection is a POSITION in the narrowed array (the seam's
+        // clamp is over that position, not a source index): the window
+        // follows it by position, and the in-window row is its offset.
+        let sel_pos = self.buffer_list_selected;
+        let mut scroll = self.buffer_list_scroll.min(total.saturating_sub(1));
+        if sel_pos < total {
+            scroll = keep_cursor_visible(scroll, sel_pos, total, window);
+        }
+        self.buffer_list_scroll = scroll;
+        let (start, end) = window_slice(scroll, total, window);
+        let list = self.buffers.list();
+        let rows = narrowed[start..end]
+            .iter()
+            .filter_map(|&src| list.get(src).map(|(key, _)| self.buffer_row_at(key)))
+            .collect();
+        let selected_row = (sel_pos >= start && sel_pos < end).then_some(sel_pos - start);
+        (rows, scroll, total, selected_row)
     }
 
     /// Insert text at the end of the current buffer (the shared editing
@@ -1972,13 +2054,22 @@ impl AppStore {
         }
         self.normalize_top_view();
         self.minibuffer_message(&format!("killed {display}"));
+        // The buffer-list narrow set is re-derived from the (now shorter)
+        // source rows, and its selection clamps into the new set (the
+        // selection is an index into the narrowed set, plan 018 issue 04).
+        self.buffer_list_recompute_selection();
     }
 
-    /// Buffer-list view: open the selected buffer and close the list.
+    /// Buffer-list view: open the buffer the SELECTED ROW identifies and
+    /// close the list. The row is addressed through the narrowed set's
+    /// source index — never by a first-match over names (the
+    /// issue-annotation-per-symbol-creation lesson).
     pub fn open_buffer_list_selected(&mut self) {
-        let key = match self.buffers.list().get(self.buffer_list_selected) {
-            Some((key, _)) => key.to_string(),
-            None => return,
+        let Some(&src) = self.buffer_list_narrowed().get(self.buffer_list_selected) else {
+            return;
+        };
+        let Some(key) = self.buffers.list().get(src).map(|(key, _)| key.to_string()) else {
+            return;
         };
         self.buffers.set_current(&key);
         // 006-03b item 1: a switched-to external buffer keeps its owning
@@ -1988,35 +2079,40 @@ impl AppStore {
         self.normalize_top_view();
     }
 
+    /// Move the selection within the NARROWED set (plan 018 issue 04):
+    /// an empty query makes the narrowed set the full MRU list, so this
+    /// is byte-for-byte today's behaviour when no query is typed.
     pub fn buffer_list_next(&mut self) {
-        let n = self.buffers.len();
+        let n = self.buffer_list_narrowed().len();
         if n > 0 {
             self.buffer_list_selected = (self.buffer_list_selected + 1) % n;
         }
     }
 
     pub fn buffer_list_prev(&mut self) {
-        let n = self.buffers.len();
+        let n = self.buffer_list_narrowed().len();
         if n > 0 {
             self.buffer_list_selected = (self.buffer_list_selected + n - 1) % n;
         }
     }
 
-    /// Buffer list: `d` kills the SELECTED buffer (issue 05h; the
-    /// dired-convention kill verb backlogged in parity log row 31). Reuses
-    /// the existing `kill_buffer` path the `C-x k` picker runs — no second
-    /// kill verb. The list stays open; the selection clamps to a valid row.
+    /// Buffer list: `d` kills the buffer the SELECTED ROW identifies
+    /// (issue 05h; the dired-convention kill verb backlogged in parity
+    /// log row 31). Reuses the existing `kill_buffer` path the `C-x k`
+    /// picker runs — no second kill verb. The row is addressed through
+    /// the narrowed set's source index (the selected row, not the first
+    /// match — plan 018 issue 04). The list stays open; the killed row
+    /// drops out of the source rows and the selection clamps into the
+    /// re-derived set.
     pub fn buffer_list_kill_selected(&mut self) {
-        let key = match self.buffers.list().get(self.buffer_list_selected) {
-            Some((key, _)) => key.to_string(),
-            None => return,
+        let Some(&src) = self.buffer_list_narrowed().get(self.buffer_list_selected) else {
+            return;
+        };
+        let Some(key) = self.buffers.list().get(src).map(|(key, _)| key.to_string()) else {
+            return;
         };
         self.kill_buffer(&key);
-        let n = self.buffers.len();
-        self.buffer_list_selected = if n > 0 {
-            self.buffer_list_selected.min(n - 1)
-        } else {
-            0
-        };
+        // kill_buffer re-derived the narrowed set and clamped the
+        // selection into it.
     }
 }

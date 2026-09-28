@@ -1,6 +1,35 @@
 use super::*;
 
 impl AppStore {
+    /// Buffer-list narrow-prompt guard (plan 018 issue 04): printable
+    /// chars extend the narrow query, Backspace pops the last character,
+    /// and C-g clears the query (v1: C-g = clear, NOT close — closing
+    /// stays on `q`). The view's own keys (`n`, `p`, `d`, `q` — plus
+    /// RET / arrows / C-n / C-p / page keys, which carry no printable
+    /// char value) fall through to the keymap engine. Returns `true`
+    /// when the key is consumed, `false` to fall through.
+    fn buffer_list_key_event(&mut self, key: Key) -> bool {
+        if let Some(c) = key.char_value() {
+            if matches!(c, 'n' | 'p' | 'd' | 'q') {
+                return false;
+            }
+            self.buffer_list_query.push(c);
+            self.buffer_list_recompute_selection();
+            return true;
+        }
+        if key.code == KeyCode::Backspace {
+            self.buffer_list_query.pop();
+            self.buffer_list_recompute_selection();
+            return true;
+        }
+        if key == Key::ctrl_char('g') {
+            self.buffer_list_query.clear();
+            self.buffer_list_recompute_selection();
+            return true;
+        }
+        false
+    }
+
     /// Feed one keypress from the terminal, as a priority chain of named
     /// modals: the first active modal that consumes the key ends the chain,
     /// and a key no modal consumes reaches `dispatch_key` (the keymap
@@ -147,6 +176,16 @@ impl AppStore {
             && self.picker.is_none()
         {
             self.search_cancel();
+            return;
+        }
+        // Buffer-list narrow prompt (plan 018 issue 04): while the list
+        // view is on top, printable chars extend the query (the view's own
+        // n / p / d / q keys fall through to the keymap), Backspace pops
+        // the query, and C-g CLEARS THE QUERY — NOT cancel/close (the v1
+        // decision; closing stays on q). Intercepted before the global C-g
+        // so C-g cannot close the list through `cancel`.
+        if self.top_view() == ViewId::BufferList && self.buffer_list_key_event(key) {
+            self.self_insert_run = None;
             return;
         }
         // C-g aborts from any state: it clears the pending sequence and

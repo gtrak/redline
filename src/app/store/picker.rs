@@ -84,7 +84,10 @@ impl AppStore {
         self.buffers.list().into_iter().map(|(key, _)| {
             // picker-density: name-first — the (marked) buffer name left,
             // the absolute path right-aligned (the project root context
-            // display alone doesn't carry for external buffers).
+            // display alone doesn't carry for external buffers). `display`
+            // is the ONE shared display source (plan 018 issue 04): the
+            // same string the buffer list's rows score, marker slot
+            // included (`*` current buffer, ` ` otherwise).
             let detail = self
                 .buffers
                 .get(key)
@@ -93,7 +96,7 @@ impl AppStore {
                 .unwrap_or_default();
             PickerCandidate {
                 name: key.to_string(),
-                display: self.buffer_display(key),
+                display: self.buffer_row_display(key),
                 label: self.buffer_display(key),
                 detail,
                 docs: String::new(),
