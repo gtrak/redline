@@ -68,6 +68,16 @@ BATTERY = [
     "probe_notes_dump.py", "drive_syntax_notes.py", "drive_symbol_precise.py",
     "drive_xref.py",
     "drive_external_notes.py", "drive_external_crate.py", "drive_redo_live.py",
+    # issue-battery-drive-registration: the seven that ran in `full` but were
+    # never pooled (the pooled battery silently skipped them), plus the four
+    # genuine gaps (drive_log/tree/search/magit) that were in NEITHER list.
+    # All are hermetic redline App drives (no emacs/network), so each gets a
+    # private lane fixture exactly like the rest of the battery.
+    "drive_external_use.py",
+    "drive_issue_011_01.py", "drive_issue_011_02.py",
+    "drive_issue_011_04.py", "drive_issue_011_05.py", "drive_issue_011_06.py",
+    "drive_issue_017_f2.py",
+    "drive_log.py", "drive_tree.py", "drive_search.py", "drive_magit.py",
     "sweep_flows.py",
 ]
 

@@ -41,9 +41,14 @@ def snap(tag):
     return blues
 
 
+# every check's failure flag; drives a non-zero exit (see end)
+BAD = []
+
+
 def check(tag, blues):
     ok = len(blues) == 1
     print(f"   {'OK' if ok else 'FAIL'} {tag}: exactly-one={len(blues)==1} (n={len(blues)})")
+    BAD.append(not ok)
     return ok
 
 
@@ -76,3 +81,5 @@ for i in range(3):
 
 print("\nfirst-hit row:", first_row)
 app.kill()
+print(f"{len(BAD) - sum(BAD)}/{len(BAD)} checks passed")
+sys.exit(1 if any(BAD) else 0)

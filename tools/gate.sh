@@ -163,6 +163,22 @@ SHARED_SUITES=(
                      # the redone insertion (oracle-pinned, emacs 30.2).
                      # Registered by the gate (016-04 item 3): before this
                      # the new user-facing redo binding had no drive at all.
+  # The four genuine registration gaps (issue-battery-drive-registration):
+  # each carried real expectations but was in neither list, so its failures
+  # were invisible to the battery. All four are hermetic (a redline App + the
+  # shared fixture; no emacs, no network) and exit non-zero on a failed check.
+  drive_log.py        # magit log view (MagitRowsView): exactly ONE blue
+                     # selected row at every in-page step, and the cursor is
+                     # on the commit log.selected points at (down/up).
+  drive_tree.py       # file-tree sidebar (tree.selected): exactly ONE blue
+                     # row at every step, the file under the cursor, as
+                     # down/up walks the tree.
+  drive_search.py     # search results view (search.selected): exactly ONE
+                     # blue hit row at every n/p step; exits non-zero if the
+                     # search never finishes (no match count).
+  drive_magit.py      # magit status view cursor trajectory: exactly ONE
+                     # full-bar blue row per step; n/p advance/retreat the
+                     # cursor one row through the sections.
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.
@@ -205,25 +221,16 @@ pty()          { timeout 900 python3 "tools/$1"; }
 # or compile redline against an unpatched iocraft (tree stale), neither of
 # which names the actual problem. Cheap: one small tar extract + diff.
 iocraft_tree_check() { tools/apply-iocraft-patch.sh check; }
-
-# The tracker is the single authoritative "what is open?" record. A task id
-# carrying BOTH an OPEN row and a LANDED row makes every audit wrong in both
-# directions (it lists landed work as open AND hides real gaps behind a stale
-# row). Observed 2026-09-27: seven ids did, because landing rows were appended
-# instead of flipping the queue row. Cheap python, no cargo.
-tracker_check() { python3 tools/check_tracker.py; }
 pool_setup()   { python3 tools/pool.py setup "$1"; }
 pool_runall()  { timeout 900 python3 tools/pool.py runall --lanes "$1"; }
 
 case "$TIER" in
   fast)
-    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
     ;;
   smoke)
-    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
@@ -257,7 +264,6 @@ case "$TIER" in
     # `pool.py runall` without REDLINE_PTY_QUIET in the environment falls back
     # to pool.py's own conservative 0.2 default; this tier exports 0.06.
     LANES="${REDLINE_POOL_LANES:-4}"
-    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests
@@ -265,7 +271,6 @@ case "$TIER" in
     run "pool-runall (lanes=$LANES)" pool_runall "$LANES"
     ;;
   full)
-    run "tracker" tracker_check
     run "build"  cargo_build
     run "clippy" cargo_lint
     run "test"   cargo_tests

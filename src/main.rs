@@ -19,6 +19,8 @@ mod theme;
 mod ui;
 
 #[cfg(test)]
+mod gate_registry;
+#[cfg(test)]
 mod perf;
 #[cfg(test)]
 pub(crate) mod test_support;

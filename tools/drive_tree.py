@@ -15,6 +15,10 @@ from fixture import repo
 app = App(repo("redline_pyte_repo"), rows=24, cols=80)
 app.key("C-c p t")      # toggle the tree sidebar on
 
+# Accumulate every check's result; exit non-zero if ANY fails (a red gate, not
+# a silent OK/FAIL print).
+BAD = []
+
 
 def snap(tag):
     blues = app.blue_rows()
@@ -29,6 +33,7 @@ def snap(tag):
 def check(tag, blues):
     ok = len(blues) == 1
     print(f"   {'OK' if ok else 'FAIL'} {tag}: exactly-one={len(blues)==1} (n={len(blues)})")
+    BAD.append(not ok)
     return ok
 
 
@@ -51,3 +56,5 @@ for i in range(2):
     b = snap(f"up x{i+1}")
     check(f"up x{i+1}", b)
 app.kill()
+print(f"\n{len(BAD) - sum(BAD)}/{len(BAD)} checks passed")
+sys.exit(1 if any(BAD) else 0)

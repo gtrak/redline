@@ -16,6 +16,10 @@ app = App(repo("redline_pyte_repo"), rows=24, cols=80)
 app.key("C-x g")     # magit status
 app.key("l")         # magit-log -> Log view (MagitRowsView)
 
+# Accumulate every check's result; the drive exits non-zero if ANY fails, so a
+# rotting view is a red gate, not a silent "OK (n=...)' it used to print.
+BAD = []
+
 
 def snap(tag):
     blues = app.blue_rows()
@@ -34,6 +38,7 @@ def snap(tag):
 def check(tag, blues, expect_one):
     ok = (len(blues) == 1) if expect_one else (len(blues) == 0)
     print(f"   {'OK' if ok else 'FAIL'} {tag}: exactly-one={len(blues)==1} (n={len(blues)})")
+    BAD.append(not ok)
     return ok
 
 
@@ -52,6 +57,7 @@ for i in range(1, 6):
         subj = expected_subjects[i] if i < len(expected_subjects) else "?"
         match = subj in txt
         print(f"        cursor-on-{subj!r}={match}")
+        BAD.append(not match)
 
 # move back up
 for i in range(3):
@@ -60,3 +66,5 @@ for i in range(3):
     check(f"up x{i+1}", b, expect_one=True)
 
 app.kill()
+print(f"\n{len(BAD) - sum(BAD)}/{len(BAD)} checks passed")
+sys.exit(1 if any(BAD) else 0)
