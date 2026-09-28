@@ -1,4 +1,7 @@
 use super::*;
+use nucleo_matcher::{Config, Matcher};
+use crate::app::store::narrowing::narrow;
+use crate::nav::index::build_index;
 
     #[test]
     fn find_file_picker_opens_filters_and_opens_on_ret() {
@@ -1046,5 +1049,212 @@ use super::*;
             names,
             vec!["src/café.rs".to_string()],
             "the pasted é must reach the filter (before the widening it was dropped, 'caf' would match more)"
+        );
+    }
+
+    // ── plan 018 issue 01: the shared-narrowing-mechanism discrimination pins ──
+
+    /// A store with candidates for EVERY `PickerKind` — the fixture for the
+    /// narrowing cross-check pin (plan 018 issue 01). Every kind's
+    /// `candidates_for` is non-empty so the per-kind "picker output == shared
+    /// core" comparison is exercised, not vacuous. The tempdirs are leaked
+    /// (OS-cleaned on exit) so the paths the store holds stay valid.
+    fn rich_picker_store() -> AppStore {
+        let dir = tempfile::tempdir().unwrap();
+        // A git project (committed files) — the walk + index root.
+        git_repo_init(dir.path(), "Test", "test@example.com", true);
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "fn alpha() {}\nfn beta() {}\nimpl SomeTrait for T {\n    fn method(&self) {}\n}\nfn main() {\n    alpha();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/other.rs"), "fn alpha() {}\nfn gamma() {}\n").unwrap();
+        git_cli(dir.path(), &["add", "-A"], "Test", "test@example.com");
+        git_cli(dir.path(), &["commit", "-q", "-m", "init"], "Test", "test@example.com");
+        // A second branch (Branch kind) and a stash (Stash kind): dirty a
+        // tracked file, then stash the change.
+        git_cli(dir.path(), &["branch", "feature"], "Test", "test@example.com");
+        std::fs::write(
+            dir.path().join("src/other.rs"),
+            "fn alpha() {}\nfn gamma() {}\n// dirty\n",
+        )
+        .unwrap();
+        git_cli(dir.path(), &["stash", "push", "-m", "wip subject"], "Test", "test@example.com");
+
+        let base = tempfile::tempdir().unwrap();
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
+        let mut s = AppStore::at(dir.path(), base_path);
+        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+
+        // Prime the cached git repo handle (Branch, Stash kinds) and the
+        // project file list (FindFile kind).
+        s.ensure_git(dir.path().to_path_buf());
+        s.ensure_files();
+
+        // The symbol index (Symbols, Imenu, Xref, Impls kinds).
+        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        let index = build_index(dir.path(), &files_list.files, None);
+        s.set_index(index);
+
+        // A second registered project (Projects kind excludes the current).
+        let p2 = tempfile::tempdir().unwrap();
+        std::fs::write(p2.path().join("Cargo.toml"), "[package]\n").unwrap();
+        s.project_store.registry.upsert(p2.path());
+        std::mem::forget(p2);
+
+        // Open buffers (Buffers, KillBuffer, Imenu) + a recent (RecentFiles).
+        s.open_path("src/lib.rs");
+        s.open_path("src/other.rs");
+        s.record_recent("src/other.rs");
+
+        // A note record (Annotations kind). `anchor` is a required field —
+        // a record missing it is a Raw entry, never a candidate.
+        std::fs::write(
+            dir.path().join(".redline-notes.md"),
+            "# Notes\n\n<!-- redline-annotations:begin -->\n[annotation]\npath: src/lib.rs\nline: 1\nanchor: fn alpha() {}\nnote: top of the lib\n<!-- redline-annotations:end -->\n",
+        )
+        .unwrap();
+
+        // An ambiguous Xref lookup and an Impls lookup (two defs of `alpha`; one
+        // impl of `SomeTrait`).
+        s.xref_lookup_name = "alpha".to_string();
+        s.impls_keys = vec!["SomeTrait".to_string()];
+
+        std::mem::forget(dir);
+        s
+    }
+
+    /// Pin C (PLAN 5.5, `0829ddd` cross-check): enumerate EVERY `PickerKind`
+    /// from the production enumeration (`picker_kinds`, kept in lockstep with
+    /// the enum + `candidates_for`) and assert each kind's query path re-derives
+    /// its rows through the SHARED core — i.e. the picker's filtered rows equal
+    /// `narrowing::narrow` on the same `candidates_for(kind)` and the same
+    /// matcher (`picker_kind_uses_file_matcher`, the shared predicate). A kind
+    /// whose query path diverges from the core (its own private filter) fails
+    /// here, named; a new variant that is not routed through the seam would too.
+    #[test]
+    fn every_picker_kind_routes_its_query_through_the_shared_core() {
+        let mut s = rich_picker_store();
+        let mut empty_kinds = Vec::new();
+        for kind in picker_kinds() {
+            let candidates = s.candidates_for(kind);
+            if candidates.is_empty() {
+                empty_kinds.push(kind);
+            }
+            s.open_picker(kind, "Pin C: ", candidates.clone());
+            // Extend the query ('a' is not the Stash `x` / Annotations `d` verb).
+            s.picker_query_char('a');
+            let query = s.picker_query().to_string();
+            let uses_file = picker_kind_uses_file_matcher(kind);
+            let displays: Vec<&str> = candidates.iter().map(|c| c.display.as_str()).collect();
+            let expected = {
+                let m = if uses_file { &mut s.file_matcher } else { &mut s.matcher };
+                narrow(&query, &displays, m)
+            };
+            let expected_names: Vec<&str> =
+                expected.iter().map(|(i, _)| candidates[*i].name.as_str()).collect();
+            let actual_names: Vec<&str> =
+                s.picker_filtered().iter().map(|(c, _)| c.name.as_str()).collect();
+            assert_eq!(
+                actual_names, expected_names,
+                "kind {kind:?}: the picker's filtered rows must equal the shared core (narrowing::narrow) on the same candidates_for({kind:?}) and matcher — a divergence means this kind bypassed the shared narrowing seam"
+            );
+        }
+        assert!(
+            empty_kinds.is_empty(),
+            "rich_picker_store gave no candidates for {empty_kinds:?} — the cross-check is vacuous for those; populate them"
+        );
+    }
+
+    /// Pin A: the shared core parses with `CaseMatching::Ignore` — the query's
+    /// case need not match the candidate's. A query typed UPPERCASE still finds
+    /// the lowercase candidate. Mutating the core to `CaseMatching::Respect`
+    /// reddens this.
+    #[test]
+    fn picker_query_matches_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_find_file();
+        // Uppercase query against the lowercase "src/lib.rs" display.
+        for c in "LIB".chars() {
+            store.key_event(key(&c.to_string()));
+        }
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["src/lib.rs"],
+            "CaseMatching::Ignore must match case-insensitively: {names:?}"
+        );
+    }
+
+    /// Pin B: when a query shrinks the filtered set below the current selection,
+    /// the selection is clamped into the new set (the session's one rule: `selected
+    /// = selected.min(filtered.len().saturating_sub(1))`). The selection survives
+    /// the shrink on the last surviving row. Dropping the clamp reddens this.
+    #[test]
+    fn picker_selection_clamps_into_a_shrunk_filtered_set() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.open_find_file(); // 4 rows: Cargo.toml, README.md, src/lib.rs, src/main.rs
+        // Move the selection to the last row (index 3).
+        for _ in 0..3 {
+            store.key_event(key("DOWN"));
+        }
+        assert_eq!(store.picker_selected(), 3);
+        // "lib" leaves exactly one row (src/lib.rs); the selection clamps 3 -> 0.
+        for c in "lib".chars() {
+            store.key_event(key(&c.to_string()));
+        }
+        assert_eq!(store.picker_count().0, 1, "only src/lib.rs survives");
+        assert_eq!(store.picker_selected(), 0, "selection clamped into the shrunken set");
+        let names: Vec<_> = store
+            .picker_filtered()
+            .iter()
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["src/lib.rs"], "the survivor is src/lib.rs: {names:?}");
+    }
+
+    /// Pin D: `narrow`'s sort is STABLE — rows with equal scores keep source
+    /// order. Identical displays score identically; a stable sort keeps the lower
+    /// source index first. The existing picker suite never asserted tie order, so
+    /// this locks it as behaviour (plan 018 issue 01).
+    ///
+    /// What this pin actually discriminates: it locks the TIE ORDER (equal-score
+    /// rows appear in source order). It reddens under any order-CHANGING mutation
+    /// — e.g. a tie-break by descending index, `sort_by_key(|(Reverse(score),
+    /// Reverse(index))|)`, observed as the index list coming out `[N-1, N-2, …]`.
+    /// It does NOT redden under `sort_unstable_by_key`: std's sort detects that an
+    /// all-equal input is already ordered and bails, so that specific mutation is
+    /// non-discriminative here (measured at N=32 and N=4096). The pin therefore
+    /// proves the tie ORDER is pinned as behaviour; it is not, by itself, a proof
+    /// that the sort is specifically the stable `sort_by_key`.
+    #[test]
+    fn narrow_sort_is_stable_equal_scores_keep_source_order() {
+        // A modest list of identical displays → all equal scores. A stable sort
+        // keeps the source index order [0..N); an order-changing sort does not.
+        // N is kept small: on failure we print only a prefix, never the whole list.
+        const N: usize = 32;
+        let displays = vec!["same candidate"; N];
+        let mut m = Matcher::new(Config::DEFAULT);
+        let out = narrow("candidate", &displays, &mut m);
+        let indices: Vec<usize> = out.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices.len(), N, "every row must be retained for an all-match query");
+        // A permutation of 0..N is the source order iff it is strictly ascending.
+        // That check is complete here and, on failure, dumps only a short prefix.
+        let is_source_order = indices.windows(2).all(|w| w[0] < w[1]);
+        assert!(
+            is_source_order,
+            "equal-score rows must keep source order (stable sort); first 6: {:?}",
+            &indices[..N.min(6)]
         );
     }

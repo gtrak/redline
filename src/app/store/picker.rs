@@ -1,5 +1,26 @@
+use nucleo_matcher::Matcher;
+
 use super::navigation::{tooling_candidate_name, xref_location_candidate};
+use super::narrowing::NarrowSession;
 use super::*;
+
+impl Picker {
+    /// Route the picker's candidates through the shared narrowing core
+    /// (plan 018 issue 01): score each candidate's `display` string via the
+    /// session, and materialize the `PickerCandidate` list the renderer/tests
+    /// read through `picker_filtered()` (the seam deals in indices; the
+    /// picker renders candidates — plan 018 §2.2a).
+    fn recompute(&mut self, candidates: &[PickerCandidate], matcher: &mut Matcher) {
+        let displays: Vec<&str> = candidates.iter().map(|c| c.display.as_str()).collect();
+        self.session.recompute(&displays, matcher);
+        self.filtered = self
+            .session
+            .filtered
+            .iter()
+            .map(|(i, s)| (candidates[*i].clone(), *s))
+            .collect();
+    }
+}
 
 impl AppStore {
     fn palette_candidates(&self) -> Vec<PickerCandidate> {
@@ -204,9 +225,9 @@ impl AppStore {
                 (p.kind == PickerKind::Annotations)
                     .then(|| {
                         p.filtered
-                            .get(p.selected)
+                            .get(p.session.selected)
                             .map(|(cand, _)| {
-                                (cand.name.clone(), cand.ann_col, p.query.clone())
+                                (cand.name.clone(), cand.ann_col, p.session.query.clone())
                             })
                     })
                     .flatten()
@@ -230,7 +251,7 @@ impl AppStore {
         }
     }
 
-    fn candidates_for(&mut self, kind: PickerKind) -> Vec<PickerCandidate> {
+    pub(crate) fn candidates_for(&mut self, kind: PickerKind) -> Vec<PickerCandidate> {
         match kind {
             PickerKind::Palette => self.palette_candidates(),
             PickerKind::FindFile => self.find_file_candidates(),
@@ -567,12 +588,11 @@ impl AppStore {
         if !matches!(kind, PickerKind::Xref) {
             self.xref_tooling_pending = None;
         }
-        let files = matches!(kind, PickerKind::FindFile | PickerKind::RecentFiles);
+        let files = picker_kind_uses_file_matcher(kind);
         let mut picker = Picker {
             kind,
             prompt: prompt.to_string(),
-            query: String::new(),
-            selected: 0,
+            session: NarrowSession::default(),
             filtered: Vec::new(),
             preview: String::new(),
         };
@@ -585,7 +605,7 @@ impl AppStore {
     pub(super) fn picker_query_char(&mut self, c: char) {
         let (kind, query, candidates) = match self.picker.as_ref() {
             Some(p) => {
-                let mut q = p.query.clone();
+                let mut q = p.session.query.clone();
                 q.push(c);
                 (p.kind, q, self.candidates_for(p.kind))
             }
@@ -597,7 +617,7 @@ impl AppStore {
     /// Backspace / C-h: remove the last query character.
     pub(super) fn picker_query_backspace(&mut self) {
         let (kind, query, candidates) = match self.picker.as_ref() {
-            Some(p) => (p.kind, p.query.clone(), self.candidates_for(p.kind)),
+            Some(p) => (p.kind, p.session.query.clone(), self.candidates_for(p.kind)),
             None => return,
         };
         let mut query = query;
@@ -606,12 +626,11 @@ impl AppStore {
     }
 
     fn set_picker_query(&mut self, kind: PickerKind, query: String, candidates: Vec<PickerCandidate>) {
-        let files = matches!(kind, PickerKind::FindFile | PickerKind::RecentFiles);
+        let files = picker_kind_uses_file_matcher(kind);
         if let Some(p) = self.picker.as_mut() {
-            p.query = query;
+            p.session.query = query;
             let m = if files { &mut self.file_matcher } else { &mut self.matcher };
             p.recompute(&candidates, m);
-            p.selected = p.selected.min(p.filtered.len().saturating_sub(1));
         }
         self.refresh_preview();
     }
@@ -629,7 +648,7 @@ impl AppStore {
     }
 
     pub fn picker_query(&self) -> &str {
-        self.picker.as_ref().map(|p| p.query.as_str()).unwrap_or("")
+        self.picker.as_ref().map(|p| p.session.query.as_str()).unwrap_or("")
     }
 
     /// The filtered candidates for the current query, best-first.
@@ -685,7 +704,7 @@ impl AppStore {
     }
 
     pub fn picker_selected(&self) -> usize {
-        self.picker.as_ref().map(|p| p.selected).unwrap_or(0)
+        self.picker.as_ref().map(|p| p.session.selected).unwrap_or(0)
     }
 
     /// The preview-pane text for the selected candidate.
@@ -706,7 +725,7 @@ impl AppStore {
             .as_ref()
             .and_then(|p| {
                 p.filtered
-                    .get(p.selected)
+                    .get(p.session.selected)
                     .map(|(c, _)| (p.kind, c.name.clone(), c.docs.clone()))
             });
         let (kind, name, docs) = match choice {
@@ -864,7 +883,7 @@ impl AppStore {
             .as_ref()
             .and_then(|p| {
                 p.filtered
-                    .get(p.selected)
+                    .get(p.session.selected)
                     .map(|(c, _)| {
                         (
                             p.kind,
@@ -1039,7 +1058,7 @@ impl AppStore {
 
     pub fn picker_select_next(&mut self) {
         if let Some(p) = self.picker.as_mut() && !p.filtered.is_empty() {
-            p.selected = (p.selected + 1) % p.filtered.len();
+            p.session.selected = (p.session.selected + 1) % p.filtered.len();
         }
         // helm follow-mode: a selection move re-renders the preview of
         // the newly selected candidate.
@@ -1049,7 +1068,7 @@ impl AppStore {
     pub fn picker_select_prev(&mut self) {
         if let Some(p) = self.picker.as_mut() && !p.filtered.is_empty() {
             // Wrap-decrement: prev at index 0 lands on the last candidate.
-            p.selected = (p.selected + p.filtered.len() - 1) % p.filtered.len();
+            p.session.selected = (p.session.selected + p.filtered.len() - 1) % p.filtered.len();
         }
         // helm follow-mode: a selection move re-renders the preview of
         // the newly selected candidate.

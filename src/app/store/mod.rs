@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nucleo_matcher::{
-    Matcher, pattern::{CaseMatching, Normalization, Pattern},
-};
+use nucleo_matcher::Matcher;
 use redline_resolve::{
     CargoProvider, ResolvedSource, Resolver, SymbolContext,
     providers::{go_provider::GoProvider, js_provider::JsProvider, python_provider::PythonProvider},
@@ -60,10 +58,12 @@ mod buffers;
 mod notes;
 mod search;
 mod picker;
+mod narrowing;
 mod file_view;
 mod index_wiring;
 mod navigation;
 mod commit;
+use self::narrowing::NarrowSession;
 use self::helpers::{
     blame_line_display, editor_cursor_line, extract_commit_message, file_candidate,
     keep_cursor_visible, log_entry_display, pane_window, prefill_commit_message,
@@ -710,6 +710,46 @@ pub enum PickerKind {
     Annotations,
 }
 
+/// Every `PickerKind`, in declaration order — the single enumeration the
+/// narrowing cross-check pin (plan 018 issue 01) iterates. Keep it in
+/// lockstep with the enum above and with `candidates_for`'s arms: a variant
+/// added to the enum but not here would silently escape the pin (pure Rust
+/// cannot enumerate a plain enum's variants at runtime, so this is a
+/// reviewed, not compiler-checked, list — the same source of truth the
+/// cross-check reads, per PLAN 5.5 / `0829ddd`).
+#[allow(dead_code)] // test-only consumer (the cross-check pin); kept in the
+// production module, co-located with the enum + candidates_for, so a reviewer
+// who adds a variant sees this list and those arms together and updates all
+// three. There is no production caller by design (nothing else enumerates
+// every kind), so the binary never calls it.
+pub(crate) fn picker_kinds() -> [PickerKind; 13] {
+    [
+        PickerKind::Palette,
+        PickerKind::FindFile,
+        PickerKind::RecentFiles,
+        PickerKind::Buffers,
+        PickerKind::KillBuffer,
+        PickerKind::Projects,
+        PickerKind::Xref,
+        PickerKind::Impls,
+        PickerKind::Imenu,
+        PickerKind::Symbols,
+        PickerKind::Branch,
+        PickerKind::Stash,
+        PickerKind::Annotations,
+    ]
+}
+
+/// The picker kinds scored with the tuned file-path matcher (`file_matcher`);
+/// every other kind uses the general `matcher`. One predicate shared by the
+/// picker's recompute and the narrowing cross-check pin, so both read the
+/// same source (plan 018 issue 01, PLAN 5.5). The two matcher instances stay
+/// separate — the seam takes the `Matcher` as a parameter, it does not unify
+/// them.
+pub(crate) fn picker_kind_uses_file_matcher(kind: PickerKind) -> bool {
+    matches!(kind, PickerKind::FindFile | PickerKind::RecentFiles)
+}
+
 /// The file view's point for one buffer (plan 004 issue 05b): the
 /// `(line, col)` position of the cursor plus the emacs **goal column**.
 ///
@@ -869,9 +909,14 @@ pub struct PickerCandidate {
 struct Picker {
     kind: PickerKind,
     prompt: String,
-    query: String,
-    selected: usize,
-    /// (candidate, nucleo score) for the current query, best-first.
+    /// The shared narrowing session (plan 018 issue 01): the query, the
+    /// clamped selection, and the (source-row index, score) ranking the
+    /// shared core (`narrowing::narrow`) produced. The picker's per-kind
+    /// verb keys stay in its key handler, not in the session.
+    session: NarrowSession,
+    /// The picker's own row type, materialized from the session's index
+    /// ranking at recompute time (the seam deals in indices; the picker
+    /// renders `PickerCandidate`s — plan 018 §2.2a). Best-first.
     filtered: Vec<(PickerCandidate, u32)>,
     /// Preview-pane text for the selected candidate (multi-line).
     preview: String,
@@ -2976,32 +3021,6 @@ enum EditorMove {
 impl Default for AppStore {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Picker {
-    fn recompute(&mut self, candidates: &[PickerCandidate], matcher: &mut Matcher) {
-        let query = self.query.as_str();
-        if query.is_empty() {
-            self.filtered = candidates
-                .iter()
-                .map(|c| (c.clone(), u32::MAX))
-                .collect();
-            return;
-        }
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let mut scored: Vec<(&PickerCandidate, u32)> = candidates
-            .iter()
-            .filter_map(|c| {
-                let haystack = nucleo_matcher::Utf32Str::new(&c.display, &mut buf);
-                pattern
-                    .score(haystack, matcher)
-                    .map(|score| (c, score))
-            })
-            .collect();
-        scored.sort_by_key(|item| std::cmp::Reverse(item.1));
-        self.filtered = scored.into_iter().map(|(c, s)| (c.clone(), s)).collect();
     }
 }
 

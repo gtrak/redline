@@ -408,7 +408,7 @@ use super::*;
             .as_ref()
             .and_then(|p| p.filtered.iter().position(|(c, _)| c.name.starts_with("beta")))
             .expect("beta candidate");
-        s.picker.as_mut().unwrap().selected = idx;
+        s.picker.as_mut().unwrap().session.selected = idx;
         s.run_selected();
         s.jump_back();
         assert_eq!((s.point_line(), s.point_col()), (3, 8), "S3: imenu M-, restores origin");
