@@ -30,6 +30,34 @@ impl AppStore {
         false
     }
 
+    /// Results-view narrow-prompt guard (plan 018 issue 03, beside the
+    /// buffer-list one): while the results view is on top (and no picker
+    /// is over it), printable chars extend the narrow query and Backspace
+    /// pops the last character; each keystroke re-runs the shared core's
+    /// projection (the narrowing is a PROJECTION at view time — the
+    /// canonical `hits`/`rows`/`hit_rows` are never mutated). The
+    /// view's own decision keys (`n` / `p` / `g` / `q` — plus RET /
+    /// arrows / C-n / C-p / page keys / M-, / C-g, which carry no
+    /// printable char value or are intercepted above) fall through to
+    /// the keymap engine / the C-g split. Returns `true` when the key is
+    /// consumed, `false` to fall through.
+    fn search_key_event(&mut self, key: Key) -> bool {
+        if let Some(c) = key.char_value() {
+            if matches!(c, 'n' | 'p' | 'g' | 'q') {
+                return false;
+            }
+            self.search.narrow.query.push(c);
+            self.search_narrow_recompute();
+            return true;
+        }
+        if key.code == KeyCode::Backspace {
+            self.search.narrow.query.pop();
+            self.search_narrow_recompute();
+            return true;
+        }
+        false
+    }
+
     /// Feed one keypress from the terminal, as a priority chain of named
     /// modals: the first active modal that consumes the key ends the chain,
     /// and a key no modal consumes reaches `dispatch_key` (the keymap
@@ -166,16 +194,39 @@ impl AppStore {
         {
             return;
         }
-        // C-g in the results view cancels the in-flight search (the view
-        // stays open on the partial results) — intercepted before the
-        // global C-g so the advertised `C-g cancel search` works. The
-        // picker guard keeps C-g closing an open palette (the global
-        // intercept) instead of cancelling the search underneath it.
+        // C-g in the results view (plan 018 issue 03's C-g split):
+        // the IN-FLIGHT search still cancels (the view stays open on the
+        // partial results); with a narrow query active and the job NOT
+        // running, C-g clears the query (the narrowed set re-derives to
+        // the full list); an empty query is today's no-op. Intercepted
+        // before the global C-g so the advertised `C-g cancel search`
+        // works. The picker guard keeps C-g closing an open palette (the
+        // global intercept) instead of touching the search underneath it.
         if key == Key::ctrl_char('g')
             && self.top_view() == ViewId::Search
             && self.picker.is_none()
         {
-            self.search_cancel();
+            if self.search.running {
+                self.search_cancel();
+            } else if !self.search.narrow.query.is_empty() {
+                self.search_narrow_clear();
+            } else {
+                // Pre-018-03: the not-running C-g was always
+                // `search_cancel`'s "nothing to cancel".
+                self.search_cancel();
+            }
+            return;
+        }
+        // Results narrow prompt (plan 018 issue 03): while the results
+        // view is on top, printable chars extend the narrow query (the
+        // view's own n / p / g / q decision keys fall through to the
+        // keymap), Backspace pops the query. C-g is the split above
+        // (cancel / clear), never a query char.
+        if self.top_view() == ViewId::Search
+            && self.picker.is_none()
+            && self.search_key_event(key)
+        {
+            self.self_insert_run = None;
             return;
         }
         // Buffer-list narrow prompt (plan 018 issue 04): while the list

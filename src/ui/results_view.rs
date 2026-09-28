@@ -5,6 +5,14 @@
 //! `M-,` returns), `g` re-runs, `q`/`ESC` cancel/close, `C-g` cancels
 //! the in-flight search.
 //!
+//! Plan 018 issue 03: a one-row `NoWrap` narrow prompt at the top of the
+//! view (the picker canvas row-0 precedent — NOT the minibuffer, which
+//! already hosts search echoes, isearch, and status). The DECISION KEYS
+//! LEAD (`filter:  RET jump · n/p · g re-run · C-g clear · q close`) and
+//! the query trails, so a right-edge clip eats the query tail, never the
+//! keys (PLAN §5.2, the `7f0090a` keys-first rule). Typing narrows the
+//! rows live (FilterOnly); `n`/`p` wrap within the narrowed set.
+//!
 //! The store pre-computes the visible row window (`search_view_info`);
 //! this component only renders.
 
@@ -17,12 +25,15 @@ use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 #[derive(Default, Props)]
 pub struct ResultsViewProps {
     pub title: String,
+    /// The narrow query (plan 018 issue 03); empty = no narrowing.
+    pub query: String,
     /// The visible row window (pre-computed by the store).
     pub rows: Vec<ResultRow>,
     pub top_row: usize,
     pub total_rows: usize,
     /// The selected hit's row, relative to the window (`None` when the
-    /// selection scrolled out of the window or there are no hits).
+    /// selection scrolled out of the window, was narrowed out, or there
+    /// are no hits).
     pub selected_row: Option<usize>,
     pub running: bool,
     pub error: Option<String>,
@@ -53,6 +64,23 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
+                // The narrow prompt row (plan 018 issue 03, PLAN §5.2):
+                // ONE NoWrap row whose LEFTMOST text is the decision/verb
+                // information — `filter:  RET jump · n/p · g re-run ·
+                // C-g clear · q close` — with the query trailing. The
+                // keys lead so a right-edge clip eats the query tail
+                // (recognisable), never the keys (unguessable) — the
+                // quit-prompt keys-first precedent (`7f0090a`).
+                View(overflow: Overflow::Hidden) {
+                    Text(
+                        content: format!(
+                            "filter:  RET jump · n/p · g re-run · C-g clear · q close  {}",
+                            if props.query.is_empty() { "· type to narrow".to_string() } else { props.query.clone() }
+                        ),
+                        color: face_color(t.preview),
+                        wrap: TextWrap::NoWrap,
+                    )
+                }
                 #(if let Some(e) = &props.error {
                     Some(element! {
                         Text(

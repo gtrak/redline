@@ -343,6 +343,21 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       `isearch_list_*` / `isearch_recompute_rederives_*` / 
       `isearch_ret_lands_on_the_selected_*` twins in
       `src/app/store/tests/search.rs`.
+- [ ] **U-E9 Results narrowing (018-03)**: in the results view (`C-c p s s`),
+      the one-row NoWrap prompt under the title carries the DECISION KEYS
+      LEADING (`filter:  RET jump · n/p · g re-run · C-g clear · q close`) with
+      the query trailing (a right-edge clip eats the query tail, never the
+      keys — the `7f0090a` rule); typing narrows the rows live (FilterOnly,
+      source order, a file header survives iff a child hit does); the title
+      carries both numbers ("1 of 8 matches") so the narrowing state is
+      always visible; `n`/`p` wrap within the narrowed set; RET jumps the
+      narrowed row's hit and `M-,` returns with the selection restored under
+      the still-active query; C-g (job idle) CLEARS the query (the full list
+      re-derives, the selection clamped, not lost); an in-flight C-g still
+      cancels the job; `g` re-run clears the query (a new job is a new result
+      set). PTY drive: `tools/drive_results_narrow.py`. Store pins: the
+      `results_narrow_*` / `results_rerun_clears_the_query` /
+      `results_prompt_*` pins in `src/app/store/tests/search.rs`.
 
 ## U-F · Git surface
 

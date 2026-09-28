@@ -370,8 +370,21 @@ impl AppStore {
         }
     }
 
+    /// `C-g` in the results view with a narrow query active and the job
+    /// NOT running (plan 018 issue 03's C-g split): clear the query.
+    /// The narrowed set re-derives to the full list and the selection
+    /// clamps — it is never reset. The in-flight case stays on
+    /// `search_cancel`; the empty-query case is today's no-op.
+    pub fn search_narrow_clear(&mut self) {
+        self.search.narrow.query.clear();
+        self.search_narrow_recompute();
+        self.minibuffer_message("filter cleared");
+    }
+
     /// `g` in the results view: re-run the current search with the same
-    /// query.
+    /// query. `begin_search` replaces the whole `SearchState`, which
+    /// resets the narrow session too: the narrow query CLEARS on a
+    /// re-run (a new job is a new result set — stated, not accidental).
     pub fn search_rerun(&mut self) {
         let query = self.search.query.clone();
         match self.search.kind {
@@ -381,34 +394,79 @@ impl AppStore {
         }
     }
 
-    /// `n` in the results view: move to the next match (wraps).
+    /// `n` in the results view: move to the next match (wraps). With a
+    /// narrow query active (plan 018 issue 03) the step wraps WITHIN the
+    /// narrowed set; with an empty query it is today's exact behaviour
+    /// over the full hit list. The canonical `selected` stays a flat hit
+    /// index; the prompt cursor is the session's position in the
+    /// narrowed list.
     pub fn search_next(&mut self) {
-        let n = self.search.hits.len();
-        if n == 0 {
-            self.minibuffer_message("no matches");
-            return;
+        if self.search.narrow.query.is_empty() {
+            let n = self.search.hits.len();
+            if n == 0 {
+                self.minibuffer_message("no matches");
+                return;
+            }
+            self.search.selected = (self.search.selected + 1) % n;
+            // Keep the session's position in step (empty query: the
+            // position IS the hit index — the full-list 1:1 regime).
+            self.search.narrow.selected = self.search.selected;
+        } else {
+            self.search_narrow_recompute();
+            let n = self.search.narrow.filtered.len();
+            if n == 0 {
+                self.minibuffer_message("no matches");
+                return;
+            }
+            self.search.narrow.selected = (self.search.narrow.selected + 1) % n;
+            self.search.selected = self.search.narrow.filtered[self.search.narrow.selected].0;
         }
-        self.search.selected = (self.search.selected + 1) % n;
         self.search_keep_visible();
     }
 
     /// `p` in the results view: move to the previous match (wraps).
+    /// Narrowed-set mirror of `search_next`.
     pub fn search_prev(&mut self) {
-        let n = self.search.hits.len();
-        if n == 0 {
-            self.minibuffer_message("no matches");
-            return;
+        if self.search.narrow.query.is_empty() {
+            let n = self.search.hits.len();
+            if n == 0 {
+                self.minibuffer_message("no matches");
+                return;
+            }
+            self.search.selected = (self.search.selected + n - 1) % n;
+            // Keep the session's position in step (the full-list 1:1
+            // regime, as in `search_next`).
+            self.search.narrow.selected = self.search.selected;
+        } else {
+            self.search_narrow_recompute();
+            let n = self.search.narrow.filtered.len();
+            if n == 0 {
+                self.minibuffer_message("no matches");
+                return;
+            }
+            self.search.narrow.selected = (self.search.narrow.selected + n - 1) % n;
+            self.search.selected = self.search.narrow.filtered[self.search.narrow.selected].0;
         }
-        self.search.selected = (self.search.selected + n - 1) % n;
         self.search_keep_visible();
     }
 
-    /// Keep the selected hit's row inside the visible window.
+    /// Keep the selected hit's row inside the visible window. The window
+    /// is the NARROWED row list when a query is active (plan 018 issue
+    /// 03 — the callers recompute the session before moving the
+    /// selection), the canonical `hit_rows` map otherwise.
     fn search_keep_visible(&mut self) {
-        let viewport = self.viewport_lines.max(1);
-        let Some(&row) = self.search.hit_rows.get(self.search.selected) else {
-            return;
+        let row = if self.search.narrow.query.is_empty() {
+            let Some(&row) = self.search.hit_rows.get(self.search.selected) else {
+                return;
+            };
+            row
+        } else {
+            match self.search_narrow_row_of(self.search.selected) {
+                Some(row) => row,
+                None => return, // narrowed out: no row to keep visible
+            }
         };
+        let viewport = self.viewport_lines.max(1);
         let scroll = &mut self.search.scroll;
         if row < *scroll {
             *scroll = row;
@@ -581,8 +639,50 @@ impl AppStore {
 
     /// The visible window of results-view rows, pre-computed for the UI:
     /// (rows, scroll top, total rows, selected hit's row relative to the
-    /// window). The window keeps the selected hit visible.
-    pub fn search_view_info(&self) -> (Vec<ResultRow>, usize, usize, Option<usize>) {
+    /// window).
+    ///
+    /// Plan 018 issue 03: with a narrow query active the window is the
+    /// NARROWED row list — a projection computed HERE, at view time
+    /// (plan 018 §2.3-3): a query typed while `running` applies to the
+    /// hits arrived so far; nothing buffers, nothing re-spawns the job,
+    /// and the canonical `rows`/`hits`/`hit_rows` are never mutated by
+    /// the narrowing (the generation guard and the `Finished`-time sort
+    /// are untouched). With an empty query the window is the canonical
+    /// one, byte-for-byte the pre-018-03 behaviour.
+    pub fn search_view_info(&mut self) -> (Vec<ResultRow>, usize, usize, Option<usize>) {
+        if self.search.narrow.query.is_empty() {
+            return self.search_view_info_full();
+        }
+        self.search_narrow_recompute();
+        let rows = self.search_narrow_rows();
+        let total = rows.len();
+        let viewport = self.viewport_lines.max(1);
+        // The selected hit's row in the narrowed list (`None` when the
+        // selection is narrowed out — same as today's out-of-window case).
+        let sel_row = self.search_narrow_row_of(self.search.selected);
+        let mut scroll = self.search.scroll.min(total.saturating_sub(1));
+        if let Some(row) = sel_row {
+            if row < scroll {
+                scroll = row;
+            } else if row >= scroll + viewport {
+                scroll = row - viewport + 1;
+            }
+            scroll = scroll.min(total.saturating_sub(1));
+        }
+        if total == 0 {
+            return (Vec::new(), 0, 0, None);
+        }
+        let end = (scroll + viewport).min(total);
+        let window = rows[scroll..end].to_vec();
+        let selected_row = sel_row
+            .filter(|r| *r >= scroll && *r < end)
+            .map(|r| r - scroll);
+        (window, scroll, total, selected_row)
+    }
+
+    /// The un-narrowed results window (the pre-018-03 windowing, kept
+    /// intact: the canonical rows keep the selected hit visible).
+    fn search_view_info_full(&self) -> (Vec<ResultRow>, usize, usize, Option<usize>) {
         let s = &self.search;
         let total = s.rows.len();
         let viewport = self.viewport_lines.max(1);
@@ -609,26 +709,160 @@ impl AppStore {
         (rows, scroll, total, selected_row)
     }
 
-    /// The results-view title: kind, query, running counts.
-    pub fn search_title(&self) -> String {
+    /// The narrow display projection for a hit: `"{file}:{line_no}
+    /// {line}"` (plan 018 issue 03) — file name and line number are
+    /// scored, so narrowing by file name works (the fzf property the
+    /// results view lacks without it).
+    fn hit_display(hit: &crate::search::rg::Hit) -> String {
+        format!("{}:{} {}", hit.file, hit.line_no, hit.line)
+    }
+
+    /// Re-score the LIVE hits against the narrow query through the ONE
+    /// shared core (plan 018 issue 01) and run the session's clamp
+    /// (issue 01's rule: after every recompute the cursor clamps into the
+    /// shrunken set — a narrowed-out selection is never silently reset).
+    ///
+    /// The canonical `selected` is a flat hit index (RET and the M-,
+    /// sentinel depend on it); the session's position is the cursor over
+    /// the narrowed list. The cursor's identity is the HIT it is on:
+    /// when that hit survives the re-projection, the position follows
+    /// the hit (stable across set growth — a Backspace/C-g clear keeps
+    /// the selection, not the position — and across shrinks that drop
+    /// earlier hits). Only when the hit is narrowed OUT does issue 01's
+    /// rule apply: the cursor's old POSITION clamps into the surviving
+    /// set (and the selection mirrors it) — never a reset to 0.
+    pub(super) fn search_narrow_recompute(&mut self) {
+        let s = &mut self.search;
+        let old_pos = s.narrow.selected;
+        let displays: Vec<String> = s.hits.iter().map(Self::hit_display).collect();
+        let refs: Vec<&str> = displays.iter().map(|d| d.as_str()).collect();
+        s.narrow.recompute(&refs, &mut self.matcher);
+        // FilterOnly: the core ranks best-first; the results surface keeps
+        // SOURCE order (the hits' `(path, line, col)` order — a narrowing
+        // reorder would move RET's landing target under the cursor).
+        s.narrow.filtered.sort_by_key(|&(i, _)| i);
+        if s.narrow.filtered.is_empty() {
+            // The seam's clamp parked the cursor at 0 of the empty set;
+            // the canonical selection is left alone (no narrowed row
+            // under the cursor — the selection is neither lost nor reset).
+            return;
+        }
+        match s.narrow
+            .filtered
+            .iter()
+            .position(|&(h, _)| h == s.selected)
+        {
+            Some(pos) => {
+                // The cursor's hit survives: the position follows the hit.
+                s.narrow.selected = pos;
+            }
+            None => {
+                // The hit was narrowed out: issue 01's rule — the cursor's
+                // old position clamps into the surviving set.
+                let pos = old_pos.min(s.narrow.filtered.len() - 1);
+                s.narrow.selected = pos;
+                s.selected = s.narrow.filtered[pos].0;
+            }
+        }
+    }
+
+    /// The narrowed row list (plan 018 issue 03): the surviving hits
+    /// (the session's FilterOnly projection, source order) with file-group
+    /// headers re-derived from the survivors — a header stays iff ≥1
+    /// child hit survives, its `count` is the SURVIVING count for the
+    /// file and `final_count` is unchanged from the canonical header.
+    /// The session must be current (a `search_narrow_recompute` has run
+    /// against the live hits).
+    fn search_narrow_rows(&self) -> Vec<ResultRow> {
+        let s = &self.search;
+        let mut per_file: HashMap<String, u64> = HashMap::new();
+        for &(h, _) in &s.narrow.filtered {
+            *per_file.entry(s.hits[h].file.clone()).or_insert(0) += 1;
+        }
+        let mut out = Vec::with_capacity(s.narrow.filtered.len() + s.file_row.len());
+        let mut last_file: Option<&str> = None;
+        for &(hit_idx, _) in &s.narrow.filtered {
+            let hit = &s.hits[hit_idx];
+            if last_file != Some(hit.file.as_str()) {
+                let final_count = s
+                    .file_row
+                    .get(&hit.file)
+                    .and_then(|&hr| match &s.rows[hr] {
+                        ResultRow::Header { final_count, .. } => Some(*final_count),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                out.push(ResultRow::Header {
+                    file: hit.file.clone(),
+                    count: *per_file.get(&hit.file).unwrap_or(&0),
+                    final_count,
+                });
+                last_file = Some(hit.file.as_str());
+            }
+            out.push(ResultRow::Hit { hit: hit.clone(), hit_index: hit_idx });
+        }
+        out
+    }
+
+    /// The selected hit's row index in the NARROWED row list (`None` when
+    /// the hit is narrowed out or there are no hits). Pure read over a
+    /// current session.
+    fn search_narrow_row_of(&self, hit_idx: usize) -> Option<usize> {
+        let s = &self.search;
+        let mut row = 0usize;
+        let mut last_file: Option<&str> = None;
+        for &(h, _) in &s.narrow.filtered {
+            let hit = &s.hits[h];
+            if last_file != Some(hit.file.as_str()) {
+                row += 1; // a surviving header
+                last_file = Some(hit.file.as_str());
+            }
+            if h == hit_idx {
+                return Some(row);
+            }
+            row += 1;
+        }
+        None
+    }
+
+    /// The results-view narrow query (plan 018 issue 03): the text typed
+    /// on the view's own prompt row (keys leading, one NoWrap row);
+    /// empty = no narrowing.
+    pub fn search_narrow_query(&self) -> &str {
+        &self.search.narrow.query
+    }
+
+    /// The results-view title: kind, query, running counts. With a narrow
+    /// query active it carries the narrowing state — `{narrowed} of
+    /// {total} matches` — so both numbers are always visible together
+    /// (plan 018 issue 03).
+    pub fn search_title(&mut self) -> String {
+        if !self.search.narrow.query.is_empty() {
+            self.search_narrow_recompute();
+        }
         let s = &self.search;
         let files = s.file_row.len();
         let running = if s.running { " (searching…)" } else { "" };
+        let matches = if s.narrow.query.is_empty() {
+            format!("{} matches", s.hits.len())
+        } else {
+            format!("{} of {} matches", s.narrow.filtered.len(), s.hits.len())
+        };
         if s.cancelled {
             format!(
-                "{}: '{}' — {} matches in {} files (cancelled){}",
+                "{}: '{}' — {} in {} files (cancelled){}",
                 s.kind.label(),
                 s.query,
-                s.hits.len(),
+                matches,
                 files,
                 running
             )
         } else {
             format!(
-                "{}: '{}' — {} matches in {} files{}",
+                "{}: '{}' — {} in {} files{}",
                 s.kind.label(),
                 s.query,
-                s.hits.len(),
+                matches,
                 files,
                 running
             )
@@ -739,6 +973,9 @@ impl AppStore {
             selected: 0,
             scroll: 0,
             cancel: Some(cancel.clone()),
+            // 018-03: a new job is a new result set — the narrow query
+            // goes with it (this is why `g` re-run clears it).
+            narrow: NarrowSession::default(),
         };
         let bus = self.search_bus.clone();
         spawn(&bus, generation, cancel);

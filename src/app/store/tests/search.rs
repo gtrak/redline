@@ -1545,3 +1545,411 @@ use super::*;
             "the pasted é must reach the query and match both lines"
         );
     }
+
+    // ── plan 018 issue 03: results-view narrowing ────────────────────
+
+    /// Narrow to a file subset through the prompt (the user's typing
+    /// path — printable chars route through the guard, not the keymap):
+    /// the canonical `hits`/`rows` are NEVER narrowed away (the
+    /// projection, not a mutation, plan 018 §2.3-3), the view window
+    /// keeps only that file's header + hits (the other file's header is
+    /// DROPPED — 0 surviving children), the title carries both numbers,
+    /// `n`/`p` wrap WITHIN the subset, and RET lands on a hit in that
+    /// file. On the pre-018-03 tree the typed chars echo "unbound key"
+    /// and every one of these asserts is red (the window is still the
+    /// full 6-row list and the title still says "4 matches").
+    #[test]
+    fn results_narrow_to_file_subset_ret_and_wrap() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.hits.len(), 4); // 1 lib.rs + 3 main.rs
+
+        // "lib" (no decision-key chars — n/p/g/q are the view's own
+        // keys and fall through to the keymap, not the query).
+        for c in "lib".chars() {
+            store.key_event(Key::char(c));
+        }
+        // Canonical stream state untouched by the narrowing:
+        assert_eq!(store.search.hits.len(), 4, "hits are never narrowed away");
+        assert_eq!(store.search.rows.len(), 6, "canonical rows (2 headers + 4 hits) untouched");
+
+        // The window: the lib.rs header (SURVIVING count 1, final_count
+        // unchanged) + its one hit — no main.rs rows at all.
+        let (rows, _top, total, sel_row) = store.search_view_info();
+        assert_eq!(total, 2, "narrowed row list: 1 header + 1 hit");
+        match &rows[0] {
+            crate::app::store::ResultRow::Header { file, count, final_count } => {
+                assert_eq!(file, "src/lib.rs");
+                assert_eq!(*count, 1, "the surviving count for the file");
+                assert!(*final_count, "final_count unchanged from the canonical header");
+            }
+            other => panic!("expected the lib.rs header, got {other:?}"),
+        }
+        assert!(matches!(
+            &rows[1],
+            crate::app::store::ResultRow::Hit { hit_index: 0, .. }
+        ));
+        assert_eq!(sel_row, Some(1), "the selection (lib.rs hit 0) is in the window");
+
+        // The title carries both numbers, visible together.
+        assert!(store.search_title().contains("1 of 4 matches"));
+
+        // n/p wrap within the 1-hit subset (they do NOT step to the
+        // narrowed-out main.rs hits).
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 0, "n wraps within the 1-hit subset");
+        store.key_event(key("p"));
+        assert_eq!(store.search.selected, 0, "p wraps within the 1-hit subset");
+
+        // RET lands on a hit in that file (the un-narrowed RET semantics,
+        // on the canonical hit index).
+        store.key_event(key("RET"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+        assert_eq!(store.view_name_display(), "src/lib.rs");
+    }
+
+    /// n/p wrap within a MULTI-hit subset: the wrap target is the
+    /// subset's first hit, not the full list's. On the pre-018-03 tree
+    /// `n` from the last main hit wraps to hit 0 (the lib.rs hit) —
+    /// red; with the narrowing it lands on the subset's first hit.
+    #[test]
+    fn results_n_p_wrap_within_the_narrowed_subset() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        // Narrow to main.rs via "mai" (hits 1, 2, 3) — "main" cannot be
+        // typed: the final `n` is the view's next-match key and falls
+        // through to the keymap. The cursor's old position 0 (the
+        // lib.rs hit, hit index 0) clamps to position 0 of the surviving
+        // set -> hit 1.
+        for c in "mai".chars() {
+            store.key_event(Key::char(c));
+        }
+        assert_eq!(store.search.narrow.query, "mai");
+        assert_eq!(store.search.selected, 1, "the clamped cursor sits on the subset's first hit");
+        assert_eq!(store.search.narrow.selected, 0, "the prompt cursor indexes the NARROWED list");
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 2);
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 3);
+        store.key_event(key("n"));
+        assert_eq!(
+            store.search.selected,
+            1,
+            "n wraps to the SUBSET's first hit — not the full list's hit 0"
+        );
+        store.key_event(key("p"));
+        assert_eq!(store.search.selected, 3, "p wraps back within the subset");
+    }
+
+    /// Narrowing away the selected hit CLAMPS (issue 01's rule — the
+    /// cursor's old POSITION survives into the shrunk set) and clearing
+    /// the query restores the full list with that clamped selection:
+    /// clamped, not lost, and never a reset to 0. On the pre-018-03
+    /// tree the typed chars are unbound, the selection never moves, and
+    /// the narrowed-view asserts are red.
+    #[test]
+    fn results_narrow_clamp_survives_the_clear_not_reset() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        // Park the cursor on main.rs line 1 (hit 1, position 1).
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 1);
+        // ";" survives on main.rs lines 2+3 only (hits 2, 3) — the
+        // selected hit 1 ("fn target() {}", no semicolon) is narrowed
+        // out. (The obvious "target();" cannot be typed: its `g` is the
+        // view's re-run key.) The cursor's old position 1 clamps into
+        // the 2-hit set -> position 1 -> hit 3. A "reset selection to 0"
+        // implementation would land on hit 2.
+        store.key_event(Key::char(';'));
+        assert_eq!(
+            store.search.selected,
+            3,
+            "the clamped position keeps the selection on a survivor — never a reset"
+        );
+        let (_rows, _top, total, sel_row) = store.search_view_info();
+        assert_eq!(total, 3, "1 header + 2 surviving hits");
+        assert_eq!(sel_row, Some(2), "the clamped hit's row in the narrowed window");
+        // C-g (job not running) CLEARS the query: the full list
+        // re-derives and the clamped selection survives (not lost).
+        store.key_event(key("C-g"));
+        assert_eq!(store.search.narrow.query, "", "C-g cleared the query (job not running)");
+        assert_eq!(store.top_view(), ViewId::Search, "the view stays open");
+        assert!(store.message.contains("filter cleared"), "{}", store.message);
+        let (rows, _top, total, sel_row) = store.search_view_info();
+        assert_eq!(total, 6, "the full list: 2 headers + 4 hits");
+        assert_eq!(store.search.selected, 3, "the clamped selection is not lost");
+        assert_eq!(sel_row, Some(5));
+        let _ = &rows;
+        // C-g again with an empty query: today's no-op message (the C-g
+        // split's third case).
+        store.key_event(key("C-g"));
+        assert_eq!(store.message, "nothing to cancel");
+    }
+
+    /// A query typed while the job is STILL RUNNING applies to the hits
+    /// arrived so far (the projection is at view time — nothing
+    /// buffers, nothing re-spawns the job, the generation guard is
+    /// untouched): arriving non-matching hits stay out of the window,
+    /// matching ones appear, and NOTHING is buffered — the full result
+    /// set arrives after `Finished` while the narrow holds. On the
+    /// pre-018-03 tree the typed chars are unbound and the window still
+    /// lists every arrived hit — red.
+    #[test]
+    fn results_narrow_mid_stream_applies_to_hits_so_far() {
+        // A slow-enough walk: 300 files, half named alpha_* (the narrow
+        // target), half beta_* (the drops).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        for i in 0..150 {
+            let name = if i < 75 { "alpha" } else { "beta" };
+            std::fs::write(
+                dir.path().join(format!("src/{name}_{i:03}.txt")),
+                "needle\n",
+            )
+            .unwrap();
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut store = AppStore::at(dir.path(), base.path().to_path_buf());
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("needle".into());
+        // Apply the bus's Hit events (and FileDones) — but apply the
+        // Finished event ONLY at the end, so the job is still `running`
+        // while the narrow is typed. Bounded.
+        let start = std::time::Instant::now();
+        let mut have_alpha = false;
+        let mut have_beta = false;
+        'pull: loop {
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, crate::search::rg::SearchEvent::Finished { .. }) {
+                    continue; // park Finished for the final drain
+                }
+                if let crate::search::rg::SearchEvent::Hit { file, .. } = &ev {
+                    if file.starts_with("src/alpha_") {
+                        have_alpha = true;
+                    }
+                    if file.starts_with("src/beta_") {
+                        have_beta = true;
+                    }
+                }
+                store.apply_search_event(&ev);
+                if have_alpha && have_beta {
+                    break 'pull;
+                }
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "both file classes did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(store.search_running(), "the job is still in flight (Finished unapplied)");
+        // Type the narrow query MID-STREAM.
+        for c in "alpha".chars() {
+            store.key_event(Key::char(c));
+        }
+        // The window shows only arriving alpha hits; beta hits (already
+        // in `hits`) stay OUT of the window.
+        let (_rows, _top, total, _) = store.search_view_info();
+        assert!(total > 0, "arriving alpha hits are in the narrowed list");
+        for &(h, _) in &store.search.narrow.filtered {
+            assert!(store.search.hits[h].file.starts_with("src/alpha_"));
+        }
+        assert!(
+            store.search.hits.iter().any(|h| h.file.starts_with("src/beta_")),
+            "beta hits arrived and are in the canonical set (narrowing is a projection)"
+        );
+        // The title carries both numbers mid-stream (narrowed / total).
+        let narrowed = store.search.narrow.filtered.len();
+        let hits = store.search.hits.len();
+        assert!(
+            store.search_title().contains(&format!("{narrowed} of {hits} matches")),
+            "title: {}", store.search_title()
+        );
+        // Finish: the FULL result set arrived (nothing was buffered by
+        // the narrowing) and the narrow still holds. The projection is
+        // re-derived at VIEW time (the stored filtered is the last
+        // keystroke's cache — view_info re-scores the live hits).
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.hits.len(), 150, "all hits arrived despite the mid-stream narrow");
+        let (_rows, _top, total, _) = store.search_view_info();
+        assert_eq!(store.search.narrow.filtered.len(), 75, "the narrow holds after Finished");
+        for &(h, _) in &store.search.narrow.filtered {
+            assert!(store.search.hits[h].file.starts_with("src/alpha_"));
+        }
+        // The headers re-derive at view time: 75 surviving files
+        // (1 header + 1 hit each) = 150 narrowed rows.
+        assert_eq!(total, 150, "75 surviving headers + 75 surviving hits");
+    }
+
+    /// `g` re-run clears the narrow query (a new job is a new result set
+    /// — stated, not accidental: `begin_search` replaces the
+    /// `SearchState`, and the session lives inside it). On the
+    /// pre-018-03 tree there is no query to clear; the post-run window
+    /// assert (6 rows) is the leg that only passes once the prompt
+    /// exists and is cleared by the re-run.
+    #[test]
+    fn results_rerun_clears_the_query() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        for c in "lib".chars() {
+            store.key_event(Key::char(c));
+        }
+        assert_eq!(store.search.narrow.query, "lib");
+        let old_gen = store.search.generation;
+        store.key_event(key("g"));
+        assert_eq!(store.search.generation, old_gen + 1);
+        assert_eq!(
+            store.search.narrow.query,
+            "",
+            "g re-run cleared the narrow query (a new job is a new result set)"
+        );
+        assert!(store.search_running());
+        drain_search_finished(&mut store, &mut rx);
+        let (_rows, _top, total, _) = store.search_view_info();
+        assert_eq!(total, 6, "the full list re-derives (2 headers + 4 hits)");
+    }
+
+    /// RET under an active query records the jump-stack sentinel on the
+    /// canonical hit index, and `M-,` returns to the results WITH the
+    /// selection restored — under the still-active query (the narrow
+    /// survives the jump/return round trip; the existing
+    /// `search_jump` sentinel behaviour is unbroken).
+    #[test]
+    fn results_narrowed_ret_sentinel_restores_selection_on_mcomma() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        // Walk the cursor to main.rs line 1 (hit 1, position 1), then
+        // narrow to main.rs via "mai" (the subset's hits 1, 2, 3 —
+        // "main" cannot be typed: the `n` is the view's next key): the
+        // cursor's hit 1 survives the narrowing, so the cursor stays on
+        // it (the position follows the hit).
+        store.key_event(key("n"));
+        for c in "mai".chars() {
+            store.key_event(Key::char(c));
+        }
+        assert_eq!(store.search.selected, 1, "the cursor's hit survives the narrowing");
+        store.key_event(key("RET"));
+        assert_eq!(store.top_view(), ViewId::Buffer);
+        assert_eq!(store.view_name_display(), "src/main.rs");
+        assert_eq!(store.point_line(), 0, "the jumped hit's line (0-based)");
+        // M-,: the sentinel — back to the results, selection restored
+        // (hit 1), the narrow still active.
+        store.key_event(key("M-,"));
+        assert_eq!(store.top_view(), ViewId::Search, "M-, must return to the results");
+        assert_eq!(store.search.selected, 1, "the selection restored on the canonical hit index");
+        let (_rows, _top, total, sel_row) = store.search_view_info();
+        assert_eq!(total, 4, "1 header + 3 main hits — the narrow survived the round trip");
+        assert_eq!(sel_row, Some(1), "the restored selection is the window's selected row");
+    }
+
+    /// The prompt row is ONE NoWrap row and the DECISION KEYS LEAD
+    /// (PLAN §5.2, the `7f0090a` clip pin): at 80 cols with a 200-char
+    /// query the row is filled to the edge by the query tail, every
+    /// decision group is still present and left of the query — a clip
+    /// eats the query tail (recognisable), never the keys (unguessable).
+    /// A mutation that reorders the row (query first) reddens this.
+    #[test]
+    fn results_prompt_row_keys_lead_at_80_with_200_char_query() {
+        use crate::ui::root::render_at_width;
+
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        for _ in 0..200 {
+            store.key_event(Key::char('x'));
+        }
+        let frame = render_at_width(store, 80);
+        let lines: Vec<&str> = frame.lines().collect();
+        let prompt_idx = lines
+            .iter()
+            .position(|l| l.contains("filter:"))
+            .unwrap_or_else(|| panic!("prompt row missing\n{frame}"));
+        let prompt = lines[prompt_idx];
+        // One row, NoWrap: the row is exactly 80 cells, filled to the
+        // edge with the query (200 chars -> clipped, tail gone). (The
+        // `·` separators are 2 bytes each — count CELLS, not bytes.)
+        assert_eq!(prompt.chars().count(), 80, "the prompt row is one 80-col row: {prompt:?}");
+        assert!(prompt.trim_end().ends_with('x'), "the row is filled by the query");
+        let query_at = prompt.find('x').unwrap();
+        for group in ["RET jump", "n/p", "g re-run", "C-g clear", "q close"] {
+            assert!(
+                prompt.contains(group),
+                "decision group {group:?} must survive the 80-col clip: {prompt:?}"
+            );
+            assert!(
+                prompt.find(group).unwrap() < query_at,
+                "decision group {group:?} must LEAD the query: {prompt:?}"
+            );
+        }
+        // The query tail is clipped (the row holds ~22 of the 200 chars).
+        assert!(
+            !prompt.contains(&"x".repeat(25)),
+            "the 200-char query cannot fit: its tail is the clipped part: {prompt:?}"
+        );
+    }
+
+    /// The prompt row at rest shows the keys + the `type to narrow`
+    /// placeholder (ONE NoWrap row under the title); Backspacing the
+    /// query back to empty restores the FULL list with the selection
+    /// preserved (the clear path's Backspace half — C-g's is pinned in
+    /// `results_narrow_clamp_survives_the_clear_not_reset`).
+    #[test]
+    fn results_prompt_placeholder_and_backspace_to_empty() {
+        use crate::ui::root::render_at_width;
+
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        // Walk the cursor to main.rs line 2 (hit 2), then narrow to a
+        // query that keeps hit 2 among survivors ("mai" — hits 1, 2, 3:
+        // "main" cannot be typed, the `n` is the view's next key): the
+        // cursor's hit 2 survives, so it stays under the cursor.
+        store.key_event(key("n"));
+        store.key_event(key("n"));
+        assert_eq!(store.search.selected, 2);
+        for c in "mai".chars() {
+            store.key_event(Key::char(c));
+        }
+        assert_eq!(store.search.narrow.query, "mai");
+        assert_eq!(store.search.narrow.filtered.len(), 3, "hits 1, 2, 3 survive 'mai'");
+        assert_eq!(store.search.selected, 2, "the cursor's hit survives the narrowing");
+        // Backspace the query away (3 chars): the full list re-derives
+        // and the selection (hit 2) is preserved — not lost, not reset.
+        for _ in 0..3 {
+            store.key_event(Key::new(KeyCode::Backspace));
+        }
+        assert_eq!(store.search.narrow.query, "");
+        let (rows, _top, total, sel_row) = store.search_view_info();
+        assert_eq!(total, 6, "the full list: 2 headers + 4 hits");
+        assert_eq!(store.search.selected, 2, "the selection survived the Backspace-away");
+        assert_eq!(sel_row, Some(4));
+        let _ = &rows;
+        // The at-rest prompt row: keys + placeholder, one row under the
+        // title (the render consumes the store, so it runs last).
+        let frame = render_at_width(store, 80);
+        let lines: Vec<&str> = frame.lines().collect();
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains("Search: 'target'"))
+            .unwrap_or_else(|| panic!("title row missing\n{frame}"));
+        let prompt = lines.get(title_idx + 1).copied().unwrap_or("");
+        assert!(prompt.contains("filter:"), "the prompt row sits under the title: {prompt:?}");
+        assert!(prompt.contains("type to narrow"), "the empty-query placeholder: {prompt:?}");
+        for group in ["RET jump", "n/p", "g re-run", "C-g clear", "q close"] {
+            assert!(prompt.contains(group), "decision group {group:?}: {prompt:?}");
+        }
+        let _ = &rows;
+    }

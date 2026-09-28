@@ -1696,6 +1696,16 @@ pub struct SearchState {
     pub scroll: usize,
     /// The in-flight job's cancel flag (`None` when idle).
     pub cancel: Option<Arc<AtomicBool>>,
+    /// The results-view narrow session (plan 018 issue 03): the prompt
+    /// query, the cursor position over the NARROWED set, and the narrowed
+    /// hit indices (the shared core's `(index, score)` ranking, re-sorted
+    /// into source order — FilterOnly). It lives INSIDE `SearchState` so a
+    /// new job (`begin_search` — including the `g` re-run) resets it:
+    /// a new job is a new result set, and the query goes with it
+    /// (stated, not accidental). The canonical `selected` above stays the
+    /// flat hit index (RET and the M-, sentinel depend on it); the
+    /// session's position is the cursor over the narrowed list.
+    pub narrow: NarrowSession,
 }
 
 /// The search query prompt (issue 06): typed characters extend the

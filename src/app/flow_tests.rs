@@ -3392,7 +3392,7 @@ fn ux_sweep_leg(
         // stale "unbound key: …" from a previous key is not a finding).
         let echo = s.message.contains("unbound key") && s.message != msg_before;
         let expected_echo = known_unbound.contains(tok);
-        oks.push(echo == expected_echo && !s.quit && ux_view_alive(&s));
+        oks.push(echo == expected_echo && !s.quit && ux_view_alive(&mut s));
     }
     (oks, s)
 }
@@ -3414,7 +3414,7 @@ fn drive_token(s: &mut AppStore, tok: &str) {
 /// marker, and the live view still holds content with a coherent cursor
 /// (the "blank frame while a view is open" + "cursor parked off-screen"
 /// twins; the raw-pixel / hardware-cursor halves stay in the thin PTY tier).
-fn ux_view_alive(s: &AppStore) -> bool {
+fn ux_view_alive(s: &mut AppStore) -> bool {
     if s.current_buffer_changed_on_disk() {
         return false;
     }

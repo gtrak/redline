@@ -103,6 +103,10 @@ SHARED_SUITES=(
   drive_buffer_list_narrow.py # 018-04: C-x C-b narrowing (prompt keys lead,
                               # live narrow, RET opens, d kills the selected
                               # narrowed row, C-g clears not closes, q closes)
+  drive_results_narrow.py     # 018-03: C-c p s s results narrowing (prompt
+                              # keys lead, live narrow, RET jump, M-, return
+                              # with selection, C-g clears not cancels idle,
+                              # g re-run clears the query, q closes)
   drive_windowing.py
   drive_windowing_panes.py
   check_cursor_stream.py

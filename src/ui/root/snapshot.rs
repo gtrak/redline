@@ -103,6 +103,9 @@ pub(super) struct Snapshot {
     pub(super) search_selected_row: Option<usize>,
     pub(super) search_running: bool,
     pub(super) search_error: Option<String>,
+    // Plan 018 issue 03: the results-view narrow query (the prompt row's
+    // trailing text; empty = no narrowing).
+    pub(super) search_narrow_query: String,
     pub(super) searching: String,
     // plan 018 issue 02: the isearch list overlay (the match rows in
     // search order + the selection; rendered in place of the buffer
@@ -253,6 +256,7 @@ pub(super) fn build(
         search_selected_row,
         search_running: s.search_running(),
         search_error: s.search_error(),
+        search_narrow_query: s.search_narrow_query().to_string(),
         searching: s.search_display(),
         isearch_active,
         isearch_rows,

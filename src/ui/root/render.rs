@@ -113,6 +113,7 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
         ViewId::Search => Some(element! {
             ResultsView(
                 title: snap.search_title.clone(),
+                query: snap.search_narrow_query.clone(),
                 rows: snap.search_rows.clone(),
                 top_row: snap.search_top_row,
                 total_rows: snap.search_total_rows,
