@@ -1,4 +1,10 @@
+# `autobins = false`: this fixture HAS a src/main.rs (the cargo provider's
+# fixture needs one), and without this `cargo install --git <redline>` fails
+# with "multiple packages with binaries found: gearbox, redline" - cargo
+# scans EVERY Cargo.toml in a git repo for installable packages. The fixture
+# only ever supplies test DATA, so it must not present an install target.
 [package]
+autobins = false
 name = "gearbox"
 version = "0.1.0"
 edition = "2021"
