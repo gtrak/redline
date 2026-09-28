@@ -219,19 +219,45 @@ run() {  # run <label> <cmd...>
 # entire `redline-resolve` crate (~92 tests + all its lints). Found
 # 2026-09-19 via 007-03 (the crate gained a public scope field while no gate
 # ever compiled its tests). Do not drop these flags.
-cargo_build()  { iocraft_tree_check; cargo build --workspace; }
+cargo_build()  { iocraft_patch_check; cargo build --workspace; }
 cargo_lint()   { cargo clippy --workspace --all-targets -- -D warnings; }
 cargo_tests()  { cargo test --workspace --quiet; }
 pty()          { timeout 900 python3 "tools/$1"; }
 
-# vendor/iocraft is GENERATED, not committed (plan 013-02 patch form): the
-# repo carries the sha256 pin + the patch, and the tree must equal
-# pristine iocraft-0.9.1 + that patch. Verify it before any build so a
-# missing or stale tree fails the gate loudly — a bare `cargo build` would
-# otherwise die cryptically in [patch.crates-io] resolution (tree absent)
-# or compile redline against an unpatched iocraft (tree stale), neither of
-# which names the actual problem. Cheap: one small tar extract + diff.
-iocraft_tree_check() { tools/apply-iocraft-patch.sh check; }
+# Plan 013-02 (fork form): redline depends on a PATCHED iocraft, carried in
+# github.com/gtrak/iocraft and pinned by rev in [patch.crates-io]. Two things
+# must hold, and this guards the one the compiler cannot see:
+#   1. the [patch.crates-io] stanza still points iocraft at that GIT source —
+#      a deleted stanza, or a stray `cargo update` reverting the lock to
+#      crates.io, would silently rebuild against unpatched iocraft;
+#   2. the lock resolves iocraft to the same rev the manifest declares, so a
+#      half-applied pin change cannot pass.
+# The COMPILE is the second backstop and needs no check: redline calls
+# `hooks.use_cursor_position`, which does not exist in pristine 0.9.1.
+# WHY NOT the old vendor-tree check: it verified a generated tree the build
+# no longer uses (a guard aimed at the wrong subject — the tree is now only a
+# local convenience for tools/apply-iocraft-patch.sh, which keeps its own
+# `check` mode for anyone who wants it).
+iocraft_patch_check() {
+  local stanza lock_rev manifest_rev
+  stanza=$(grep -A1 '^\[patch\.crates-io\]' Cargo.toml | grep '^iocraft' || true)
+  case "$stanza" in
+    *gtrak/iocraft*) ;;
+    *) echo "iocraft patch stanza is missing or no longer points at the fork:" >&2
+       echo "  ${stanza:-<absent>}" >&2
+       echo "  The build would silently use UNPATCHED iocraft (no use_cursor_position)." >&2
+       return 1 ;;
+  esac
+  manifest_rev=$(printf '%s' "$stanza" | sed -n 's/.*rev *= *"\([0-9a-f]\{40\}\)".*/\1/p')
+  lock_rev=$(awk '/^name = "iocraft"$/{f=1} f&&/^source = "git\+/{print; exit}' Cargo.lock \
+              | sed -n 's/.*rev=\([0-9a-f]\{40\}\).*/\1/p')
+  if [ -n "$manifest_rev" ] && [ "$manifest_rev" != "$lock_rev" ]; then
+    echo "iocraft pin mismatch: manifest rev ${manifest_rev} vs Cargo.lock ${lock_rev:-<none>}" >&2
+    echo "  Run: cargo update -p iocraft   (then re-run the gate)." >&2
+    return 1
+  fi
+  return 0
+}
 
 # The tracker is the single authoritative "what is open?" record. A task id
 # carrying BOTH an OPEN row and a LANDED row makes every audit wrong in both
