@@ -30,6 +30,22 @@ def state_of(cell: str) -> str | None:
     return None
 
 
+def task_id(id_cell: str) -> str:
+    """The LEADING id token of an id cell.
+
+    Cells often carry prose after the id - e.g. `` `016-04` redo + coalescing ``
+    versus `` `016-04` redo-and-coalescing (`issue-016-04-...`) ``. Reading the
+    whole cell as the id makes those look like two different tasks, so a real
+    contradiction silently passes. (Found the hard way 2026-09-27: 016-04 had an
+    OPEN row and a LANDED row that this check did not connect.)
+
+    The first whitespace-delimited token is the id; the rest is description. A
+    deliberate ``-old`` variant is still its own token, so it stays distinct.
+    """
+    text = id_cell.replace("*", "").replace("`", "").strip()
+    return text.split()[0] if text else ""
+
+
 def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else ".agents/plans/STATUS.md"
     seen: dict[str, set[str]] = defaultdict(set)
@@ -40,7 +56,7 @@ def main() -> int:
         cells = line.split("|")
         if len(cells) < 3:
             continue
-        tid = cells[1].strip().strip("`").strip()
+        tid = task_id(cells[1])
         st = state_of(cells[2])
         if st and tid:
             seen[tid].add(st)
