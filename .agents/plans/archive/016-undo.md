@@ -1,25 +1,46 @@
 # Plan 016 — undo (a subsystem, not a command)
 
-**COMPLETION RECORD (added 2026-09-27, correcting an overstatement).** Three of the four
-issues landed: **01** the undo stack + guard (`ff84669`), **02** edit coverage + `M-y`
-coalescing (`f6082a9`), **04** redo + the self-insert-run coalescing rule (`8431cca`,
-plan complete). **03 (the saved-state marker / dirty-flag-and-reload) did NOT land**, and
-the commit that archived this plan (`862f172` "all four issues landed") **overstated it**.
+**COMPLETION RECORD (corrected 2026-09-28).** ALL FOUR issues landed: **01** the undo
+stack + guard (`ff84669`), **02** edit coverage + `M-y` coalescing (`f6082a9`), **03** the
+saved-state marker / dirty-flag-and-reload (`37285cb`), **04** redo + the
+self-insert-run coalescing rule (`8431cca`, plan complete). The original archive commit
+`862f172` ("all four issues landed") was CORRECT.
 
-**What actually exists for 03**: only a notes-buffer `dirty` BOOLEAN (`notes_buffer_dirty`,
-`src/app/store/notes.rs`). The plan's own requirement — *where in the edit HISTORY the
-saved/loaded state sits*, so an edit-then-undo-back-to-saved reports clean — does not exist:
-there is no `saved_undo_depth` and no marker-identity anywhere in the code. This is a
-**data-loss-adjacent gap**, and the plan's own risk list puts it first: a false "clean" while
-holding unsaved edits stops the quit prompt asking, whereas a false "modified" is only an
-annoyance — so the tie-break must always favour *modified*. Tracked as an OPEN row in
-`.agents/plans/STATUS.md` (`016-03`).
+**The 2026-09-27 record that sat here — "03 did NOT land" — was a FALSE NEGATIVE, and is
+corrected here rather than inherited.** It asserted that no saved-state marker exists in
+the code. In fact `37285cb` (2026-09-22, an ancestor of main) implemented exactly the
+plan's requirement: *where in the edit HISTORY the saved/loaded state sits*. The code:
+`Buffer.saved_marker: Option<usize>` plus `UndoStep.id` from a monotonic per-buffer
+`undo_seq` counter (`src/model/buffer.rs`); `UndoStack::position_id()` with the `0`
+empty-history sentinel; `locally_modified()` DERIVED from marker-vs-position with the
+conservative tie-break documented in code (when the marker cannot prove the buffer matches
+disk, it reports modified — a false clean is the `C-x C-c` data-loss path, a false
+modified is only an annoyance); `drop_undo_history(key)` wired at all three
+rope-assigning sites (`reload_in_place` in `index_wiring.rs`, `toggle_ro_accept` and
+`replace_buffer_text` in `buffers.rs`) and resetting the marker; the marker set at every
+save/load (`mark_saved` on `save_buffer_key`, `mark_fresh` at both disk-truth reload sites
+and the notes sync in `notes.rs`); redo re-enters with the original id (`8431cca`). Every
+acceptance pin exists and passes at `04b5fa8` (`cargo test --workspace` green):
+`dirty_flag_round_trip_matrix_text_and_flag`,
+`save_at_intermediate_point_undo_past_saved_state_reads_modified` (the data-loss
+direction), `dirty_flag_cap_eviction_of_saved_marker_reads_modified`,
+`dirty_flag_tie_break_unresolvable_marker_reads_modified`,
+`force_reload_clears_history_and_resets_marker`,
+`toggle_ro_accept_clears_history_and_resets_marker`,
+`notes_sync_drops_history_and_reproves_clean` (the notes path — the site 01 found the
+hard way), `m_y_merge_cannot_hijack_the_saved_marker`,
+`reload_confirm_y_clears_history_and_resets_marker` and
+`reload_confirm_n_preserves_history_and_stays_modified` (the ask-policy composition).
 
-**Also incomplete as an archive**: this file is a bare rename of the plan's `PLAN.md` (git
-records the move as 0 changed lines) — the four issue files were deleted rather than copied
-in, so unlike plans 012/015/016-after-this-fix it is NOT the verbatim full record the
-plan-process skill requires. The issue texts remain recoverable from `.agents/tasks/`
-(`issue-016-0*.md`) and git history. Do not treat this file as the evidence store for 03.
+**How the false negative happened, stated plainly**: the audit searched for the name the
+SPEC suggested (`saved_undo_depth` / `saved_state`) rather than the name the code uses
+(`saved_marker`), and scoped the search to `src/app/store/{buffers,notes}.rs` — while the
+field lives in `src/model/buffer.rs`. A check aimed at the wrong subject in the wrong
+files found nothing, and that confident nothing then propagated into this archive header,
+the tracker (`016-03` row), and a dispatched work order. It was caught by a lane that
+read the code rather than the record. Same failure class this repo keeps finding — a
+check that passes silently because it is aimed at the wrong subject — except this time
+the wrong check was the orchestrator's and it wrote the lie into the evidence store.
 
 ---
 

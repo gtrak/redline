@@ -850,3 +850,43 @@ Observed live: landing the change left the main checkout without the generated t
 failed with "vendor/iocraft is missing — the tree is generated, not committed. Run
 'tools/apply-iocraft-patch.sh' once". That is the guard working — on the orchestrator, in the cold-clone case
 it was designed for.
+
+## "It does not exist" is a claim — search for the name the CODE would use, not the one the SPEC guessed
+
+The worst audit failure is not a miss, it is a **confident false negative written into the evidence
+store**. Observed 2026-09-27, and it was mine:
+
+I audited whether plan-016 issue 03 (the saved-state marker) had landed. I searched
+`src/app/store/{buffers,notes}.rs` for `saved_state` / `saved_rev` / `undo_to_saved` — names I had
+**invented by reading the spec's suggestion** — found only the notes `dirty` boolean, and recorded
+*"the saved-state marker does NOT exist — no `saved_undo_depth`/marker-identity anywhere in the
+code"*. It had landed six days earlier as `37285cb`: the field is `saved_marker` in
+**`src/model/buffer.rs`** (a directory I never opened), with `position_id()`, `undo_seq`,
+`mark_saved`/`mark_fresh`, and `locally_modified()` derived from it — plus nine acceptance tests,
+all green.
+
+The false claim then **propagated**, which is what makes this category dangerous rather than merely
+wrong: into the archive's completion header, into the tracker row, and — worst — into a **dispatched
+work order** for a lane that was told to build a feature which already existed. The lane caught it in
+15 turns by reading the code instead of the record, and asked for a decision. Had it been less
+careful, it would have built a duplicate marker, and the record would have "confirmed" the premise.
+
+**Rules:**
+
+1. **Search the whole artifact, and search for what the code would plausibly be named — several
+   ways.** A name guess is a hypothesis, not a search. Grep the widest sensible root (`src/`,
+   `crates/`) for the *concept* (`marker`, `marked`, `baseline`, `position`, `clean`), not one
+   imagined identifier, and **never scope to files you happened to pick by eye** — the field was in
+   `model/`, one directory outside where I looked.
+2. **Prefer a positive existence check over a negative inference.** `git log -S<concept>` and a
+   workspace-wide `rg` answer "does anything implement this?"; a `rg` for an invented name answers
+   nothing. For "did issue N land?", `git log --grep` on the issue id, then read the commit.
+3. **A commit's existence is one command.** `git cat-file -t 37285cb` / `git log --oneline 37285cb` existed the whole time. **A claim that a commit does not
+   exist is settled in one command** — the same rule as "when a claim is about what a
+   language/compiler does, the compiler is the oracle".
+4. **Never write a negative finding into the archive or the tracker without the name-under-test
+   stated.** "Searched X for Y, Z found" is falsifiable by the next reader; "does not exist" is not.
+5. **A false negative in an audit is worse than no audit**, because it is trusted: it becomes the
+   spec for the next lane. When a lane contradicts your record with evidence, **verify the evidence
+   first and be willing to be wrong** — twice tonight I was wrong in both directions (a false
+   negative here, and earlier a false accusation that a lane's green gate hid a defect).
