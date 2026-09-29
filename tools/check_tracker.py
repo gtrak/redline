@@ -21,6 +21,17 @@ from collections import defaultdict
 STATES = ("OPEN", "LANDED", "BLOCKED", "SUPERSEDED", "FIXED", "RESOLVED", "COMPLETE", "PARTIAL", "CLOSED", "SPECD")
 
 
+# An id cell is a TASK when its leading token looks like one. This is the
+# only correct discriminator: keying on a leading BACKTICK (the first version
+# of this check) silently skipped every queue row whose id was unbackticked -
+# 76 of 231 rows, a third of the tracker - and so MISSED a real contradiction
+# on 2026-09-29: `014-02` carried a LANDED row (backticked, the one that had
+# just been written) and a stale OPEN queue row (unbackticked), and this check
+# printed OK. The check was aimed at the wrong subject: it could only ever see
+# rows the author had formatted the way the checker happened to expect.
+ID_SHAPED = re.compile(r"^(?:\d{3}-|issue-)")
+
+
 def state_of(cell: str) -> str | None:
     """The leading state token of a status cell, ignoring markdown emphasis."""
     text = cell.replace("*", "").strip()
@@ -51,12 +62,16 @@ def main() -> int:
     seen: dict[str, set[str]] = defaultdict(set)
     lines: dict[str, list[int]] = defaultdict(list)
     for n, line in enumerate(open(path), 1):
-        if not line.startswith("| `"):
+        if not line.startswith("| "):
             continue
         cells = line.split("|")
         if len(cells) < 3:
             continue
         tid = task_id(cells[1])
+        if not ID_SHAPED.match(tid):
+            # Not a task row (a prose row, a Group row, a header). The id
+            # CELL is what decides - NOT a leading backtick.
+            continue
         st = state_of(cells[2])
         if st and tid:
             seen[tid].add(st)
