@@ -10,7 +10,15 @@ impl AppStore {
     /// when the key is consumed, `false` to fall through.
     fn buffer_list_key_event(&mut self, key: Key) -> bool {
         if let Some(c) = key.char_value() {
-            if matches!(c, 'n' | 'p' | 'd' | 'q') {
+            // A printable that completes or extends a BOUND sequence (the
+            // `2` of `C-x 2`) must reach the engine FIRST — a swallowed
+            // starter key would strand the sequence. Chord starters carry
+            // no char value (they arm `self.pending` in `dispatch_key`), so
+            // a non-empty pending is exactly the "mid-sequence" case: the
+            // key MUST reach the engine (the `notes_edit_key_event` /
+            // `dispatch_key` discipline). The view's own n/p/d/q decision
+            // keys fall through.
+            if !self.pending.is_empty() || matches!(c, 'n' | 'p' | 'd' | 'q') {
                 return false;
             }
             self.buffer_list_query.push(c);
@@ -43,7 +51,15 @@ impl AppStore {
     /// consumed, `false` to fall through.
     fn search_key_event(&mut self, key: Key) -> bool {
         if let Some(c) = key.char_value() {
-            if matches!(c, 'n' | 'p' | 'g' | 'q') {
+            // A printable that completes or extends a BOUND sequence (the
+            // `2` of `C-x 2`) must reach the engine FIRST — a swallowed
+            // starter key would strand the sequence. Chord starters carry
+            // no char value (they arm `self.pending` in `dispatch_key`), so
+            // a non-empty pending is exactly the "mid-sequence" case: the
+            // key MUST reach the engine (the `notes_edit_key_event` /
+            // `dispatch_key` discipline). The view's own n/p/g/q decision
+            // keys fall through.
+            if !self.pending.is_empty() || matches!(c, 'n' | 'p' | 'g' | 'q') {
                 return false;
             }
             self.search.narrow.query.push(c);
@@ -53,6 +69,67 @@ impl AppStore {
         if key.code == KeyCode::Backspace {
             self.search.narrow.query.pop();
             self.search_narrow_recompute();
+            return true;
+        }
+        false
+    }
+
+    /// Magit status narrow-prompt guard (U-E10, beside the buffer-list and
+    /// results-view guards): while the magit status view is on top, printable
+    /// chars extend the SECTION-narrow query (each keystroke re-derives the
+    /// section-structural projection at view time — the canonical
+    /// `status_tree` is never mutated by the query), Backspace pops the last
+    /// character, and C-g CLEARS THE QUERY (the full list re-derives; the
+    /// cursor — a section id, not a row index — is clamped, never lost; v1:
+    /// C-g = clear, NOT close — closing stays on `q`). The view's own keys
+    /// fall through to the keymap engine: the rule is keymap-derived, never
+    /// a hand-copied set — any single-char binding of `MAGIT_STATUS_BINDINGS`
+    /// (the advertised s/u/n/p/g/q decision keys AND the context keys
+    /// l/b/c/y/z/h/k) is a view command, and the query never steals it
+    /// (the `7f0090a` rule covers the advertised groups; the rest are the
+    /// view's existing commands the query must not shadow). A printable
+    /// that completes or extends a BOUND sequence (e.g. the `x` of `C-x
+    /// 2`) must reach the keymap engine FIRST (the
+    /// `notes_edit_key_event` discipline — a swallowed starter key would
+    /// strand the sequence). RET / TAB / arrows / C-n / C-p / page keys
+    /// carry no printable char value, so they fall through by
+    /// construction. Returns `true` when the key is consumed, `false` to
+    /// fall through.
+    fn magit_key_event(&mut self, key: Key) -> bool {
+        if let Some(c) = key.char_value() {
+            // The query never steals a key the view (or the engine) owns:
+            // any single-char `MAGIT_STATUS_BINDINGS` binding — the
+            // advertised s/u/n/p/g/q decision keys AND the context keys
+            // l/b/c/y/z/h/k — is a view command. A printable that
+            // completes or extends a BOUND sequence (the `2` of `C-x 2`,
+            // `C-c p s s`, …) must reach the engine FIRST — a swallowed
+            // starter key would strand the sequence (the
+            // `notes_edit_key_event` / `dispatch_key` discipline: compose
+            // the armed prefix with this key; a NON-EMPTY pending means the
+            // key MUST reach the engine). The keymap is read straight,
+            // never copied.
+            let mut seq = self.pending.clone();
+            seq.push(key);
+            if !self.pending.is_empty()
+                || MAGIT_STATUS_BINDINGS.iter().any(|(seq, _)| *seq == c.to_string())
+                || matches!(
+                    self.engine.resolve(&seq),
+                    Some(Lookup::Command(_)) | Some(Lookup::Pending)
+                )
+            {
+                return false;
+            }
+            self.magit_narrow_query.push(c);
+            self.magit_narrow_recompute();
+            return true;
+        }
+        if key.code == KeyCode::Backspace {
+            self.magit_narrow_query.pop();
+            self.magit_narrow_recompute();
+            return true;
+        }
+        if key == Key::ctrl_char('g') {
+            self.magit_narrow_clear();
             return true;
         }
         false
@@ -238,6 +315,23 @@ impl AppStore {
         // decision; closing stays on q). Intercepted before the global C-g
         // so C-g cannot close the list through `cancel`.
         if self.top_view() == ViewId::BufferList && self.buffer_list_key_event(key) {
+            self.self_insert_run = None;
+            return;
+        }
+        // Magit status narrow prompt (U-E10): while the status view is on
+        // top AND no picker is over it (the picker owns its prompt — its
+        // C-g closes the palette, never the section query), printable
+        // chars extend the section-narrow query (every bound view key
+        // falls through to the keymap — the query never steals a bound
+        // view key, and a printable that starts a bound sequence reaches
+        // the engine first), Backspace pops the query, and C-g CLEARS THE
+        // QUERY — NOT cancel/close (v1, the buffer-list precedent; closing
+        // stays on q). Intercepted before the global C-g so C-g cannot
+        // reach `cancel` while the prompt is live.
+        if self.top_view() == ViewId::MagitStatus
+            && self.picker.is_none()
+            && self.magit_key_event(key)
+        {
             self.self_insert_run = None;
             return;
         }

@@ -107,6 +107,12 @@ SHARED_SUITES=(
                               # keys lead, live narrow, RET jump, M-, return
                               # with selection, C-g clears not cancels idle,
                               # g re-run clears the query, q closes)
+  drive_magit_narrow.py       # U-E10: C-x g magit status section narrowing
+                              # (prompt row at rest, live section narrow, RET
+                              # visits the narrowed row's real target, s/u while
+                              # narrowed hits the right file, C-g clears not
+                              # close, C-x 2 chord reaches the engine not the
+                              # query — the pending-chord class-bug leg)
   drive_windowing.py
   drive_windowing_panes.py
   check_cursor_stream.py

@@ -29,10 +29,11 @@
 //!    dimension does NOT — see below (its second dimension DOES, since
 //!    U-E13 landed).
 //! 3. **every DIFFER verdict that is a *named follow-up* (not a silent
-//!    omission) still carries its doc marker**: magit status → U-E10,
-//!    log → U-E11, tree → U-E12, isearch's second query dimension →
-//!    U-E13 — one greppable paragraph each in
-//!    `docs/ux-testing-plan.md` (§ U-E · Search & references). Comment
+//!    omission) still carries its doc marker**: log → U-E11, tree → U-E12
+//!    (magit status → U-E10 LANDED — the checkbox flipped in place; its
+//!    verdict is now `narrows=true, mechanism=MagitSectionFilter`; isearch's
+//!    second query dimension → U-E13 LANDED) — one greppable paragraph each
+//!    in `docs/ux-testing-plan.md` (§ U-E · Search & references). Comment
 //!    → doc, never comment → memory.
 //!
 //! **Why isearch's FIRST dimension is `narrows=true, mechanism=own
@@ -113,6 +114,21 @@ enum Mechanism {
     /// line-text projection (source order preserved — match order IS the
     /// search).
     OwnLiteralAndSharedCoreFilter,
+    /// U-E10 (magit status, LANDED): the magit-native SECTION filter — a
+    /// section-structural projection over the `StatusTree`: each text is
+    /// scored through the ONE shared core (`narrowing::narrow` as a
+    /// predicate, so the query semantics never drift), but a section
+    /// heading survives iff IT or a SURVIVING DESCENDANT matches (filter
+    /// children, keep the section structure — a group heading survives by
+    /// its child alone, even though it never matched itself). The diff
+    /// payload (context/add/delete lines) is never scored into a rank,
+    /// re-ordered, or trimmed: a surviving hunk renders its FULL body
+    /// (one document), and a surviving child renders under a canonical
+    /// fold (the projection reveals the match; the fold state is
+    /// untouched). This is NOT the shared core's row-level
+    /// score-and-filter: the survivors are SECTION IDS over the tree's
+    /// own headings/bodies, not a ranked row list.
+    MagitSectionFilter,
 }
 
 /// One row of the inventory: a surface, the plan's verdict for it, and
@@ -178,7 +194,7 @@ const INVENTORY: &[Row] = &[
     // silent omissions — each is one paragraph in
     // docs/ux-testing-plan.md, cross-checked below).
     Row { id: "tree", narrows: false, mechanism: None, reason: "hierarchical (filter-children-keep-parents) AND the one renderer-windowed surface (PLAN §1 row 4) — re-home the windowing to the store first; its actual job (find a file fast) is already the narrowing FindFile picker", follow_up: Some("U-E12") },
-    Row { id: "magit status", narrows: false, mechanism: None, reason: "diff payload: a score-reorder destroys the diff, and even filter-only must keep context lines glued to their hunk headers; the right primitive is magit's own section narrow (PLAN §2.3-2)", follow_up: Some("U-E10") },
+    Row { id: "magit status", narrows: true, mechanism: Some(Mechanism::MagitSectionFilter), reason: "U-E10 LANDED (the 018 §2.3-2 deferral's own deferred shape): a magit-native section filter over the Section tree — a heading survives iff it or a surviving descendant matches the shared core's scoring (filter children, keep the section structure); the diff payload is never re-ranked or trimmed (context/add/delete lines are ONE document), a surviving hunk renders its full body, and a surviving child renders under a canonical fold (the view-time projection reveals the match without touching the fold state)", follow_up: None },
     Row { id: "log", narrows: false, mechanism: None, reason: "server-paged (git log range fetch): a client-side filter of one page hides commits and breaks n/p paging; real log narrow is a `git log` query change (PLAN §2.3-4)", follow_up: Some("U-E11") },
     Row { id: "blame", narrows: false, mechanism: None, reason: "read-only aligned lines; no string dimension the user would type (filter by author/commit is a git query, not a string filter)", follow_up: None },
     Row { id: "home", narrows: false, mechanism: None, reason: "a help screen: no cursor, no selection (HOME_BINDINGS deliberately empty)", follow_up: None },
@@ -312,6 +328,10 @@ fn narrowing_inventory_declares_a_verdict_for_every_row_list_surface() {
                 row.narrows && matches!(row.mechanism, Some(Mechanism::SharedCore)),
                 "ViewId {view:?} (`{id}`): the plan's verdict is narrows=true via the shared core (018-03 / 018-04)"
             ),
+            ViewId::MagitStatus => assert!(
+                row.narrows && matches!(row.mechanism, Some(Mechanism::MagitSectionFilter)),
+                "ViewId {view:?} (`{id}`): U-E10 landed — narrows=true via the magit-native SECTION filter (filter children, keep the section structure; the diff payload is never re-ranked)"
+            ),
             _ => assert!(
                 !row.narrows && row.mechanism.is_none(),
                 "ViewId {view:?} (`{id}`): the plan's verdict is DIFFER (PLAN §4) — narrows in INVENTORY means the plan table was edited without a re-derivation"
@@ -345,6 +365,7 @@ fn narrowing_inventory_declares_a_verdict_for_every_row_list_surface() {
             }
             "search results" => check_results_recompute_is_the_shared_core(),
             "buffer list" => check_buffer_list_recompute_is_the_shared_core(),
+            "magit status" => check_magit_status_recompute_is_the_section_filter(),
             id if kind_ids.contains(id) => {
                 let kind = *picker_kinds()
                     .iter()
@@ -661,6 +682,94 @@ fn check_isearch_second_dimension_is_the_shared_core() {
     }
 }
 
+/// The magit status's recompute path IS the magit-native section filter
+/// (U-E10, LANDED): typing a discriminating query on the guard's own
+/// path (`key_event`, not a field poke) must leave exactly the
+/// section-structural projection over the tree's OWN headings/bodies
+/// (never a copied projection string), each text scored through the ONE
+/// shared core. The query "oa" is a SUBSEQUENCE of exactly one tree text —
+/// `  M omega.txt (+1 -0)` (o@2…a@6) — and a contiguous substring of
+/// NONE: a hand-rolled contains-filter recompute keeps ZERO sections
+/// (reddening the row-shape assert below), and a shared-core ROW-LEVEL
+/// re-rank reddens it too (the survivors are the group heading — which
+/// never matched, surviving by its child alone — plus the file:
+/// structure, not rank).
+fn check_magit_status_recompute_is_the_section_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    // The tests::magit U-E10 fixture, verbatim: alpha (staged) + omega
+    // (unstaged) + beta (clean); committed first.
+    redline_testutil::git_repo_init(dir.path(), "Test", "test@example.com", true);
+    for name in ["alpha.txt", "beta.txt", "omega.txt"] {
+        std::fs::write(dir.path().join(name), "hello\nworld\n").unwrap();
+    }
+    redline_testutil::git_cli(dir.path(), &["add", "-A"], "Test", "test@example.com");
+    redline_testutil::git_cli(dir.path(), &["commit", "-q", "-m", "init"], "Test", "test@example.com");
+    std::fs::write(dir.path().join("alpha.txt"), "hello\nworld\nstaged line\n").unwrap();
+    redline_testutil::git_cli(dir.path(), &["add", "alpha.txt"], "Test", "test@example.com");
+    std::fs::write(dir.path().join("omega.txt"), "hello\nworld\nwork line\n").unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
+    s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+    s.open_magit_status();
+    for c in "oa".chars() {
+        s.key_event(Key::char(c));
+    }
+    assert_eq!(
+        s.magit_narrow_query(),
+        "oa",
+        "the typed chars must reach the magit narrow query (the prompt guard)"
+    );
+    // The projection's observable: exactly the match's structural path —
+    // the group heading (never a match itself) + its surviving file.
+    let (rows, _top, total) = s.magit_view_info();
+    assert_eq!(
+        total,
+        2,
+        "surface `magit status`: the narrowed set is the section filter's survivors (2 sections), got {total} — a row-level contains-filter keeps ZERO (`oa` is a subsequence, not a substring)"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+        vec!["Unstaged changes", "  M omega.txt (+1 -0)"],
+        "surface `magit status`: the group survives iff its child does — a shared-core row-level re-rank (which would score the group heading out) or a contains-filter (which would drop the whole list) cannot produce this shape"
+    );
+    // Shared-core cross-check over the tree's OWN texts (every section
+    // heading + every hunk body line): the core matches exactly the
+    // omega heading; the projection adds precisely its ancestor.
+    fn all_texts(sec: &crate::model::sections::Section, out: &mut Vec<(String, String)>) {
+        out.push((sec.id.clone(), sec.heading.clone()));
+        for l in &sec.body {
+            out.push((sec.id.clone(), l.content.clone()));
+        }
+        for c in &sec.children {
+            all_texts(c, out);
+        }
+    }
+    let tree = s.status_tree.as_ref().unwrap();
+    let mut texts = Vec::new();
+    for top in tree.sections() {
+        all_texts(top, &mut texts);
+    }
+    let core_matched: std::collections::BTreeSet<String> = texts
+        .iter()
+        .filter(|(_id, text)| {
+            !narrow("oa", &[text.as_str()], &mut s.matcher).is_empty()
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    assert_eq!(
+        core_matched,
+        std::collections::BTreeSet::from(["unstaged:omega.txt".to_string()]),
+        "the fixture must discriminate: the shared core scores exactly the omega heading over the tree's own texts"
+    );
+    let projected = tree
+        .narrowed_surviving_ids(&mut |t| !narrow("oa", &[t], &mut s.matcher).is_empty());
+    assert_eq!(
+        projected,
+        vec!["unstaged".to_string(), "unstaged:omega.txt".to_string()],
+        "surface `magit status`: the recompute path diverges from the section filter — its survivors ({projected:?}) are not the core's matched section plus its surviving ancestor"
+    );
+}
+
 /// The DIFFER verdicts are NAMED FOLLOW-UPS, not silent omissions
 /// (PLAN §4): every row that declares a follow-up marker must still
 /// carry it in `docs/ux-testing-plan.md` — the decision is greppable
@@ -687,7 +796,7 @@ fn declared_differ_surfaces_carry_named_follow_ups_in_the_doc() {
     }
     assert_eq!(
         markers.len(),
-        3,
-        "the plan names exactly three OPEN follow-ups (magit status U-E10, log U-E11, tree U-E12; U-E13 — isearch's second dimension — LANDED, its doc checkbox flipped); the table declares {markers:?}"
+        2,
+        "the plan names exactly two OPEN follow-ups (log U-E11, tree U-E12; U-E10 — magit section narrowing — LANDED, its doc checkbox flipped; U-E13 — isearch's second dimension — LANDED); the table declares {markers:?}"
     );
 }

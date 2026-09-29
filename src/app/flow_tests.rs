@@ -2496,7 +2496,7 @@ fn unit_flow_win_magit_follow() {
     assert_eq!(s.top_view(), ViewId::MagitStatus, "magit status open");
     let (_win, top0, total) = s.magit_view_info();
     assert!(total > 19, "status buffer taller than the window: {total}");
-    let in_window = |s: &AppStore| -> bool {
+    let in_window = |s: &mut AppStore| -> bool {
         let (win, top, total) = s.magit_view_info();
         s.magit_rows()
             .iter()
@@ -2507,13 +2507,13 @@ fn unit_flow_win_magit_follow() {
     let single = |s: &AppStore| -> bool {
         s.magit_rows().iter().filter(|r| r.selected).count() == 1
     };
-    assert!(single(&s) && in_window(&s), "initial: one cursor row, in view");
+    assert!(single(&s) && in_window(&mut s), "initial: one cursor row, in view");
     let mut all_ok = true;
     let mut prev_top = top0;
     let mut scrolled = 0usize;
     for _ in 1..=27 {
         s.key_event(key("n"));
-        all_ok &= s.top_view() == ViewId::MagitStatus && single(&s) && in_window(&s);
+        all_ok &= s.top_view() == ViewId::MagitStatus && single(&s) && in_window(&mut s);
         let top = s.magit_view_info().1;
         if top != prev_top {
             scrolled += 1;

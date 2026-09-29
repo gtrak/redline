@@ -37,24 +37,40 @@ impl AppStore {
 
     /// `n` / `C-n`: move the cursor to the next visible section. Magit
     /// 4.7.1 does not wrap: at the last visible section the cursor stays
-    /// put and the echo area reports `No next section`.
+    /// put and the echo area reports `No next section`. U-E10: while the
+    /// narrow query is active the move runs over the NARROWED render
+    /// order (the surviving set — a filtered-out section is never a
+    /// landing spot; the no-wrap boundary keeps its echo).
     pub fn magit_cursor_down(&mut self) {
-        if let Some(t) = self.status_tree.as_mut()
-            && !t.move_down()
-        {
-            self.minibuffer_message("No next section");
+        if let Some(t) = self.status_tree.as_mut() {
+            let moved = if self.magit_narrow_query.is_empty() {
+                t.move_down()
+            } else {
+                let q = self.magit_narrow_query.clone();
+                t.move_down_within(&mut |text| !super::narrowing::narrow(&q, &[text], &mut self.matcher).is_empty())
+            };
+            if !moved {
+                self.minibuffer_message("No next section");
+            }
         }
         self.magit_keep_visible();
     }
 
     /// `p` / `C-p`: move the cursor to the previous visible section. Magit
     /// 4.7.1 does not wrap: at the first visible section the cursor stays
-    /// put and the echo area reports `No previous section`.
+    /// put and the echo area reports `No previous section`. U-E10: while
+    /// narrowed, over the narrowed render order (see `magit_cursor_down`).
     pub fn magit_cursor_up(&mut self) {
-        if let Some(t) = self.status_tree.as_mut()
-            && !t.move_up()
-        {
-            self.minibuffer_message("No previous section");
+        if let Some(t) = self.status_tree.as_mut() {
+            let moved = if self.magit_narrow_query.is_empty() {
+                t.move_up()
+            } else {
+                let q = self.magit_narrow_query.clone();
+                t.move_up_within(&mut |text| !super::narrowing::narrow(&q, &[text], &mut self.matcher).is_empty())
+            };
+            if !moved {
+                self.minibuffer_message("No previous section");
+            }
         }
         self.magit_keep_visible();
     }
@@ -148,11 +164,69 @@ impl AppStore {
 
     /// The magit status rows for the current fold state (empty when the
     /// tree has not been built).
+    #[allow(dead_code)] // test-only accessor (the view renders magit_view_info's windowed projection)
     pub fn magit_rows(&self) -> Vec<MagitRow> {
         self.status_tree
             .as_ref()
             .map(|t| t.visible_rows())
             .unwrap_or_default()
+    }
+
+    /// The magit status narrow query (U-E10): the text typed on the
+    /// view's own prompt row (keys leading, one NoWrap row at the top);
+    /// empty = no narrowing.
+    pub fn magit_narrow_query(&self) -> &str {
+        &self.magit_narrow_query
+    }
+
+    /// The status rows under the current narrow query: with an empty
+    /// query the full list (the canonical `visible_rows`); otherwise the
+    /// section-structural projection — a heading survives iff it or a
+    /// surviving descendant matches, and the diff payload is never
+    /// scored, re-ranked, or trimmed (PLAN 018 §2.3-2's magit-native
+    /// primitive, NOT a row-level narrowing of the shared core). Text
+    /// matching goes through the shared core's scoring (`narrowing::narrow`
+    /// as a predicate), so the query semantics stay identical to the
+    /// app's other list surfaces.
+    fn magit_narrowing_rows(&mut self) -> Vec<MagitRow> {
+        let Some(t) = self.status_tree.as_ref() else {
+            return Vec::new();
+        };
+        if self.magit_narrow_query.is_empty() {
+            return t.visible_rows();
+        }
+        let q = self.magit_narrow_query.clone();
+        t.narrowed_rows(&mut |text| !super::narrowing::narrow(&q, &[text], &mut self.matcher).is_empty())
+    }
+
+    /// Re-derive the narrowed state after a query change (U-E10): the
+    /// projection itself is view-time (`magit_narrowing_rows` recomputes
+    /// it), so this keeps the two invariants — the cursor rests on a
+    /// surviving section (the selection is clamped into the narrowed set,
+    /// never lost: the cursor's identity is the section it is on, not a
+    /// row index), and the scroll window tracks the narrowed rows.
+    pub(super) fn magit_narrow_recompute(&mut self) {
+        if self.magit_narrow_query.is_empty() {
+            self.magit_keep_visible();
+            return;
+        }
+        let Some(t) = self.status_tree.as_mut() else {
+            return;
+        };
+        let q = self.magit_narrow_query.clone();
+        t.clamp_cursor_to_narrowed(
+            &mut |text| !super::narrowing::narrow(&q, &[text], &mut self.matcher).is_empty(),
+        );
+        self.magit_keep_visible();
+    }
+
+    /// `C-g` in the magit status view with a narrow query active: clear
+    /// the query — the full list re-derives, and the cursor (a section
+    /// id, not a row index) survives the clear: clamped, not lost.
+    pub(super) fn magit_narrow_clear(&mut self) {
+        self.magit_narrow_query.clear();
+        self.magit_narrow_recompute();
+        self.minibuffer_message("filter cleared");
     }
 
     /// The number of magit status rows that fit in the content area:
@@ -166,13 +240,10 @@ impl AppStore {
     /// Keep the magit cursor row inside the visible window (issue 002-02
     /// windowing for long status buffers). Called on every cursor move, fold,
     /// and refresh; persists `magit_scroll` so the window tracks the cursor in
-    /// both directions. Clamped to the row count.
+    /// both directions. Clamped to the row count. U-E10: the rows are the
+    /// NARROWED projection (with an empty query that IS the full list).
     fn magit_keep_visible(&mut self) {
-        let rows = self
-            .status_tree
-            .as_ref()
-            .map(|t| t.visible_rows())
-            .unwrap_or_default();
+        let rows = self.magit_narrowing_rows();
         let total = rows.len();
         if total == 0 {
             self.magit_scroll = 0;
@@ -196,9 +267,12 @@ impl AppStore {
     /// count) for long status buffers (issue 002-02). The cursor row is always
     /// inside the window (kept by `magit_keep_visible`); the view renders the
     /// window plus a scroll indicator and a pinned help line so neither is
-    /// clipped.
-    pub fn magit_view_info(&self) -> (Vec<MagitRow>, usize, usize) {
-        let rows = self.magit_rows();
+    /// clipped. U-E10: the rows are the NARROWED projection (with an empty
+    /// query that IS the full list) — windowing still runs through the ONE
+    /// shared `window_slice`. `&mut self`: the projection scores through the
+    /// shared core's matcher (scratch-buffer mutation, no semantic state).
+    pub fn magit_view_info(&mut self) -> (Vec<MagitRow>, usize, usize) {
+        let rows = self.magit_narrowing_rows();
         let total = rows.len();
         if total == 0 {
             return (Vec::new(), 0, 0);
@@ -317,7 +391,11 @@ impl AppStore {
             untracked: status.untracked_count(),
         });
         self.status_tree = Some(tree);
-        self.magit_keep_visible();
+        // U-E10: `g`/refresh re-derives under a still-active narrow query —
+        // the projection is recomputed over the fresh tree, the query is
+        // neither cleared nor re-typed, and the cursor re-clamps into the
+        // surviving set.
+        self.magit_narrow_recompute();
         true
     }
 

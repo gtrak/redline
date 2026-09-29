@@ -358,14 +358,43 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       set). PTY drive: `tools/drive_results_narrow.py`. Store pins: the
       `results_narrow_*` / `results_rerun_clears_the_query` /
       `results_prompt_*` pins in `src/app/store/tests/search.rs`.
-- [ ] **U-E10 · Named follow-up: magit section narrowing (018 deferral, NOT plan 018)**:
-      magit status stays DIFFER (PLAN 018 §4) because its rows carry diff
+- [x] **U-E10 · Named follow-up: magit section narrowing (018 deferral, NOT plan 018)**:
+      magit status stays DIFFER-from-plan-018 (PLAN 018 §4) because its rows carry diff
       payload (context/add/delete lines are one document) — a score-reorder
       destroys the diff, and even a filter must keep context lines glued to
       their hunk headers (PLAN §2.3-2). The right primitive is magit's own
       *section* narrowing: filter children, keep the section structure
       (headings survive iff a child does). Recorded as a candidate plan of
       its own — not a silent omission, not an extension of plan 018.
+      **LANDED (branch `magit-section-narrow`):** the status view carries a
+      one-row NoWrap narrow prompt under the title, DECISION KEYS LEADING
+      (`s/u stage · n/p · g refresh · RET open · C-g clear · q close`) with
+      the query trailing (the `7f0090a` keys-first rule; the advertised
+      decision keys fall through to the view's commands — as does every
+      other single-char MagitStatus binding, keymap-derived: the query
+      never steals a bound view key). Typing re-derives a
+      VIEW-TIME section-structural projection over the `Section` tree (the
+      canonical tree and its fold state are never mutated by the query):
+      a heading survives iff it or a surviving descendant matches the
+      shared core's scoring (`narrowing::narrow` as a predicate — the query
+      semantics never drift from the other surfaces), a surviving hunk
+      renders its FULL body (one document), and a surviving child renders
+      under a canonical fold — the projection reveals the match (pinned
+      decision: a hit hidden behind a fold would be a dead end; the fold
+      state stays untouched, so clearing restores it). The cursor (a
+      section id, never a row index) clamps into the surviving set —
+      selection clamped, not lost — `n`/`p` move within it (magit's no-wrap
+      echoes kept), C-g CLEARS the query (full list re-derives, cursor
+      intact; v1: clear, not close — closing stays on `q`), `g` re-derives
+      under the still-active query, and RET/`s`/`u` act on the selected
+      row's real target while narrowed (staging hits the right file).
+      Inventory verdict re-derived: `narrows=true,
+      mechanism=MagitSectionFilter` (the inventory cross-check now asserts
+      the section-filter shape on the guard's own key path). PTY drive:
+      `tools/drive_magit_narrow.py`. Store pins: the `magit_narrow_*` pins
+      in `src/app/store/tests/magit.rs` + the model pin
+      `narrowed_projection_keeps_structure_and_reveals_folded_matches` in
+      `src/model/sections.rs`.
 - [ ] **U-E11 · Named follow-up: log query-level narrowing (018 deferral)**:
       the log view is server-paged (git log range fetch); a client-side
       filter of one page hides commits and breaks `n`/`p` paging

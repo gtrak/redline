@@ -1933,6 +1933,13 @@ pub struct AppStore {
     /// `visible_rows()` so long status buffers keep the cursor in view and the
     /// help line stays pinned. Kept in range by `magit_keep_visible`.
     magit_scroll: usize,
+    /// The magit status narrow query (U-E10): typed on the status view's own
+    /// prompt row (keys leading, one NoWrap row at the top of the view);
+    /// empty = no narrowing. NOT a row-level narrowing: the query drives a
+    /// section-structural projection over `status_tree` (a heading survives
+    /// iff it or a surviving descendant matches — PLAN 018 §2.3-2's
+    /// magit-native primitive), and the diff payload is never re-ranked.
+    magit_narrow_query: String,
     /// Live dirty counts for the status line, updated on each magit
     /// refresh (watcher-driven live refresh is issue 04).
     dirty: Option<DirtyCounts>,
@@ -2354,6 +2361,7 @@ impl AppStore {
             git: None,
             status_tree: None,
             magit_scroll: 0,
+            magit_narrow_query: String::new(),
             dirty: None,
             grammar_registry: GrammarRegistry::build(),
             highlight_cache: HighlightCache::new(),

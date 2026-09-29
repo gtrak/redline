@@ -21,7 +21,11 @@ app = App(repo("redline_tall_repo"), rows=24, cols=80)
 app.key("C-x g")      # magit status on the tall repo
 
 HELP = "s stage"
-CONTENT_TOP = 1        # row 0 is the title
+# Row 0 is the title, row 1 the U-E10 section-narrow PROMPT — pinned chrome
+# above the scroll window, always non-empty. Measuring the scroll from row 1
+# reads the prompt on every step and can never see the top advance (0/20 with
+# every cursor leg green). Content starts at row 2.
+CONTENT_TOP = 2
 CONTENT_BOT = app.rows - 3   # rows 22,23 are mode + status lines
 
 

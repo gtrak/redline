@@ -2023,6 +2023,46 @@ use super::*;
         assert_eq!(store.view_name_display(), "src/lib.rs");
     }
 
+    /// Plan 018 issue 03 — the pending-sequence discipline (class-bug pin,
+    /// sibling of the magit/buffer-list narrow guards): a chord that arms a
+    /// prefix must NOT be stranded by the results-view narrow-prompt guard.
+    /// With the results view on top, `C-x` reaches the engine (no char
+    /// value — the guard cannot swallow it) and arms the `C-x` prefix; the
+    /// follow-up `2` — which completes the bound `C-x 2` — must reach the
+    /// engine too. On the pre-fix guard the `2` was silently edited into
+    /// `search.narrow.query` (the guard had NO pending-sequence check) and
+    /// the sequence was stranded. The guard now consults `self.pending`:
+    /// a non-empty pending means the key MUST reach the engine, so the
+    /// filter query stays empty and the unbound echo lands.
+    #[test]
+    fn results_narrow_guard_reaches_the_engine_for_a_pending_chord_c_x_2() {
+        let (_dir, mut store) = search_project();
+        let mut rx = store.search_rx().unwrap();
+        store.start_project_search("target".into());
+        drain_search_finished(&mut store, &mut rx);
+        assert_eq!(store.search.hits.len(), 4);
+        // No narrow query yet.
+        assert_eq!(store.search.narrow.query, "");
+        store.key_event(key("C-x"));
+        assert_eq!(
+            store.search.narrow.query,
+            "",
+            "a bare C-x must not feed the narrow query"
+        );
+        store.key_event(key("2"));
+        assert_eq!(
+            store.search.narrow.query,
+            "",
+            "the `2` must NOT be silently edited into the narrow query"
+        );
+        assert!(
+            store.message.contains("unbound key: 2"),
+            "the `2` reaches the engine and dead-ends to the unbound echo: {}",
+            store.message
+        );
+        assert_eq!(store.top_view(), ViewId::Search, "no view change on the echo");
+    }
+
     /// n/p wrap within a MULTI-hit subset: the wrap target is the
     /// subset's first hit, not the full list's. On the pre-018-03 tree
     /// `n` from the last main hit wraps to hit 0 (the lib.rs hit) —

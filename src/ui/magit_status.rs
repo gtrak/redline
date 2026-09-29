@@ -13,12 +13,15 @@ use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 #[derive(Default, Props)]
 pub struct MagitStatusViewProps {
     /// The visible window of status rows (pre-computed by the store; the
-    /// cursor row is always inside it).
+    /// cursor row is always inside it). U-E10: the NARROWED projection
+    /// (with an empty query that IS the full list).
     pub rows: Vec<MagitRow>,
     /// The scroll offset (index of the first visible row in the full list).
     pub top_row: usize,
     /// The total number of status rows (drives the scroll indicators).
     pub total_rows: usize,
+    /// The section-narrow query (U-E10); empty = no narrowing.
+    pub query: String,
 }
 
 #[cfg(test)]
@@ -116,6 +119,27 @@ pub fn MagitStatusView(
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
+                // The section-narrow prompt row (U-E10, PLAN 018 §5.2):
+                // ONE NoWrap row whose LEFTMOST text is the decision/verb
+                // information — `s/u stage · n/p · g refresh · RET open ·
+                // C-g clear · q close` — with the query trailing. The
+                // keys lead so a right-edge clip eats the query tail
+                // (recognisable), never the keys (unguessable) — the
+                // quit-prompt keys-first precedent (`7f0090a`). The
+                // advertised decision keys fall through to the view's
+                // commands in `magit_key_event` — as does every other
+                // single-char MagitStatus binding (the context keys
+                // l/b/c/y/z/h/k): the query never steals a bound key.
+                View(overflow: Overflow::Hidden) {
+                    Text(
+                        content: format!(
+                            "s/u stage · n/p · g refresh · RET open · C-g clear · q close  {}",
+                            if props.query.is_empty() { "· type to narrow".to_string() } else { props.query.clone() }
+                        ),
+                        color: face_color(t.preview),
+                        wrap: TextWrap::NoWrap,
+                    )
+                }
                 #({
                     // One unambiguous cursor treatment: the selected row gets
                     // its face's explicit background (white-on-blue bar) with NO

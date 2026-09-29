@@ -37,9 +37,18 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 .or(Some((0, 2)))
         }
         ViewId::Search => snap.search_selected_row.map(cell).or_else(|| Some(cell(0))),
-        ViewId::MagitStatus => Some(cell(
-            snap.magit_rows.iter().position(|r| r.selected).unwrap_or(0),
-        )),
+        ViewId::MagitStatus => {
+            // U-E10: the pane's content starts TWO rows down (the title row
+            // and the section-narrow prompt row above it) — the same shape
+            // 018-04 gave BufferList. The CUP must land on the SELECTED
+            // row's absolute screen row, not one above it (the CUP-tracks
+            // check measured cup=6/want=7 on every n/p step before this).
+            Some((0u16, 2 + snap
+                .magit_rows
+                .iter()
+                .position(|r| r.selected)
+                .unwrap_or(0) as u16))
+        }
         ViewId::Log => Some(cell(snap.log_rows.iter().position(|r| r.selected).unwrap_or(0))),
         ViewId::Blame => Some(cell(snap.blame_rows.iter().position(|r| r.selected).unwrap_or(0))),
         ViewId::CommitDiff => Some(cell(
@@ -266,6 +275,7 @@ mod tests {
             search_selected_row: None,
             search_running: false,
             search_error: None,
+            magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
             searching: String::new(),
             position: String::new(),
@@ -274,6 +284,31 @@ mod tests {
             region_size: None,
             file_view_notes_folded: false,
         }
+    }
+
+    /// U-E10: the magit pane's content starts TWO rows down (the title row
+    /// and the section-narrow prompt above it), so the selected section row
+    /// `i` puts the hardware cursor at screen row `2 + i` — the same shape
+    /// 018-04 gave the buffer list. The pre-fix value `1 + i` landed the CUP
+    /// one row ABOVE the selected (blue-bar) row; the PTY CUP-tracks check
+    /// measured `cup=6/want=7` on every n/p step before this.
+    #[test]
+    fn cursor_cell_magit_row_accounts_for_the_narrow_prompt_row() {
+        use crate::model::sections::{MagitRow, RowRole};
+        let mut snap = buffer_snapshot(&[], 0, 0);
+        snap.view = ViewId::MagitStatus;
+        snap.magit_rows = (0..5)
+            .map(|i| MagitRow {
+                text: format!("row {i}"),
+                role: RowRole::File,
+                selected: i == 3,
+            })
+            .collect();
+        assert_eq!(
+            cursor_cell(&snap),
+            Some((0, 5)),
+            "selected index 3 → screen row 2+3: title row + narrow prompt row above the content"
+        );
     }
 
     /// The cursor column is the point's DISPLAY column (terminal cells),
@@ -435,6 +470,7 @@ mod tests {
             search_selected_row: None,
             search_running: false,
             search_error: None,
+            magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
             searching: String::new(),
             position: String::new(),
@@ -770,6 +806,7 @@ mod tests {
             search_selected_row: None,
             search_running: false,
             search_error: None,
+            magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
             searching: String::new(),
             position: String::new(),

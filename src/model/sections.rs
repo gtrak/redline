@@ -202,6 +202,14 @@ impl StatusTree {
         find_by_id(&self.sections, &cursor)
     }
 
+    /// The top-level sections (read-model access: the U-E10 inventory
+    /// cross-check scores the tree's OWN headings/bodies through the
+    /// shared core — never a copy of the projection's strings).
+    #[allow(dead_code)] // test-only accessor (the U-E10 inventory cross-check + magit pins read the tree's own headings/bodies)
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+
     /// The cursor's dwim fields (path, kind, side, …), if any.
     pub fn cursor_target(&self) -> Option<CursorTarget> {
         self.cursor_section().map(|s| CursorTarget {
@@ -275,6 +283,114 @@ impl StatusTree {
         out
     }
 
+    /// The U-E10 section-narrowing projection over the current tree:
+    /// the flat list of display rows that survive `match_text` (the
+    /// narrow query's matcher, supplied by the store — the model stays
+    /// matcher-free). A section survives iff ITS heading, one of its own
+    /// body lines, or a descendant section matches — so a heading
+    /// survives iff a surviving descendant exists (magit's own section
+    /// narrowing; PLAN 018 §2.3-2). Two structural guarantees:
+    ///
+    /// - a surviving hunk renders its FULL body — the diff payload
+    ///   (context/add/delete lines) is ONE document; a match is never
+    ///   trimmed to its matching lines, and the rows are never re-ranked;
+    /// - a surviving child renders even when the canonical tree has its
+    ///   section folded: the projection REVEALS the match (a hit hidden
+    ///   behind a fold would be a dead end), while the fold state itself
+    ///   is untouched — this is a view-time projection, so clearing the
+    ///   query restores the previous folds byte-for-byte.
+    pub fn narrowed_rows(&self, match_text: &mut impl FnMut(&str) -> bool) -> Vec<MagitRow> {
+        let mut out = Vec::new();
+        let cursor = self.cursor.as_deref();
+        for s in &self.sections {
+            render_narrowed(s, cursor, 0, match_text, &mut out);
+        }
+        out
+    }
+
+    /// The ids of the sections whose heading survives the U-E10
+    /// projection, in NARROWED RENDER ORDER (revealed DFS: a surviving
+    /// child's heading follows its parent's even under a canonical fold —
+    /// the projection's on-screen row order). This is both the set of
+    /// rows a cursor may rest on while the narrow query is active and the
+    /// order `move_down_within` / `move_up_within` step through.
+    pub fn narrowed_surviving_ids(&self, match_text: &mut impl FnMut(&str) -> bool) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in &self.sections {
+            collect_surviving_ids(s, match_text, &mut out);
+        }
+        out
+    }
+
+    /// U-E10 cursor invariant: while the narrow query is active the
+    /// cursor rests on a SURVIVING section (the selection is clamped
+    /// into the narrowed set, never lost — the cursor's identity is the
+    /// section it is on). When the current cursor's section does not
+    /// survive (or none is set), the cursor moves to the first surviving
+    /// addressable (File/Hunk) section in render order, else the first
+    /// surviving section. When nothing survives the cursor is left
+    /// alone: the narrowed set is empty (no rows to select), and the
+    /// query's clear re-derives the full list where the section id is
+    /// valid again.
+    pub fn clamp_cursor_to_narrowed(&mut self, match_text: &mut impl FnMut(&str) -> bool) {
+        let surviving = self.narrowed_surviving_ids(match_text);
+        if surviving.is_empty() {
+            return;
+        }
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|c| surviving.iter().any(|s| s == c))
+        {
+            return;
+        }
+        let target = first_surviving_section(
+            &self.sections,
+            match_text,
+            &|s| matches!(s.kind, SectionKind::File | SectionKind::Hunk),
+        )
+        .or_else(|| first_surviving_section(&self.sections, match_text, &|_| true));
+        if let Some(id) = target {
+            self.cursor = Some(id);
+        }
+    }
+
+    /// Move the cursor to the next section in the U-E10 narrowed render
+    /// order (the surviving set, revealed DFS — the on-screen row order
+    /// while the query is active; a filtered-out section is never a
+    /// landing spot, and a revealed hunk IS). Boundary semantics identical
+    /// to `move_down`: no wrap, and the move reports `false` at the edge.
+    /// The cursor must already rest on a surviving section (the store's
+    /// recompute keeps that invariant); a cursor outside the set reports
+    /// `false` without moving.
+    pub fn move_down_within(&mut self, match_text: &mut impl FnMut(&str) -> bool) -> bool {
+        let ids = self.narrowed_surviving_ids(match_text);
+        let cur = self.cursor.clone();
+        let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref()) else {
+            return false;
+        };
+        if pos + 1 >= ids.len() {
+            return false;
+        }
+        self.cursor = Some(ids[pos + 1].clone());
+        true
+    }
+
+    /// The `move_up` twin over the U-E10 narrowed render order, same
+    /// no-wrap boundary semantics as `move_up`.
+    pub fn move_up_within(&mut self, match_text: &mut impl FnMut(&str) -> bool) -> bool {
+        let ids = self.narrowed_surviving_ids(match_text);
+        let cur = self.cursor.clone();
+        let Some(pos) = ids.iter().position(|id| Some(id.as_str()) == cur.as_deref()) else {
+            return false;
+        };
+        if pos == 0 {
+            return false;
+        }
+        self.cursor = Some(ids[pos - 1].clone());
+        true
+    }
+
     // ── rendering ─────────────────────────────────────────────────────
 
     /// Ids of every section whose heading is rendered (DFS order, skipping
@@ -308,6 +424,98 @@ fn collect_all_visible(sections: &[Section]) -> Vec<String> {
         s.collect_visible_ids(&mut out);
     }
     out
+}
+
+/// U-E10: whether `s` survives the narrow projection — its heading,
+/// one of its own body lines, or a descendant section matches.
+fn survives(s: &Section, match_text: &mut impl FnMut(&str) -> bool) -> bool {
+    match_text(&s.heading)
+        || s.body.iter().any(|l| match_text(&l.content))
+        || s.children.iter().any(|c| survives(c, match_text))
+}
+
+/// U-E10: push `s`'s heading row, then its surviving children (rendered
+/// even under a canonical fold — the projection reveals the match), and
+/// — for a surviving hunk — its FULL body (the diff payload is one
+/// document).
+fn render_narrowed(
+    s: &Section,
+    cursor: Option<&str>,
+    depth: usize,
+    match_text: &mut impl FnMut(&str) -> bool,
+    out: &mut Vec<MagitRow>,
+) {
+    if !survives(s, match_text) {
+        return;
+    }
+    let role = match s.kind {
+        SectionKind::Header => RowRole::Branch,
+        SectionKind::Group => RowRole::Group,
+        SectionKind::File => RowRole::File,
+        SectionKind::Hunk => RowRole::HunkHeader,
+    };
+    let indent = "  ".repeat(depth);
+    let selected = cursor == Some(s.id.as_str());
+    out.push(MagitRow {
+        text: format!("{indent}{}", s.heading),
+        role,
+        selected,
+    });
+    for c in &s.children {
+        render_narrowed(c, cursor, depth + 1, match_text, out);
+    }
+    if !s.body.is_empty() {
+        for line in &s.body {
+            let role = match line.origin {
+                DiffOrigin::Addition => RowRole::DiffAdd,
+                DiffOrigin::Deletion => RowRole::DiffDelete,
+                DiffOrigin::Context => RowRole::DiffContext,
+            };
+            out.push(MagitRow {
+                text: format!("{indent}  {}{}", line.origin.marker(), line.content),
+                role,
+                selected: false,
+            });
+        }
+    }
+}
+
+/// U-E10: push `s`'s id (when it survives) and its surviving children's
+/// ids, in DFS render order.
+fn collect_surviving_ids(
+    s: &Section,
+    match_text: &mut impl FnMut(&str) -> bool,
+    out: &mut Vec<String>,
+) {
+    if !survives(s, match_text) {
+        return;
+    }
+    out.push(s.id.clone());
+    for c in &s.children {
+        collect_surviving_ids(c, match_text, out);
+    }
+}
+
+/// The first section in DFS render order that survives `match_text` AND
+/// passes `kind_ok` (U-E10's cursor clamp target). `kind_ok` is a `dyn`
+/// pointer so the recursion's type stays flat (a generic `impl Fn` would
+/// nest one reference per level and hit the recursion limit).
+fn first_surviving_section(
+    sections: &[Section],
+    match_text: &mut impl FnMut(&str) -> bool,
+    kind_ok: &dyn Fn(&Section) -> bool,
+) -> Option<String> {
+    for s in sections {
+        if survives(s, match_text) {
+            if kind_ok(s) {
+                return Some(s.id.clone());
+            }
+            if let Some(c) = first_surviving_section(&s.children, match_text, &kind_ok) {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 /// The first file/hunk section in DFS order (the default cursor position).
@@ -832,6 +1040,79 @@ mod tests {
             "opened file must keep its hunk children"
         );
         assert!(!tree2.cursor_section().unwrap().folded);
+    }
+
+    // U-E10: the section-structural projection. `"staged line"` matches
+    // exactly ONE text in the sample fixture — the staged-side hunk body
+    // line of src/c.rs — so the survivors are exactly: the "Staged
+    // changes" group (via its surviving child), the c.rs file (via its
+    // surviving descendant), and that hunk. The c.rs file section starts
+    // FOLDED, and the projection reveals the match: the hunk header +
+    // the FULL body render while the canonical fold state stays folded.
+    #[test]
+    fn narrowed_projection_keeps_structure_and_reveals_folded_matches() {
+        let mut tree = build();
+        // The c.rs file section is folded by default (pre-fix state).
+        let c = find_by_id(&tree.sections, "staged:src/c.rs").unwrap();
+        assert!(c.folded, "the fixture's c.rs file section starts folded");
+
+        let mut pred = |text: &str| text == "staged line";
+        let rows = tree.narrowed_rows(&mut pred);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Staged changes",
+                "  M src/c.rs (+1 -0)",
+                "    @@ -7,1 +7,2 @@",
+                "       base",
+                "      +staged line",
+            ],
+            "a heading survives iff a surviving descendant exists; the surviving hunk renders its full body: {texts:?}"
+        );
+        // The surviving set is exactly the match's structural path.
+        let ids = tree.narrowed_surviving_ids(&mut pred);
+        assert_eq!(
+            ids,
+            vec!["staged", "staged:src/c.rs", "staged:src/c.rs#7"],
+            "only the match's ancestor chain survives: {ids:?}"
+        );
+        // The projection reveals the match UNDER THE FOLD: the hunk rows
+        // are present although the canonical tree keeps the file folded.
+        assert!(
+            find_by_id(&tree.sections, "staged:src/c.rs").unwrap().folded,
+            "the projection must not mutate the canonical fold state"
+        );
+        // And the un-narrowed render is untouched by the projection.
+        let full = tree.visible_rows();
+        assert!(
+            !full.iter().any(|r| r.text == "    @@ -7,1 +7,2 @@"),
+            "the canonical (folded) render shows no hunk rows: {full:?}"
+        );
+        // The cursor clamps into the surviving set: from a.rs (filtered
+        // out) it lands on the first surviving addressable section.
+        tree.clamp_cursor_to_narrowed(&mut pred);
+        assert_eq!(
+            tree.cursor.as_deref(),
+            Some("staged:src/c.rs"),
+            "clamped onto the first surviving File section"
+        );
+        // n/p move WITHIN the narrowed render order (never onto a
+        // filtered row; the revealed hunk IS a landing spot).
+        assert!(tree.move_down_within(&mut pred));
+        assert_eq!(tree.cursor.as_deref(), Some("staged:src/c.rs#7"));
+        assert!(!tree.move_down_within(&mut pred), "no wrap past the surviving set's last section");
+        assert!(tree.move_up_within(&mut pred));
+        assert_eq!(tree.cursor.as_deref(), Some("staged:src/c.rs"));
+        assert!(tree.move_up_within(&mut pred), "back up to the surviving group heading");
+        assert_eq!(tree.cursor.as_deref(), Some("staged"));
+        assert!(!tree.move_up_within(&mut pred), "the filtered a.rs/renamed sections are not allowed predecessors");
+        // Nothing survives: the cursor is left alone (the empty set has
+        // no rows to select; the clear re-derives the full list).
+        let mut none_pred = |text: &str| text == "zzz-no-match";
+        tree.clamp_cursor_to_narrowed(&mut none_pred);
+        assert_eq!(tree.cursor.as_deref(), Some("staged"));
+        assert!(tree.narrowed_rows(&mut none_pred).is_empty());
     }
 
     #[test]

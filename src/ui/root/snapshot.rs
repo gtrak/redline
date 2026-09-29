@@ -35,6 +35,9 @@ pub(super) struct Snapshot {
     pub(super) magit_rows: Vec<MagitRow>,
     pub(super) magit_top_row: usize,
     pub(super) magit_total_rows: usize,
+    // U-E10: the magit status narrow query (the prompt row's trailing text;
+    // empty = no narrowing — the full list).
+    pub(super) magit_narrow_query: String,
     // issue 002: transient menu overlay
     pub(super) menu_open: bool,
     pub(super) menu_rows: Vec<TransientMenuRow>,
@@ -214,6 +217,7 @@ pub(super) fn build(
         magit_rows,
         magit_top_row,
         magit_total_rows,
+        magit_narrow_query: s.magit_narrow_query().to_string(),
         menu_open: s.menu_open(),
         menu_rows: s.menu_rows(),
         menu_height: s.menu_height(),

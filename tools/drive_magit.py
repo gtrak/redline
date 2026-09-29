@@ -50,9 +50,16 @@ def snapshot(tag):
 # The observed, fixture-deterministic trajectory (the baseline magit status
 # view): the first modified file is the default selection, then n/p walk the
 # cursor one row at a time through the sections and their entries.
-EXPECTED_INITIAL = 3
-EXPECTED_DOWN = [4, 5, 6, 7, 8, 9, 10, 11]
-EXPECTED_UP = [10, 9, 8]
+#
+# U-E10 (018-fu-magit-section-narrow) added the section-narrow PROMPT row at
+# the top of the view (row 1, under the title) — the same unconditional
+# one-row NoWrap prompt 018-03/018-04 gave the results and buffer-list views.
+# Every fixture row therefore shifted +1: initial 3->4, down [4..11]->[5..12],
+# up [10,9,8]->[11,10,9]. The prompt row is not a section row, so it never
+# carries the cursor bar; only the section rows' absolute positions moved.
+EXPECTED_INITIAL = 4
+EXPECTED_DOWN = [5, 6, 7, 8, 9, 10, 11, 12]
+EXPECTED_UP = [11, 10, 9]
 
 
 def row_of(blues):

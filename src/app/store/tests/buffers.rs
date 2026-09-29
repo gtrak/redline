@@ -934,6 +934,43 @@ use super::*;
         assert_eq!(store.top_view(), ViewId::BufferList, "narrowing to empty must not close");
     }
 
+    /// Plan 018 issue 04 — the pending-sequence discipline (class-bug pin,
+    /// sibling of the magit/results narrow guards): a chord that arms a
+    /// prefix must NOT be stranded by the buffer-list narrow-prompt guard.
+    /// With the list on top, `C-x` reaches the engine (no char value — the
+    /// guard cannot swallow it) and arms the `C-x` prefix; the follow-up
+    /// `2` — which completes the bound `C-x 2` — must reach the engine too.
+    /// On the pre-fix guard the `2` was swallowed into `buffer_list_query`
+    /// (the guard had NO pending-sequence check) and the sequence was
+    /// stranded. The guard now consults `self.pending`: a non-empty pending
+    /// means the key MUST reach the engine, so the query stays empty and the
+    /// unbound echo lands.
+    #[test]
+    fn buffer_list_narrow_guard_reaches_the_engine_for_a_pending_chord_c_x_2() {
+        let dir = tempfile::tempdir().unwrap();
+        project_with_files(dir.path());
+        let mut store = store(dir.path());
+        store.dispatch("list-buffers", None).unwrap();
+        assert_eq!(store.top_view(), ViewId::BufferList);
+        store.key_event(key("C-x"));
+        assert!(
+            store.buffer_list_query().is_empty(),
+            "a bare C-x must not feed the narrow query"
+        );
+        store.key_event(key("2"));
+        assert_eq!(
+            store.buffer_list_query(),
+            "",
+            "the `2` must NOT be swallowed into the narrow query"
+        );
+        assert!(
+            store.message.contains("unbound key: 2"),
+            "the `2` reaches the engine and dead-ends to the unbound echo: {}",
+            store.message
+        );
+        assert_eq!(store.top_view(), ViewId::BufferList, "no view change on the echo");
+    }
+
     /// Plan 018 issue 04 (pin 2 — the `*` marker): the current-buffer
     /// marker lives INSIDE the display string (the shared display source,
     /// marker slot included), so it IS scoreable — a query of `*` matches

@@ -81,6 +81,7 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
                 rows: snap.magit_rows.clone(),
                 top_row: snap.magit_top_row,
                 total_rows: snap.magit_total_rows,
+                query: snap.magit_narrow_query.clone(),
             )
         }
         .into()),

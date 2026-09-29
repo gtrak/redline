@@ -109,16 +109,20 @@ def drive_windowing():
     app = App(repo("redline_tall_repo"), rows=24, cols=80)
     app.key("C-x g")
     HELP = "s stage"
-    top, bot = 1, app.rows - 3
+    # Row 0 = title, row 1 = the U-E10 narrow prompt (pinned chrome, never
+    # scrolls). Tracking row 1 for the scroll reads the prompt on every step
+    # and can never see the top advance — start at row 2, the first row that
+    # actually scrolls.
+    top, bot = 2, app.rows - 3
     in_win = []
     help_ok = []
     scrolled = 0
-    prev = app.row_text(1).strip()
+    prev = app.row_text(2).strip()
     for _ in range(28):
         b = app.blue_rows()
         in_win.append(len(b) == 1 and top <= b[0] <= bot)
         help_ok.append(HELP in app.screen_text())
-        first = app.row_text(1).strip()
+        first = app.row_text(2).strip()
         if first != prev:
             scrolled += 1
             prev = first
