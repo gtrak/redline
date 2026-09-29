@@ -395,12 +395,49 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       in `src/app/store/tests/magit.rs` + the model pin
       `narrowed_projection_keeps_structure_and_reveals_folded_matches` in
       `src/model/sections.rs`.
-- [ ] **U-E11 · Named follow-up: log query-level narrowing (018 deferral)**:
+- [x] **U-E11 · Named follow-up: log query-level narrowing (018 deferral)**:
       the log view is server-paged (git log range fetch); a client-side
       filter of one page hides commits and breaks `n`/`p` paging
       (PLAN §2.3-4). Real log narrowing is a `git log` query change
       (`--grep` / `-G` / author / commit filters) — a SERVER-side mechanism,
       a different design, recorded as a named follow-up.
+      **LANDED (branch `log-query-narrow`):** the log view carries a
+      one-row NoWrap narrow prompt under the title, DECISION KEYS LEADING
+      (`n/p page · RET diff · C-g clear · q close`) with the query trailing
+      (the `7f0090a` keys-first rule; the advertised decision keys fall
+      through to the view's commands — as does every other single-char
+      `LOG_BINDINGS` binding (the n/p page keys and the j/k in-page motion
+      keys), keymap-derived: the query never steals a bound view key).
+      The query is part of the git log WALK — redline-git's `log_all`
+      (the unwindowed walk) with the shared core's scoring
+      (`narrowing::narrow` as a predicate over subject + author, the
+      `git log --grep`/`--author` surface — never the clock-derived age
+      token) applied BEFORE offset/limit: `total` is the FILTERED count,
+      every page is a page of the filtered set, and the walk's order is
+      never re-ranked (FilterOnly). libgit2's revwalk exposes no `--grep`,
+      so the filter is post-walk at fetch time — still server-side, and
+      fast: the 2000-commit walk measures 31 ms, the filter pass 0.15 ms,
+      so the re-derive is live per keystroke. A query change starts at the
+      TOP of the filtered set (the `git log --grep` re-derive); `n`/`p`
+      page within the filtered set; C-g CLEARS the query (the full
+      unfiltered log re-derives, total back to the full count; v1: clear,
+      not close — closing stays on `q`); a re-open (`l`) re-derives under
+      a still-active query (the magit query-persists precedent), and the
+      commit/branch-switch refresh re-derives through the filtered walk
+      with the offset/selection clamped. The guard composes pending + key
+      from the first commit (the `issue-narrow-guard-pending-prefix`
+      discipline, fourth surface: the `2` of `C-x 2` reaches the engine,
+      never the query), and `cursor_cell`'s Log arm accounts for the
+      prompt row (`2 + i`, pinned by
+      `cursor_cell_log_row_accounts_for_the_narrow_prompt_row`).
+      PTY drive: `tools/drive_log_narrow.py` (38 checks: the footer's
+      total walks 6 -> 5 -> 1 -> (pop) 5 -> (C-g) 6 -> 1 (`commit1`) ->
+      (C-g) 6, the filtered set's paging boundaries echo, RET opens the
+      narrowed row's real commit diff, the C-x 2 chord dead-ends to the
+      unbound-key echo with the query untouched, and the old in-page
+      motion trajectory holds one-blue at every step). Store pins: the
+      `log_narrow_*` pins in `src/app/store/tests/commit.rs`; redline-git
+      pin: `log_all_is_the_unwindowed_walk_and_pages_compose_it`.
 - [ ] **U-E12 · Named follow-up: tree narrowing (018 deferral)**: the tree
       sidebar stays DIFFER — it is hierarchical (narrowing means
       filter-children-keep-parents in the 34-col sidebar) AND it is the one

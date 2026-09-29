@@ -30,6 +30,11 @@ impl AppStore {
             selected: 0,
         });
         self.log_scroll = 0;
+        // U-E11: a still-active narrow query re-derives the page under the
+        // filtered walk (the query state persists store-side, the magit
+        // precedent — a re-open is a fresh page of the SAME filtered set).
+        // No-op when the query is empty (the unfiltered derive above stands).
+        self.log_narrow_recompute();
         if self.top_view() != ViewId::Log {
             self.push_view(ViewId::Log);
         }
@@ -58,8 +63,27 @@ impl AppStore {
 
     fn log_offset_to(&mut self, offset: usize) {
         let Some(log) = self.log.as_ref() else { return };
-        let branch = log.branch.clone();
         let limit = log.limit;
+        // U-E11: with a narrow query active the offset is a position in the
+        // FILTERED walk — `total` is the filtered count and the page is a
+        // page of the filtered set (the query is part of the walk, applied
+        // before offset/limit; PLAN 018 §2.3-4). Without one, today's
+        // unfiltered range fetch.
+        if !self.log_narrow_query.is_empty() {
+            let branch = log.branch.clone();
+            let (total, filtered) = self.log_filtered_set(&branch);
+            let entries = filtered.iter().skip(offset).take(limit).cloned().collect();
+            if let Some(l) = self.log.as_mut() {
+                l.offset = offset;
+                l.total = total;
+                l.entries = entries;
+                l.selected = 0;
+            }
+            // A new page starts its in-page window at the top (issue 003-02).
+            self.log_scroll = 0;
+            return;
+        }
+        let branch = log.branch.clone();
         let total = self.with_git(|g| g.log_total(branch.as_deref())).unwrap_or(0);
         let entries = self
             .with_git(|g| g.log(branch.as_deref(), offset, limit))
@@ -72,6 +96,86 @@ impl AppStore {
         }
         // A new page starts its in-page window at the top (issue 003-02).
         self.log_scroll = 0;
+    }
+
+    /// The log narrow query (U-E11): the text typed on the view's own
+    /// prompt row (keys leading, one NoWrap row at the top); empty = no
+    /// narrowing.
+    pub fn log_narrow_query(&self) -> &str {
+        &self.log_narrow_query
+    }
+
+    /// The log's filtered walk under the active narrow query (U-E11): ONE
+    /// full walk, the shared core's scoring applied BEFORE any window, and
+    /// the filtered set returned in the WALK's order (FilterOnly — the
+    /// query never re-ranks, it only removes). `(total, filtered)` where
+    /// `total` is the FILTERED count — the invariant that keeps `n`/`p`
+    /// paging inside the filtered set. With an empty query the walk is
+    /// unfiltered and `total` is the full commit count (the pre-U-E11
+    /// value). The matching fields are the commit's subject and author —
+    /// the `git log` grep/author surface — never the clock-derived
+    /// relative-age token (a query against `48m` would rot as the clock
+    /// ticks).
+    fn log_filtered_set(&mut self, branch: &Option<String>) -> (usize, Vec<redline_git::log::LogEntry>) {
+        let all = self
+            .with_git(|g| g.log_all(branch.as_deref()))
+            .unwrap_or_default();
+        if self.log_narrow_query.is_empty() {
+            return (all.len(), all);
+        }
+        let q = self.log_narrow_query.clone();
+        let displays: Vec<String> = all
+            .iter()
+            .map(|e| format!("{} {}", e.subject, e.author))
+            .collect();
+        let refs: Vec<&str> = displays.iter().map(|s| s.as_str()).collect();
+        let mut hits = vec![false; all.len()];
+        for (i, _score) in super::narrowing::narrow(&q, &refs, &mut self.matcher) {
+            hits[i] = true;
+        }
+        let filtered: Vec<redline_git::log::LogEntry> = all
+            .into_iter()
+            .zip(hits)
+            .filter_map(|(e, hit)| hit.then_some(e))
+            .collect();
+        (filtered.len(), filtered)
+    }
+
+    /// Re-derive the log under the current narrow query after a query
+    /// change (U-E11, the `magit_narrow_recompute` twin): the query change
+    /// starts at the TOP of the filtered set (offset 0, the first page of
+    /// the matches — a `git log --grep`-style re-derive), the selection
+    /// resets to the page head, and the in-page window resets with it.
+    /// An empty query is a no-op (the unfiltered state is already derived;
+    /// a stray Backspace must not re-page a paged log).
+    pub(super) fn log_narrow_recompute(&mut self) {
+        if self.log_narrow_query.is_empty() {
+            return;
+        }
+        let Some(log) = self.log.as_ref() else { return };
+        let branch = log.branch.clone();
+        let limit = log.limit;
+        let (total, filtered) = self.log_filtered_set(&branch);
+        let entries = filtered.iter().take(limit).cloned().collect();
+        if let Some(l) = self.log.as_mut() {
+            l.offset = 0;
+            l.total = total;
+            l.entries = entries;
+            l.selected = 0;
+        }
+        self.log_scroll = 0;
+    }
+
+    /// `C-g` in the log view with the narrow prompt live (U-E11): clear
+    /// the query — the full unfiltered log re-derives at offset 0 (total
+    /// back to the full count) — NOT cancel/close (the v1 decision, the
+    /// buffer-list/magit precedent; closing stays on `q`).
+    pub(super) fn log_narrow_clear(&mut self) {
+        self.log_narrow_query.clear();
+        if self.log.is_some() {
+            self.log_offset_to(0);
+        }
+        self.minibuffer_message("filter cleared");
     }
 
     /// Move the in-page log selection down (arrows / j / C-n).
@@ -118,8 +222,27 @@ impl AppStore {
     fn refresh_log_page(&mut self) {
         let Some(log) = self.log.as_ref() else { return };
         let branch = log.branch.clone();
-        let offset = log.offset;
         let limit = log.limit;
+        // U-E11: a still-active narrow query re-derives through the
+        // filtered walk (the fresh history is re-walked and re-matched; the
+        // offset/selection are clamped into the fresh filtered set).
+        if !self.log_narrow_query.is_empty() {
+            let offset = log.offset;
+            let selected = log.selected;
+            let (total, filtered) = self.log_filtered_set(&branch);
+            let offset = offset.min(total.saturating_sub(1));
+            let entries: Vec<redline_git::log::LogEntry> = filtered.iter().skip(offset).take(limit).cloned().collect();
+            let selected = selected.min(entries.len().saturating_sub(1));
+            if let Some(l) = self.log.as_mut() {
+                l.offset = offset;
+                l.total = total;
+                l.entries = entries;
+                l.selected = selected;
+            }
+            self.log_keep_visible();
+            return;
+        }
+        let offset = log.offset;
         let total = self.with_git(|g| g.log_total(branch.as_deref())).unwrap_or(0);
         let entries = self
             .with_git(|g| g.log(branch.as_deref(), offset, limit))

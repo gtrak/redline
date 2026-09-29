@@ -45,6 +45,9 @@ pub(super) struct Snapshot {
     // issue 08: log / blame / commit-diff / commit editor
     pub(super) log_title: String,
     pub(super) log_rows: Vec<MagitRow>,
+    // U-E11: the log query-level narrow query (the prompt row's trailing
+    // text; empty = no narrowing — the full walk).
+    pub(super) log_narrow_query: String,
     pub(super) blame_title: String,
     pub(super) blame_rows: Vec<MagitRow>,
     pub(super) commit_diff_title: String,
@@ -223,6 +226,7 @@ pub(super) fn build(
         menu_height: s.menu_height(),
         log_title: s.log_title(),
         log_rows,
+        log_narrow_query: s.log_narrow_query().to_string(),
         blame_title: s.blame_title(),
         blame_rows,
         commit_diff_title: s.commit_diff_title(),

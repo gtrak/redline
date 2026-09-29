@@ -82,6 +82,7 @@ BATTERY = [
     "drive_isearch_list.py",
     "drive_results_narrow.py",
     "drive_magit_narrow.py",
+    "drive_log_narrow.py",
     "sweep_flows.py",
 ]
 

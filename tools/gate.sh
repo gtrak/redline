@@ -113,6 +113,15 @@ SHARED_SUITES=(
                               # narrowed hits the right file, C-g clears not
                               # close, C-x 2 chord reaches the engine not the
                               # query — the pending-chord class-bug leg)
+  drive_log_narrow.py         # U-E11: C-x g -> l log query-level narrowing
+                              # (prompt row at rest, live QUERY-level narrow —
+                              # the footer total is the FILTERED count
+                              # 6 -> 5 -> 1, n/p echo the filtered set's
+                              # boundaries, Backspace pops and re-derives, RET
+                              # opens the narrowed row's real commit diff,
+                              # C-g clears not close, C-x 2 chord reaches the
+                              # engine not the query — the pending-chord
+                              # class-bug leg, log surface)
   drive_windowing.py
   drive_windowing_panes.py
   check_cursor_stream.py

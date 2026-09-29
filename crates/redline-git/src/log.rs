@@ -63,6 +63,23 @@ impl GitRepo {
         Ok(out)
     }
 
+    /// The full walk: EVERY commit reachable from `branch` (or HEAD when
+    /// `None`), newest-first (the same topological + time sort as `log`),
+    /// with no offset/limit window. U-E11's query-level narrowing needs the
+    /// whole walk in one pass so the filter lands BEFORE offset/limit — a
+    /// windowed fetch (`log`) cannot count the filtered total, so a client
+    /// filter of one fetched page would hide commits and break `n`/`p`
+    /// (PLAN 018 §2.3-4).
+    pub fn log_all(&self, branch: Option<&str>) -> Result<Vec<LogEntry>, GitError> {
+        let walk = revwalk(&self.inner, branch)?;
+        let mut out = Vec::new();
+        for oid in walk {
+            let commit = self.inner.find_commit(oid?)?;
+            out.push(log_entry(&commit));
+        }
+        Ok(out)
+    }
+
     /// The full tree diff of the commit at `oid` (a full or abbreviated hex
     /// id), against its first parent (or the empty tree for the root commit).
     pub fn commit_diff(&self, oid: &str) -> Result<CommitDiff, GitError> {
@@ -236,6 +253,32 @@ mod tests {
         let tail = g.log(None, 28, 10).unwrap();
         assert_eq!(tail.len(), n - 28, "tail page must clamp");
         assert_eq!(tail[0].subject, git_subjects[28]);
+    }
+
+    #[test]
+    fn log_all_is_the_unwindowed_walk_and_pages_compose_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let g = init_repo(root);
+        let n = 30;
+        make_history(&g, root, n);
+
+        // The full walk holds every commit, newest first, and its count
+        // agrees with log_total.
+        let all = g.log_all(None).unwrap();
+        assert_eq!(all.len(), n);
+        assert_eq!(g.log_total(None).unwrap(), n);
+        assert_eq!(all[0].subject, "commit 29", "newest first");
+        assert_eq!(all[n - 1].subject, "commit 0", "root last");
+
+        // The windowed pages compose the full walk exactly (offset/limit
+        // are positions in the same walk — the pre-U-E11 contract, now also
+        // the filtered path's spine).
+        let paged: Vec<LogEntry> = g.log(None, 5, 10).unwrap()
+            .into_iter()
+            .chain(g.log(None, 15, 10).unwrap())
+            .collect();
+        assert_eq!(paged, all[5..25], "pages 5..15 and 15..25 compose the walk");
     }
 
     #[test]

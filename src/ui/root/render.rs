@@ -86,7 +86,11 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
         }
         .into()),
         ViewId::Log => Some(element! {
-            LogView(title: snap.log_title.clone(), rows: snap.log_rows.clone())
+            LogView(
+                title: snap.log_title.clone(),
+                rows: snap.log_rows.clone(),
+                query: snap.log_narrow_query.clone(),
+            )
         }
         .into()),
         ViewId::Blame => Some(element! {

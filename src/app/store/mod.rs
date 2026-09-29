@@ -2164,6 +2164,16 @@ pub struct AppStore {
     commit_diff_scroll: usize,
     blame_scroll: usize,
     log_scroll: usize,
+    /// The log narrow query (U-E11): typed on the log view's own prompt row
+    /// (keys leading, one NoWrap row at the top of the view); empty = no
+    /// narrowing. NOT a client-side filter of the fetched page (that would
+    /// hide commits and break `n`/`p` — PLAN 018 §2.3-4): the query is part
+    /// of the git log WALK, applied before offset/limit, so `log.total` is
+    /// the FILTERED count and every page is a page of the filtered set. The
+    /// matching goes through the shared core's scoring (the
+    /// `narrowing::narrow` predicate over subject + author), so the query
+    /// semantics stay identical to the app's other list surfaces.
+    log_narrow_query: String,
     /// The inline commit-editor state (the first editable buffer).
     commit_editor: Option<CommitEditorState>,
     /// The branch-create name prompt (`M-x` → `branch-create`), when active.
@@ -2419,6 +2429,7 @@ impl AppStore {
             commit_diff_scroll: 0,
             blame_scroll: 0,
             log_scroll: 0,
+            log_narrow_query: String::new(),
             commit_editor: None,
             branch_create: None,
             tree: TreeState {

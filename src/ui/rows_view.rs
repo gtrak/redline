@@ -32,6 +32,11 @@ pub struct MagitRowsViewProps {
     /// the list views (log, blame, status, commit-diff) do NOT — their
     /// cursor row already has the prominent selected-item face.
     pub current_line: Option<usize>,
+    /// U-E11 (log): the narrow-prompt row (pre-composed by the caller —
+    /// decision keys leading, query trailing, `· type to narrow` at rest).
+    /// Rendered as ONE NoWrap row between the title and the window when
+    /// `Some`; `None` (the default) for the non-narrowable panes.
+    pub prompt: Option<String>,
 }
 
 #[cfg(test)]
@@ -121,6 +126,25 @@ pub fn MagitRowsView(
                     color: face_color(t.view_title),
                     weight: face_weight(t.view_title),
                 )
+                #({
+                    // The narrow-prompt row (U-E11, log only): ONE NoWrap row
+                    // whose LEFTMOST text is the decision/verb information
+                    // (keys leading, query trailing — the 018-03/04/U-E10
+                    // shape). A right-edge clip eats the query tail
+                    // (recognisable), never the keys (unguessable) — the
+                    // quit-prompt keys-first precedent (`7f0090a`).
+                    props.prompt.as_ref().map(|prompt| {
+                        element! {
+                            View(overflow: Overflow::Hidden) {
+                                Text(
+                                    content: prompt.clone(),
+                                    color: face_color(t.preview),
+                                    wrap: TextWrap::NoWrap,
+                                )
+                            }
+                        }
+                    })
+                })
                 #({
                     // One unambiguous cursor treatment (shared with the magit
                     // status buffer): the selected row's face background is

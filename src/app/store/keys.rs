@@ -135,6 +135,64 @@ impl AppStore {
         false
     }
 
+    /// Log narrow-prompt guard (U-E11, beside the buffer-list, results-view
+    /// and magit guards): while the log view is on top (and no picker is
+    /// over it), printable chars extend the QUERY-level narrow — each
+    /// keystroke re-walks the git log with the shared core's scoring
+    /// applied BEFORE offset/limit (the server-side seam: `total` is the
+    /// FILTERED count and the page is a page of the filtered set, never a
+    /// client filter of one fetched page — PLAN 018 §2.3-4) — Backspace
+    /// pops the last character, and C-g CLEARS THE QUERY (the full
+    /// unfiltered log re-derives; v1: C-g = clear, NOT close — closing
+    /// stays on `q`). The view's own keys fall through to the keymap
+    /// engine: the rule is keymap-derived, never a hand-copied set — any
+    /// single-char binding of `LOG_BINDINGS` (the n/p page keys AND the
+    /// j/k in-page motion keys) is a view command, and the query never
+    /// steals it. A printable that completes or extends a BOUND sequence
+    /// (the `2` of `C-x 2`) must reach the keymap engine FIRST (the
+    /// `notes_edit_key_event` discipline — a swallowed starter key would
+    /// strand the sequence). RET / arrows / C-n / C-p / page keys carry no
+    /// printable char value, so they fall through by construction. Returns
+    /// `true` when the key is consumed, `false` to fall through.
+    fn log_key_event(&mut self, key: Key) -> bool {
+        if let Some(c) = key.char_value() {
+            // The query never steals a key the view (or the engine) owns:
+            // any single-char `LOG_BINDINGS` binding (the n/p page keys and
+            // the j/k motion keys) is a view command. A printable that
+            // completes or extends a BOUND sequence (the `2` of `C-x 2`,
+            // `C-c p s s`, …) must reach the engine FIRST — a swallowed
+            // starter key would strand the sequence (the
+            // `notes_edit_key_event` / `dispatch_key` discipline: compose
+            // the armed prefix with this key; a NON-EMPTY pending means the
+            // key MUST reach the engine). The keymap is read straight,
+            // never copied.
+            let mut seq = self.pending.clone();
+            seq.push(key);
+            if !self.pending.is_empty()
+                || LOG_BINDINGS.iter().any(|(seq, _)| *seq == c.to_string())
+                || matches!(
+                    self.engine.resolve(&seq),
+                    Some(Lookup::Command(_)) | Some(Lookup::Pending)
+                )
+            {
+                return false;
+            }
+            self.log_narrow_query.push(c);
+            self.log_narrow_recompute();
+            return true;
+        }
+        if key.code == KeyCode::Backspace {
+            self.log_narrow_query.pop();
+            self.log_narrow_recompute();
+            return true;
+        }
+        if key == Key::ctrl_char('g') {
+            self.log_narrow_clear();
+            return true;
+        }
+        false
+    }
+
     /// Feed one keypress from the terminal, as a priority chain of named
     /// modals: the first active modal that consumes the key ends the chain,
     /// and a key no modal consumes reaches `dispatch_key` (the keymap
@@ -331,6 +389,23 @@ impl AppStore {
         if self.top_view() == ViewId::MagitStatus
             && self.picker.is_none()
             && self.magit_key_event(key)
+        {
+            self.self_insert_run = None;
+            return;
+        }
+        // Log narrow prompt (U-E11): while the log view is on top AND no
+        // picker is over it (the picker owns its prompt — its C-g closes the
+        // palette, never the log query), printable chars extend the
+        // query-level narrow (every bound view key falls through to the
+        // keymap — the query never steals a bound view key, and a printable
+        // that starts a bound sequence reaches the engine first), Backspace
+        // pops the query, and C-g CLEARS THE QUERY — NOT cancel/close (v1,
+        // the buffer-list/magit precedent; closing stays on q). Intercepted
+        // before the global C-g so C-g cannot reach `cancel` while the
+        // prompt is live.
+        if self.top_view() == ViewId::Log
+            && self.picker.is_none()
+            && self.log_key_event(key)
         {
             self.self_insert_run = None;
             return;

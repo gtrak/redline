@@ -521,3 +521,365 @@ use super::*;
             "committed message must be byte-exact (the pasted LF must survive)"
         );
     }
+
+    // ── U-E11: log query-level narrowing (018-fu-log-query-narrow) ──────
+
+    /// The U-E11 fixture: `n` commits, even-index subjects `omga {i}`,
+    /// odd-index `beta {i}` (15 each at n = 30). Neither word carries a
+    /// `LOG_BINDINGS` key (n/p/j/k/q), so the whole query reaches the
+    /// prompt guard. `omga` is a subsequence of NO `beta {i}` subject (no
+    /// `o` in it), so the shared core's scoring is exact on this fixture.
+    fn log_narrow_repo(dir: &std::path::Path, n: usize) {
+        git_repo_init(dir, "Test", "test@example.com", true);
+        for i in 0..n {
+            std::fs::write(dir.join("f.txt"), format!("rev {i}\n")).unwrap();
+            git_cli(dir, &["add", "f.txt"], "Test", "test@example.com");
+            let subj = if i % 2 == 0 { format!("omga {i}") } else { format!("beta {i}") };
+            git_cli(dir, &["commit", "-q", "-m", &subj], "Test", "test@example.com");
+        }
+    }
+
+    /// A store rooted in `dir` with the project set (the U-E11 pins'
+    /// fixture root).
+    fn log_narrow_store(dir: &std::path::Path) -> AppStore {
+        let base = tempfile::tempdir().unwrap();
+        let mut s = AppStore::at(dir, base.path().to_path_buf());
+        s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));
+        s
+    }
+
+    /// U-E11: the log narrow-prompt guard — printable chars extend the
+    /// query live, Backspace pops, and the view's own bound keys (every
+    /// single-char `LOG_BINDINGS` binding — the n/p page keys AND the j/k
+    /// in-page motion keys, keymap-derived, never copied) fall through to
+    /// the keymap instead of the query.
+    #[test]
+    fn log_narrow_guard_extends_the_query_and_bound_keys_fall_through() {
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 30);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        assert_eq!(s.top_view(), ViewId::Log);
+        assert_eq!(s.log.as_ref().unwrap().total, 30, "the unfiltered total");
+
+        for c in "omga".chars() {
+            s.key_event(Key::char(c));
+        }
+        assert_eq!(s.log_narrow_query(), "omga", "the typed chars must reach the log narrow query (the prompt guard)");
+
+        // `n` pages (the filtered set), not the query: at offset 0 the
+        // page holds all 15 matches (15 < LOG_PAGE), so `n` is the
+        // end-of-log boundary — its echo lands and the query stays put.
+        s.key_event(key("n"));
+        assert_eq!(s.log_narrow_query(), "omga", "`n` must fall through, not extend the query");
+        assert_eq!(s.message, "end of log", "`n` reached the keymap: {}", s.message);
+        // `p` at offset 0: start-of-log boundary echo, query untouched.
+        s.key_event(key("p"));
+        assert_eq!(s.log_narrow_query(), "omga", "`p` must fall through, not extend the query");
+        assert_eq!(s.message, "start of log", "`p` reached the keymap: {}", s.message);
+        // `j`/`k` move the in-page selection (the query keys must not
+        // steal the motion keys).
+        s.key_event(key("j"));
+        assert_eq!(s.log.as_ref().unwrap().selected, 1, "`j` must move the selection, not extend the query");
+        s.key_event(key("k"));
+        assert_eq!(s.log.as_ref().unwrap().selected, 0, "`k` must move the selection back");
+        assert_eq!(s.log_narrow_query(), "omga", "`j`/`k` must not extend the query");
+        // `q` closes the view; the query state persists store-side (the
+        // magit precedent — a re-open re-derives under the SAME query).
+        s.key_event(key("q"));
+        assert_ne!(s.top_view(), ViewId::Log, "`q` must close the log view");
+        assert_eq!(s.log_narrow_query(), "omga", "the query persists across the close");
+        // The re-open re-derives the page under the same query (open_log's
+        // re-derive), and Backspace then pops the last character.
+        s.open_log();
+        assert_eq!(s.log.as_ref().unwrap().total, 15, "the re-open re-derives under the same query");
+        s.key_event(Key::new(KeyCode::Backspace));
+        assert_eq!(s.log_narrow_query(), "omg");
+    }
+
+    /// U-E11 (the load-bearing invariant): the query re-walks with the
+    /// filter BEFORE offset/limit — `total` is the FILTERED count (15 of
+    /// 30, asserted as the number, not "changed"), and `n`/`p` page WITHIN
+    /// the filtered set (a client-side filter of the fetched page would
+    /// keep `total` = 30 and could page onto `beta` rows — PLAN 018
+    /// §2.3-4's forbidden shape).
+    #[test]
+    fn log_narrow_total_is_the_filtered_count_and_paging_walks_within_the_set() {
+        let dir = tempfile::tempdir().unwrap();
+        // 60 commits: 30 `omga` (even) + 30 `beta` (odd) — the filtered
+        // set (30) overflows LOG_PAGE (25), so paging inside it is real.
+        log_narrow_repo(dir.path(), 60);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        assert_eq!(s.log.as_ref().unwrap().total, 60, "the unfiltered total");
+
+        for c in "omga".chars() {
+            s.key_event(Key::char(c));
+        }
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(log.total, 30, "total is the FILTERED count (15+15 omga commits): got {}", log.total);
+        assert_eq!(log.entries.len(), 25, "the first filtered page fills LOG_PAGE");
+        assert_eq!(log.entries[0].subject, "omga 58", "newest match first: {:?}", log.entries.iter().map(|e| e.subject.as_str()).collect::<Vec<_>>());
+        assert_eq!(log.entries[24].subject, "omga 10");
+        assert!(
+            log.entries.iter().all(|e| e.subject.starts_with("omga")),
+            "no beta row may leak into the filtered page"
+        );
+        // The footer measures the filtered set on screen.
+        let footer = s.log_rows().last().unwrap().text.clone();
+        assert!(footer.contains("(1–25/30"), "the footer counts the filtered set: {footer}");
+
+        // `n`: the NEXT filtered page (offset 25 — positions 26–30 of the
+        // filtered set), not an unfiltered-range fetch.
+        s.key_event(key("n"));
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(log.offset, 25);
+        assert_eq!(log.total, 30, "the filtered total survives the page step");
+        assert_eq!(log.entries.len(), 5, "the tail page holds the remaining 5 matches");
+        assert_eq!(log.entries[0].subject, "omga 8");
+        assert_eq!(log.entries[4].subject, "omga 0");
+        let footer = s.log_rows().last().unwrap().text.clone();
+        assert!(footer.contains("(26–30/30"), "the footer counts the filtered set: {footer}");
+
+        // The boundaries are the filtered set's: `n` at the filtered end,
+        // `p`/`p` back to the top and the unfiltered offset 0.
+        s.key_event(key("n"));
+        assert_eq!(s.message, "end of log", "the filtered set's end, not the full walk's: {}", s.message);
+        s.key_event(key("p"));
+        assert_eq!(s.log.as_ref().unwrap().offset, 0, "`p` steps back within the filtered set");
+        assert_eq!(s.log.as_ref().unwrap().entries.len(), 25);
+        s.key_event(key("p"));
+        assert_eq!(s.message, "start of log", "the filtered set's start: {}", s.message);
+    }
+
+    /// U-E11: the query matches the AUTHOR field too (the `git log
+    /// --author` surface) — `alice` keeps exactly Alice's commits, in the
+    /// walk's order (FilterOnly: never re-ranked).
+    #[test]
+    fn log_narrow_author_query_matches_the_author_not_the_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        git_repo_init(dir.path(), "Alice", "alice@example.com", true);
+        for (i, who, email) in [
+            (0, "Alice", "alice@example.com"),
+            (1, "Bob", "bob@example.com"),
+            (2, "Alice", "alice@example.com"),
+            (3, "Bob", "bob@example.com"),
+        ] {
+            std::fs::write(dir.path().join("f.txt"), format!("rev {i}\n")).unwrap();
+            git_cli(dir.path(), &["add", "f.txt"], who, email);
+            git_cli(dir.path(), &["commit", "-q", "-m", &format!("change {i}")], who, email);
+        }
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        assert_eq!(s.log.as_ref().unwrap().total, 4);
+
+        for c in "alice".chars() {
+            s.key_event(Key::char(c));
+        }
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(log.total, 2, "total is the author-filtered count: {:?}", log.entries.iter().map(|e| (e.subject.as_str(), e.author.as_str())).collect::<Vec<_>>());
+        assert_eq!(log.entries[0].subject, "change 2", "newest Alice commit first");
+        assert_eq!(log.entries[1].subject, "change 0");
+        assert!(log.entries.iter().all(|e| e.author == "Alice"), "every surviving row is Alice's");
+    }
+
+    /// U-E11: a query matching nothing — total 0, the view renders empty
+    /// without panicking, and the cursor/selected state is sane (the
+    /// stale-index class U-E10 caught: `selected` stays 0, in-page motion
+    /// is a no-op, RET has no commit at point, and the paging boundaries
+    /// echo on the EMPTY set). C-g restores the full unfiltered log.
+    #[test]
+    fn log_narrow_no_match_renders_empty_and_state_is_sane() {
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 30);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+
+        for c in "zzz".chars() {
+            s.key_event(Key::char(c));
+        }
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(log.total, 0, "nothing matches `zzz`");
+        assert!(log.entries.is_empty());
+        assert_eq!(log.selected, 0, "selected stays 0 on the empty set (the stale-index class)");
+        // The view renders the empty page without panicking: header +
+        // footer only, no selected row, one sane window.
+        let rows = s.log_rows();
+        assert_eq!(rows.len(), 2, "the empty page is header + footer: {rows:?}");
+        assert!(!rows.iter().any(|r| r.selected), "no blue row on the empty set: {rows:?}");
+        let (win, top, total) = s.log_view_info();
+        assert_eq!((win.len(), top, total), (2, 0, 2), "the windowing reads the empty page sanely");
+        // In-page motion is a no-op on the empty page (no panic, no
+        // stale index).
+        s.key_event(key("j"));
+        s.key_event(key("k"));
+        assert_eq!(s.log.as_ref().unwrap().selected, 0, "motion is a no-op on the empty set");
+        // RET has no commit at point (the page holds none).
+        s.key_event(key("RET"));
+        assert_eq!(s.top_view(), ViewId::Log, "RET must not push a diff on the empty set");
+        assert_eq!(s.message, "no commit at point", "the empty-set echo: {}", s.message);
+        // The paging boundaries echo on the EMPTY set (0 + 0 >= 0 and
+        // offset == 0).
+        s.key_event(key("n"));
+        assert_eq!(s.message, "end of log");
+        s.key_event(key("p"));
+        assert_eq!(s.message, "start of log");
+        // C-g clears: the full unfiltered log re-derives, total back to 30.
+        s.key_event(key("C-g"));
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(s.log_narrow_query(), "");
+        assert_eq!(s.message, "filter cleared");
+        assert_eq!(log.total, 30, "the unfiltered total returns");
+        assert_eq!(log.entries.len(), 25, "the first full page re-derives");
+        assert_eq!(s.top_view(), ViewId::Log, "C-g must not close the view");
+    }
+
+    /// U-E11: C-g CLEARS the query (the full unfiltered log re-derives —
+    /// total back to the full count, offset 0) — NOT cancel/close (the
+    /// v1 decision, the buffer-list/magit precedent; closing stays on q).
+    /// C-g on an empty query is the same clear path (the magit pin's
+    /// shape), not a view close.
+    #[test]
+    fn log_narrow_c_g_clears_and_total_returns_to_the_unfiltered_count() {
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 30);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        for c in "omga".chars() {
+            s.key_event(Key::char(c));
+        }
+        assert_eq!(s.log.as_ref().unwrap().total, 15, "narrowed before the clear");
+        s.key_event(key("C-g"));
+        assert_eq!(s.log_narrow_query(), "");
+        assert_eq!(s.message, "filter cleared");
+        let log = s.log.as_ref().unwrap();
+        assert_eq!(log.total, 30, "the full unfiltered total re-derives");
+        assert_eq!(log.offset, 0, "the re-derive starts at the walk's top");
+        assert_eq!(log.entries.len(), 25, "the first full page re-derives");
+        assert_eq!(s.top_view(), ViewId::Log, "C-g must not close the view");
+        // C-g on the now-empty query: the clear no-op path, not a close.
+        s.key_event(key("C-g"));
+        assert_eq!(s.message, "filter cleared", "C-g on an empty query is the clear path, not a view close");
+        assert_eq!(s.top_view(), ViewId::Log);
+        assert_eq!(s.log.as_ref().unwrap().total, 30);
+    }
+
+    /// U-E11 class-bug pin (the pending-sequence discipline, the C-x 2
+    /// twin): a chord that arms a prefix must NOT be stranded by the
+    /// narrow-prompt guard. With the log view on top, `C-x` reaches the
+    /// engine (arms the `C-x` prefix — it carries no char value, so the
+    /// guard cannot swallow it), and the follow-up `2` must reach the
+    /// engine too, echoing the unbound-key dead end. On the pre-fix guard
+    /// (key tested in isolation) the `2` would be consumed into the query,
+    /// stranding the sequence. The guard now composes the armed prefix
+    /// with the key: a non-empty `self.pending` means the key MUST reach
+    /// the engine, so the query stays empty and the echo lands.
+    #[test]
+    fn log_narrow_guard_reaches_the_engine_for_a_pending_chord_c_x_2() {
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 30);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        s.key_event(key("C-x"));
+        assert!(s.log_narrow_query().is_empty(), "a bare C-x must not feed the narrow query");
+        s.key_event(key("2"));
+        assert_eq!(s.log_narrow_query(), "", "the `2` must NOT be swallowed into the narrow query");
+        assert!(
+            s.message.contains("unbound key: 2"),
+            "the `2` reaches the engine and dead-ends to the unbound echo: {}",
+            s.message
+        );
+        assert_eq!(s.top_view(), ViewId::Log, "no view change on the echo");
+    }
+
+    /// U-E11 (the `7f0090a` keys-first rule): the prompt row is ONE NoWrap
+    /// row directly under the title, and EVERY decision group survives the
+    /// 80-col clip AND leads the query — a right-edge clip eats the query
+    /// tail, never the keys.
+    #[test]
+    fn log_narrow_prompt_row_keys_lead_at_80_with_long_query() {
+        use crate::ui::root::render_at_width;
+
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 6);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        // "omga" + 200 x's (`x` is not a decision key, so the whole run
+        // reaches the query).
+        for c in "omga".chars() {
+            s.key_event(Key::char(c));
+        }
+        for _ in 0..200 {
+            s.key_event(Key::char('x'));
+        }
+        let frame = render_at_width(s, 80);
+        let lines: Vec<&str> = frame.lines().collect();
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains("log —"))
+            .unwrap_or_else(|| panic!("title row missing\n{frame}"));
+        let prompt_idx = lines
+            .iter()
+            .position(|l| l.contains("n/p page"))
+            .unwrap_or_else(|| panic!("prompt row missing\n{frame}"));
+        assert_eq!(
+            prompt_idx,
+            title_idx + 1,
+            "the prompt row sits directly under the title\n{frame}"
+        );
+        let prompt = lines[prompt_idx];
+        // One row, NoWrap: at a 204-char query the row is filled to the
+        // edge with the query tail (a wrap would leave the edge empty).
+        assert!(prompt.trim_end().ends_with('x'), "the prompt row is one NoWrap row filled by the query: {prompt:?}");
+        let query_at = prompt.find('x').unwrap();
+        for group in ["n/p page", "RET diff", "C-g clear", "q close"] {
+            assert!(
+                prompt.contains(group),
+                "decision group {group:?} must survive the 80-col clip: {prompt:?}"
+            );
+            assert!(
+                prompt.find(group).unwrap() < query_at,
+                "decision group {group:?} must LEAD the query: {prompt:?}"
+            );
+        }
+        // The query tail is the clipped part: a 50-run of x's cannot fit
+        // after the 43-char decision-key prefix (at most 33 cells remain).
+        assert!(
+            !prompt.contains(&"x".repeat(50)),
+            "the 204-char query cannot fit: its tail is the clipped part: {prompt:?}"
+        );
+    }
+
+    /// U-E11: at rest (no query) the prompt row shows the decision keys +
+    /// the `type to narrow` placeholder — the shape pin of the at-rest
+    /// frame (the live-frame assertions live in the drive).
+    #[test]
+    fn log_narrow_prompt_row_at_rest_shows_keys_and_placeholder() {
+        use crate::ui::root::render_at_width;
+
+        let dir = tempfile::tempdir().unwrap();
+        log_narrow_repo(dir.path(), 6);
+        let mut s = log_narrow_store(dir.path());
+        s.open_log();
+        let frame = render_at_width(s, 80);
+        let lines: Vec<&str> = frame.lines().collect();
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains("log —"))
+            .unwrap_or_else(|| panic!("title row missing\n{frame}"));
+        let prompt = lines.get(title_idx + 1).copied().unwrap_or("");
+        assert!(prompt.contains("type to narrow"), "the empty-query placeholder: {prompt:?}");
+        for group in ["n/p page", "RET diff", "C-g clear", "q close"] {
+            assert!(prompt.contains(group), "decision group {group:?} missing at rest: {prompt:?}");
+        }
+        // The un-narrowed list renders below the prompt row (both
+        // omga rows of the 6-commit fixture).
+        assert!(
+            lines.iter().any(|l| l.contains("omga 4")),
+            "the newest commit row renders: {frame}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("beta 5")),
+            "the beta row renders: {frame}"
+        );
+    }

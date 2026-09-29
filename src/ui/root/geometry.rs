@@ -49,7 +49,14 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 .position(|r| r.selected)
                 .unwrap_or(0) as u16))
         }
-        ViewId::Log => Some(cell(snap.log_rows.iter().position(|r| r.selected).unwrap_or(0))),
+        ViewId::Log => {
+            // U-E11: the pane's content starts TWO rows down (the title row
+            // and the narrow prompt row above it) — the same shape U-E10
+            // gave MagitStatus. The CUP must land on the SELECTED row's
+            // absolute screen row, not one above it (the cup=6/want=7
+            // class the magit arm caught on the full gate).
+            Some((0u16, 2 + snap.log_rows.iter().position(|r| r.selected).unwrap_or(0) as u16))
+        }
         ViewId::Blame => Some(cell(snap.blame_rows.iter().position(|r| r.selected).unwrap_or(0))),
         ViewId::CommitDiff => Some(cell(
             snap.commit_diff_rows.iter().position(|r| r.selected).unwrap_or(0),
@@ -248,6 +255,7 @@ mod tests {
             menu_height: 0,
             log_title: String::new(),
             log_rows: Vec::new(),
+            log_narrow_query: String::new(),
             blame_title: String::new(),
             blame_rows: Vec::new(),
             commit_diff_title: String::new(),
@@ -308,6 +316,30 @@ mod tests {
             cursor_cell(&snap),
             Some((0, 5)),
             "selected index 3 → screen row 2+3: title row + narrow prompt row above the content"
+        );
+    }
+
+    /// U-E11: the log pane's content starts TWO rows down (the title row
+    /// and the narrow prompt row above it), so the selected log row `i`
+    /// puts the hardware cursor at screen row `2 + i` — the magit-arm twin
+    /// (a pre-fix `1 + i` would land the CUP one row ABOVE the selected
+    /// blue-bar row on every in-page / paging step).
+    #[test]
+    fn cursor_cell_log_row_accounts_for_the_narrow_prompt_row() {
+        use crate::model::sections::{MagitRow, RowRole};
+        let mut snap = buffer_snapshot(&[], 0, 0);
+        snap.view = ViewId::Log;
+        snap.log_rows = (0..5)
+            .map(|i| MagitRow {
+                text: format!("commit row {i}"),
+                role: RowRole::Commit,
+                selected: i == 2,
+            })
+            .collect();
+        assert_eq!(
+            cursor_cell(&snap),
+            Some((0, 4)),
+            "selected index 2 → screen row 2+2: title row + narrow prompt row above the content"
         );
     }
 
@@ -443,6 +475,7 @@ mod tests {
             menu_height: 0,
             log_title: String::new(),
             log_rows: Vec::new(),
+            log_narrow_query: String::new(),
             blame_title: String::new(),
             blame_rows: Vec::new(),
             commit_diff_title: String::new(),
@@ -779,6 +812,7 @@ mod tests {
             menu_height: 0,
             log_title: String::new(),
             log_rows: Vec::new(),
+            log_narrow_query: String::new(),
             blame_title: String::new(),
             blame_rows: Vec::new(),
             commit_diff_title: String::new(),
