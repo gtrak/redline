@@ -155,6 +155,7 @@ pub(super) fn render_frame(
                         TreeSidebar(
                             rows: snap.tree_rows.clone(),
                             selected: snap.tree_selected,
+                            query: snap.tree_narrow_query.clone(),
                         )
                     })
                 } else {

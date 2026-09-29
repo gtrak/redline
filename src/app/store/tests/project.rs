@@ -740,3 +740,410 @@ use super::*;
 
     // ── plan 004 issue 03: mark / region / kill ring / yank tests ──────
 
+
+    // ── U-E12: tree sidebar narrowing (018-fu-tree-narrow) ──────────
+
+    /// The U-E12 pin fixture: five files in sorted walk order —
+    /// `Cargo.toml` (0; ALSO the project marker `detect_root` needs, the
+    /// rest of the suite's `store()` fixtures carry it the same way),
+    /// `alpha.txt` (1), `beta.txt` (2), `src/delta.rs` (3),
+    /// `src/gamma.rs` (4). The discriminating queries, measured against
+    /// this exact set (nucleo `Pattern::parse(.., Ignore, Smart)` over the
+    /// FULL relative paths): `gam` scores exactly `src/gamma.rs`; `src`
+    /// scores exactly the two files under the `src/` directory (the parent
+    /// component match keeps its children); `d`/`da` exactly
+    /// `src/delta.rs`; `gamz` and `zzz` score NOTHING (zero-match legs).
+    fn tree_narrow_fixture(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.join("alpha.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("beta.txt"), "b\n").unwrap();
+        std::fs::write(dir.join("src/delta.rs"), "d\n").unwrap();
+        std::fs::write(dir.join("src/gamma.rs"), "g\n").unwrap();
+    }
+
+    fn type_tree_query(s: &mut AppStore, q: &str) {
+        for c in q.chars() {
+            s.key_event(Key::char(c));
+        }
+    }
+
+    /// U-E12: the tree narrow-prompt guard — printable chars extend the
+    /// tree query live, Backspace pops, and the sidebar's OWN keys fall
+    /// through to the keymap engine instead of the query: `?` (the globally
+    /// bound transient-menu key) never extends the query, the `t`
+    /// COMPLETING the bound `C-c p t` toggle reaches the engine and
+    /// toggles the tree (the pending-chord discipline: a non-empty pending
+    /// means the key MUST reach the engine), and the `2` of `C-x 2` reaches
+    /// the engine (split-window-vertical's echo lands — the buffer view
+    /// binds it), with the query untouched; and an unbound COMPLETION of an
+    /// armed prefix (C-c p z) dead-ends to the unbound-key echo, never the
+    /// query (the arm itself proven load-bearing by mutation) — the fifth
+    /// surface of the `issue-narrow-guard-pending-prefix` discipline.
+    #[test]
+    fn tree_narrow_guard_extends_the_query_and_bound_keys_fall_through() {
+        let dir = tempfile::tempdir().unwrap();
+        tree_narrow_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.ensure_files();
+        s.toggle_tree();
+        assert!(s.tree_visible());
+        assert_eq!(s.top_view(), ViewId::Home, "boot is the home view (tree guard is active over it)");
+
+        // Typing extends the query live (the top view is Home — the
+        // sidebar's key surface, no buffer open).
+        type_tree_query(&mut s, "gam");
+        assert_eq!(s.tree_narrow_query(), "gam", "the typed chars must reach the tree narrow query (the prompt guard)");
+
+        // Open a buffer (the tree stays visible): `?` — the globally bound
+        // transient-menu key (a single-char binding the engine resolves) —
+        // must fall through to the keymap, never extend the query.
+        s.open_path("alpha.txt");
+        assert_eq!(s.top_view(), ViewId::Buffer);
+        s.key_event(key("?"));
+        assert!(s.menu_open(), "`?` must open the transient menu through the engine");
+        assert_eq!(s.tree_narrow_query(), "gam", "`?` must fall through, not extend the query");
+        // Close the menu again (its own C-g — the menu owns the key while
+        // open, before the tree guard can see it).
+        s.key_event(key("C-g"));
+        assert!(!s.menu_open(), "the menu closed");
+        assert_eq!(s.tree_narrow_query(), "gam", "the menu's C-g must not touch the tree query");
+
+        // The `t` COMPLETING the bound `C-c p t` (toggle-tree) must reach
+        // the engine: the armed prefix (C-c, p) is exactly the "mid-
+        // sequence" case — a non-empty pending means the key MUST reach
+        // the engine (a swallowed `t` would strand the toggle sequence).
+        s.key_event(key("C-c"));
+        s.key_event(key("p"));
+        assert_eq!(s.pending_display(), "C-c p");
+        s.key_event(key("t"));
+        assert!(!s.tree_visible(), "C-c p t must toggle the tree off through the engine");
+        assert_eq!(s.tree_narrow_query(), "gam", "the `t` completing C-c p t must NOT be swallowed into the query");
+
+        // Re-open the tree: the still-active query re-derives (the magit/
+        // log query-persists precedent) and the selection re-clamps into
+        // the surviving set (gamma, the only `gam` survivor).
+        s.key_event(key("C-c"));
+        s.key_event(key("p"));
+        s.key_event(key("t"));
+        assert!(s.tree_visible());
+        assert_eq!(s.tree_selected(), 4, "re-clamped onto the surviving gamma row (full-list index)");
+
+        // The C-x 2 twin: a chord that arms a prefix (C-x carries no char
+        // value, so the guard cannot swallow it); the follow-up `2`
+        // COMPLETES the bound `C-x 2` (split-window-vertical — the buffer
+        // view binds it) and must reach the engine: the command's own echo
+        // lands and the query stays put (the pre-fix guard fed the `2` into
+        // the query, stranding the chord).
+        s.key_event(key("C-x"));
+        s.key_event(key("2"));
+        assert_eq!(
+            s.message,
+            "single pane by design: redline runs as a herdr popup, one pane",
+            "the `2` must reach the engine (C-x 2 = split-window-vertical)"
+        );
+        assert_eq!(s.tree_narrow_query(), "gam", "the `2` must NOT be swallowed into the narrow query");
+
+        // The pending PREFIX itself is load-bearing too (proven by mutation:
+        // disabling the `!self.pending.is_empty()` arm makes the guard
+        // swallow the follow-up key instead of letting the engine dead-end
+        // it): with the `C-c p` prefix armed, the unbound completion `z`
+        // (no `C-c p z` binding) must reach the engine (unbound-key echo,
+        // pending cleared) — never the query.
+        s.key_event(key("C-c"));
+        s.key_event(key("p"));
+        assert_eq!(s.pending_display(), "C-c p");
+        s.key_event(key("z"));
+        assert_eq!(s.message, "unbound key: z", "the armed prefix's unbound completion must reach the engine");
+        assert_eq!(s.tree_narrow_query(), "gam", "an unbound completion of an armed prefix must NOT be swallowed into the query");
+        assert_eq!(s.pending_display(), "", "the engine cleared the dead prefix");
+
+        // Backspace pops the last character (live re-derive).
+        s.key_event(Key::new(KeyCode::Backspace));
+        assert_eq!(s.tree_narrow_query(), "ga");
+    }
+
+    /// U-E12 survival rule: a node matching the query survives WITH its
+    /// ancestor chain rendered (the row's depth indentation — a child hit
+    /// is never hidden behind a filtered-out sibling), non-matching leaves
+    /// collapse, a parent component match keeps every file under it
+    /// (filter-children-keep-parents), the rows are never re-ranked
+    /// (source order), and the tree's UNDERLYING DATA is never mutated by
+    /// the query (view-time projection — the full rows stay intact through
+    /// the narrow, and the clear re-derives them byte-for-byte).
+    #[test]
+    fn tree_narrow_survival_rule_keeps_the_ancestor_chain_and_mutates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        tree_narrow_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.ensure_files();
+        s.toggle_tree();
+        let full: Vec<String> = s.tree_rows().iter().map(|r| r.rel_path.clone()).collect();
+        assert_eq!(
+            full,
+            vec!["Cargo.toml", "alpha.txt", "beta.txt", "src/delta.rs", "src/gamma.rs"],
+            "the fixture must walk in sorted order (the pins below index into it)"
+        );
+
+        // `gam` matches exactly ONE file: the rendered row set is exactly
+        // that row — and it carries its depth-1 indentation (the ancestor
+        // `src` chain is visible, never hidden behind the filtered-out
+        // siblings).
+        type_tree_query(&mut s, "gam");
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(
+            rows.iter().map(|r| r.rel_path.clone()).collect::<Vec<_>>(),
+            vec!["src/gamma.rs"],
+            "a node matching the query survives WITH its ancestor chain; the non-matching leaves collapse: {rows:?}"
+        );
+        assert_eq!(rows[0].depth, 1, "the survivor keeps its depth (the ancestor chain renders)");
+        assert_eq!(sel, 0, "the (clamped) selection is the in-window index of the survivor");
+
+        // The shared-core cross-check over the tree's OWN paths (never a
+        // copy of the projection's strings): the core scores exactly
+        // gamma, and the projection is that core-matched row alone.
+        let core_matched: Vec<String> = full
+            .iter()
+            .filter(|p| !crate::app::store::narrowing::narrow("gam", &[p.as_str()], &mut s.matcher).is_empty())
+            .cloned()
+            .collect();
+        assert_eq!(
+            core_matched,
+            vec!["src/gamma.rs"],
+            "the fixture must discriminate: the shared core scores exactly gamma"
+        );
+
+        // Parent component match keeps its children (filter-children-keep-
+        // parents): `src` survives on the TWO files under it, in SOURCE
+        // order (never re-ranked).
+        s.key_event(key("C-g"));
+        assert_eq!(s.tree_narrow_query(), "");
+        type_tree_query(&mut s, "src");
+        let (rows, _) = s.tree_view_info();
+        assert_eq!(
+            rows.iter().map(|r| r.rel_path.clone()).collect::<Vec<_>>(),
+            vec!["src/delta.rs", "src/gamma.rs"],
+            "the parent component match keeps every file under it: {rows:?}"
+        );
+
+        // The underlying data is never mutated by the query (view-time
+        // projection): the full rows are untouched through the whole
+        // narrow…
+        let after: Vec<String> = s.tree_rows().iter().map(|r| r.rel_path.clone()).collect();
+        assert_eq!(after, full, "the canonical rows must be untouched by the query");
+        // …and the clear re-derives the full tree byte-for-byte.
+        s.key_event(key("C-g"));
+        let (rows, _) = s.tree_view_info();
+        assert_eq!(
+            rows.iter().map(|r| r.rel_path.clone()).collect::<Vec<_>>(),
+            full,
+            "C-g: the full tree re-derives byte-for-byte"
+        );
+    }
+
+    /// U-E12 selection fate: if the selection SURVIVES it stays (identity
+    /// is the file, not a row index); if it does not, it clamps onto the
+    /// FIRST surviving row in source order; a zero-match query leaves it
+    /// alone (no surviving row to rest on) and the index stays valid
+    /// against the FULL list — the stale-index class U-E10/U-E13 caught:
+    /// `selected` must never index into the narrowed set.
+    #[test]
+    fn tree_narrow_selection_clamps_into_the_surviving_set_and_never_loses_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        tree_narrow_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.ensure_files();
+        s.toggle_tree();
+
+        // The surviving-selection-stays leg: rest on `src/delta.rs` (row 3)
+        // and narrow to `d` — delta survives, so the selection stays on it.
+        s.tree_move_down();
+        s.tree_move_down();
+        s.tree_move_down();
+        assert_eq!(s.tree_selected(), 3);
+        type_tree_query(&mut s, "d");
+        assert_eq!(s.tree_selected(), 3, "a surviving selection stays on its file");
+        assert_eq!(s.tree.rows[3].rel_path, "src/delta.rs");
+
+        // The clamp leg: `gam` filters delta out — the selection clamps
+        // onto the first surviving row in source order (gamma, row 4),
+        // keeping its FULL-LIST index (the identity is the file).
+        for _ in 0..2 {
+            s.key_event(Key::new(KeyCode::Backspace));
+        }
+        assert_eq!(s.tree_narrow_query(), "");
+        type_tree_query(&mut s, "gam");
+        assert_eq!(s.tree_selected(), 4, "clamped onto the first surviving row");
+        assert_eq!(s.tree.rows[4].rel_path, "src/gamma.rs");
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(rows.len(), 1, "the narrowed window holds exactly the survivor");
+        assert_eq!(rows[sel].rel_path, "src/gamma.rs", "the in-window selection IS the surviving file");
+
+        // The zero-match leg: extend `gam` to `gamz` (no path holds a
+        // g…a…m…z chain — gamma's path is g…a…m…m…a: a z never trails the
+        // match) — nothing survives: the empty state is sane (empty
+        // window, no panic, no highlight row) and the selection is LEFT
+        // ALONE (no surviving row to rest on; it must not index into the
+        // narrowed set, because `tree_open_selected` reads it against the
+        // full rows).
+        s.key_event(Key::char('z'));
+        assert_eq!(s.tree_narrow_query(), "gamz");
+        let (rows, sel) = s.tree_view_info();
+        assert!(rows.is_empty(), "zero matches: the empty state renders no rows: {rows:?}");
+        assert_eq!(sel, 0, "zero matches: no row to highlight (in-window index is inert)");
+        assert_eq!(s.tree_selected(), 4, "zero matches: the selection is left alone (still a FULL-list index)");
+        // The stale-index class: the selection must still address the FULL
+        // list — RET opens the file at the full index (gamma), never a
+        // narrowed-set row.
+        s.tree_open_selected();
+        let want = s.project.as_ref().unwrap().root.join("src/gamma.rs").to_string_lossy().into_owned();
+        assert_eq!(
+            s.buffers.current(),
+            Some(want.as_str()),
+            "the selection must index the FULL row list (the stale-index class)"
+        );
+
+        // The clear re-derives the full list with the selection intact.
+        s.key_event(key("C-g"));
+        assert_eq!(s.tree_narrow_query(), "");
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(rows.len(), 5, "the full tree re-derives");
+        assert_eq!(rows[sel].rel_path, "src/gamma.rs", "the selection survived the clear (clamped, not lost)");
+    }
+
+    /// U-E12 C-g: the clear is layered and honest — the full tree
+    /// re-derives, the message is the shared `filter cleared` (v1: clear,
+    /// not close — the sidebar has no close: `C-c p t` toggles it), and a
+    /// second C-g on the already-empty query is still the clear path (not
+    /// the global cancel — the prompt stays live while the sidebar is on
+    /// the key surface).
+    #[test]
+    fn tree_narrow_c_g_clears_the_query_and_the_tree_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        tree_narrow_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.ensure_files();
+        s.toggle_tree();
+        type_tree_query(&mut s, "gam");
+        assert_eq!(s.tree_selected(), 4, "clamped onto the survivor before the clear");
+
+        s.key_event(key("C-g"));
+        assert_eq!(s.tree_narrow_query(), "");
+        assert_eq!(s.message, "filter cleared");
+        assert_eq!(s.tree_view_info().0.len(), 5, "the full list re-derived");
+        assert_eq!(s.tree_selected(), 4, "the selection survived the clear");
+        assert!(s.tree_visible(), "C-g must not toggle/close the tree");
+
+        // The nothing-survives-then-clear leg (the U-E10/U-E13 stale-
+        // index class): `zzz` survives nothing, the selection is left
+        // alone, and the clear restores the full list with it intact.
+        type_tree_query(&mut s, "zzz");
+        assert!(s.tree_view_info().0.is_empty(), "`zzz` survives nothing");
+        assert_eq!(s.tree_selected(), 4, "the empty survivor set leaves the selection where it was");
+        s.key_event(key("C-g"));
+        assert_eq!(s.tree_view_info().0.len(), 5);
+        assert_eq!(s.tree_selected(), 4, "the full list re-derived with the selection intact");
+        // A C-g on an already-empty query is still the clear path (the
+        // prompt is live: it must not reach the global cancel).
+        s.key_event(key("C-g"));
+        assert_eq!(s.message, "filter cleared", "empty-query C-g is the clear path, not a cancel");
+        assert!(s.tree_visible());
+    }
+
+    /// U-E12: arrows step WITHIN the narrowed set — a filtered-out file is
+    /// never a landing spot (down at the last survivor stays put; up at
+    /// the first survivor never steps onto a filtered-out predecessor),
+    /// and the full-list no-wrap boundary semantics are kept.
+    #[test]
+    fn tree_narrow_arrows_move_within_the_narrowed_set() {
+        let dir = tempfile::tempdir().unwrap();
+        tree_narrow_fixture(dir.path());
+        let mut s = store(dir.path());
+        s.ensure_files();
+        s.toggle_tree();
+        // `s` survives on the two `src/` files (rows 3 and 4); the
+        // selection (row 0, filtered out) clamps onto the first survivor.
+        type_tree_query(&mut s, "s");
+        assert_eq!(s.tree_selected(), 3, "clamped onto the first surviving row");
+
+        // Down walks the survivors only (delta → gamma), then stops (no
+        // wrap past the narrowed set — rows 0/1/2 are filtered out and row
+        // 4 is the last survivor).
+        s.tree_move_down();
+        assert_eq!(s.tree_selected(), 4, "down: onto the next survivor");
+        s.tree_move_down();
+        assert_eq!(s.tree_selected(), 4, "down: no wrap past the narrowed set");
+        // Up steps back through the survivors only and never onto a
+        // filtered-out predecessor (rows 0/1/2).
+        s.tree_move_up();
+        assert_eq!(s.tree_selected(), 3, "up: onto the previous survivor");
+        s.tree_move_up();
+        assert_eq!(s.tree_selected(), 3, "up: the filtered-out rows above are not allowed predecessors");
+
+        // The full-list move (empty query) is byte-for-byte unchanged:
+        // clear the query first, then back down to row 1 down still lands
+        // on row 2 — a row the `s` query would have filtered out (motion
+        // is only narrowed while a query is active).
+        s.key_event(key("C-g"));
+        s.tree_move_up();
+        s.tree_move_up();
+        assert_eq!(s.tree_selected(), 1, "back onto the root-level row (full-list motion)");
+        s.tree_move_down();
+        assert_eq!(s.tree_selected(), 2, "the full-list motion is untouched by the narrow");
+    }
+
+    /// U-E12 windowing re-home (PLAN §1 row 4 — the ONE surface whose
+    /// windowing used to live in the RENDERER): the store's window tracks
+    /// the selection (the pre-re-home `sel.saturating_sub(5)` +
+    /// `TREE_VISIBLE_ROWS` math, verbatim), the invariant is that the
+    /// cursor row is ALWAYS inside the window, and the window is over the
+    /// NARROWED set while a query is active (with an empty query that IS
+    /// the full list — byte-for-byte the old renderer window).
+    #[test]
+    fn tree_view_info_window_tracks_the_selection_and_always_contains_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // `Cargo.toml` (the project marker) + 12 `fileNN` rows: 13 rows,
+        // sorted as Cargo.toml (0), file00.rs (1), …, file11.rs (12).
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        for i in 0..12 {
+            std::fs::write(root.join(format!("file{i:02}.rs")), "x\n").unwrap();
+        }
+        let mut s = store(root);
+        s.ensure_files();
+        s.toggle_tree();
+        assert_eq!(s.tree_rows().len(), 13, "13 rows: the window (8) must actually clip");
+
+        // Selection at 0: the window is the first 8 rows, cursor in-window 0.
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[sel].rel_path, "Cargo.toml");
+        assert!(sel <= 5, "the cursor's in-window index is within 5 rows of the window top");
+
+        // Selection at 12 (file11): the window slides (top = 12 - 5 = 7)
+        // and the cursor row is STILL inside it (in-window 5 — the last
+        // slot).
+        for _ in 0..12 {
+            s.tree_move_down();
+        }
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(rows.len(), 6, "the window slides to the list end (6 rows): {rows:?}");
+        assert_eq!(rows[sel].rel_path, "file11.rs", "the cursor row is always inside the window");
+        assert_eq!(rows[0].rel_path, "file06.rs", "the window top is sel.saturating_sub(5)");
+
+        // The window is over the NARROWED set while a query is active:
+        // `file11` scores exactly the last row (a subsequence of no other
+        // `fileNN` — `file10` has no trailing 1), so the window holds the
+        // single survivor with the cursor inside it.
+        for c in "file11".chars() {
+            s.key_event(Key::char(c));
+        }
+        let (rows, sel) = s.tree_view_info();
+        assert_eq!(
+            rows.iter().map(|r| r.rel_path.clone()).collect::<Vec<_>>(),
+            vec!["file11.rs"],
+            "the store window is over the narrowed set: {rows:?}"
+        );
+        assert_eq!(rows[sel].rel_path, "file11.rs");
+        assert_eq!(s.tree_selected(), 12, "the full-list index is unchanged by the window");
+    }

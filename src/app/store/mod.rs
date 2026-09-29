@@ -1024,6 +1024,19 @@ struct TreeState {
     rows: Vec<TreeRow>,
     selected: usize,
     follow: bool,
+    /// The tree narrow query (U-E12): typed on the sidebar's own prompt row
+    /// (keys leading, one NoWrap row under the `*tree*` title); empty = no
+    /// narrowing. The narrowing is a VIEW-TIME projection over `rows` —
+    /// filter-children-keep-parents (the tracker's 018 deferral verdict):
+    /// a file survives iff the shared core scores its full relative path
+    /// (its own name or an ancestor directory component), surviving rows
+    /// keep their full indentation (the ancestor chain is never hidden),
+    /// and non-matching files collapse out. `rows` itself is NEVER mutated
+    /// by the query (clearing it re-derives the full tree byte-for-byte).
+    /// `selected` stays an index into the FULL `rows` list and always points
+    /// at a surviving row while the query is active (the selection's
+    /// identity is the file, never a row index of the narrowed set).
+    narrow_query: String,
 }
 
 /// One RENDERED row of the file view (plan 005 issue 02): either a code
@@ -2437,6 +2450,7 @@ impl AppStore {
                 rows: Vec::new(),
                 selected: 0,
                 follow: false,
+                narrow_query: String::new(),
             },
             menu: TransientMenuState::default(),
             discard_confirm: None,

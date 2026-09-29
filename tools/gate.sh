@@ -122,6 +122,13 @@ SHARED_SUITES=(
                               # C-g clears not close, C-x 2 chord reaches the
                               # engine not the query — the pending-chord
                               # class-bug leg, log surface)
+  drive_tree_narrow.py        # U-E12: C-c p t tree sidebar HIERARCHICAL
+                              # narrowing (prompt row in the tree pane, live
+                              # filter-children-keep-parents row sets,
+                              # selection identity clamps and survives the
+                              # zero-match + clear, C-g clears, C-x 2 chord
+                              # reaches the engine not the query — the
+                              # pending-chord class-bug leg, tree surface)
   drive_windowing.py
   drive_windowing_panes.py
   check_cursor_stream.py

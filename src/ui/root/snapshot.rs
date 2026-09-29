@@ -89,8 +89,15 @@ pub(super) struct Snapshot {
     pub(super) buffer_mode: String,
     // Tree sidebar (issue 09).
     pub(super) tree_visible: bool,
+    /// The store-owned window of tree rows (U-E12 re-home: the narrowed
+    /// projection windowed by the store — the renderer no longer windows).
     pub(super) tree_rows: Vec<crate::app::store::TreeRow>,
+    /// The IN-WINDOW index of the selected tree row (the store's window
+    /// always contains it when non-empty).
     pub(super) tree_selected: usize,
+    // U-E12: the tree narrow query (the prompt row's trailing text; empty =
+    // no narrowing — the full tree).
+    pub(super) tree_narrow_query: String,
     // Terminal width (0 in the static render path; the hardware cursor is
     // live-only, so the tree offset clamps to a real width in practice).
     pub(super) terminal_width: u16,
@@ -165,6 +172,10 @@ pub(super) fn build(
     let (blame_rows, _blame_top, _blame_total) = s.blame_view_info();
     let (commit_diff_rows, commit_diff_top_row, commit_diff_total_rows) =
         s.commit_diff_view_info();
+    // U-E12 windowing re-home: the tree sidebar's store-owned window (the
+    // narrowed projection windowed around the selection; with an empty
+    // query that IS the full-list window) and the in-window selection.
+    let (tree_rows, tree_selected) = s.tree_view_info();
     // jump-highlight: the landing row's highlight is attached AFTER the
     // rows are built — the fade intensity is computed HERE (in the
     // snapshot) as a pure function of the landing's age and the
@@ -250,8 +261,9 @@ pub(super) fn build(
         file_view_current_buffer_editable: s.current_buffer_editable(),
         buffer_mode: s.buffer_mode_display(),
         tree_visible: s.tree_visible(),
-        tree_rows: s.tree_rows(),
-        tree_selected: s.tree_selected(),
+        tree_rows,
+        tree_selected,
+        tree_narrow_query: s.tree_narrow_query().to_string(),
         terminal_width,
         which_function: s.which_function(),
         indexing: s.indexing_display(),

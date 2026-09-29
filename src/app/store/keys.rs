@@ -331,6 +331,28 @@ impl AppStore {
         {
             return;
         }
+        // Tree narrow prompt (U-E12): while the sidebar is visible on top of
+        // Buffer/Home AND no picker is over it (the picker owns its prompt —
+        // its C-g closes the palette, never the tree query), printable chars
+        // extend the hierarchical narrow query (every bound key falls through
+        // to the keymap — the query never steals a bound key, and a printable
+        // that completes a bound sequence reaches the engine first),
+        // Backspace pops the query, and C-g CLEARS THE QUERY — NOT
+        // cancel/close (v1, the buffer-list/magit/log precedent). Intercepted
+        // before the global C-g so C-g cannot reach `cancel` while the prompt
+        // is live. Deliberately IN THE TREE PANE (not the main pane): the
+        // sidebar is a left column — its row adds shift only the tree
+        // column, never the main view's rows, so `cursor_cell` and
+        // `click_pane` (the column split) are untouched; the tree's OWN
+        // click-row mapping (`tree_click_row`) carries the +1 prompt row.
+        if self.tree_visible()
+            && matches!(self.top_view(), ViewId::Buffer | ViewId::Home)
+            && self.picker.is_none()
+            && self.tree_narrow_key_event(key)
+        {
+            self.self_insert_run = None;
+            return;
+        }
         // C-g in the results view (plan 018 issue 03's C-g split):
         // the IN-FLIGHT search still cancels (the view stays open on the
         // partial results); with a narrow query active and the job NOT
@@ -875,6 +897,64 @@ impl AppStore {
             }
             _ => false,
         }
+    }
+
+    /// Tree narrow-prompt guard (U-E12, beside the buffer-list, results-view,
+    /// magit and log guards): while the tree sidebar is visible (its key
+    /// surface: the top view is Buffer/Home, see `tree_key_event`) and no
+    /// picker is over it, printable chars extend the HIERARCHICAL narrow
+    /// query (each keystroke re-derives the filter-children-keep-parents
+    /// projection at view time — the canonical `tree.rows` are never
+    /// mutated by the query), Backspace pops the last character, and C-g
+    /// CLEARS THE QUERY (the full tree re-derives; the selection — the
+    /// selected file, not a row index — is clamped, never lost; v1: C-g =
+    /// clear, NOT close). The sidebar's own keys fall through to the
+    /// keymap engine: the rule is keymap-derived, never a hand-copied set —
+    /// the motion keys (↑/↓/PgUp/PgDn/RET) carry no printable char value,
+    /// so they fall through by construction (and `tree_key_event` consumes
+    /// them first anyway), and a printable that completes or extends a
+    /// BOUND sequence — the `t` completing the bound `C-c p t` toggle, the
+    /// `2` of `C-x 2`, … — must reach the engine FIRST (the
+    /// `notes_edit_key_event` / `dispatch_key` discipline — a swallowed
+    /// starter key would strand the sequence). The keymap is read straight,
+    /// never copied. Returns `true` when the key is consumed, `false` to
+    /// fall through.
+    fn tree_narrow_key_event(&mut self, key: Key) -> bool {
+        if let Some(c) = key.char_value() {
+            // The query never steals a key the view (or the engine) owns:
+            // any single-char global/buffer binding (e.g. the buffer view's
+            // `q` close-view) is a view command, and a printable that
+            // completes or extends a BOUND sequence (the `t` of `C-c p t`,
+            // the `2` of `C-x 2`) must reach the engine FIRST — a swallowed
+            // starter key would strand the sequence (the
+            // `notes_edit_key_event` / `dispatch_key` discipline: compose
+            // the armed prefix with this key; a NON-EMPTY pending means the
+            // key MUST reach the engine). The keymap is read straight,
+            // never copied.
+            let mut seq = self.pending.clone();
+            seq.push(key);
+            if !self.pending.is_empty()
+                || matches!(
+                    self.engine.resolve(&seq),
+                    Some(Lookup::Command(_)) | Some(Lookup::Pending)
+                )
+            {
+                return false;
+            }
+            self.tree.narrow_query.push(c);
+            self.tree_narrow_recompute();
+            return true;
+        }
+        if key.code == KeyCode::Backspace {
+            self.tree.narrow_query.pop();
+            self.tree_narrow_recompute();
+            return true;
+        }
+        if key == Key::ctrl_char('g') {
+            self.tree_narrow_clear();
+            return true;
+        }
+        false
     }
 
     fn dispatch_key(&mut self, key: Key) {

@@ -14,19 +14,25 @@ use super::*;
         // The code point starts away from (0,0) so any movement is visible.
         s.set_point(3, 2, 0);
 
-        // Terminal row 0 is the tree title: a no-op (selection + point).
+        // Terminal row 0 is the tree title and row 1 is the U-E12 narrow
+        // prompt: both are no-ops (selection + point).
         s.tree_click_row(0);
         assert_eq!(s.tree_selected(), 0);
         assert_eq!((s.point_line(), s.point_col()), (3, 2), "title-row click must not move the code point");
+        s.tree_click_row(1);
+        assert_eq!(s.tree_selected(), 0, "prompt-row click is a no-op (U-E12)");
+        assert_eq!((s.point_line(), s.point_col()), (3, 2), "prompt-row click must not move the code point");
 
-        // Terminal row 2 → visible row 1 (window top is `selected-5`, 0
-        // here): the selection moves, the point does not.
-        s.tree_click_row(2);
-        assert_eq!(s.tree_selected(), 1, "terminal row 2 → tree row 1");
+        // Terminal row 3 → visible row 1 (window top is `selected-5`, 0
+        // here; the window starts at row 2 under the U-E12 prompt row):
+        // the selection moves, the point does not.
+        s.tree_click_row(3);
+        assert_eq!(s.tree_selected(), 1, "terminal row 3 → tree row 1");
         assert_eq!((s.point_line(), s.point_col()), (3, 2), "tree-row click must not move the code point");
 
-        // The help row (row TREE_VISIBLE_ROWS+1 = 9) is a no-op.
-        s.tree_click_row(9);
+        // The help row (row TREE_VISIBLE_ROWS+2 = 10, title + prompt above
+        // the 8-row window) is a no-op.
+        s.tree_click_row(10);
         assert_eq!(s.tree_selected(), 1);
         // A far row (past the window) is a no-op.
         s.tree_click_row(99);
@@ -35,15 +41,16 @@ use super::*;
         // With the tree hidden every tree click is a no-op.
         s.toggle_tree();
         assert!(!s.tree_visible());
-        s.tree_click_row(2);
+        s.tree_click_row(3);
         assert_eq!(s.tree_selected(), 1, "hidden tree: click is a no-op");
     }
 
     #[test]
     fn tree_click_row_selects_within_a_scrolled_window() {
         // Window top is `selected - 5`: after moving the selection to row 7
-        // (of 8 rows) the visible window starts at row 2, so terminal row
-        // 1 (the first visible row) selects tree row 2.
+        // (of 8 rows) the visible window starts at row 2, so terminal row 2
+        // (the first visible row, under the U-E12 prompt row) selects tree
+        // row 2.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -57,8 +64,8 @@ use super::*;
         let n = s.tree_rows().len();
         assert!(n >= 8, "need >=8 tree rows: {n}");
         s.tree.selected = 7;
-        s.tree_click_row(1);
-        assert_eq!(s.tree_selected(), 2, "terminal row 1 → window row 0 → tree row 2");
+        s.tree_click_row(2);
+        assert_eq!(s.tree_selected(), 2, "terminal row 2 → window row 0 → tree row 2");
         assert_eq!((s.point_line(), s.point_col()), (0, 0), "selection only; point untouched");
     }
 

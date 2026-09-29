@@ -150,6 +150,10 @@ impl AppStore {
                     self.tree.rows = self.build_tree_rows();
                     self.tree.selected = 0;
                 }
+                // U-E12: a re-walk re-derives under a still-active narrow
+                // query — the projection recomputes over the fresh rows and
+                // the selection re-clamps into the surviving set.
+                self.tree_narrow_recompute();
                 self.minibuffer_message(&format!(
                     "re-walked {}: {} files",
                     project.name, n
@@ -225,6 +229,10 @@ impl AppStore {
             self.ensure_files();
             self.tree.rows = self.build_tree_rows();
         }
+        // U-E12: re-showing re-derives under a still-active narrow query
+        // (the magit/log query-persists precedent) — the selection
+        // re-clamps into the surviving set.
+        self.tree_narrow_recompute();
         if self.tree.visible && self.tree.rows.is_empty() {
             self.minibuffer_message("tree: no files in project");
         }
@@ -263,7 +271,10 @@ impl AppStore {
         self.tree.visible
     }
 
-    /// The sidebar's rows (empty when hidden or not yet built).
+    /// The sidebar's FULL rows (the canonical walk output; empty when
+    /// hidden or not yet built). The narrow query never mutates these —
+    /// it is a view-time projection over them (`tree_view_info`).
+    #[allow(dead_code)] // test-only accessor (the view renders tree_view_info's windowed projection)
     pub fn tree_rows(&self) -> Vec<TreeRow> {
         if self.tree.visible {
             self.tree.rows.clone()
@@ -272,35 +283,142 @@ impl AppStore {
         }
     }
 
+    #[allow(dead_code)] // test-only accessor (the view renders the in-window selection from tree_view_info)
     pub fn tree_selected(&self) -> usize {
         self.tree.selected
     }
 
-    /// `↓` / `PageDown`: move the tree cursor down (clamped).
+    /// The tree narrow query (U-E12): the text typed on the sidebar's own
+    /// prompt row (keys leading, one NoWrap row under the `*tree*` title);
+    /// empty = no narrowing (the full tree).
+    pub fn tree_narrow_query(&self) -> &str {
+        &self.tree.narrow_query
+    }
+
+    /// Re-derive the narrowed state after a query change (U-E12): the
+    /// projection itself is view-time (`tree_narrowing_rows` recomputes
+    /// it), so this keeps the selection invariant — while a query is
+    /// active `selected` (an index into the FULL `rows` list) points at a
+    /// SURVIVING row: if the currently selected file survives it stays,
+    /// otherwise it clamps onto the FIRST surviving row in source order
+    /// (the U-E10 cursor-clamp shape: the selection's identity is the
+    /// file, never a row index of the narrowed set). A zero-match query
+    /// leaves the selection alone: there is no surviving row to rest on,
+    /// and the clear re-derives the full list where the index is valid
+    /// again (the stale-index class U-E10/U-E13 caught — `selected` must
+    /// never index into the narrowed set, because `tree_open_selected`
+    /// and the follow sync read it against the full `rows`).
+    pub(super) fn tree_narrow_recompute(&mut self) {
+        if self.tree.narrow_query.is_empty() {
+            return;
+        }
+        let q = self.tree.narrow_query.clone();
+        let surviving =
+            tree_surviving_indexes(&self.tree.rows, &q, &mut self.matcher);
+        if surviving.is_empty() {
+            return;
+        }
+        if !surviving.contains(&self.tree.selected) {
+            self.tree.selected = surviving[0];
+        }
+    }
+
+    /// `C-g` in the tree sidebar with a narrow query active (U-E12): clear
+    /// the query — the full tree re-derives, and the selection is intact
+    /// (clamped, not lost: while the query was active it rested on a
+    /// surviving row, which exists in the full list again).
+    pub(super) fn tree_narrow_clear(&mut self) {
+        self.tree.narrow_query.clear();
+        self.tree_narrow_recompute();
+        self.minibuffer_message("filter cleared");
+    }
+
+    /// The store-owned tree window (U-E12 windowing re-home, PLAN §1 row 4
+    /// — the ONE surface whose windowing used to live in the RENDERER):
+    /// the narrowed projection windowed around the selection, the way every
+    /// other list surface gets its window from the store. The window is the
+    /// first `TREE_VISIBLE_ROWS` rows of the narrowed set starting at
+    /// `sel.saturating_sub(5)` (the pre-re-home renderer math, verbatim —
+    /// with an empty query the narrowed set IS the full list, so this is
+    /// byte-for-byte the old renderer window), and `selected` is the
+    /// IN-WINDOW index of the selected row. Load-bearing invariant: when
+    /// the window is non-empty the cursor row is ALWAYS inside it (the
+    /// selection's in-window index is `<= 5 < TREE_VISIBLE_ROWS`), and the
+    /// renderer renders exactly what this returns — it no longer skips or
+    /// takes anything.
+    pub fn tree_view_info(&mut self) -> (Vec<TreeRow>, usize) {
+        let q = self.tree.narrow_query.clone();
+        let surviving =
+            tree_surviving_indexes(&self.tree.rows, &q, &mut self.matcher);
+        if surviving.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let sel_pos = surviving
+            .iter()
+            .position(|&i| i == self.tree.selected)
+            .unwrap_or(0);
+        let start = sel_pos.saturating_sub(5);
+        let end = (start + crate::model::tree_layout::TREE_VISIBLE_ROWS).min(surviving.len());
+        let rows: Vec<TreeRow> = surviving[start..end]
+            .iter()
+            .map(|&i| self.tree.rows[i].clone())
+            .collect();
+        (rows, sel_pos - start)
+    }
+
+    /// `↓` / `PageDown`: move the tree cursor down (clamped). U-E12: while
+    /// the narrow query is active the move steps over the NARROWED set — a
+    /// filtered-out file is never a landing spot (the clamped, no-wrap
+    /// boundary semantics of the full-list move are kept: at the last
+    /// surviving row the cursor stays put).
     pub fn tree_move_down(&mut self) {
         if !self.tree.visible || self.tree.rows.is_empty() {
             return;
         }
-        self.tree.selected = (self.tree.selected + 1).min(self.tree.rows.len() - 1);
+        if self.tree.narrow_query.is_empty() {
+            self.tree.selected = (self.tree.selected + 1).min(self.tree.rows.len() - 1);
+            return;
+        }
+        let q = self.tree.narrow_query.clone();
+        let surviving =
+            tree_surviving_indexes(&self.tree.rows, &q, &mut self.matcher);
+        if let Some(pos) = surviving.iter().position(|&i| i == self.tree.selected)
+            && pos + 1 < surviving.len()
+        {
+            self.tree.selected = surviving[pos + 1];
+        }
     }
 
-    /// `↑` / `PageUp`: move the tree cursor up (clamped).
+    /// `↑` / `PageUp`: move the tree cursor up (clamped). U-E12: while
+    /// narrowed, over the narrowed set (see `tree_move_down`).
     pub fn tree_move_up(&mut self) {
         if !self.tree.visible || self.tree.rows.is_empty() {
             return;
         }
-        self.tree.selected = self.tree.selected.saturating_sub(1);
+        if self.tree.narrow_query.is_empty() {
+            self.tree.selected = self.tree.selected.saturating_sub(1);
+            return;
+        }
+        let q = self.tree.narrow_query.clone();
+        let surviving =
+            tree_surviving_indexes(&self.tree.rows, &q, &mut self.matcher);
+        if let Some(pos) = surviving.iter().position(|&i| i == self.tree.selected)
+            && pos > 0
+        {
+            self.tree.selected = surviving[pos - 1];
+        }
     }
 
     /// Click-to-select in the tree sidebar (plan 004 issue 05e): the
-    /// sidebar layout is a title row (terminal row 0), up to
-    /// `TREE_VISIBLE_ROWS` file rows (starting at the visible window top,
-    /// `selected.saturating_sub(5)`), then a help row. Map a 0-based
-    /// terminal row onto the tree row under it; the title row, the help
-    /// row, rows past the window, a hidden tree, or a non-buffer top view
-    /// are no-ops. A tree click moves ONLY the tree cursor — it never
-    /// touches the code point (the code point is set by code-pane clicks,
-    /// and `RET` opens the selected file).
+    /// sidebar layout is a title row (terminal row 0), the U-E12 narrow
+    /// prompt row (terminal row 1), up to `TREE_VISIBLE_ROWS` file rows
+    /// (the store-owned window, U-E12 re-home: starting at the window top
+    /// `sel.saturating_sub(5)` over the NARROWED set), then a help row.
+    /// Map a 0-based terminal row onto the tree row under it; the title
+    /// row, the prompt row, the help row, rows past the window, a hidden
+    /// tree, or a non-buffer top view are no-ops. A tree click moves ONLY
+    /// the tree cursor — it never touches the code point (the code point
+    /// is set by code-pane clicks, and `RET` opens the selected file).
     pub fn tree_click_row(&mut self, terminal_row: usize) {
         // 06a: the tree shares the main pane with home (home renders in the
         // buffer slot), so clicks land while either is on top.
@@ -317,16 +435,33 @@ impl AppStore {
         // AFTER the guard, like the buffer click: a click that ran nothing
         // leaves the run armed.
         self.self_insert_run = None;
-        let Some(rel) = terminal_row.checked_sub(1) else {
-            return; // terminal row 0 is the tree title
+        // U-E12: terminal row 0 is the tree title and row 1 is the narrow
+        // prompt — neither is a file row (a prompt-row click is a no-op,
+        // not a selection).
+        let Some(rel) = terminal_row.checked_sub(2) else {
+            return;
         };
         if rel >= crate::model::tree_layout::TREE_VISIBLE_ROWS {
             return; // the help row (or below it)
         }
-        let start = self.tree.selected.saturating_sub(5);
-        let idx = start.saturating_add(rel);
-        if idx < self.tree.rows.len() {
-            self.tree.selected = idx;
+        // The window is over the NARROWED set (U-E12): with an empty query
+        // that IS the full list, so the mapping is the pre-re-home one.
+        let q = self.tree.narrow_query.clone();
+        let surviving =
+            tree_surviving_indexes(&self.tree.rows, &q, &mut self.matcher);
+        if surviving.is_empty() {
+            return; // the zero-match empty state: no rows under the cursor
+        }
+        let sel_pos = surviving
+            .iter()
+            .position(|&i| i == self.tree.selected)
+            .unwrap_or(0);
+        let start = sel_pos.saturating_sub(5);
+        // `rel` is the window SLOT (0-based from the row under the prompt):
+        // the set index under it is `start + rel` (a slot past the end of a
+        // short tail window is a no-op, as before the re-home).
+        if let Some(&full) = surviving.get(start + rel) {
+            self.tree.selected = full;
         }
     }
 
@@ -359,6 +494,39 @@ impl AppStore {
             && let Some(idx) = self.tree.rows.iter().position(|r| r.rel_path == rel)
         {
             self.tree.selected = idx;
+            // U-E12: the follow move re-derives under a still-active narrow
+            // query — the opened file rests on its row when it survives,
+            // otherwise the cursor clamps back onto the first survivor.
+            self.tree_narrow_recompute();
         }
     }
+}
+
+/// U-E12: the full-list indexes of the tree rows that survive the narrow
+/// `query`, in SOURCE order (never re-ranked — the
+/// filter-children-keep-parents projection keeps the tree; re-ranking is
+/// the score-reorder mechanism this surface is declared DIFFER against in
+/// PLAN 018 §4). A row survives iff the shared core scores its FULL
+/// relative path — its own name or an ancestor directory component — so a
+/// parent component match keeps every file under it, and every surviving
+/// file keeps its full indentation (the ancestor chain is never hidden).
+/// An empty query survives everything (the full list in its own order).
+fn tree_surviving_indexes(
+    rows: &[TreeRow],
+    query: &str,
+    matcher: &mut Matcher,
+) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..rows.len()).collect();
+    }
+    rows.iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            if !super::narrowing::narrow(query, &[row.rel_path.as_str()], matcher).is_empty() {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
 }

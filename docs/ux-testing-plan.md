@@ -438,13 +438,62 @@ cancel · `q`/`ESC` close. Pending: issue 08 (`l`/`b`/`c`/`y`/`z`).
       motion trajectory holds one-blue at every step). Store pins: the
       `log_narrow_*` pins in `src/app/store/tests/commit.rs`; redline-git
       pin: `log_all_is_the_unwindowed_walk_and_pages_compose_it`.
-- [ ] **U-E12 · Named follow-up: tree narrowing (018 deferral)**: the tree
+- [x] **U-E12 · Named follow-up: tree narrowing (018 deferral)**: the tree
       sidebar stays DIFFER — it is hierarchical (narrowing means
       filter-children-keep-parents in the 34-col sidebar) AND it is the one
       renderer-windowed surface (PLAN §1 row 4), so unifying it starts with
       re-homing its windowing to the store (a refactor with no user value by
       itself). Note its actual job — find a file fast — is already served by
       the narrowing FindFile picker (`C-c p f`), which narrows.
+      **LANDED (branch `tree-narrow`):** the tree sidebar carries a live
+      HIERARCHICAL narrow — the tracker's filter-children-keep-parents
+      verdict as a view-time projection: a file survives iff the shared
+      core scores its FULL relative path (its name or an ancestor directory
+      component — typing a directory name keeps every file under it),
+      survivors keep their full indentation (a child hit is never hidden
+      behind a filtered-out sibling), rows are never re-ranked (source
+      order — the score-reorder DIFFER, PLAN 018 §4), and the underlying
+      rows are never mutated by the query (clearing re-derives the full
+      tree byte-for-byte). The prompt row went IN THE TREE PANE (row 1
+      under the `*tree*` title: `↑/↓ · C-g clear` keys leading, query
+      trailing, `· type to narrow` placeholder — RET open and C-c p t
+      toggle stay on the help line below; the 34-col column fits exactly).
+      Deliberate geometry: the sidebar is a left column, so its extra row
+      shifts only the tree column — the main view's rows, `cursor_cell`
+      (the tree is not a cursor surface), and `click_pane` (the column
+      split) are untouched; the tree's OWN click-row mapping carries the
+      +1 (title 0, prompt 1, window 2..=9, help 10). The guard composes
+      pending+key from the first commit (the
+      `issue-narrow-guard-pending-prefix` discipline, fifth surface — the
+      `2` of `C-x 2` and an armed `C-c p` prefix's unbound completion reach
+      the engine, never the query; the `t` completing `C-c p t` toggles
+      the tree; proven load-bearing by mutation). Arrows step over the
+      narrowed set (a filtered-out file is never a landing spot); the
+      selection's identity is the file, never a row index — it clamps
+      into the surviving set, survives the zero-match state (the index
+      stays valid against the FULL list — `RET` opens the right file),
+      and the clear keeps it (clamped, not lost). THE WINDOWING RE-HOME
+      (the deferral's precondition, PLAN §1 row 4): the store now owns the
+      tree window — `tree_view_info` returns the narrowed projection
+      windowed around the selection (`sel.saturating_sub(5)` +
+      `TREE_VISIBLE_ROWS`, byte-for-byte the old renderer math on an empty
+      query) plus the IN-WINDOW selection index; `src/ui/tree.rs` no
+      longer skips/takes anything (the invariant: the cursor row is
+      always inside the window). PTY drive:
+      `tools/drive_tree_narrow.py` (31 checks: the row-set walk
+      3 -> (lib) 1 -> (C-g) 3 -> (ma) 1 -> (pop m) 2 -> (pop) 3 ->
+      (zz) 0 -> (C-g) 3 with the selection's identity surviving every
+      re-derive, the survivor's depth-1 indentation on screen, the C-x 2
+      chord dead-ending to the unbound-key echo with the query untouched,
+      and the old arrow trajectory holding one-blue at every step —
+      `drive_tree.py` needed no update: it carries no absolute row
+      expectations, only blue-row count/text). Store pins: the
+      `tree_narrow_*` / `tree_view_info_*` pins in
+      `src/app/store/tests/project.rs`; renderer pins:
+      `tree_prompt_row_keys_lead_the_query` / `tree_renderer_draws_exactly_
+      the_store_window_it_is_handed` in `src/ui/tree.rs`; the click-mapping
+      +1 pinned in the updated `tree_click_row_*` pins in
+      `src/app/store/tests/magit.rs`.
 - [x] **U-E13 · Named follow-up: isearch's second query dimension (018
       deferral)**: the isearch list narrows BY the search itself — a literal
       byte search whose match order IS the search (plan 018 §3; the corrected

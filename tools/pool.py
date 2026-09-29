@@ -83,6 +83,7 @@ BATTERY = [
     "drive_results_narrow.py",
     "drive_magit_narrow.py",
     "drive_log_narrow.py",
+    "drive_tree_narrow.py",
     "sweep_flows.py",
 ]
 
