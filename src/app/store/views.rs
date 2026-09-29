@@ -7,6 +7,19 @@ impl AppStore {
         self.view_stack.push(view);
     }
 
+    /// The view directly BENEATH the top of the view stack (the "underlying"
+    /// view). The half-screen search overlay's top half renders this — the
+    /// view the search was launched from. The search view is only ever
+    /// pushed on top of a populated stack, so in practice the result is the
+    /// real view the search opened over; with only one view on the stack
+    /// (nothing beneath) it falls back to Home.
+    pub fn underlying_view(&self) -> ViewId {
+        self.view_stack
+            .get(self.view_stack.len().saturating_sub(2))
+            .copied()
+            .unwrap_or(ViewId::Home)
+    }
+
     /// Pop the top view (if a non-root view is on top) and restore the
     /// new top view's keymap (re-normalizing home ⇄ buffer, 06a).
     pub fn close_view(&mut self) {

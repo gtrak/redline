@@ -119,6 +119,19 @@ pub(super) struct Snapshot {
     // Plan 018 issue 03: the results-view narrow query (the prompt row's
     // trailing text; empty = no narrowing).
     pub(super) search_narrow_query: String,
+    // Half-screen search overlay (the helm shape): the overlay's height in
+    // pane rows (its title sits at the pane's midpoint = row
+    // `search_overlay_half`) and the view directly beneath the results view
+    // (the top half's source: FileView when it is a Buffer, HomeView
+    // otherwise).
+    pub(super) search_overlay_half: usize,
+    pub(super) search_underlying: ViewId,
+    /// The current buffer's display name (project-relative when it belongs
+    /// to the project). The half-screen search overlay's top half renders a
+    /// FileView titled with THIS (not the top view's name, which is
+    /// `*search*` while the results view is on top); empty when no buffer is
+    /// current (the top half renders HomeView instead).
+    pub(super) current_buffer_display: String,
     pub(super) searching: String,
     // plan 018 issue 02: the isearch list overlay (the match rows in
     // search order + the selection; rendered in place of the buffer
@@ -277,6 +290,13 @@ pub(super) fn build(
         search_running: s.search_running(),
         search_error: s.search_error(),
         search_narrow_query: s.search_narrow_query().to_string(),
+        search_overlay_half: s.search_overlay_half(),
+        search_underlying: s.underlying_view(),
+        current_buffer_display: s
+            .buffers
+            .current()
+            .map(|k| s.buffer_display(k))
+            .unwrap_or_default(),
         searching: s.search_display(),
         isearch_active,
         isearch_rows,

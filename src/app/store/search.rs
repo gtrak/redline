@@ -749,7 +749,7 @@ impl AppStore {
                 None => return, // narrowed out: no row to keep visible
             }
         };
-        let viewport = self.viewport_lines.max(1);
+        let viewport = self.search_overlay_rows();
         let scroll = &mut self.search.scroll;
         if row < *scroll {
             *scroll = row;
@@ -920,6 +920,31 @@ impl AppStore {
         };
     }
 
+    /// The half-screen search overlay's height in PANE rows (the helm
+    /// reading): the overlay occupies the pane's bottom half, its title row
+    /// sitting at the pane's midpoint and filling downward to the pane's
+    /// bottom. The pane is `viewport_lines + 1` rows — the main view is one
+    /// row of title plus `viewport_lines` content rows (the relationship
+    /// `home_body_rows` pins: "the main view is `viewport_lines + 1`"), so
+    /// the bottom half is `(viewport_lines + 1) / 2` rows. (The store's
+    /// `viewport_lines` is the CONTENT budget, one row short of the pane —
+    /// using `viewport_lines / 2` would land the title one row into the top
+    /// half instead of on the midpoint.)
+    pub fn search_overlay_half(&self) -> usize {
+        self.viewport_lines.div_ceil(2)
+    }
+
+    /// The half-screen search overlay's RESULT-ROW budget: `half - 2`, the
+    /// two chrome rows being the overlay's title and the narrow-prompt row
+    /// (both above the result rows). The store windows the result rows to
+    /// this budget so the visible window tracks the HALF, not the full pane
+    /// (the search navigation must not assume the full-viewport room it had
+    /// when the results were a full-pane swap). Floored at 1 so a very short
+    /// pane still shows one result row rather than panicking the slice.
+    pub fn search_overlay_rows(&self) -> usize {
+        self.search_overlay_half().saturating_sub(2).max(1)
+    }
+
     /// The visible window of results-view rows, pre-computed for the UI:
     /// (rows, scroll top, total rows, selected hit's row relative to the
     /// window).
@@ -939,7 +964,7 @@ impl AppStore {
         self.search_narrow_recompute();
         let rows = self.search_narrow_rows();
         let total = rows.len();
-        let viewport = self.viewport_lines.max(1);
+        let viewport = self.search_overlay_rows();
         // The selected hit's row in the narrowed list (`None` when the
         // selection is narrowed out — same as today's out-of-window case).
         let sel_row = self.search_narrow_row_of(self.search.selected);
@@ -968,7 +993,7 @@ impl AppStore {
     fn search_view_info_full(&self) -> (Vec<ResultRow>, usize, usize, Option<usize>) {
         let s = &self.search;
         let total = s.rows.len();
-        let viewport = self.viewport_lines.max(1);
+        let viewport = self.search_overlay_rows();
         let mut scroll = s.scroll.min(total.saturating_sub(1));
         if let Some(&row) = s.hit_rows.get(s.selected) {
             if row < scroll {

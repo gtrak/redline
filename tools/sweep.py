@@ -156,6 +156,22 @@ def drive_to(app, view):
     raise ValueError(view)
 
 
+def search_top_half_row(frame):
+    """The half-screen (helm) search overlay's title row in a captured
+    FRAME (a list of row texts). The overlay's TOP HALF is the view the
+    search was launched FROM — Home when the reference was captured from
+    home, the file when the transition ran from a file. That half is
+    state-dependent BY DESIGN, so the frame diff for the search view
+    covers only the OVERLAY (from its title row down): diffing the whole
+    frame against a home-captured reference asserted a layout contract
+    the helm shape deliberately breaks (the transition's top half is the
+    file — correct, and exactly the property the user asked for)."""
+    for r, t in enumerate(frame):
+        if t.lstrip().startswith("Search:"):
+            return r
+    return None
+
+
 RESULTS = []
 
 
@@ -258,7 +274,16 @@ def transitions(refs):
 
 
 def run(app, refs, name, keys, target):
-    stale, mismatch = diff(refs[target], stable_capture(app))
+    actual = stable_capture(app)
+    ref = refs[target]
+    # The half-screen search overlay's top half is STATE-DEPENDENT (the
+    # view the search was launched from): for the search target the diff
+    # covers only the overlay region (title row down), on both sides.
+    if target == "search":
+        rt, at = search_top_half_row(ref), search_top_half_row(actual)
+        if rt is not None and at is not None:
+            ref, actual = ref[rt:], actual[at:]
+    stale, mismatch = diff(ref, actual)
     ok = not stale and not mismatch
     parts = []
     if stale:

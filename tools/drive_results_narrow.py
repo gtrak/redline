@@ -47,6 +47,41 @@ def verdict(tag, ok, detail=""):
     BAD.append(not ok)
 
 
+def overlay_top(app):
+    """The first row of the search overlay (its title row): the row whose
+    text starts the results pane. The half-screen (helm) overlay sits in
+    the pane's bottom half, so selection assertions must count blue rows
+    WITHIN the overlay — the top half legitimately renders the buffer the
+    search was launched from, and its current-line tint reads as a second
+    blue row to a whole-screen scan."""
+    for r in range(app.rows):
+        if app.row_text(r).lstrip().startswith("Search:"):
+            return r
+    return None
+
+
+def overlay_blue_rows(app):
+    top = overlay_top(app)
+    if top is None:
+        return []
+    return [r for r in app.blue_rows() if r >= top]
+
+
+def overlay_one_blue(app):
+    return len(overlay_blue_rows(app)) == 1 and len(app.reverse_rows()) == 0
+
+
+def overlay_text(app):
+    """The overlay region's text: from the title row down to the status
+    line. Content-absence checks for the LIST must scan this region — the
+    top half legitimately shows the buffer the search was launched from,
+    whose content can contain the very line that dropped from the list."""
+    top = overlay_top(app)
+    if top is None:
+        return ""
+    return "\n".join(app.row_text(r) for r in range(top, app.rows))
+
+
 def one_blue(app):
     return len(app.blue_rows()) == 1 and len(app.reverse_rows()) == 0
 
@@ -151,8 +186,8 @@ def main():
             "filter:" in screen and f"1 of {N_HITS} matches" in screen,
             "narrowed title + prompt row")
     verdict("M-, restored the selection",
-            one_blue(app) and "target_lib" in app.row_text(blues[0]),
-            f"blue={[app.row_text(r) for r in blues]}")
+            overlay_one_blue(app) and "target_lib" in app.row_text(overlay_blue_rows(app)[0]),
+            f"overlay blue={[app.row_text(r) for r in overlay_blue_rows(app)]}")
 
     # 5. C-g (job idle) CLEARS the query: full list re-derives, the
     #    selection is not lost.
@@ -167,8 +202,8 @@ def main():
             and "target_one" in screen and "target README" in screen,
             "README + main rows back")
     verdict("the selection survived the clear",
-            one_blue(app) and "target_lib" in app.row_text(blues[0]),
-            f"blue={[app.row_text(r) for r in blues]}")
+            overlay_one_blue(app) and "target_lib" in app.row_text(overlay_blue_rows(app)[0]),
+            f"overlay blue={[app.row_text(r) for r in overlay_blue_rows(app)]}")
 
     # 6. A fresh query ("mai" -> main.rs's 5 hits), then g re-run: the
     #    narrow query is CLEARED (a new job is a new result set). (The
@@ -180,9 +215,12 @@ def main():
     screen = app.screen_text()
     verdict("fresh query narrowed to main.rs",
             "5 of 8 matches" in screen
-            and "# target README" not in screen
-            and "pub fn target_lib() {}" not in screen,
-            "narrowed title + rows")
+            and "# target README" not in overlay_text(app)
+            and "pub fn target_lib() {}" not in overlay_text(app),
+            "narrowed title + rows (overlay region only — the top half\n"
+            "            legitimately shows the buffer, whose content IS the\n"
+            "            lib.rs hit line; a whole-screen absence check cannot\n"
+            "            see the LIST)")
     app.key("g", 1.0)
     ok, text = prompt_row(app, expect_placeholder=True)
     verdict("g re-run cleared the query (placeholder back)", ok,

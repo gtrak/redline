@@ -253,11 +253,17 @@ def flow_h2_search(app):
     # in-flight cancel).
     cancelled = wait_for(app, lambda: "search cancelled"
                          in app.row_text(app.rows - 2), 4.0)
-    view_stays = "Search:" in row0(app)
-    alive = "(cancelled)" in row0(app)
+    # The half-screen (helm) overlay's TITLE row, not row 0: the overlay
+    # sits in the pane's bottom half and row 0 is the TOP HALF — the view
+    # the search was launched from (Home here; a file when launched from a
+    # buffer). Asserting the title at row 0 was the full-pane assumption.
+    title_row = next((r for r in range(app.rows)
+                      if app.row_text(r).lstrip().startswith("Search:")), None)
+    view_stays = title_row is not None
+    alive = title_row is not None and "(cancelled)" in app.row_text(title_row)
     record("U-H2 search", "C-c p s s,target,RET+C-g(fast)", cancelled and view_stays and alive,
            f"in-flight-cancel-message={cancelled} view-stays-open={view_stays} "
-           f"title={row0(app)[:40]!r}")
+           f"title-row={title_row} title={app.row_text(title_row)[:40]!r}")
     app.key("q")
     app.wait(0.6)
 

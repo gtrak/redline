@@ -36,7 +36,21 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                 .map(|row| (0u16, 2 + row as u16))
                 .or(Some((0, 2)))
         }
-        ViewId::Search => snap.search_selected_row.map(cell).or_else(|| Some(cell(0))),
+        ViewId::Search => {
+            // Half-screen overlay (the helm shape): the overlay's chrome
+            // (title + narrow prompt) starts at the pane's midpoint —
+            // screen row `search_overlay_half` (0-based; the pane top is
+            // terminal row 0) — so the in-window result row `i` sits at
+            // `half + 2 + i`. The fallback (selection narrowed out or no
+            // hits) parks on the first result row, `half + 2` — the spot
+            // where the "no matches" / "searching…" text renders.
+            let half = snap.search_overlay_half as u16;
+            Some(
+                snap.search_selected_row
+                    .map(|i| (0u16, half + 2 + i as u16))
+                    .unwrap_or((0, half + 2)),
+            )
+        }
         ViewId::MagitStatus => {
             // U-E10: the pane's content starts TWO rows down (the title row
             // and the section-narrow prompt row above it) — the same shape
@@ -286,6 +300,13 @@ mod tests {
             search_error: None,
             magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
+
+            search_overlay_half: 11,
+
+            search_underlying: ViewId::Home,
+
+
+            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),
@@ -507,6 +528,13 @@ mod tests {
             search_error: None,
             magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
+
+            search_overlay_half: 11,
+
+            search_underlying: ViewId::Home,
+
+
+            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),
@@ -845,6 +873,13 @@ mod tests {
             search_error: None,
             magit_narrow_query: String::new(),
             search_narrow_query: String::new(),
+
+            search_overlay_half: 11,
+
+            search_underlying: ViewId::Home,
+
+
+            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),

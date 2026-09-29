@@ -1,9 +1,16 @@
 //! The search results view (issue 06): file groups with per-file counts
-//! (live while the search streams), match lines with line numbers, the
-//! running total in the title, and a help line. `n`/`p` navigate
-//! matches, `RET` jumps to the match (recording a jump-stack entry so
-//! `M-,` returns), `g` re-runs, `q`/`ESC` cancel/close, `C-g` cancels
-//! the in-flight search.
+//! (live while the search streams), match lines with line numbers, and the
+//! running total in the title. `n`/`p` navigate matches, `RET` jumps to the
+//! match (recording a jump-stack entry so `M-,` returns), `g` re-runs,
+//! `q`/`ESC` cancel/close, `C-g` cancels the in-flight search.
+//!
+//! Half-screen (the helm shape): this view renders as the pane's BOTTOM HALF
+//! overlay (see `render_view`'s `ViewId::Search` arm — the view the search
+//! was launched from stays visible in the top half). It draws EXACTLY a
+//! title row, the narrow-prompt row, and the store-windowed result rows
+//! (the `search_overlay_rows` budget = the half minus those two chrome rows)
+//! — no trailing help line or scroll indicator (they would overflow the
+//! half; the decision keys already lead the prompt row).
 //!
 //! Plan 018 issue 03: a one-row `NoWrap` narrow prompt at the top of the
 //! view (the picker canvas row-0 precedent — NOT the minibuffer, which
@@ -132,31 +139,21 @@ pub fn ResultsView(props: &ResultsViewProps, mut _hooks: Hooks) -> impl Into<Any
                         }
                     })
                 })
-                #({
-                    // Scroll indicators (same convention as the file view).
-                    let mut ind = String::new();
-                    if props.top_row > 0 {
-                        ind.push('↑');
-                    }
-                    if props.top_row + props.rows.len() < props.total_rows {
-                        ind.push('↓');
-                    }
-                    if ind.is_empty() {
-                        None
-                    } else {
-                        Some(element! {
-                            Text(content: ind, color: face_color(t.preview))
-                        })
-                    }
-                })
-                Text(
-                    content: "RET jump (M-, returns) · n/p next/prev · g re-run · q/ESC close · C-g cancel search",
-                    color: face_color(t.preview),
-                )
             }
         }
     }
 }
+
+// The half-screen overlay renders EXACTLY title + narrow-prompt + the
+// store-windowed result rows (the overlay's `search_overlay_rows` budget —
+// the pane's bottom half minus the two chrome rows). There is deliberately
+// NO trailing scroll indicator or help line: the box is `half` rows tall and
+// title(1) + prompt(1) + rows(budget) fills it exactly, so any extra row
+// would overflow. (A flex column whose content exceeds its box shrinks every
+// child by default, which silently collapsed the narrow-prompt row to <1 row
+// — the prompt-vanishes class. Filling the box exactly removes the overflow
+// and the shrink together.) The decision keys already lead the prompt row,
+// and the title carries the running match counts.
 
 #[cfg(test)]
 mod tests {
@@ -240,7 +237,12 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn target() {}\ntarget();\n").unwrap();
 
         let mut store = store(dir.path());
-        store.set_viewport_lines(24);
+        // The live 24-row terminal's viewport (canvas - title/help/status;
+        // hooks.rs subtracts 3, pty_store uses 21). With the half-screen
+        // overlay's FIXED heights (behind + overlay = viewport) an explicit
+        // 24 here overflowed the pane and clipped the status line off the
+        // canvas — the value must be the one the live UI would set.
+        store.set_viewport_lines(21);
         store.start_project_search("target".to_string());
 
         // The search view is on top; drain the bus until it finishes.
@@ -287,7 +289,12 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn target() {}\ntarget();\n").unwrap();
 
         let mut store = store(dir.path());
-        store.set_viewport_lines(24);
+        // The live 24-row terminal's viewport (canvas - title/help/status;
+        // hooks.rs subtracts 3, pty_store uses 21). With the half-screen
+        // overlay's FIXED heights (behind + overlay = viewport) an explicit
+        // 24 here overflowed the pane and clipped the status line off the
+        // canvas — the value must be the one the live UI would set.
+        store.set_viewport_lines(21);
         store.start_project_search("target".to_string());
 
         let mut rx = store.search_rx().unwrap();
@@ -318,3 +325,38 @@ mod tests {
         );
     }
 }
+// temporary debug
+#[cfg(test)]
+mod dbg {
+    use std::sync::{Arc, Mutex};
+    use iocraft::prelude::*;
+    use crate::ui::root::Root;
+    #[test]
+    fn dbg_dump() {
+        for vl in [16u16, 21, 24] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::write(dir.path().join("src/main.rs"), "fn target() {}\ntarget();\n").unwrap();
+            let base = tempfile::tempdir().unwrap();
+            let mut store = crate::app::store::AppStore::at(dir.path(), base.path().to_path_buf());
+            store.set_viewport_lines(vl as usize);
+            store.start_project_search("target".to_string());
+            let mut rx = store.search_rx().unwrap();
+            let start = std::time::Instant::now();
+            loop {
+                let mut done = false;
+                while let Ok(ev) = rx.try_recv() { store.apply_search_event(&ev); if matches!(ev, crate::search::rg::SearchEvent::Finished{..}) { done = true; } }
+                if done { break; }
+                assert!(start.elapsed() < std::time::Duration::from_secs(5));
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let mut app = element! { ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) { Root } };
+            let s = app.to_string();
+            let lines: Vec<&str> = s.lines().collect();
+            let search_row = lines.iter().position(|l| l.contains("Search: 'target'")).unwrap_or(usize::MAX);
+            eprintln!("vl={} canvas_lines={} search_row={}", vl, lines.len(), search_row);
+        }
+    }
+}
+

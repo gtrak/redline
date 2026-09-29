@@ -40,34 +40,51 @@ use super::widgets::{Minibuffer, StatusLine};
 /// that escape the window render off-screen and their absence is catchable.
 #[derive(Clone, Copy)]
 pub struct StaticRenderWidth(pub u16);
+/// The home view's element (the `ViewId::Home` render; factored out so the
+/// half-screen search overlay can reuse it as the top half when the search
+/// was launched from home).
+fn home_view_element(snap: &Snapshot) -> AnyElement<'static> {
+    element! {
+        HomeView(
+            title: snap.home_title.clone(),
+            rows: snap.home_rows.clone(),
+            help: "C-x C-c quit · ? menu".to_string(),
+        )
+    }
+    .into()
+}
+
+/// The file (buffer) view's element (the `ViewId::Buffer` render; factored
+/// out so the half-screen search overlay can reuse it as the top half — the
+/// buffer the search was launched from — without disturbing the store's
+/// file-view window). `title` is passed separately: the Buffer arm passes
+/// the view's own title, the search overlay passes the buffer's display
+/// name (the top view's name is `*search*`, not the buffer's).
+fn file_view_element(snap: &Snapshot, title: String) -> AnyElement<'static> {
+    element! {
+        FileView(
+            title: title,
+            rows: snap.file_view_rows.clone(),
+            total_rows: snap.file_view_total_rows,
+            top_line: snap.file_view_top_line,
+            viewport_lines: snap.file_view_viewport_lines,
+            changed_on_disk: snap.file_view_changed_on_disk,
+            buffer_editable: snap.file_view_current_buffer_editable,
+            region_lines: snap.region_lines,
+            point_line: snap.file_view_point_line,
+            notes_folded: snap.file_view_notes_folded,
+        )
+    }
+    .into()
+}
+
 /// The view dispatch: the top-of-stack view for the current `ViewId`
 /// (the root view is never rendered here — the root's own title/help
 /// come from the view itself).
 pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
     match snap.view {
-        ViewId::Home => Some(element! {
-            HomeView(
-                title: snap.home_title.clone(),
-                rows: snap.home_rows.clone(),
-                help: "C-x C-c quit · ? menu".to_string(),
-            )
-        }
-        .into()),
-        ViewId::Buffer => Some(element! {
-            FileView(
-                title: snap.file_view_title.clone(),
-                rows: snap.file_view_rows.clone(),
-                total_rows: snap.file_view_total_rows,
-                top_line: snap.file_view_top_line,
-                viewport_lines: snap.file_view_viewport_lines,
-                changed_on_disk: snap.file_view_changed_on_disk,
-                buffer_editable: snap.file_view_current_buffer_editable,
-                region_lines: snap.region_lines,
-                point_line: snap.file_view_point_line,
-                notes_folded: snap.file_view_notes_folded,
-            )
-        }
-        .into()),
+        ViewId::Home => Some(home_view_element(snap)),
+        ViewId::Buffer => Some(file_view_element(snap, snap.file_view_title.clone())),
         ViewId::BufferList => Some(element! {
             BufferListView(
                 rows: snap.buffer_list_rows.clone(),
@@ -115,19 +132,52 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
             )
         }
         .into()),
-        ViewId::Search => Some(element! {
-            ResultsView(
-                title: snap.search_title.clone(),
-                query: snap.search_narrow_query.clone(),
-                rows: snap.search_rows.clone(),
-                top_row: snap.search_top_row,
-                total_rows: snap.search_total_rows,
-                selected_row: snap.search_selected_row,
-                running: snap.search_running,
-                error: snap.search_error.clone(),
-            )
-        }
-        .into()),
+        ViewId::Search => {
+            // Half-screen (the helm shape): the results occupy the pane's
+            // bottom half; the view the search was launched from — a file
+            // buffer's FileView (its own title + scroll, the store's
+            // file-view window undisturbed) or HomeView from home — stays
+            // visible in the top half. Both halves get EXPLICIT heights off
+            // the pane's viewport (behind = viewport - half, overlay =
+            // half): a flex_grow + min_height-0 behind box does NOT clip in
+            // iocraft's flex — the behind content's own height floors the
+            // box and pushes the fixed overlay below the canvas, which the
+            // static renders caught (the overlay's title absent from the
+            // frame). Fixed heights clip deterministically in both the
+            // static and the live path.
+            let behind_h = snap
+                .file_view_viewport_lines
+                .saturating_sub(snap.search_overlay_half)
+                .max(1) as u32;
+            let behind = if snap.search_underlying == ViewId::Buffer {
+                Some(file_view_element(snap, snap.current_buffer_display.clone()))
+            } else {
+                Some(home_view_element(snap))
+            };
+            Some(element! {
+                View(flex_direction: FlexDirection::Column, flex_grow: 1.0f32, overflow: Overflow::Hidden) {
+                    // The behind view: the top half, its own content clipped
+                    // (the home body's ~22 rows or the file view's canvas
+                    // both exceed half a pane).
+                    View(height: iocraft::Size::Length(behind_h), overflow: Overflow::Hidden) {
+                        #(behind)
+                    }
+                    View(height: snap.search_overlay_half as u32, flex_shrink: 0.0f32, overflow: Overflow::Hidden) {
+                        ResultsView(
+                            title: snap.search_title.clone(),
+                            query: snap.search_narrow_query.clone(),
+                            rows: snap.search_rows.clone(),
+                            top_row: snap.search_top_row,
+                            total_rows: snap.search_total_rows,
+                            selected_row: snap.search_selected_row,
+                            running: snap.search_running,
+                            error: snap.search_error.clone(),
+                        )
+                    }
+                }
+            }
+            .into())
+        },
     }
 }
 
