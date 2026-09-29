@@ -3578,7 +3578,7 @@ use super::*;
     /// inverse (range [3,4)) applies.
     #[test]
     fn staleness_guard_catches_byte_char_mixup_in_kill_recording() {
-        use crate::model::buffer::UndoStep;
+        use redline_model::buffer::UndoStep;
         let (mut s, bk, _dir) = accurate_file_store("café\n");
         // c a f é (é = 2 bytes: 0xC3 0xA9). 4 chars, 5 bytes, + newline.
         // A correct char-based kill of "é" records range [3,4), removed "é".
@@ -3629,7 +3629,7 @@ use super::*;
     /// dropped and undo stops earlier.
     #[test]
     fn undo_cap_still_holds_for_the_new_paths() {
-        use crate::model::buffer::UndoStack;
+        use redline_model::buffer::UndoStack;
         let max = UndoStack::MAX_ENTRIES;
         let (mut s, bk, _dir) = accurate_file_store("x\n");
         s.set_point(0, 0, 0);
@@ -3836,7 +3836,7 @@ use super::*;
     /// win.
     #[test]
     fn undo_history_is_capped() {
-        use crate::model::buffer::UndoStack;
+        use redline_model::buffer::UndoStack;
         let max = UndoStack::MAX_ENTRIES;
         let (mut s, bk, _dir) = accurate_file_store("end\n");
         s.set_point(0, 0, 0);
@@ -3879,7 +3879,7 @@ use super::*;
         let bk = s.buffers.current().unwrap().to_string();
         assert!(!s.buffers.get(&bk).unwrap().editable);
         // Seed a step to prove the gate holds even with history present.
-        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+        s.buffers.get_mut(&bk).unwrap().undo.push(redline_model::buffer::UndoStep {
             id: 1,
             range: 0..1,
             removed: "h".into(),
@@ -3994,7 +3994,7 @@ use super::*;
         // A step whose range (0..3) fits "defgh\n" but whose `removed` ("abc")
         // does NOT match the rope's text there ("def") → stale on the text
         // check even though the range is in bounds.
-        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+        s.buffers.get_mut(&bk).unwrap().undo.push(redline_model::buffer::UndoStep {
             id: 1,
             range: 0..3,
             removed: "abc".into(),
@@ -4029,7 +4029,7 @@ use super::*;
         // `clippy::reversed_empty_ranges` (deny-by-default), and the subject
         // here is the guard, not the lint.
         let (start, end) = (3usize, 1usize);
-        s.buffers.get_mut(&bk).unwrap().undo.push(crate::model::buffer::UndoStep {
+        s.buffers.get_mut(&bk).unwrap().undo.push(redline_model::buffer::UndoStep {
             id: 1,
             range: start..end, // start > end
             removed: "de".into(),
@@ -4164,7 +4164,7 @@ use super::*;
     /// comparison is conservative by construction.
     #[test]
     fn dirty_flag_cap_eviction_of_saved_marker_reads_modified() {
-        use crate::model::buffer::UndoStack;
+        use redline_model::buffer::UndoStack;
         let max = UndoStack::MAX_ENTRIES;
         let (mut s, bk, dir) = accurate_file_store("end\n");
         s.set_point(0, 0, 0);

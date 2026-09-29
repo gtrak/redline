@@ -11,7 +11,7 @@
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
 use crate::app::store::TransientMenuRow;
-use crate::model::text_width::{char_display_width, display_width};
+use redline_model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::{color, text_style};
 
@@ -175,7 +175,7 @@ pub(crate) fn truncate_ellipsis(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::truncate_ellipsis;
-    use crate::model::text_width::display_width;
+    use redline_model::text_width::display_width;
 
     // ── plan 004 issue 05f: ellipsis-truncation helper ────────────────
 

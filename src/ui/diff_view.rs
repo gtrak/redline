@@ -3,7 +3,7 @@
 //! log/commit diff buffers (issue 08), so added/deleted/context/hunk-header
 //! coloring lives in exactly one place.
 
-use crate::model::sections::RowRole;
+use redline_model::sections::RowRole;
 use crate::theme;
 
 /// The face for a magit/diff row, given its role and whether the row is the

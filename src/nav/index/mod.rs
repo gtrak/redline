@@ -70,7 +70,7 @@ mod tests {
     }
 
     fn rel_files(root: &Path) -> Vec<String> {
-        let list = crate::model::files::FileList::build(root).unwrap();
+        let list = redline_model::files::FileList::build(root).unwrap();
         list.files
     }
 

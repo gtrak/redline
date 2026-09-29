@@ -47,7 +47,7 @@ use redline_syntax::queries::{
 };
 use redline_syntax::registry::{resolve_language, file_extension, LanguageId};
 
-use crate::model::files::FileList;
+use redline_model::files::FileList;
 use crate::nav::index::assemble_index;
 
 /// Profiler options (parsed in `main`).

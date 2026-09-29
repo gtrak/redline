@@ -358,7 +358,7 @@ impl AppStore {
             .position(|&i| i == self.tree.selected)
             .unwrap_or(0);
         let start = sel_pos.saturating_sub(5);
-        let end = (start + crate::model::tree_layout::TREE_VISIBLE_ROWS).min(surviving.len());
+        let end = (start + redline_model::tree_layout::TREE_VISIBLE_ROWS).min(surviving.len());
         let rows: Vec<TreeRow> = surviving[start..end]
             .iter()
             .map(|&i| self.tree.rows[i].clone())
@@ -441,7 +441,7 @@ impl AppStore {
         let Some(rel) = terminal_row.checked_sub(2) else {
             return;
         };
-        if rel >= crate::model::tree_layout::TREE_VISIBLE_ROWS {
+        if rel >= redline_model::tree_layout::TREE_VISIBLE_ROWS {
             return; // the help row (or below it)
         }
         // The window is over the NARROWED set (U-E12): with an empty query

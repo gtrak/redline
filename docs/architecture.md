@@ -23,7 +23,8 @@ stage and for reviewers.
 crates/
   redline-resolve/        1,426  background M-. workspace fall-through (cargo metadata, lockfile)
   redline-syntax/         6,663  tree-sitter grammar registry, highlight pipeline, cache (moved from src/syntax/, plan 014 stage 1)
-  redline-git/            3,806  git wrappers (libgit2 via git2), the magit subset (moved from src/git/, plan 014 stage 2; 50 lines of it — the StatusTree snapshot test — live in src/model/sections.rs until redline-model exists)
+  redline-git/            3,806  git wrappers (libgit2 via git2), the magit subset (moved from src/git/, plan 014 stage 2)
+  redline-model/         3,882  headless data models: project layer, file lists, buffers, magit status section tree (moved from src/model/, plan 014 stage 3; mid-tier, not leaf — sections.rs builds the Section tree from redline-git's plain status/diff data, so model -> git is a production edge)
   redline-testutil/         83  hermetic git test harness + the env-mutation lock, dev-dependency only (promoted from src/test_support.rs, plan 014 stage 2)
 
 src/
@@ -48,12 +49,7 @@ src/
     log.rs                 341 · refs.rs   268 · status.rs 101
     repo.rs               1,713  GitRepo facade (status/staging/log/blame/commit)
 
-  model/
-    buffer.rs              596  BufferTable + ropey-backed buffers (SCRATCH)
-    files.rs               292  FileList (ignore-aware project walk)
-    project.rs             364  Project root detection, ProjectStore (recents)
-    sections.rs            761  MagitRow / StatusTree (status section model)
-    text_width.rs          111  width-safe string truncation
+  model/  (moved to crates/redline-model, plan 014 stage 3)
 
   nav/
     index.rs              1,075  SymbolIndex, background indexing, IndexBus
@@ -484,7 +480,7 @@ field would need `pub(crate)` — not required by this plan.
 | M-. / imenu / jump | `src/app/store/navigation/`; index in `src/nav/index.rs`; fall-through in `crates/redline-resolve` |
 | pickers of any flavor | `src/app/store/picker.rs`; rendering in `src/ui/picker.rs` |
 | annotations / notes | `src/app/store/notes.rs` (format: `NOTES_*` consts + `parse_notes`) |
-| project / files / recents / tree sidebar | `src/app/store/project.rs`; walk in `src/model/files.rs` |
+| project / files / recents / tree sidebar | `src/app/store/project.rs`; walk in `crates/redline-model/src/files.rs` |
 | background jobs & their buses | `src/app/store/index_wiring.rs`; bus types defined at the top of the same module family |
 | rendering / drain loops | `src/ui/root.rs` (owns the event loop, bus drains) |
 | syntax / highlighting | `crates/redline-syntax` (registry = the only tree-sitter API surface) |

@@ -9,7 +9,7 @@ use iocraft::hooks::State;
 use crate::app::store::AppStore;
 use crate::app::store::jump_highlight_intensity;
 use crate::app::store::{BufferRow, DirtyCounts, FileViewRow, IsearchMatchRow, PickerCandidate, ResultRow, TransientMenuRow, ViewId};
-use crate::model::sections::MagitRow;
+use redline_model::sections::MagitRow;
 /// One render's worth of store state, extracted as owned values so the
 /// `Mutex` guard can be dropped before the element tree is built.
 pub(super) struct Snapshot {

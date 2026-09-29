@@ -2406,3 +2406,172 @@ use super::*;
         }
         let _ = &rows;
     }
+
+    // ── R3 agreement test, moved from `redline_model::files::tests`
+    // (plan 014 stage 3): it exercises the search pipeline (bin-only)
+    // against the file-list walk (now a workspace crate), and an
+    // extracted crate cannot reach the bin's `search` module — the bin
+    // side next to the search tests is the honest home ────────────────
+    /// R3: the file-list walk and the search pipeline must agree on
+    /// gitignore semantics. This fixture exercises a nested `.gitignore`
+    /// (root + subdir), a negation (`!important.log`), and a directory
+    /// rule (`build/`). The only expected difference is the documented
+    /// `graft/` asymmetry (Item 2): the file-list walk prunes `graft/`,
+    /// the search pipeline does not. Both walkers call the same
+    /// `load_gitignore` + `gitignore_matches` helpers (R3 extraction).
+    #[test]
+    fn finder_and_search_agree_on_gitignore() {
+        use crate::search::rg::{SearchBus, SearchConfig, SearchEvent, spawn};
+        use std::sync::atomic::AtomicBool;
+
+        fn wfile(path: impl AsRef<std::path::Path>, content: &str) {
+            let path = path.as_ref();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+        }
+
+        // Single-path test shim over the model's shared predicate
+        // (identical to the model's own tests' `ignored` twin).
+        fn ignored(root: &std::path::Path, path: &std::path::Path, is_dir: bool) -> bool {
+            let memo: redline_model::files::GitignoreMemo =
+                std::sync::Mutex::new(std::collections::HashMap::new());
+            redline_model::files::is_gitignored(root, path, is_dir, &memo)
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        wfile(dir.path().join("Cargo.toml"), "[package]\n");
+        // Root .gitignore: ignore *.log (except important.log), ignore build/
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "*.log\n!important.log\nbuild/\n",
+        )
+        .unwrap();
+        wfile(dir.path().join("kept.txt"), "hello world\n");
+        wfile(dir.path().join("crash.log"), "hello world\n");
+        wfile(dir.path().join("important.log"), "hello world\n");
+        wfile(dir.path().join("build/out.bin"), "hello world\n");
+        // Subdirectory .gitignore: ignore gen/
+        wfile(dir.path().join("src/.gitignore"), "gen/\n");
+        wfile(dir.path().join("src/keep.rs"), "hello world\n");
+        wfile(dir.path().join("src/gen/out.rs"), "hello world\n");
+        wfile(dir.path().join("src/visible.rs"), "hello world\n");
+        // graft/ directory (the documented asymmetry)
+        wfile(dir.path().join("graft/card.md"), "hello world\n");
+
+        // FileList walk (the finder side)
+        let list = redline_model::files::FileList::build(dir.path()).unwrap();
+        let finder_files: std::collections::BTreeSet<&str> =
+            list.files.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            finder_files,
+            std::collections::BTreeSet::from([
+                "Cargo.toml", "important.log", "kept.txt", "src/keep.rs", "src/visible.rs"
+            ]),
+            "FileList should contain exactly the non-ignored, non-graft files"
+        );
+
+        // Search pipeline (the grep side)
+        let cfg = SearchConfig {
+            root: dir.path().to_path_buf(),
+            pattern: "hello world".to_string(),
+            word: false,
+            fixed: true,
+            case_smart: false,
+            case_insensitive: false,
+            glob: None,
+            file_type: None,
+            filter: None,
+            cancel: std::sync::Arc::new(AtomicBool::new(false)),
+        };
+        let (bus, mut rx) = SearchBus::new();
+        spawn(cfg, &bus, 0);
+        drop(bus);
+
+        // Drain until Finished
+        let mut search_files: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let start = std::time::Instant::now();
+        loop {
+            match rx.try_recv() {
+                Ok(SearchEvent::Hit { file, .. }) => {
+                    search_files.insert(file);
+                }
+                Ok(SearchEvent::Finished { .. }) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        panic!(
+                            "search did not finish within 5s; files so far: {search_files:?}"
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+
+        // The only expected difference is graft/card.md (Item 2: the
+        // file-list walk prunes graft/, the search pipeline does not).
+        // All files except Cargo.toml (whose content doesn't match the
+        // search pattern) contain "hello world".
+        let expected_search: std::collections::BTreeSet<String> =
+            ["graft/card.md", "important.log", "kept.txt", "src/keep.rs", "src/visible.rs"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert_eq!(
+            search_files, expected_search,
+            "search and finder must agree on gitignore (modulo the documented graft/ asymmetry)"
+        );
+
+        // Index filter (the THIRD walker, this issue): the incremental
+        // reindex must keep exactly the walk's file set over the same
+        // fixture — the nested `.gitignore` (`src/gen/`), the root rules
+        // (`*.log`, `build/`), the negation (`!important.log`), and the
+        // graft/ prune all agree with the walk.
+        let every_path = [
+            "Cargo.toml", "kept.txt", "important.log", "crash.log", "build/out.bin",
+            "src/keep.rs", "src/gen/out.rs", "src/visible.rs", "graft/card.md",
+        ]
+        .map(|rel| dir.path().join(rel));
+        let index_kept: std::collections::BTreeSet<String> = every_path
+            .iter()
+            .filter(|p| {
+                !ignored(dir.path(), p, false) && !redline_model::files::under_graft(dir.path(), p, false)
+            })
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            index_kept,
+            list.files.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
+            "the index's changed-path filter must agree with the file walk"
+        );
+        // Pin the shared predicate on each rule kind (the one that
+        // discriminates a root-only check is the nested one).
+        assert!(
+            ignored(dir.path(), &dir.path().join("src/gen/out.rs"), false),
+            "nested .gitignore"
+        );
+        assert!(
+            ignored(dir.path(), &dir.path().join("crash.log"), false),
+            "root .gitignore file rule"
+        );
+        assert!(
+            ignored(dir.path(), &dir.path().join("build/out.bin"), false),
+            "directory rule (build/)"
+        );
+        assert!(
+            !ignored(dir.path(), &dir.path().join("important.log"), false),
+            "negation (!important.log)"
+        );
+        assert!(
+            !ignored(dir.path(), &dir.path().join("src/visible.rs"), false),
+            "non-ignored path stays"
+        );
+    }

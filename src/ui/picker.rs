@@ -50,7 +50,7 @@
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
 use crate::app::store::PickerCandidate;
-use crate::model::text_width::{char_display_width, display_width};
+use redline_model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::{color, text_style};
 
@@ -380,7 +380,7 @@ pub fn Picker(props: &PickerProps, mut _hooks: Hooks) -> impl Into<AnyElement<'s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::text_width::display_width;
+    use redline_model::text_width::display_width;
 
     /// The picker's truncation is CELL-AWARE (not char-counting): a wide
     /// (CJK) char is 2 cells and never straddles a column boundary. This is

@@ -1,5 +1,5 @@
 ---
-source: src/model/sections.rs
+source: src/sections.rs
 assertion_line: 806
 expression: rows
 ---

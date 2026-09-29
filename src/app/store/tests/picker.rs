@@ -1087,7 +1087,7 @@ use crate::nav::index::build_index;
         let base_path = base.path().to_path_buf();
         std::mem::forget(base);
         let mut s = AppStore::at(dir.path(), base_path);
-        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
 
         // Prime the cached git repo handle (Branch, Stash kinds) and the
         // project file list (FindFile kind).
@@ -1095,7 +1095,7 @@ use crate::nav::index::build_index;
         s.ensure_files();
 
         // The symbol index (Symbols, Imenu, Xref, Impls kinds).
-        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        let files_list = redline_model::files::FileList::build(dir.path()).unwrap();
         let index = build_index(dir.path(), &files_list.files, None);
         s.set_index(index);
 

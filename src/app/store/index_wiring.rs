@@ -538,14 +538,14 @@ impl AppStore {
     /// path, so a 10,000-path burst
     /// stays cheap on the UI thread.
     pub(super) fn indexable_changes(changed: &[PathBuf], root: &Path) -> Vec<PathBuf> {
-        let memo: crate::model::files::GitignoreMemo =
+        let memo: redline_model::files::GitignoreMemo =
             std::sync::Mutex::new(std::collections::HashMap::new());
         changed
             .iter()
             .filter(|p| {
                 let is_dir = p.is_dir();
-                !crate::model::files::under_graft(root, p, is_dir)
-                    && !crate::model::files::is_gitignored(root, p, is_dir, &memo)
+                !redline_model::files::under_graft(root, p, is_dir)
+                    && !redline_model::files::is_gitignored(root, p, is_dir, &memo)
             })
             .cloned()
             .collect()

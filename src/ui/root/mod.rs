@@ -359,7 +359,7 @@ mod tests {
         let name = "alpha_symbol_name_that_is_really_quite_long";
         std::fs::write(p.join(long), format!("fn {name}() {{}}\n")).unwrap();
         let mut store = pty_store(p);
-        let files_list = crate::model::files::FileList::build(p).unwrap();
+        let files_list = redline_model::files::FileList::build(p).unwrap();
         store.set_index(crate::nav::index::build_index(p, &files_list.files, None));
         store.open_symbol_picker();
         assert!(store.picker_open(), "symbol picker open");
@@ -372,9 +372,9 @@ mod tests {
         assert_eq!(cand.0.label, name);
         assert_eq!(cand.0.detail, format!("[fn] {long}"), "right-aligned detail");
         assert!(
-            crate::model::text_width::display_width(name) > 32,
+            redline_model::text_width::display_width(name) > 32,
             "name must exceed the old 32-cell label budget: len {}",
-            crate::model::text_width::display_width(name)
+            redline_model::text_width::display_width(name)
         );
         // The 80-col frame renders the FULL name at the left (the old code
         // left-truncated it at 32 cells) and keeps the detail's tail (the file

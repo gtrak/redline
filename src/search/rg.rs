@@ -33,7 +33,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 use tokio::sync::mpsc;
 
-use crate::model::files::{gitignore_matches, load_gitignore};
+use redline_model::files::{gitignore_matches, load_gitignore};
 
 /// One match found by the pipeline: the (project-relative) file, the
 /// 1-based line number, the line's text (terminator stripped, UTF-8
@@ -595,11 +595,11 @@ impl Sink for StreamSink {
 /// match inside `local/xyz` — the match is the namespace part of a longer
 /// symbol).
 fn is_word_boundary(line: &str, idx: usize, len: usize, lang: LanguageId) -> bool {
-    // Word-constituency is the per-language rule (`crate::model::buffer`
+    // Word-constituency is the per-language rule (`redline_model::buffer`
     // delegates to the `redline_syntax::language` table), not ASCII-only —
     // a non-ASCII identifier (e.g. `café`) must not be truncated by an
     // ASCII boundary.
-    use crate::model::buffer::is_word_char;
+    use redline_model::buffer::is_word_char;
     let prev = line[..idx].chars().next_back();
     let next = line.get(idx + len..).and_then(|rest| rest.chars().next());
     let lisp = matches!(lang, LanguageId::Clojure | LanguageId::Scheme);

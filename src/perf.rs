@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use crate::app::store::AppStore;
-    use crate::model::files::FileList;
+    use redline_model::files::FileList;
     use crate::search::rg::SearchEvent;
     use std::path::Path;
     use std::time::{Duration, Instant};

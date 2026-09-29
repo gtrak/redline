@@ -138,6 +138,12 @@ impl FileList {
     pub fn len(&self) -> usize {
         self.files.len()
     }
+
+    /// Whether the walk found no files (pair for `len`; the crate is a
+    /// library, so clippy's `len_without_is_empty` is on public API here).
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
 }
 
 /// True when any DIRECTORY component of `path`'s project-relative path is
@@ -401,7 +407,7 @@ fn load_global_excludes() -> Option<Gitignore> {
 /// or unparseable. Shared by the file-list walk, the incremental index
 /// filter, and the search pipeline (R3: all walkers must agree on
 /// gitignore semantics).
-pub(crate) fn load_ignore_file(dir: &Path, name: &str) -> Option<Gitignore> {
+pub fn load_ignore_file(dir: &Path, name: &str) -> Option<Gitignore> {
     match Gitignore::new(dir.join(name)) {
         (gi, None) => Some(gi),
         _ => None,
@@ -412,7 +418,7 @@ pub(crate) fn load_ignore_file(dir: &Path, name: &str) -> Option<Gitignore> {
 /// file is absent or unparseable. Shared by the file-list walk, the
 /// incremental index filter, and the search pipeline (R3: all walkers
 /// must agree on gitignore semantics).
-pub(crate) fn load_gitignore(dir: &Path) -> Option<Gitignore> {
+pub fn load_gitignore(dir: &Path) -> Option<Gitignore> {
     load_ignore_file(dir, ".gitignore")
 }
 
@@ -420,7 +426,7 @@ pub(crate) fn load_gitignore(dir: &Path) -> Option<Gitignore> {
 /// otherwise). The single shared gitignore decision used by the
 /// file-list walk, the incremental index filter, and the search
 /// pipeline.
-pub(crate) fn gitignore_matches(gi: &Gitignore, path: &Path, is_dir: bool) -> bool {
+pub fn gitignore_matches(gi: &Gitignore, path: &Path, is_dir: bool) -> bool {
     gi.matched(path, is_dir).is_ignore()
 }
 
@@ -429,7 +435,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use crate::model::write_test_file;
+    use crate::write_test_file;
 
     /// Single-path test shim: the predicate with a throwaway memo.
     /// Production callers always share one memo per invocation (one
@@ -645,7 +651,7 @@ mod tests {
 
     impl EnvGuard {
         fn set(pairs: &[(&str, &str)]) -> Self {
-            let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let restore = pairs
                 .iter()
                 .map(|(k, _)| (k.to_string(), std::env::var_os(k)))
@@ -653,7 +659,7 @@ mod tests {
             // SAFETY: `set_var` is unsafe in edition 2024 because it races
             // with ANY concurrent `env::var`/`var_os` reader on another
             // thread (process-wide, not per-variable). This runs while
-            // holding `crate::ENV_LOCK` (kept in the struct, declared
+            // holding `redline_testutil::ENV_LOCK` (kept in the struct, declared
             // after `restore`, so it drops LAST — the `Drop` restore below
             // also runs under the lock), and every other env-mutating
             // test in this crate (`git::commit`'s `EnvScope`, the
@@ -662,7 +668,7 @@ mod tests {
             // `app::store` fetch tests still mutate/read `PATH` under
             // their own `PATH_LOCK` — to be moved onto `ENV_LOCK`.
             for (k, v) in pairs {
-                // SAFETY: as above — under `crate::ENV_LOCK`, held for
+                // SAFETY: as above — under `redline_testutil::ENV_LOCK`, held for
                 // this guard's whole life.
                 unsafe { std::env::set_var(k, v); }
             }
@@ -1016,153 +1022,6 @@ mod tests {
             memo.lock().unwrap().len(),
             6,
             "second batch must not re-load"
-        );
-    }
-
-    /// R3: the file-list walk and the search pipeline must agree on
-    /// gitignore semantics. This fixture exercises a nested `.gitignore`
-    /// (root + subdir), a negation (`!important.log`), and a directory
-    /// rule (`build/`). The only expected difference is the documented
-    /// `graft/` asymmetry (Item 2): the file-list walk prunes `graft/`,
-    /// the search pipeline does not. Both walkers call the same
-    /// `load_gitignore` + `gitignore_matches` helpers (R3 extraction).
-    #[test]
-    fn finder_and_search_agree_on_gitignore() {
-        use crate::search::rg::{SearchBus, SearchConfig, SearchEvent, spawn};
-        use std::sync::atomic::AtomicBool;
-
-        let dir = project();
-        // Root .gitignore: ignore *.log (except important.log), ignore build/
-        fs::write(
-            dir.path().join(".gitignore"),
-            "*.log\n!important.log\nbuild/\n",
-        )
-        .unwrap();
-        write_test_file(dir.path().join("kept.txt"), "hello world\n");
-        write_test_file(dir.path().join("crash.log"), "hello world\n");
-        write_test_file(dir.path().join("important.log"), "hello world\n");
-        write_test_file(dir.path().join("build/out.bin"), "hello world\n");
-        // Subdirectory .gitignore: ignore gen/
-        write_test_file(dir.path().join("src/.gitignore"), "gen/\n");
-        write_test_file(dir.path().join("src/keep.rs"), "hello world\n");
-        write_test_file(dir.path().join("src/gen/out.rs"), "hello world\n");
-        write_test_file(dir.path().join("src/visible.rs"), "hello world\n");
-        // graft/ directory (the documented asymmetry)
-        write_test_file(dir.path().join("graft/card.md"), "hello world\n");
-
-        // FileList walk (the finder side)
-        let list = FileList::build(dir.path()).unwrap();
-        let finder_files: std::collections::BTreeSet<&str> =
-            list.files.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            finder_files,
-            std::collections::BTreeSet::from([
-                "Cargo.toml", "important.log", "kept.txt", "src/keep.rs", "src/visible.rs"
-            ]),
-            "FileList should contain exactly the non-ignored, non-graft files"
-        );
-
-        // Search pipeline (the grep side)
-        let cfg = SearchConfig {
-            root: dir.path().to_path_buf(),
-            pattern: "hello world".to_string(),
-            word: false,
-            fixed: true,
-            case_smart: false,
-            case_insensitive: false,
-            glob: None,
-            file_type: None,
-            filter: None,
-            cancel: std::sync::Arc::new(AtomicBool::new(false)),
-        };
-        let (bus, mut rx) = SearchBus::new();
-        spawn(cfg, &bus, 0);
-        drop(bus);
-
-        // Drain until Finished
-        let mut search_files: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        let start = std::time::Instant::now();
-        loop {
-            match rx.try_recv() {
-                Ok(SearchEvent::Hit { file, .. }) => {
-                    search_files.insert(file);
-                }
-                Ok(SearchEvent::Finished { .. }) => break,
-                Ok(_) => {}
-                Err(_) => {
-                    if start.elapsed() > std::time::Duration::from_secs(5) {
-                        panic!(
-                            "search did not finish within 5s; files so far: {search_files:?}"
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            }
-        }
-
-        // The only expected difference is graft/card.md (Item 2: the
-        // file-list walk prunes graft/, the search pipeline does not).
-        // All files except Cargo.toml (whose content doesn't match the
-        // search pattern) contain "hello world".
-        let expected_search: std::collections::BTreeSet<String> =
-            ["graft/card.md", "important.log", "kept.txt", "src/keep.rs", "src/visible.rs"]
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
-        assert_eq!(
-            search_files, expected_search,
-            "search and finder must agree on gitignore (modulo the documented graft/ asymmetry)"
-        );
-
-        // Index filter (the THIRD walker, this issue): the incremental
-        // reindex must keep exactly the walk's file set over the same
-        // fixture — the nested `.gitignore` (`src/gen/`), the root rules
-        // (`*.log`, `build/`), the negation (`!important.log`), and the
-        // graft/ prune all agree with the walk.
-        let every_path = [
-            "Cargo.toml", "kept.txt", "important.log", "crash.log", "build/out.bin",
-            "src/keep.rs", "src/gen/out.rs", "src/visible.rs", "graft/card.md",
-        ]
-        .map(|rel| dir.path().join(rel));
-        let index_kept: std::collections::BTreeSet<String> = every_path
-            .iter()
-            .filter(|p| {
-                !ignored(dir.path(), p, false) && !under_graft(dir.path(), p, false)
-            })
-            .map(|p| {
-                p.strip_prefix(dir.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(
-            index_kept,
-            list.files.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
-            "the index's changed-path filter must agree with the file walk"
-        );
-        // Pin the shared predicate on each rule kind (the one that
-        // discriminates a root-only check is the nested one).
-        assert!(
-            ignored(dir.path(), &dir.path().join("src/gen/out.rs"), false),
-            "nested .gitignore"
-        );
-        assert!(
-            ignored(dir.path(), &dir.path().join("crash.log"), false),
-            "root .gitignore file rule"
-        );
-        assert!(
-            ignored(dir.path(), &dir.path().join("build/out.bin"), false),
-            "directory rule (build/)"
-        );
-        assert!(
-            !ignored(dir.path(), &dir.path().join("important.log"), false),
-            "negation (!important.log)"
-        );
-        assert!(
-            !ignored(dir.path(), &dir.path().join("src/visible.rs"), false),
-            "non-ignored path stays"
         );
     }
 }

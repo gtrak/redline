@@ -95,7 +95,7 @@ pub fn symbol_under_point(
     let mut ids: Vec<(usize, usize, &str)> = Vec::new();
     let mut start = 0;
     for (i, c) in line.char_indices() {
-        if !crate::model::buffer::is_word_char(lang, c) {
+        if !redline_model::buffer::is_word_char(lang, c) {
             if start < i {
                 ids.push((start, i, &line[start..i]));
             }

@@ -182,7 +182,7 @@ use redline_git::log::LogEntry;
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
         // Build the index synchronously (no tokio runtime in unit tests).
-        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        let files_list = redline_model::files::FileList::build(dir.path()).unwrap();
         let root = dir.path().to_path_buf();
         let index = build_index(&root, &files_list.files, None);
         s.set_index(index);
@@ -341,7 +341,7 @@ use redline_git::log::LogEntry;
         git_cli(dir, &["commit", "-q", "-m", "init"], "Test", "test@example.com");
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir, base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.to_path_buf()));
         s
     }
 

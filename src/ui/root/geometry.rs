@@ -2,7 +2,7 @@
 //! view and the tree-sidebar click split (pure math over a Snapshot).
 
 use crate::app::store::{FileViewRow, ViewId};
-use crate::model::tree_layout::TREE_WIDTH;
+use redline_model::tree_layout::TREE_WIDTH;
 
 use super::snapshot::Snapshot;
 
@@ -142,12 +142,12 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                                 .filter(|&&g| g <= code_col_expanded)
                                 .count();
                             code_start
-                                + crate::model::text_width::char_index_to_display_col(
+                                + redline_model::text_width::char_index_to_display_col(
                                     &r.text, code_col_expanded,
                                 )
                                 + inserted
                         } else {
-                            crate::model::text_width::char_index_to_display_col(
+                            redline_model::text_width::char_index_to_display_col(
                                 &r.text,
                                 snap.file_view_point_col,
                             )
@@ -303,7 +303,7 @@ mod tests {
     /// measured `cup=6/want=7` on every n/p step before this.
     #[test]
     fn cursor_cell_magit_row_accounts_for_the_narrow_prompt_row() {
-        use crate::model::sections::{MagitRow, RowRole};
+        use redline_model::sections::{MagitRow, RowRole};
         let mut snap = buffer_snapshot(&[], 0, 0);
         snap.view = ViewId::MagitStatus;
         snap.magit_rows = (0..5)
@@ -327,7 +327,7 @@ mod tests {
     /// blue-bar row on every in-page / paging step).
     #[test]
     fn cursor_cell_log_row_accounts_for_the_narrow_prompt_row() {
-        use crate::model::sections::{MagitRow, RowRole};
+        use redline_model::sections::{MagitRow, RowRole};
         let mut snap = buffer_snapshot(&[], 0, 0);
         snap.view = ViewId::Log;
         snap.log_rows = (0..5)

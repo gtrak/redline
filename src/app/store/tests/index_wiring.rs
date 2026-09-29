@@ -1358,7 +1358,7 @@ use super::*;
         s.project = Some(Project::new(root.clone()));
 
         // Build the initial index synchronously.
-        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let files_list = redline_model::files::FileList::build(&root).unwrap();
         let index = build_index(&root, &files_list.files, None);
         s.set_index(index);
 
@@ -1545,7 +1545,7 @@ use super::*;
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(&root, base.path().to_path_buf());
-        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let files_list = redline_model::files::FileList::build(&root).unwrap();
         let index = build_index(&root, &files_list.files, None);
         // The full build already excludes the ignored files (unchanged path).
         assert!(!index.has("src/gen/out.rs"), "full build excluded the nested-ignored file");
@@ -1694,7 +1694,7 @@ use super::*;
         s.project = Some(Project::new(root.clone()));
 
         // Build an initial index so start_indexing has files to index.
-        let files_list = crate::model::files::FileList::build(&root).unwrap();
+        let files_list = redline_model::files::FileList::build(&root).unwrap();
         let index = build_index(&root, &files_list.files, None);
         s.set_index(index);
 

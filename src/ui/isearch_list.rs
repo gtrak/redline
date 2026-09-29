@@ -46,7 +46,7 @@
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
 use crate::app::store::IsearchMatchRow;
-use crate::model::text_width::{char_display_width, display_width};
+use redline_model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::text_style;
 

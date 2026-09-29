@@ -5,7 +5,7 @@
 
 use iocraft::prelude::*;
 
-use crate::model::sections::MagitRow;
+use redline_model::sections::MagitRow;
 use crate::theme;
 use crate::ui::diff_view::row_face;
 use crate::ui::{bar_bg, face_bg, face_color, face_weight};

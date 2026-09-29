@@ -5,7 +5,7 @@
 
 use iocraft::prelude::*;
 
-use crate::model::sections::MagitRow;
+use redline_model::sections::MagitRow;
 use crate::ui::rows_view::MagitRowsView;
 
 #[derive(Default, Props)]

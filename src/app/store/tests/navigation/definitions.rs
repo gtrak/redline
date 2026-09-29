@@ -769,7 +769,7 @@ use super::*;
             ("src/model.rs", "pub struct Point { pub x: i32, pub y: i32 }\n"),
             (
                 "src/main.rs",
-                "use crate::model::Point;\nimpl Point {\n    fn coords(&self) { let _ = self.x; }\n}\n",
+                "use redline_model::Point;\nimpl Point {\n    fn coords(&self) { let _ = self.x; }\n}\n",
             ),
         ]);
         s.open_path("src/main.rs");
@@ -1022,7 +1022,7 @@ use super::*;
             ("src/model.rs", "pub struct Point { pub x: i32, pub y: i32 }\n"),
             (
                 "src/main.rs",
-                "use crate::model::Point;\nfn main() {\n    let p: Point = Point { x: 1, y: 2 };\n    let _ = p.x;\n}\n",
+                "use redline_model::Point;\nfn main() {\n    let p: Point = Point { x: 1, y: 2 };\n    let _ = p.x;\n}\n",
             ),
         ]);
         s.open_path("src/main.rs");

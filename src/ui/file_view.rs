@@ -8,7 +8,7 @@
 use iocraft::{prelude::*, Component, ComponentDrawer, ComponentUpdater};
 
 use crate::app::store::{FileViewRow, LineMatch};
-use crate::model::text_width::{char_display_width, display_width};
+use redline_model::text_width::{char_display_width, display_width};
 use crate::theme;
 use crate::ui::{color, current_line_bg, text_style};
 
@@ -309,7 +309,7 @@ impl Component for FileViewCanvas {
 /// silently mis-coloured text on exactly the annotated lines, pinned by
 /// `display_col_of_char_with_gaps_pins_the_span_after_the_marker`.
 fn display_col_of_char_with_gaps(text: &str, gaps: &[usize], idx: usize) -> usize {
-    crate::model::text_width::char_index_to_display_col(text, idx)
+    redline_model::text_width::char_index_to_display_col(text, idx)
         + gaps.iter().filter(|&&g| g <= idx).count()
 }
 
@@ -642,7 +642,7 @@ fn text_style_italic(foreground: theme::Color) -> CanvasTextStyle {
 // ── plan 004 issue 05d: char-index <-> display-column conversion ──────────
 // The pure width helpers (char_display_width / display_width /
 // char_index_to_display_col / display_col_to_char_index) live in
-// `crate::model::text_width` (moved there in plan 004 issue 05e so the app
+// `redline_model::text_width` (moved there in plan 004 issue 05e so the app
 // layer does not call into the UI layer); only the render-local `truncate`
 // stays here.
 
@@ -825,7 +825,7 @@ mod tests {
     }
 
     // ── plan 004 issue 05d: char-index <-> display-column conversion ────
-    // (the pure width helpers' tests live in `crate::model::text_width`;
+    // (the pure width helpers' tests live in `redline_model::text_width`;
     // only the render-local `truncate` stays here.)
 
     #[test]
@@ -1372,7 +1372,7 @@ mod tests {
     /// cell count of everything before it.
     fn col_of(line: &str, needle: &str) -> Option<usize> {
         let b = line.find(needle)?;
-        Some(crate::model::text_width::display_width(&line[..b]))
+        Some(redline_model::text_width::display_width(&line[..b]))
     }
 
     /// The rendered row's content from display column `col` onward, sliced by
@@ -1384,7 +1384,7 @@ mod tests {
             if acc == col {
                 return line[i..].to_string();
             }
-            acc += crate::model::text_width::char_display_width(c);
+            acc += redline_model::text_width::char_display_width(c);
             if acc > col {
                 return String::new(); // `col` falls inside a char
             }
@@ -1458,7 +1458,7 @@ mod tests {
         let src_ws_end = src_line
             .char_indices()
             .find(|&(_, c)| !c.is_whitespace())
-            .map(|(b, _)| crate::model::text_width::display_width(&src_line[..b]))
+            .map(|(b, _)| redline_model::text_width::display_width(&src_line[..b]))
             .unwrap_or(0);
         assert_eq!(src_ws_end, 4, "fixture sanity: `if` is at display col 4");
 
@@ -1833,7 +1833,7 @@ mod tests {
             if c == ch {
                 out.push(acc);
             }
-            acc += crate::model::text_width::char_display_width(c);
+            acc += redline_model::text_width::char_display_width(c);
         }
         out
     }

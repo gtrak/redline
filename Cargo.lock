@@ -889,6 +889,7 @@ dependencies = [
  "nucleo-matcher",
  "rayon",
  "redline-git",
+ "redline-model",
  "redline-resolve",
  "redline-syntax",
  "redline-testutil",
@@ -915,6 +916,23 @@ dependencies = [
  "redline-testutil",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "redline-model"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "ignore",
+ "insta",
+ "redline-git",
+ "redline-syntax",
+ "redline-testutil",
+ "ropey",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

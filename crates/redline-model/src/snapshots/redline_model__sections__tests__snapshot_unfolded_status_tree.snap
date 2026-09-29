@@ -1,5 +1,5 @@
 ---
-source: src/model/sections.rs
+source: src/sections.rs
 expression: rows_text(&tree)
 ---
 [

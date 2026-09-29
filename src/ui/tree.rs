@@ -7,7 +7,7 @@
 use iocraft::prelude::*;
 
 use crate::app::store::TreeRow;
-use crate::model::tree_layout::TREE_WIDTH;
+use redline_model::tree_layout::TREE_WIDTH;
 use crate::theme;
 use crate::ui::{bar_bg, face_bg, face_color, face_weight};
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the F2 perf fixture: a marker-only tree for measuring the
-memoized ignore-chain walk (`src/model/files.rs`, via
+memoized ignore-chain walk (`crates/redline-model/src/files.rs`, via
 `redline --index-profile=OUT`).
 
 Shape (fixed by the F2 record):
@@ -19,7 +19,7 @@ OUT_DIR is created if missing; an existing one is wiped.
 Profile (named, per P3c): `redline --index-profile=OUT_DIR` on the
 RELEASE build, cold (fresh page-cache reads not forced; report both
 the measured walk ms and the fixture command). The F2 memo record in
-`src/model/files.rs` (test (d)) restates the pre-memo vs memoized
+`crates/redline-model/src/files.rs` (test (d)) restates the pre-memo vs memoized
 WALK time as a ratio for this fixture + profile — machine absolutes
 are not comparable across boxes, so the record carries the ratio,
 the profile, and this command, not an absolute.

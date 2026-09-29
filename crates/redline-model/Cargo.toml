@@ -1,0 +1,42 @@
+[package]
+name = "redline-model"
+version = "0.1.0"
+edition = "2024"
+description = "Headless data models for redline: project layer, file lists, the open-buffer set, and the magit status section tree (plan 014 stage 3 — the mid-tier crate: it reads redline-git's plain status/diff data and builds the Section tree from it; production edges are model -> {git, syntax}, never the reverse)"
+
+# issue-guardrails: workspace lints (undocumented_unsafe_blocks deny —
+# every `unsafe` block needs a `// SAFETY:` comment; see the root
+# Cargo.toml's [workspace.lints] for the rationale).
+[lints]
+workspace = true
+
+[dependencies]
+# ── magit status section tree (the production edge the plan 014
+# stage-3 contingency decided: sections.rs builds the Section tree FROM
+# redline-git's plain status/diff data, so model -> git is a legitimate
+# production dependency — mid-tier, not leaf) ─────────────────────────
+redline-git = { path = "../redline-git" }
+# ── word-char rule (buffer.rs `is_word_char` delegates to the syntax
+# crate's per-language rules; consumers in the bin reach it through
+# this crate) ──────────────────────────────────────────────────────────
+redline-syntax = { path = "../redline-syntax" }
+# ── buffer text storage (open-buffer set) ──────────────────────────────
+ropey = "1.6.1"
+# ── file-list walk (gitignore-aware) ────────────────────────────────────
+ignore = "0.4.33"
+# ── project store persistence ──────────────────────────────────────────
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+dirs = "7.0"
+# ── display-width (wide/CJK + combining) math (text_width.rs) ─────────
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+# Test fixtures (tempdirs + the status-tree snapshot tests). Same pins as
+# the bin's dev-dependencies keep the lock unchanged.
+tempfile = "3.27"
+insta = "1.48"
+# The shared hermetic git test harness (the status-tree tests' `init_repo`
+# wrapper uses its `git_cli`/`git_repo_init`; the files/project tests take
+# its `ENV_LOCK` for the process-global env-mutation windows).
+redline-testutil = { path = "../redline-testutil" }

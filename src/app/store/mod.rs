@@ -30,12 +30,12 @@ use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use redline_git::diff::{DiffSide, FileDiff};
 use redline_git::status::{RepoStatus, Side};
 use redline_git::{GitError, GitRepo};
-use crate::model::buffer::{
+use redline_model::buffer::{
     is_word_char, load_file, BufferMode, BufferTable, SCRATCH_NAME, UndoStack, UndoStep,
 };
-use crate::model::files::FileList;
-use crate::model::project::{detect_root, Project, ProjectStore};
-use crate::model::sections::{MagitRow, RowRole, SectionKind, StatusTree};
+use redline_model::files::FileList;
+use redline_model::project::{detect_root, Project, ProjectStore};
+use redline_model::sections::{MagitRow, RowRole, SectionKind, StatusTree};
 use crate::nav::index::{build_index, refresh_in_place, IndexBus, IndexEvent, IndexProgress, SymbolIndex};
 use crate::search::occur;
 use crate::search::references;

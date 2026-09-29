@@ -438,7 +438,7 @@ mod tests {
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
         s.open_path("src/a.rs");
         // Build the symbol index synchronously (the store tests' shape).
-        let files_list = crate::model::files::FileList::build(dir.path()).unwrap();
+        let files_list = redline_model::files::FileList::build(dir.path()).unwrap();
         s.set_index(crate::nav::index::build_index(dir.path(), &files_list.files, None));
         // Point (0,0) -> the reference at (2,5) by public motion keys.
         for _ in 0..2 {

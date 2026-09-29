@@ -51,7 +51,7 @@ fn key_null() -> Key {
 /// module does the
 /// same).
 fn install_index(s: &mut AppStore, root: &std::path::Path) {
-    let files_list = crate::model::files::FileList::build(root).unwrap();
+    let files_list = redline_model::files::FileList::build(root).unwrap();
     let index = crate::nav::index::build_index(root, &files_list.files, None);
     s.set_index(index);
 }

@@ -81,7 +81,7 @@ pub const BIG_FILE_THRESHOLD: usize = 10 * 1024 * 1024; // 10 MiB
 /// no dependency on `redline` and duplicates the Rust-only rule (see its
 /// `is_ident_char` in `crates/redline-resolve/src/cargo.rs`; that lane is
 /// Rust-scoped and the Rust row is the unchanged `WordRule::Default`).
-pub(crate) fn is_word_char(lang: redline_syntax::registry::LanguageId, c: char) -> bool {
+pub fn is_word_char(lang: redline_syntax::registry::LanguageId, c: char) -> bool {
     redline_syntax::language::is_word_char(lang, c)
 }
 
@@ -171,9 +171,11 @@ impl UndoStack {
         self.steps.last()
     }
 
-    /// Whether the stack holds no steps (test-only: production drives the
-    /// stack through `push`/`pop` and reads positions via `position_id`).
-    #[cfg(test)]
+    /// Whether the stack holds no steps (test-only surface: production
+    /// drives the stack through `push`/`pop` and reads positions via
+    /// `position_id`). `pub` (not `cfg(test)`-gated) so the bin's
+    /// `app::store` test suites can assert on it across the crate
+    /// boundary (plan 014 stage 3).
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -192,10 +194,11 @@ impl UndoStack {
         self.steps.last().map(|s| s.id).unwrap_or(0)
     }
 
-    /// Number of recorded steps (test-only; the production code drives the
-    /// stack through `push`/`pop` and the cap, so this is gated rather than
-    /// carried as dead public API).
-    #[cfg(test)]
+    /// Number of recorded steps (test-only surface; the production code
+    /// drives the stack through `push`/`pop` and the cap, so this is a
+    /// thin accessor rather than a production API). `pub` (not
+    /// `cfg(test)`-gated) so the bin's `app::store` test suites can assert
+    /// on it across the crate boundary (plan 014 stage 3).
     pub fn len(&self) -> usize {
         self.steps.len()
     }
@@ -458,6 +461,12 @@ pub struct BufferTable {
     current: Option<String>,
 }
 
+impl Default for BufferTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BufferTable {
     /// An EMPTY table (plan 004 issue 06a): boot starts on the home view,
     /// so no buffer exists yet and `current` is `None`. `*scratch*` is no
@@ -574,6 +583,12 @@ impl BufferTable {
 
     pub fn len(&self) -> usize {
         self.by_key.len()
+    }
+
+    /// Whether no buffer is open (pair for `len`; the crate is a library,
+    /// so clippy's `len_without_is_empty` is on public API here).
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
     }
 }
 

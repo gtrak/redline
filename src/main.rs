@@ -5,13 +5,13 @@
 //! the terminal cleanly on every exit path including panics.
 //!
 //! Module layout: `app/` is plain Rust (store, registry, keymap,
-//! config) with zero iocraft/tokio dependencies; `model/` holds the
-//! headless data models (project, files, buffers); `ui/` holds all
-//! iocraft components; this file only starts/stops the render loop.
+//! config) with zero iocraft/tokio dependencies; the headless data
+//! models (project, files, buffers, the magit section tree) live in
+//! the `redline-model` workspace crate (plan 014 stage 3); `ui/` holds
+//! all iocraft components; this file only starts/stops the render loop.
 
 mod app;
 mod index_profile;
-mod model;
 mod nav;
 mod search;
 mod theme;
@@ -36,7 +36,7 @@ pub(crate) mod test_support;
 /// every `crate::ENV_LOCK` call site keeps compiling. Users:
 /// `redline_git` `commit.rs`'s `EnvScope` (+ its tests' per-body
 /// `TZ`/`GIT_AUTHOR_*` pins),
-/// `model::files`'s `EnvGuard` (+ `model::project`'s usage), and the
+/// `redline_model::files`'s `EnvGuard` (+ `redline_model::project`'s usage), and the
 /// `ui::file_view` tint tests' `COLORTERM` pins. Known residual (P1
 /// finding, issue-guardrails): the `app::store` fetch tests read/mutate
 /// Note: the fetch tests mutate `PATH` under `crate::ENV_LOCK`. They used to hold a local

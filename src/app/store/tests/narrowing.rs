@@ -709,7 +709,7 @@ fn check_magit_status_recompute_is_the_section_filter() {
     std::fs::write(dir.path().join("omega.txt"), "hello\nworld\nwork line\n").unwrap();
     let base = tempfile::tempdir().unwrap();
     let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
-    s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+    s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
     s.open_magit_status();
     for c in "oa".chars() {
         s.key_event(Key::char(c));
@@ -735,7 +735,7 @@ fn check_magit_status_recompute_is_the_section_filter() {
     // Shared-core cross-check over the tree's OWN texts (every section
     // heading + every hunk body line): the core matches exactly the
     // omega heading; the projection adds precisely its ancestor.
-    fn all_texts(sec: &crate::model::sections::Section, out: &mut Vec<(String, String)>) {
+    fn all_texts(sec: &redline_model::sections::Section, out: &mut Vec<(String, String)>) {
         out.push((sec.id.clone(), sec.heading.clone()));
         for l in &sec.body {
             out.push((sec.id.clone(), l.content.clone()));

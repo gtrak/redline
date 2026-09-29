@@ -271,7 +271,7 @@ use super::*;
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
         s.set_viewport_lines(8); // small viewport -> magit_window() == 6
         s.open_magit_status();
 
@@ -441,7 +441,7 @@ use super::*;
         std::fs::write(root.join("b.txt"), "B2\n").unwrap();
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(root, base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(root.to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(root.to_path_buf()));
         s.open_magit_status();
         // Cursor starts on a.txt (first unstaged file). Move to b.txt.
         s.key_event(key("n"));
@@ -541,7 +541,7 @@ use super::*;
     fn magit_narrow_store(dir: &std::path::Path) -> AppStore {
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir, base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.to_path_buf()));
         s
     }
 
@@ -635,7 +635,7 @@ use super::*;
         // file's heading (no other tree text carries `o…a`), and the
         // projection is that core-matched section plus its surviving
         // ancestor (the group heading, which never matched itself).
-        fn all_texts(sec: &crate::model::sections::Section, out: &mut Vec<(String, String)>) {
+        fn all_texts(sec: &redline_model::sections::Section, out: &mut Vec<(String, String)>) {
             out.push((sec.id.clone(), sec.heading.clone()));
             for l in &sec.body {
                 out.push((sec.id.clone(), l.content.clone()));

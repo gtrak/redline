@@ -252,7 +252,7 @@ use super::*;
         let dir = tall_commit_repo();
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
         s.set_viewport_lines(8); // pane window == 6
         s.open_log();
         s.log_open_commit();
@@ -316,7 +316,7 @@ use super::*;
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
         s.set_viewport_lines(8); // pane window == 6
         s.open_path("big.txt");
         s.open_blame();
@@ -383,7 +383,7 @@ use super::*;
 
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir.path(), base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.path().to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.path().to_path_buf()));
         s.set_viewport_lines(8); // pane window == 6
         s.open_log();
         assert_eq!(s.top_view(), ViewId::Log);
@@ -544,7 +544,7 @@ use super::*;
     fn log_narrow_store(dir: &std::path::Path) -> AppStore {
         let base = tempfile::tempdir().unwrap();
         let mut s = AppStore::at(dir, base.path().to_path_buf());
-        s.project = Some(crate::model::project::Project::new(dir.to_path_buf()));
+        s.project = Some(redline_model::project::Project::new(dir.to_path_buf()));
         s
     }
 

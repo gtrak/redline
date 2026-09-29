@@ -1,6 +1,12 @@
 //! Data models: project layer, file lists, and the open-buffer set.
 //! Plain Rust — zero iocraft/tokio/crossterm (plan layering rule:
-//! `src/model/` is headless and unit-testable in isolation).
+//! this crate is headless and unit-testable in isolation).
+//!
+//! Mid-tier crate (plan 014 stage 3): `sections.rs` builds the magit
+//! status `Section` tree FROM `redline_git`'s plain status/diff data,
+//! so the production edges run model -> {git, syntax} — never the
+//! reverse (the bin's app/search layers consume this crate, not the
+//! other way around).
 
 pub mod buffer;
 pub mod files;

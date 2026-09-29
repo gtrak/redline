@@ -106,6 +106,12 @@ impl Registry {
     pub fn len(&self) -> usize {
         self.projects.len()
     }
+
+    /// Whether no project is registered (pair for `len`; the crate is a
+    /// library, so clippy's `len_without_is_empty` is on public API here).
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
 }
 
 /// Per-project recently-opened files (relative paths, MRU first).
@@ -211,7 +217,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use crate::model::write_test_file;
+    use crate::write_test_file;
 
     #[test]
     fn git_root_wins_over_markers_above() {
@@ -349,7 +355,7 @@ mod tests {
         // unguarded READER can therefore observe a pinned HOME mid-flight,
         // which is how the whole suite went flaky once this lane added
         // XDG_CONFIG_HOME to the pinned set. Readers take the same lock.
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = redline_testutil::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = tempfile::tempdir().unwrap();
         let mut store = ProjectStore::open(base.path().join("redline-cache"));
         assert_eq!(store.registry_path().file_name().unwrap(), "projects.json");

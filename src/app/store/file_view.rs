@@ -290,7 +290,7 @@ impl AppStore {
                                     // `char_index_to_display_col` would count
                                     // a mid-line tab as 1 cell, mis-mapping a
                                     // click after the tab).
-                                    let gap_col = crate::model::text_width::
+                                    let gap_col = redline_model::text_width::
                                         char_index_to_display_col_tabs(tail, code_start, g)
                                         + k;
                                     if gap_col < col {
@@ -298,7 +298,7 @@ impl AppStore {
                                     }
                                 }
                                 indent
-                                    + crate::model::text_width::
+                                    + redline_model::text_width::
                                         display_col_to_char_index_tabs(
                                             tail,
                                             code_start,
@@ -313,7 +313,7 @@ impl AppStore {
                 .buffers
                 .current_buffer()
                 .and_then(|b| b.line_text(target_line))
-                .map(|t| crate::model::text_width::display_col_to_char_index(&t, col))
+                .map(|t| redline_model::text_width::display_col_to_char_index(&t, col))
                 .unwrap_or(0)
                 .min(line_len),
         };
@@ -826,7 +826,7 @@ impl AppStore {
             let (text, spans, matches, insertions, tab_map) = if annotated {
                 let stripped = &full_text[indent_chars..];
                 let (expanded, byte_map, char_map) = if stripped.contains('\t') {
-                    crate::model::text_width::expand_tabs(stripped, code_start)
+                    redline_model::text_width::expand_tabs(stripped, code_start)
                 } else {
                     (stripped.to_string(), Vec::new(), Vec::new())
                 };
@@ -1082,7 +1082,7 @@ impl AppStore {
             }
             match c {
                 '\t' => display += 8 - display % 8,
-                _ => display += crate::model::text_width::char_display_width(c),
+                _ => display += redline_model::text_width::char_display_width(c),
             }
         }
         // gate P1-1: a let-chain, not nested `if`s. `clippy::collapsible_if` is
@@ -1191,7 +1191,7 @@ impl AppStore {
             .collect();
         let widths: Vec<usize> = base
             .iter()
-            .map(|(_, t)| crate::model::text_width::display_width(t))
+            .map(|(_, t)| redline_model::text_width::display_width(t))
             .collect();
         // (anchor, record order): left to right, ties keep record order.
         let mut order: Vec<usize> = (0..n).collect();
