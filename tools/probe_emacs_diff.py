@@ -83,7 +83,7 @@ def probe_redline(root):
         a.key("C-n")
     for i in range(4):
         a.key("C-l", settle=0.6)
-        out[('C-l', i)] = (a.screen.cursor.y, a.row_text(1)[:22])
+        out[('C-l', i)] = (a.screen.cursor.y, a.row_text(0)[:22])
     a.kill()
     return out
 

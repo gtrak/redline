@@ -146,7 +146,8 @@ def goto(app, n):
 
 
 def top_content(app):
-    return app.row_text(1)  # terminal row 1 = content row 0
+    # W13: the file view has no title row, so terminal row 0 IS content row 0.
+    return app.row_text(0)  # terminal row 0 = content row 0
 
 
 def cup(app):
@@ -184,10 +185,10 @@ try:
         f"top={top_content(app)!r}")
     # jump-column-pty: the CUP lands ON the name (char col 3 -> 1-based
     # col 4: `fn ` is three chars), not the line start. A col-0
-    # regression shows CUP (2, 1).
+    # regression shows CUP (1, 1).
     r, c = cup(app)
-    rec("L1 same-file: CUP on the name column", (r, c) == (2, 4),
-        f"cup=({r},{c}) want (2,4)")
+    rec("L1 same-file: CUP on the name column", (r, c) == (1, 4),
+        f"cup=({r},{c}) want (1,4)")
     # Jump-back returns to the call site (the landing recorded a jump).
     app.key("M-,", 1.0)
     app.wait(0.5)
@@ -205,7 +206,7 @@ try:
     rec("L7a same-file unique: silent jump message", ok, f"minibuffer={msg!r}")
     r, c = cup(app)
     rec("L7a same-file unique: CUP on `alpha_target` (char col 7)",
-        (r, c) == (2, 8), f"cup=({r},{c}) want (2,8); col-0 regression = (2,1)")
+        (r, c) == (1, 8), f"cup=({r},{c}) want (1,8); col-0 regression = (1,1)")
     app.key("M-,", 1.0)
     app.wait(0.5)
     app.key("M->", 1.0)  # force the candidate list for the same target
@@ -216,7 +217,7 @@ try:
     rec("L7a M-> RET: landed", ok, f"minibuffer={msg!r}")
     r, c = cup(app)
     rec("L7a M-> RET: CUP on `alpha_target` (picker outline re-read arm)",
-        (r, c) == (2, 8), f"cup=({r},{c}) want (2,8); col-0 regression = (2,1)")
+        (r, c) == (1, 8), f"cup=({r},{c}) want (1,8); col-0 regression = (1,1)")
 
     # ── L7b: cross-file field -> Xref picker -> RET (the user's repro) ──
     open_file(app, "src/col_b_use.rs")
@@ -231,8 +232,8 @@ try:
         ok, f"minibuffer={msg!r}")
     r, c = cup(app)
     rec("L7b cross-file field: CUP on `beta_field` (char col 20)",
-        (r, c) == (2, 21),
-        f"cup=({r},{c}) want (2,21); pre-fix col-0 landing = (2,1)")
+        (r, c) == (1, 21),
+        f"cup=({r},{c}) want (1,21); pre-fix col-0 landing = (1,1)")
 
     # ── L7c: same-file method via the local-binding pre-step ────────────
     open_file(app, "src/col_c.rs")
@@ -242,11 +243,12 @@ try:
     ok, msg = poll(app, "jumped to src/col_c.rs", timeout=5.0)
     rec("L7c method pre-step: silent jump message", ok, f"minibuffer={msg!r}")
     r, c = cup(app)
-    # The method's `fn` is on line 2 of col_c.rs -> terminal row 4 (the
-    # title row is row 1); `gamma_method` is char col 7 -> 1-based col 8.
+    # The method's `fn` is on line 2 of col_c.rs -> terminal row 3 (W13:
+    # the file view has no title row); `gamma_method` is char col 7 ->
+    # 1-based col 8.
     rec("L7c method pre-step: CUP on `gamma_method` (char col 7)",
-        (r, c) == (4, 8),
-        f"cup=({r},{c}) want (4,8); pre-fix col-0 landing = (4,1)")
+        (r, c) == (3, 8),
+        f"cup=({r},{c}) want (3,8); pre-fix col-0 landing = (3,1)")
 
     # ── L7d: multibyte — the landing column is a CHAR column ────────────
     open_file(app, "src/col_d.rs")
@@ -259,12 +261,12 @@ try:
     # `delta_field` is char col 29 of "pub struct Pt { /* 中文 */ pub
     # delta_field: i32 }" — the CJK pair before it takes 2 EXTRA display
     # cells, so the display column is 31 -> 1-based CUP col 32. A col-0
-    # regression shows (2, 1); landing a raw byte column (33) as a char
+    # regression shows (1, 1); landing a raw byte column (33) as a char
     # index would show a shifted CUP (char 33 = 'a' of `delta_field` at
-    # display col 35 -> (2, 36)).
+    # display col 35 -> (1, 36)).
     rec("L7d multibyte field: CUP is the DISPLAY column of the char col",
-        (r, c) == (2, 32),
-        f"cup=({r},{c}) want (2,32); col-0 regression = (2,1), byte-as-char = (2,36)")
+        (r, c) == (1, 32),
+        f"cup=({r},{c}) want (1,32); col-0 regression = (1,1), byte-as-char = (1,36)")
 finally:
     app.kill()
     for stray in (LEG_RS, *L7_FILES):

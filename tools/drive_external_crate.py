@@ -167,7 +167,7 @@ def main():
             f"landed={landed!r}")
         rec("L1: the window landed on rope.rs (Rope in view)",
             "Rope" in app.screen_text(),
-            f"top={app.row_text(1)!r}")
+            f"top={app.row_text(0)!r}")
     finally:
         if app is not None:
             app.kill()

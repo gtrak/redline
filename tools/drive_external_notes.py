@@ -185,7 +185,7 @@ def main():
             f"landed={landed!r}")
         ok = "Rope" in app.screen_text()
         rec("E1: the window landed on rope.rs (Rope in view)", ok,
-            f"top={app.row_text(1)!r}")
+            f"top={app.row_text(0)!r}")
 
         # ── E1b: the ownership guard (006-02b item 1) ─────────────────
         # The registry source is a cache shared by every project on the

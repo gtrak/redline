@@ -423,42 +423,42 @@ def mouse_recenter_word_checks():
     for ch in "leg.rs":
         s.key(ch, 0.25)
     s.key("RET", 1.0)
-    # Click terminal (row 5, col 10) 0-based: content row 4 → buffer line 4,
-    # col 10. SGR is 1-based: ESC[<0;11;6M → CUP (6, 11) 1-based.
-    row, col = feed_mouse(b"\x1b[<0;11;6M")
-    rec("click at col 10: CUP col equals it", (row, col) == (6, 11),
-        f"cup=({row},{col}) want (6,11)")
-    # Click past EOL on short line 1 ("bb"): terminal row 2 (0-based) is
-    # SGR row 3, col 30 is SGR col 31 → clamped to col 2 → CUP (3, 3).
-    row, col = feed_mouse(b"\x1b[<0;31;3M")
-    rec("click past EOL clamps to EOL", (row, col) == (3, 3),
-        f"cup=({row},{col}) want (3,3)")
+    # Click terminal (row 4, col 10) 0-based: content row 4 → buffer line 4,
+    # col 10. SGR is 1-based: ESC[<0;11;5M → CUP (5, 11) 1-based.
+    row, col = feed_mouse(b"\x1b[<0;11;5M")
+    rec("click at col 10: CUP col equals it", (row, col) == (5, 11),
+        f"cup=({row},{col}) want (5,11)")
+    # Click past EOL on short line 1 ("bb"): terminal row 1 (0-based) is
+    # SGR row 2, col 30 is SGR col 31 → clamped to col 2 → CUP (2, 3).
+    row, col = feed_mouse(b"\x1b[<0;31;2M")
+    rec("click past EOL clamps to EOL", (row, col) == (2, 3),
+        f"cup=({row},{col}) want (2,3)")
 
     # ── wheel: window scroll with the point's screen row pinned ────────────
     # Reset the point to (0,0) at window top 0.
     s.key("M-<", 0.8)
-    top_line_before = s.row_text(1)        # content row 0 (terminal row 1)
+    top_line_before = s.row_text(0)        # content row 0 (terminal row 0)
     r0, c0 = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
     r, c = feed_mouse(b"\x1b[<65;1;1M")   # wheel down (3-line step)
-    top_line_after = s.row_text(1)
+    top_line_after = s.row_text(0)
     rec("wheel down: top line changed, screen row pinned",
         (r, c) == (r0, c0) and top_line_before != top_line_after,
         f"cup=({r},{c}) before=({r0},{c0}) top row now={top_line_after[:8]!r} was={top_line_before[:8]!r}")
     # The point line advanced under the window: the window top is now line 3
     # (a "bb" line) and the status line shows the point at L4 (1-based).
     rec("wheel down: point line advanced under the window",
-        s.row_text(1).strip().startswith("bb") and "L4," in s.text(),
-        f"top row={s.row_text(1)[:8]!r} status L4={('L4,' in s.text())}")
+        s.row_text(0).strip().startswith("bb") and "L4," in s.text(),
+        f"top row={s.row_text(0)[:8]!r} status L4={('L4,' in s.text())}")
     r, c = feed_mouse(b"\x1b[<64;1;1M")   # wheel back up
     rec("wheel up: original top line back, row pinned",
-        (r, c) == (r0, c0) and s.row_text(1).strip().startswith("AAAA"),
-        f"cup=({r},{c}) top row={s.row_text(1)[:8]!r}")
+        (r, c) == (r0, c0) and s.row_text(0).strip().startswith("AAAA"),
+        f"cup=({r},{c}) top row={s.row_text(0)[:8]!r}")
 
     # ── C-l x3: point line fixed, middle -> top -> bottom ─────────────────
     # Viewport = 24 - 3 = 21 (0-based screen rows: mid = 10, last = 20).
     # Point to line 25 (C-n x25 from the top). A fresh C-l goes to MIDDLE
-    # (CUP row 12); the next C-l's go to TOP (CUP 2) then BOTTOM (CUP 22);
-    # #4 returns to MIDDLE (CUP 12). The point line never moves.
+    # (CUP row 11); the next C-l's go to TOP (CUP 1) then BOTTOM (CUP 21);
+    # #4 returns to MIDDLE (CUP 11). The point line never moves.
     for _ in range(25):
         s.key("C-n", 0.15)
     s._read(0.5, quiet=0.15)
@@ -467,10 +467,10 @@ def mouse_recenter_word_checks():
     r3, _ = do("C-l")
     point_fixed = "L26," in s.text()
     rec("C-l x3: middle -> top -> bottom (point line fixed)",
-        (r1, r2, r3) == (12, 2, 22) and point_fixed,
-        f"rows={r1},{r2},{r3} want 12,2,22 L26={point_fixed}")
+        (r1, r2, r3) == (11, 1, 21) and point_fixed,
+        f"rows={r1},{r2},{r3} want 11,1,21 L26={point_fixed}")
     r4, _ = do("C-l")
-    rec("C-l #4: cycle returns to middle", r4 == 12, f"row={r4} want 12")
+    rec("C-l #4: cycle returns to middle", r4 == 11, f"row={r4} want 11")
 
     # ── M-f / M-b: cursor column on word boundaries (wordleg.rs) ──────────
     s.key("C-x C-f", 1.0)
@@ -478,14 +478,14 @@ def mouse_recenter_word_checks():
         s.key(ch, 0.25)
     s.key("RET", 1.0)
     r0, c0 = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
-    rec("wordleg open: cursor at (line 1, col 1)", (r0, c0) == (2, 1),
-        f"cup=({r0},{c0}) want (2,1)")
+    rec("wordleg open: cursor at (line 1, col 1)", (r0, c0) == (1, 1),
+        f"cup=({r0},{c0}) want (1,1)")
     fw = [
-        ("M-f", (2, 6), "end of `hello`"),
-        ("M-f", (2, 16), "skip the space, walk to the end of `world_foo`"),
-        ("M-f", (3, 2), "skip `!!`+newline, end of `x`"),
-        ("M-f", (4, 3), "wrap across lines, end of `ab`"),
-        ("M-f", (4, 6), "skip the space, end of `cd` (buffer end)"),
+        ("M-f", (1, 6), "end of `hello`"),
+        ("M-f", (1, 16), "skip the space, walk to the end of `world_foo`"),
+        ("M-f", (2, 2), "skip `!!`+newline, end of `x`"),
+        ("M-f", (3, 3), "wrap across lines, end of `ab`"),
+        ("M-f", (3, 6), "skip the space, end of `cd` (buffer end)"),
     ]
     fw_ok, fw_detail = True, []
     for key, want, why in fw:
@@ -494,11 +494,11 @@ def mouse_recenter_word_checks():
         fw_ok = fw_ok and ok
         fw_detail.append(f"{key}:{(r,c)}{'=' if ok else '!='}{want} ({why})")
     r, c = do("M-f")
-    fw_ok = fw_ok and (r, c) == (4, 6)
-    fw_detail.append(f"M-f(noop @ end):{(r,c)}== (4,6)")
+    fw_ok = fw_ok and (r, c) == (3, 6)
+    fw_detail.append(f"M-f(noop @ end):{(r,c)}== (3,6)")
     rec("M-f x5: forward-word lands on exact columns (word ends)", fw_ok, "; ".join(fw_detail))
     bw = [
-        (4, 4), (4, 1), (3, 1), (2, 7), (2, 1),
+        (3, 4), (3, 1), (2, 1), (1, 7), (1, 1),
     ]
     bw_ok, bw_detail = True, []
     for i, want in enumerate(bw):
@@ -508,7 +508,7 @@ def mouse_recenter_word_checks():
         bw_detail.append(f"M-b{i+1}:{(r,c)}{'=' if ok else '!='}{want}")
     rec("M-b x5: backward-word lands on exact columns (word starts)", bw_ok, "; ".join(bw_detail))
     r, c = do("M-b M-b M-b")
-    rec("M-b at buffer start: no-op", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
+    rec("M-b at buffer start: no-op", (r, c) == (1, 1), f"cup=({r},{c}) want (1,1)")
 
     s.kill()
     return checks
@@ -552,66 +552,66 @@ def file_view_checks():
         s.key(ch, 0.25)
     buf = s.cup_settle(s.key("RET", 1.0))
     row, col = last_cup_after_sync(buf)
-    rec("open file: cursor at (line 1, col 1)", (row, col) == (2, 1),
-        f"cup=({row},{col}) want (2,1)")
+    rec("open file: cursor at (line 1, col 1)", (row, col) == (1, 1),
+        f"cup=({row},{col}) want (1,1)")
 
     # C-f x3: col 1 -> 4.
     r, c = do("C-f C-f C-f")
-    rec("C-f x3 (char right)", (r, c) == (2, 4), f"cup=({r},{c}) want (2,4)")
+    rec("C-f x3 (char right)", (r, c) == (1, 4), f"cup=({r},{c}) want (1,4)")
     # C-b: col 4 -> 3.
     r, c = do("C-b")
-    rec("C-b (char left)", (r, c) == (2, 3), f"cup=({r},{c}) want (2,3)")
+    rec("C-b (char left)", (r, c) == (1, 3), f"cup=({r},{c}) want (1,3)")
     # C-e: to end of line 0 (col 20).
     r, c = do("C-e")
-    rec("C-e (line end)", (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+    rec("C-e (line end)", (r, c) == (1, 21), f"cup=({r},{c}) want (1,21)")
     # C-f at EOL wraps to the next line, col 0.
     r, c = do("C-f")
-    rec("C-f EOL wrap -> line 2 col 1", (r, c) == (3, 1), f"cup=({r},{c}) want (3,1)")
+    rec("C-f EOL wrap -> line 2 col 1", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
     # C-b at BOL wraps to the previous line's end (col 20).
     r, c = do("C-b")
-    rec("C-b BOL wrap -> prev line end", (r, c) == (2, 21), f"cup=({r},{c}) want (2,21)")
+    rec("C-b BOL wrap -> prev line end", (r, c) == (1, 21), f"cup=({r},{c}) want (1,21)")
     # C-a: line start.
     r, c = do("C-a")
-    rec("C-a (line start)", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
+    rec("C-a (line start)", (r, c) == (1, 1), f"cup=({r},{c}) want (1,1)")
 
     # Goal column: C-f x10 -> (0,10); C-n clamps to the short line's length;
     # C-p restores the goal column on the longer line.
     r, c = do("C-f " * 10)
-    rec("C-f x10 (col 10)", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    rec("C-f x10 (col 10)", (r, c) == (1, 11), f"cup=({r},{c}) want (1,11)")
     r, c = do("C-n")  # line 1 ("bb", len 2): col clamps to 2, goal stays 10
-    rec("C-n clamps goal on short line", (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
+    rec("C-n clamps goal on short line", (r, c) == (2, 3), f"cup=({r},{c}) want (2,3)")
     r, c = do("C-p")  # line 0 (len 20): goal 10 restored
-    rec("C-p restores goal column", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    rec("C-p restores goal column", (r, c) == (1, 11), f"cup=({r},{c}) want (1,11)")
 
     # Arrows join as point motion (Down==C-n, Up==C-p, Right==C-f, Left==C-b).
     r, c = do("Down")
-    rec("Down == C-n", (r, c) == (3, 3), f"cup=({r},{c}) want (3,3)")
+    rec("Down == C-n", (r, c) == (2, 3), f"cup=({r},{c}) want (2,3)")
     r, c = do("Up")
-    rec("Up == C-p", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    rec("Up == C-p", (r, c) == (1, 11), f"cup=({r},{c}) want (1,11)")
     r, c = do("Right")
-    rec("Right == C-f", (r, c) == (2, 12), f"cup=({r},{c}) want (2,12)")
+    rec("Right == C-f", (r, c) == (1, 12), f"cup=({r},{c}) want (1,12)")
     r, c = do("Left")
-    rec("Left == C-b", (r, c) == (2, 11), f"cup=({r},{c}) want (2,11)")
+    rec("Left == C-b", (r, c) == (1, 11), f"cup=({r},{c}) want (1,11)")
 
-    # C-v keeps the point's screen row: step to line 5 (row 6), then C-v.
+    # C-v keeps the point's screen row: step to line 5 (row 5), then C-v.
     r, c = do("C-n " * 4)
-    rec("C-n x4 -> line 5 (screen row 4)", (r, c) == (6, 11), f"cup=({r},{c}) want (6,11)")
+    rec("C-n x4 -> line 5 (screen row 5)", (r, c) == (5, 11), f"cup=({r},{c}) want (5,11)")
     before_row = r
     r, c = do("C-v")
     rec("C-v holds the point's screen row",
-        r == before_row and before_row == 6,
+        r == before_row and before_row == 5,
         f"cup_row={r} before={before_row}")
 
     # M-END lands the point at the buffer end; the window follows (screen
-    # row 20 of the 21-line window -> terminal row 22, col 3 on the 2-char
+    # row 20 of the 21-line window -> terminal row 21, col 3 on the 2-char
     # line). (jump-ambiguity: point-buffer-end moved M-> -> M-END; M-> now
     # forces the Xref candidate list.)
     r, c = do("M-END")
-    rec("M-END buffer end (window follows)", (r, c) == (22, 3),
-        f"cup=({r},{c}) want (22,3)")
+    rec("M-END buffer end (window follows)", (r, c) == (21, 3),
+        f"cup=({r},{c}) want (21,3)")
     # M-< lands the point at the buffer start.
     r, c = do("M-<")
-    rec("M-< buffer start", (r, c) == (2, 1), f"cup=({r},{c}) want (2,1)")
+    rec("M-< buffer start", (r, c) == (1, 1), f"cup=({r},{c}) want (1,1)")
 
     # The status line's position display tracks the point's line: one line
     # down from the top is the 2nd line ("L2,...").
@@ -674,24 +674,24 @@ def wide_char_checks():
     # sits at display col 14 (0-based).
     s.key("C-a", 0.5)
     r, c = do("C-f " * 13)
-    rec("cursor on char 13: CUP col is DISPLAY col 14", (r, c) == (2, 15),
-        f"cup=({r},{c}) want (2,15)")
+    rec("cursor on char 13: CUP col is DISPLAY col 14", (r, c) == (1, 15),
+        f"cup=({r},{c}) want (1,15)")
     r, c = do("C-e")
-    rec("cursor at EOL: CUP col is display col 16", (r, c) == (2, 17),
-        f"cup=({r},{c}) want (2,17)")
+    rec("cursor at EOL: CUP col is display col 16", (r, c) == (1, 17),
+        f"cup=({r},{c}) want (1,17)")
     # Click the SECOND cell of 中 (display col 10): maps to char 9, whose
-    # display col is 9 -> CUP (2, 10). Char-index arithmetic would land on
+    # display col is 9 -> CUP (1, 10). Char-index arithmetic would land on
     # the space (char 10) -> CUP col 11.
-    r, c = click(10, 1)
-    rec("click inside 中 (2nd cell) maps to that char", (r, c) == (2, 10),
-        f"cup=({r},{c}) want (2,10)")
-    # Click display col 14 (the 'g', char index 13) -> CUP (2, 15).
-    r, c = click(14, 1)
-    rec("click on display col 14 lands on char 13", (r, c) == (2, 15),
-        f"cup=({r},{c}) want (2,15)")
+    r, c = click(10, 0)
+    rec("click inside 中 (2nd cell) maps to that char", (r, c) == (1, 10),
+        f"cup=({r},{c}) want (1,10)")
+    # Click display col 14 (the 'g', char index 13) -> CUP (1, 15).
+    r, c = click(14, 0)
+    rec("click on display col 14 lands on char 13", (r, c) == (1, 15),
+        f"cup=({r},{c}) want (1,15)")
     # The space after the wide char survives the render: content row 1
-    # (terminal row 2, 0-based) shows `let 中 = 1;` with its space.
-    line1 = s.row_text(2)
+    # (terminal row 1, 0-based) shows `let 中 = 1;` with its space.
+    line1 = s.row_text(1)
     rec("space after a wide char survives the render",
         "let 中 = 1;" in line1, f"row={line1[:32]!r}")
 
@@ -743,33 +743,33 @@ def tree_click_checks():
     # Point at (0,0) before the click legs.
     s.key("C-a", 0.6)
 
-    # 1-based terminal col 34 + 6 = 40 on content row 0 (terminal row 1,
+    # 1-based terminal col 34 + 6 = 40 on content row 0 (terminal row 0,
     # 0-based): pane col 39-34=5 → char index 5 → CUP col 34 + 5 + 1 (05g:
     # the CUP is in absolute screen coordinates, offset by the tree width).
-    r, c = click(34 + 6 - 1, 1)
-    rec("tree on: click 1-based col 40 → char 5 (CUP (2,40))", (r, c) == (2, 40),
-        f"cup=({r},{c}) want (2,40)")
-    # 1-based col 35 (k=1): the first code-pane cell → char 0 → CUP (2,35).
-    r, c = click(34, 1)
-    rec("tree on: click 1-based col 35 → char 0 (CUP (2,35))", (r, c) == (2, 35),
-        f"cup=({r},{c}) want (2,35)")
+    r, c = click(34 + 6 - 1, 0)
+    rec("tree on: click 1-based col 40 → char 5 (CUP (1,40))", (r, c) == (1, 40),
+        f"cup=({r},{c}) want (1,40)")
+    # 1-based col 35 (k=1): the first code-pane cell → char 0 → CUP (1,35).
+    r, c = click(34, 0)
+    rec("tree on: click 1-based col 35 → char 0 (CUP (1,35))", (r, c) == (1, 35),
+        f"cup=({r},{c}) want (1,35)")
     # Past the code pane's EOL (20 A's): 1-based col 34+25=59 → pane col 24
     # → clamped to EOL char 20 → CUP col 34 + 20 + 1 = 55.
-    r, c = click(34 + 25 - 1, 1)
+    r, c = click(34 + 25 - 1, 0)
     rec("tree on: click past code pane EOL clamps to EOL",
-        (r, c) == (2, 55), f"cup=({r},{c}) want (2,55)")
+        (r, c) == (1, 55), f"cup=({r},{c}) want (1,55)")
     # A click inside the tree's columns (1-based col 10, a visible tree
     # row) selects a tree row but does NOT move the code point: the CUP
-    # stays where the previous click left it (point (0,20) → CUP (2,55)).
+    # stays where the previous click left it (point (0,20) → CUP (1,55)).
     r, c = click(9, 2)
     rec("tree on: click in tree cols does not move the code point",
-        (r, c) == (2, 55), f"cup=({r},{c}) want (2,55)")
+        (r, c) == (1, 55), f"cup=({r},{c}) want (1,55)")
     # Tree-hidden leg (regression): toggle the tree off; the mapping is 1:1
-    # again (1-based col 6 → char 5 → CUP (2,6)).
+    # again (1-based col 6 → char 5 → CUP (1,6)).
     s.key("C-c p t", 0.9)
-    r, c = click(5, 1)
-    rec("tree off: click 1-based col 6 → CUP (2,6) (1:1)", (r, c) == (2, 6),
-        f"cup=({r},{c}) want (2,6)")
+    r, c = click(5, 0)
+    rec("tree off: click 1-based col 6 → CUP (1,6) (1:1)", (r, c) == (1, 6),
+        f"cup=({r},{c}) want (1,6)")
 
     s.kill()
     return checks
@@ -804,8 +804,8 @@ def tree_cursor_offset_checks():
 
     def pane_start_col():
         """0-based terminal column where the code pane's line 0 text starts
-        (the first run of 20 A's on content row 0 / terminal row 1)."""
-        line = s.row_text(1)
+        (the first run of 20 A's on content row 0 / terminal row 0)."""
+        line = s.row_text(0)
         i = line.find("AAAAAA")
         if i < 0:
             return None
@@ -837,7 +837,7 @@ def tree_cursor_offset_checks():
         total += step
         r, c = do("C-f " * step)  # `step` × C-f from the previous point
         cup1 = (start is not None) and (c == start + total + 1)
-        cup_ok = cup_ok and cup1 and r == 2
+        cup_ok = cup_ok and cup1 and r == 1
         cup_detail.append(f"N={total}:cup=({r},{c}) want col {start + total + 1 if start is not None else '?'}")
     rec("tree on: cumulative C-f ×N → CUP col = pane start + N (1-based)",
         cup_ok, "; ".join(cup_detail))
@@ -847,16 +847,16 @@ def tree_cursor_offset_checks():
     # sidebar).
     s.key("M-<", 0.8)
     r, c = do("C-f C-f C-f")
-    rec("tree on: 3× C-f → CUP (row 2, 0-based col 37) (repro: was 0-based col 3)",
-        (r, c) == (2, 38), f"cup=({r},{c}) want (2,38)")
+    rec("tree on: 3× C-f → CUP (row 1, 0-based col 37) (repro: was 0-based col 3)",
+        (r, c) == (1, 38), f"cup=({r},{c}) want (1,38)")
 
     # Tree-hidden leg (regression): toggle the tree off; CUP col is 1:1
     # with the pane (3× C-f → col 4, 1-based).
     s.key("C-c p t", 0.9)
     s.key("M-<", 0.8)
     r, c = do("C-f C-f C-f")
-    rec("tree off: 3× C-f → CUP (row 2, col 4) (1:1)",
-        (r, c) == (2, 4), f"cup=({r},{c}) want (2,4)")
+    rec("tree off: 3× C-f → CUP (row 1, col 4) (1:1)",
+        (r, c) == (1, 4), f"cup=({r},{c}) want (1,4)")
 
     s.kill()
     return checks
@@ -1121,7 +1121,7 @@ def annotation_gutter_checks():
     s.cup_settle(s._read(0.8, quiet=0.15))
     # Find the row with the SHOWN arrow (▴) and verify the full text after it.
     row_text = None
-    for r in range(1, s.rows - 2):
+    for r in range(0, s.rows - 2):
         t = s.row_text(r)
         if "\u25b4" in t:
             row_text = t
@@ -1142,9 +1142,9 @@ def annotation_gutter_checks():
     # header, not its trailer). The per-cell "\u256d\u2500regression
     # check" string is the ANCHOR assertion: it is false if the corner
     # moves one cell or if the cell-1 bend is dropped.
-    marker_row_idx = next((r for r in range(1, s.rows - 2)
+    marker_row_idx = next((r for r in range(0, s.rows - 2)
                            if "\u25b4" in s.row_text(r)), None)
-    note_above = marker_row_idx is not None and marker_row_idx > 1 and (
+    note_above = marker_row_idx is not None and marker_row_idx > 0 and (
         "\u256d\u2500regression check" in s.row_text(marker_row_idx - 1)
     )
     rec("note row (╭ corner at the anchor cell 0, ─ at cell 1) sits directly ABOVE the code row",
@@ -1155,14 +1155,14 @@ def annotation_gutter_checks():
     # stays on the anchored line). Line 0 is a column-0 symbol: the code
     # sits at cell 1 (the exact-1 shift), so char 0 is at 0-based terminal
     # col 1 (1-based col 2). The note row ABOVE the code row pushed the
-    # code row down by 1, so the CUP row is now 3 (1-based).
+    # code row down by 1, so the CUP row is now 2 (1-based; W13: no title).
     r, c = do("C-a", 0.6)
     rec("cursor on annotated column-0 line: CUP row moved +1 (note above), col = code cell 1",
-        (r, c) == (3, 2), f"cup=({r},{c}) want (3,2)")
+        (r, c) == (2, 2), f"cup=({r},{c}) want (2,2)")
     # C-f x3: char 3 of the code → 0-based terminal col 1 + 3 = 4 (1-based 5).
     r, c = do("C-f C-f C-f")
     rec("cursor on annotated column-0 line: C-f x3 → CUP col = code cell 1 + 3 (1-based col 5)",
-        (r, c) == (3, 5), f"cup=({r},{c}) want (3,5)")
+        (r, c) == (2, 5), f"cup=({r},{c}) want (2,5)")
 
     # ── Leg 3: note rows do not push the point off-canvas ─────────────
     # 30-line file, viewport 21. Note on line 0 (already created). C-n x20
@@ -1172,11 +1172,11 @@ def annotation_gutter_checks():
         s.key("C-n", 0.15)
     s._read(0.5, quiet=0.15)
     r, c = last_cup_after_sync(s.cup_settle(s.key("C-a", 0.6)))
-    # The cursor row must be within the canvas: the title occupies CUP row
-    # 1, so the 21 content rows are CUP rows 2..=22 (1-based).
-    cursor_in_canvas = r is not None and 2 <= r <= 22
+    # The cursor row must be within the canvas: W13 removed the title row,
+    # so the 21 content rows are CUP rows 1..=21 (1-based).
+    cursor_in_canvas = r is not None and 1 <= r <= 21
     rec("C-n x20: cursor row within canvas (not off-screen)",
-        cursor_in_canvas, f"cup_row={r} (want 2..=22)")
+        cursor_in_canvas, f"cup_row={r} (want 1..=21)")
     # The row UNDER the cursor must CONTAIN the point's line text (line 20
     # is "filler line 20") — a range check alone would also pass a future
     # off-by-one that lands the cursor on a NEIGHBOURING drawn row.
@@ -1192,7 +1192,7 @@ def annotation_gutter_checks():
     # point moved down from line 0) and is in the lower half of the canvas.
     # The exact line number depends on the file length and note-row cap,
     # so we check the cursor is in the bottom 10 rows of the canvas.
-    point_moved_down = r is not None and r >= 12  # lower half of 21-row canvas
+    point_moved_down = r is not None and r >= 11  # lower half of 21-row canvas
     rec("C-n x20: point moved to the window bottom (cursor in lower half)",
         point_moved_down, f"cup_row={r} (want >=12)")
     # Verify the point is stable: C-p then C-n returns to the same row.
@@ -1218,7 +1218,7 @@ def annotation_gutter_checks():
     s.key("C-c a h", 0.6)
     folded_row = None
     note_row_gone = True
-    for r2 in range(1, s.rows - 2):
+    for r2 in range(0, s.rows - 2):
         t = s.row_text(r2)
         if "\u256d\u2500regression check" in t:
             note_row_gone = False
@@ -1237,7 +1237,7 @@ def annotation_gutter_checks():
     s.cup_settle(buf_t + s._read(0.4, quiet=0.15))
     shown_row = None
     note_row_back = False
-    for r2 in range(1, s.rows - 2):
+    for r2 in range(0, s.rows - 2):
         t = s.row_text(r2)
         if "\u25b4" in t and "fn target_one() {}" in t:
             shown_row = t
@@ -1283,9 +1283,10 @@ def annotation_gutter_checks():
         s.key(ch, 0.25)
     s.cup_settle(s.key("RET", 1.5))
     s._read(0.5, quiet=0.15)
-    # Content rows are CUP 2..=22 (1-based) = screen rows 1..=21 (0-based).
-    canvas_rows = [s.row_text(r) for r in range(1, s.rows - 2)]
-    title = s.row_text(0).strip()
+    # Content rows are CUP 1..=21 (1-based) = screen rows 0..=20 (0-based);
+    # W13 removed the title row, so content row 0 is terminal row 0.
+    canvas_rows = [s.row_text(r) for r in range(0, s.rows - 2)]
+    title = s.row_text(s.rows - 1).strip()
     filled = [t for t in canvas_rows if t.strip()]
     marker_rows = [t for t in canvas_rows if "\u25b4" in t]
     note_rows = [t for t in canvas_rows if "\u256d" in t]
@@ -1322,7 +1323,7 @@ def annotation_gutter_checks():
 def jump_highlight_checks():
     """jump-highlight: the animated landing highlight, with an animated
     jump exercised (the spec's CUP-race interaction check, plan 013):
-    * M-i -> beta (window pinned at Bot: beta lands on terminal row 20,
+    * M-i -> beta (window pinned at Bot: beta lands on terminal row 19,
       1-based, at the `beta` name's column (col 4) — jump-column-landings,
       the imenu landing is on the symbol, not the line start): the
       landing pulse is a YELLOW band (iocraft's bright
@@ -1334,7 +1335,7 @@ def jump_highlight_checks():
       `?2026h … ?2026l`) lands exactly on the landing row/col
       BOTH during and after the animation (the extra animation frames
       must not widen the cursor race);
-    * M-, back to the `alpha` reference (row 21, col 6): a second
+    * M-, back to the `alpha` reference (row 20, col 6): a second
       animated landing, CUP tracking;
     * COLORTERM=truecolor: the band is a genuine RGB fade — the full-
       strength `48;2;255;255;0` band plus dimmer yellow-family 48;2;
@@ -1346,16 +1347,16 @@ def jump_highlight_checks():
     # jumpfn.rs: `alpha` at line 0, filler to line 27, `fn beta() {` at
     # line 28 with an `alpha` reference at line 29 (31 lines total, no
     # trailing newline). Window: 24-3=21 rows; the imenu jump keeps the
-    # window at Bot (top=10): beta = terminal row 20 (1-based), the
-    # reference line = terminal row 21.
+    # window at Bot (top=10): beta = terminal row 19 (1-based, W13: no
+    # title row), the reference line = terminal row 20.
     lines = ["fn alpha() {}"] + [f"// filler {i}" for i in range(1, 28)] + \
         ["fn beta() {", "    alpha();", "}"]
     with open(_os.path.join(src_dir, "jumpfn.rs"), "w") as f:
         f.write("\n".join(lines))
 
-    BETA_ROW = 20          # 1-based terminal row of `fn beta() {`
+    BETA_ROW = 19          # 1-based terminal row of `fn beta() {`
     BETA_COL = 4           # 1-based terminal col of the `beta` NAME (jump-column-landings: the imenu landing is on the symbol, `fn |beta`, not the line start)
-    REF_ROW, REF_COL = 21, 6  # 1-based row/col of the `alpha` reference
+    REF_ROW, REF_COL = 20, 6  # 1-based row/col of the `alpha` reference
 
     def run(mode):
         s = Session(mode)

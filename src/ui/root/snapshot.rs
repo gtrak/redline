@@ -67,7 +67,6 @@ pub(super) struct Snapshot {
     /// The total number of rendered rows for the buffer (canvas bottom
     /// scroll indicator; plan 005 issue 02).
     pub(super) file_view_total_rows: usize,
-    pub(super) file_view_title: String,
     pub(super) file_view_top_line: usize,
     pub(super) file_view_total_lines: usize,
     pub(super) file_view_viewport_lines: usize,
@@ -126,12 +125,6 @@ pub(super) struct Snapshot {
     // otherwise).
     pub(super) search_overlay_half: usize,
     pub(super) search_underlying: ViewId,
-    /// The current buffer's display name (project-relative when it belongs
-    /// to the project). The half-screen search overlay's top half renders a
-    /// FileView titled with THIS (not the top view's name, which is
-    /// `*search*` while the results view is on top); empty when no buffer is
-    /// current (the top half renders HomeView instead).
-    pub(super) current_buffer_display: String,
     pub(super) searching: String,
     // plan 018 issue 02: the isearch list overlay (the match rows in
     // search order + the selection; rendered in place of the buffer
@@ -263,7 +256,6 @@ pub(super) fn build(
         dirty: s.dirty_counts(),
         file_view_rows,
         file_view_total_rows: s.file_view_total_rows(),
-        file_view_title: s.view_name_display(),
         file_view_top_line: top_line,
         file_view_total_lines: total_lines,
         file_view_viewport_lines: viewport_lines,
@@ -292,11 +284,6 @@ pub(super) fn build(
         search_narrow_query: s.search_narrow_query().to_string(),
         search_overlay_half: s.search_overlay_half(),
         search_underlying: s.underlying_view(),
-        current_buffer_display: s
-            .buffers
-            .current()
-            .map(|k| s.buffer_display(k))
-            .unwrap_or_default(),
         searching: s.search_display(),
         isearch_active,
         isearch_rows,

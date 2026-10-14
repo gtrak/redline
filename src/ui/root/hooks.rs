@@ -59,23 +59,28 @@ pub(super) fn install_terminal_events(
                     tick.set(tick.get() + 1);
                 }
                 MouseEventKind::Down(iocraft::MouseButton::Left) => {
-                    // Click-to-position: the file view's content area starts
-                    // at terminal row 0 (the title is part of the view's
-                    // first line). The row is 0-based from the top.
-                    // Subtract 1 for the title line offset. The column is a
-                    // terminal (display) column, which maps 1:1 to the line's
-                    // display column with the tree hidden (the file view
-                    // renders from column 0 — no gutter, plan 004 issue 05c)
-                    // and is shifted by the tree width when it is visible
-                    // (plan 004 issue 05e): a click inside the tree's
-                    // columns selects the tree row under it and never moves
-                    // the code point. issue-clipboard-and-selection: the
-                    // press ALSO arms drag-select (mouse_drag_begin) so a
-                    // subsequent left DRAG can grow a region from it — a
-                    // press in the tree disarms instead (a tree drag must
-                    // never create a code region).
-                    let row = (mouse.row as usize).saturating_sub(1);
+                    // Click-to-position: the file view's content area now
+                    // starts at terminal row 0 (W13: the buffer name no
+                    // longer renders as a title row — it already appears on
+                    // the status line). The only optional row above the
+                    // canvas is the "changed on disk" banner, which pushes
+                    // the content down one row; subtract it so the click
+                    // lands on the row under the pointer. The row is 0-based
+                    // from the top. The column is a terminal (display)
+                    // column, which maps 1:1 to the line's display column
+                    // with the tree hidden (the file view renders from
+                    // column 0 — no gutter, plan 004 issue 05c) and is
+                    // shifted by the tree width when it is visible (plan
+                    // 004 issue 05e): a click inside the tree's columns
+                    // selects the tree row under it and never moves the code
+                    // point. issue-clipboard-and-selection: the press ALSO
+                    // arms drag-select (mouse_drag_begin) so a subsequent
+                    // left DRAG can grow a region from it — a press in the
+                    // tree disarms instead (a tree drag must never create a
+                    // code region).
                     let mut store = event_store.lock().unwrap();
+                    let banner = usize::from(store.current_buffer_changed_on_disk());
+                    let row = (mouse.row as usize).saturating_sub(banner);
                     let (in_tree, pane_col) =
                         click_pane(store.tree_visible(), mouse.column as usize);
                     if in_tree {
@@ -110,8 +115,13 @@ pub(super) fn install_terminal_events(
                 // or re-click to correct it. Not clamped: the tree's
                 // columns are narrow and the drag is a transient gesture.
                 MouseEventKind::Drag(iocraft::MouseButton::Left) => {
-                    let row = (mouse.row as usize).saturating_sub(1);
-                    event_store.lock().unwrap().mouse_drag_position(row);
+                    // W13: no title row, so the pointer's terminal row is the
+                    // content row directly — minus the "changed on disk"
+                    // banner when present (it pushes the canvas down one row).
+                    let mut store = event_store.lock().unwrap();
+                    let banner = usize::from(store.current_buffer_changed_on_disk());
+                    let row = (mouse.row as usize).saturating_sub(banner);
+                    store.mouse_drag_position(row);
                     tick.set(tick.get() + 1);
                 }
                 // The release disarms the drag tracking; the region itself

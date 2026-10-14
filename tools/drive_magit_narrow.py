@@ -114,10 +114,17 @@ def main():
     verdict("one-blue while narrowed", one_blue(app), f"blue={app.blue_rows()}")
 
     # ── RET leg: the selected narrowed row's REAL target ─────────────
+    # W13 removed the file view's duplicate title row, so `row_text(0)` is
+    # no longer the title — it is the buffer's first code line. lib.rs's
+    # first line is `pub fn target_lib() {}`, so assert the new step (the
+    # content row IS lib.rs) AND keep the old outcome (the status line
+    # names the file). Both halves are load-bearing: the code-line assert
+    # proves the frame's top is lib.rs's content, the status-line assert
+    # proves the visited file is src/lib.rs.
     app.key("RET", 1.0)
     top = app.row_text(0)
     verdict("RET visited the narrowed row's target (src/lib.rs)",
-            top.strip() == "src/lib.rs" and "src/lib.rs" in app.row_text(app.rows - 1),
+            top.startswith("pub fn target_lib") and "src/lib.rs" in app.row_text(app.rows - 1),
             f"top={top!r}")
 
     # ── STAGING leg: `u` while narrowed hits the RIGHT file ─────────

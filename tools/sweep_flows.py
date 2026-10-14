@@ -110,6 +110,12 @@ def row0(app):
     return app.row_text(0)
 
 
+def status_line(app):
+    """The bottom status line (W13: it carries the buffer's display name —
+    the file view no longer renders a duplicate title row)."""
+    return app.row_text(app.rows - 1)
+
+
 def rows_containing(app, token):
     """Row indices whose text contains `token` (the no-wrap discriminator)."""
     return [r for r in range(app.rows) if token in app.row_text(r)]
@@ -189,7 +195,7 @@ def flow_editable_keys(app):
     into the buffer."""
     app.key("C-x n")
     app.wait(0.8)
-    notes_open = ".redline-notes.md" in row0(app)
+    notes_open = ".redline-notes.md" in status_line(app)
     for ch in "abc":
         app.key(ch, settle=0.3)
     # Self-insert: 'abc' is present as its own content row (row index may
@@ -207,7 +213,7 @@ def flow_editable_keys(app):
     # Close magit (q on the magit view) back to the notes buffer.
     app.key("q")
     app.wait(0.8)
-    back_to_notes = ".redline-notes.md" in row0(app)
+    back_to_notes = ".redline-notes.md" in status_line(app)
     # The prefix tail must NOT have been typed: 'abc' stays exactly 'abc'
     # (a 'g' typed into the buffer would make the row 'abcg').
     intact = any(app.row_text(r).strip() == "abc" for r in range(app.rows - 2))
@@ -302,7 +308,7 @@ def flow_banner_hint():
         try:
             app.key("C-x n")
             app.wait(0.8)
-            notes_open = ".redline-notes.md" in row0(app)
+            notes_open = ".redline-notes.md" in status_line(app)
             # One keystroke: the notes buffer becomes locally-owned.
             app.key("x", settle=0.3)
             # External disk edit: append a real line to the notes file.
@@ -412,7 +418,7 @@ def flow_quit_prompt_y():
         app = App(REPO, rows=ROWS, cols=COLS)
         app.key("C-x n")
         app.wait(0.8)
-        notes_open = ".redline-notes.md" in row0(app)
+        notes_open = ".redline-notes.md" in status_line(app)
         app.key("Q", settle=0.4)
         app.key("Y", settle=0.4)
         app.key("C-x C-c", settle=1.0)
@@ -734,10 +740,10 @@ def flow_annotation_cu_still_scrolls(app):
     app.key("G")
     app.wait(0.4)
     at_bottom = "Bot" in app.row_text(app.rows - 1)
-    top_before = app.row_text(1)
+    top_before = app.row_text(0)
     app.key("C-u")
     app.wait(0.4)
-    top_after = app.row_text(1)
+    top_after = app.row_text(0)
     moved_up = "cu line 11" in top_before and "cu line 1" in top_after
     ok = at_bottom and moved_up and top_before != top_after
     record("ann-cu-scroll", "G,C-u (30-line file)", ok,
@@ -785,10 +791,11 @@ def flow_accurate_suite():
         # (1) RET: newline-at-point at the start (point (0,0)) opens a blank
         # line 0 above "ab cd" and the point lands at the start of (new)
         # line 1 — where every later step edits. A no-op / mis-routed RET
-        # leaves the top content row "ab cd".
+        # leaves the top content row "ab cd". (W13: no title row, so content
+        # row N is terminal row N.)
         app.key("RET", settle=0.3)
         app.wait(0.4)
-        did_retnl = (app.row_text(1).strip() == ""
+        did_retnl = (app.row_text(0).strip() == ""
                      and "ab cd" in text(app))
         # (2) insert: type 'Z' at the start of line 1 → "Zab cd".
         app.key("Z", settle=0.2)
@@ -816,22 +823,22 @@ def flow_accurate_suite():
         # feed the raw bytes.
         app.feed(b"\x1b\x7f", settle=0.3)
         app.wait(0.4)
-        did_mdel = (app.row_text(2).rstrip() == " cd"
+        did_mdel = (app.row_text(1).rstrip() == " cd"
                     and "2 chars killed" in text(app))
         # (6) C-d: delete-char-forward removes ' ' (the char at the point,
         # col 0 of " cd") → "cd".
         app.key("C-d")
         app.wait(0.4)
         did_cd = (" cd" not in text(app)
-                  and "cd" in app.row_text(2))
-        # (7) C-o: open-line at col 0 of "cd" (now content line 1, row 2):
+                  and "cd" in app.row_text(1))
+        # (7) C-o: open-line at col 0 of "cd" (now content line 1, row 1):
         # a blank line lands between the already-blank line 0 (from RET) and
-        # "cd", so "cd" drops from row 2 to row 3 and row 2 becomes blank.
-        # A no-op / mis-routed C-o leaves "cd" on row 2.
+        # "cd", so "cd" drops from row 1 to row 2 and row 1 becomes blank.
+        # A no-op / mis-routed C-o leaves "cd" on row 1.
         app.key("C-o")
         app.wait(0.4)
-        did_co = (app.row_text(2).strip() == ""
-                  and "cd" in app.row_text(3))
+        did_co = (app.row_text(1).strip() == ""
+                  and "cd" in app.row_text(2))
         # (8) C-k: kill-line. C-n C-n lands on the "ef gh" line (now line 3
         # after RET and C-o pushed it down); C-a to line start (C-n carries
         # goal_col, so without it the point lands mid-line and C-k kills
@@ -851,10 +858,10 @@ def flow_accurate_suite():
         # changes). A no-op or a self-inserted 'u' would not change the TOP row.
         app.key("C-v")
         app.wait(0.4)
-        top_before = app.row_text(1)
+        top_before = app.row_text(0)
         app.key("C-u")
         app.wait(0.4)
-        top_after = app.row_text(1)
+        top_after = app.row_text(0)
         did_cu = (top_before != top_after
                   and "filler" in top_before and "filler" in top_after)
         # Save and read the disk bytes back (the definitive by-byte artifact).
@@ -890,11 +897,11 @@ def flow_g1(app, path):
     viewed file repaints the view (watcher) and preserves the scroll anchor
     (the top line stays put, since that line still exists). The shrink-clamp
     half of G1 (file shrinks below the anchor) is unit-tested in reload_anchor."""
-    top_before = app.row_text(1)
+    top_before = app.row_text(0)
     with open(path, "a") as f:
         f.write("G1_BOTTOM_APPEND\n")
     shown = wait_for(app, lambda: "G1_BOTTOM_APPEND" in text(app), 4.0)
-    top_after = app.row_text(1)
+    top_after = app.row_text(0)
     scroll_preserved = top_before == top_after and top_before.strip() != ""
     ok = shown and scroll_preserved
     record("U-G1", "disk-append (bottom)", ok,

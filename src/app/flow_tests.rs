@@ -302,7 +302,10 @@ fn unit_flow_b1() {
         "prompt={prompt_ok} filtered={filtered} opened={opened}\n{frame}"
     );
     let lines: Vec<&str> = frame.lines().collect();
-    assert!(lines[0].contains("src/main.rs"), "title: {frame}");
+    // W13: the file view's duplicate title row is gone; the name lives on
+    // the status line and the first rendered row is the first code line.
+    assert!(frame.contains("src/main.rs"), "status line names the file: {frame}");
+    assert!(lines[0].contains("fn target_one"), "first row is code, not a title (W13): {frame}");
     assert!(frame.contains("fn target_one"), "content: {frame}");
 }
 
@@ -884,7 +887,10 @@ fn unit_flow_e3() {
     assert!(jumped, "landed in src/main.rs");
     let frame = render80(s);
     let lines: Vec<&str> = frame.lines().collect();
-    assert!(lines[0].contains("src/main.rs"), "title: {frame}");
+    // W13: no duplicate title row — the name is on the status line and the
+    // first rendered row is the buffer's first code line.
+    assert!(frame.contains("src/main.rs"), "status line names the file: {frame}");
+    assert!(lines[0].contains("fn target_one"), "first row is code, not a title (W13): {frame}");
 }
 
 /// U-E2 cancel paths: ESC and q close the results view.

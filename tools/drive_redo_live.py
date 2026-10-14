@@ -64,9 +64,9 @@ def rec(name, ok, detail=""):
 
 
 def line0(app):
-    # Content line 0 (terminal row 1, 0-based) is where the notes buffer's
-    # editable text lives; the title is row 0.
-    return app.row_text(1).rstrip()
+    # Content line 0 (terminal row 0, 0-based) is where the notes buffer's
+    # editable text lives; W13 removed the file view's title row.
+    return app.row_text(0).rstrip()
 
 
 def open_notes_accurate(app):

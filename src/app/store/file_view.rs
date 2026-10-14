@@ -147,7 +147,9 @@ impl AppStore {
     /// point to the clicked `(line, col)` — both are clamped to the buffer's
     /// bounds, so a click past EOL lands at EOL and a click on an empty line
     /// lands at col 0. `row` is the click's row within the visible file area
-    /// (the caller subtracts the file view's title-line offset); `col` is
+    /// (the caller no longer subtracts a title-line offset — W13 removed the
+    /// file view's duplicate title row; the caller subtracts only the
+    /// optional "changed on disk" banner row when it is present); `col` is
     /// the clicked DISPLAY column RELATIVE TO THE FILE VIEW'S LEFT EDGE —
     /// with the tree sidebar visible the root event arm subtracts the tree
     /// width before calling (plan 004 issue 05e), so callers never mix the
@@ -324,7 +326,9 @@ impl AppStore {
     /// The click/drag row → BUFFER line translation, shared by
     /// `mouse_click_position` and the drag-select pair (issue-
     /// clipboard-and-selection part 2): `row` is the 0-based row within the
-    /// visible file area (the root event arm subtracts the title line).
+    /// visible file area (the root event arm subtracts only the optional
+    /// "changed on disk" banner row, not a title row — W13 removed the file
+    /// view's duplicate title row).
     /// With note rows visible a rendered row is NOT `scroll_top + row`
     /// buffer lines — translate through the rendered-row list (a note row
     /// maps to its anchored code row; plan 005 issue 02). A row past the

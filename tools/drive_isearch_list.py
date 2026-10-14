@@ -75,9 +75,9 @@ REPO = repo("redline_018_02_isearch_repo")
 COLS, ROWS = 80, 24
 MINI = ROWS - 2      # minibuffer row (0-based)
 
-# Screen geometry (tree sidebar hidden): row 0 = the file title, content
-# line i (0-based) = screen row i + 1 (the buffer text starts at screen
-# column 0), row 22 = minibuffer, 23 = status. The isearch list (2 rows)
+# Screen geometry (tree sidebar hidden): W13 removed the file view's title
+# row, so content line i (0-based) = screen row i (the buffer text starts at
+# screen column 0); row 22 = minibuffer, 23 = status. The isearch list (2 rows)
 # is bottom-aligned above the minibuffer: screen rows 20 and 21 (1 row:
 # row 21). A list row reads `    2 café omega …  (col 5)`: the 1-based
 # line number right-aligned in the 4-cell gutter (cells 1..=4), one blank
@@ -171,10 +171,10 @@ def main():
             mini(app) == "I-search: om [1/2]", f"minibuffer={mini(app)!r}")
         r, c = cup(app)
         rec("L-1: the point (CUP) is on the first-in-direction match (line 1, display cell 5 → 1-based col 6)",
-            (r, c) == (3, 6), f"cup=({r},{c}) want (3,6)")
+            (r, c) == (2, 6), f"cup=({r},{c}) want (2,6)")
         blues = bar_rows(app)
-        rec("L-1: the highlight band tracks the selection behind the list (content row 2) and the list bar (row 20)",
-            blues == {2, 20}, f"bar={sorted(blues)}")
+        rec("L-1: the highlight band tracks the selection behind the list (content row 1) and the list bar (row 20)",
+            blues == {1, 20}, f"bar={sorted(blues)}")
 
         # Narrow: 'omy' matches only line 3.
         app.key("y", 0.4)
@@ -187,7 +187,7 @@ def main():
             mini(app) == "I-search: omy [1/1]", f"minibuffer={mini(app)!r}")
         r, c = cup(app)
         rec("L-1: the selection re-derives to the (only) match — the point follows (line 3)",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
 
         # Backspace widens it back; the selection re-derives from the point
         # (line 3 — the first match at or after the point).
@@ -200,8 +200,8 @@ def main():
         rec("L-1: the selection re-derives to the first match in the search direction from the point (line 3 → [2/2])",
             mini(app) == "I-search: om [2/2]", f"minibuffer={mini(app)!r}")
         blues = bar_rows(app)
-        rec("L-1: the band + list bar moved with the selection (content row 4, list row 21)",
-            blues == {4, 21}, f"bar={sorted(blues)}")
+        rec("L-1: the band + list bar moved with the selection (content row 3, list row 21)",
+            blues == {3, 21}, f"bar={sorted(blues)}")
 
         print("=== L-2: C-s moves the selection; RET confirms the SELECTED match ===")
         app.key("C-r", 0.4)   # selection back to the first match (line 1)
@@ -212,7 +212,7 @@ def main():
             mini(app) == "I-search: om [2/2]", f"minibuffer={mini(app)!r}")
         r, c = cup(app)
         rec("L-2: the buffer view behind the list scrolled to the selected match (line 3)",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
         app.key("RET", 0.8)
         text = app.screen_text()
         rec("L-2: RET removes the list (no match rows on screen)",
@@ -223,7 +223,7 @@ def main():
             f"blue={app.blue_rows()} reverse={app.reverse_rows()}")
         r, c = cup(app)
         rec("L-2: the point landed ON the SELECTED match's column (line 3, char 5 — a byte landing (char 6, the 'm') would be col 7, a line start col 1)",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
         rec("L-2: the isearch echo clears on confirm (back to the default hint)",
             "I-search" not in app.row_text(MINI),
             f"minibuffer={app.row_text(MINI)[:12]!r}")
@@ -243,7 +243,7 @@ def main():
             mini(app) == "I-search: om [1/2]", f"minibuffer={mini(app)!r}")
         r, c = cup(app)
         rec("L-3: the selection is now on line 1 (the point left the pre-search point)",
-            (r, c) == (3, 6), f"cup=({r},{c}) want (3,6)")
+            (r, c) == (2, 6), f"cup=({r},{c}) want (2,6)")
         app.key("C-g", 0.8)
         text = app.screen_text()
         rec("L-3: C-g echoes 'cancel' and removes the list",
@@ -254,7 +254,7 @@ def main():
             f"blue={app.blue_rows()} reverse={app.reverse_rows()}")
         r, c = cup(app)
         rec("L-3: the pre-search LINE AND COLUMN are restored (line 3, char 5 → CUP (5,6) — not the line start (col 1), not where the selection sat ((3,6)))",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6); pre-search=(5,6), selection=(3,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6); pre-search=(4,6), selection=(2,6)")
 
         print("=== L-4: C-o arms the filter; typing narrows the matches (FilterOnly) ===")
         # Pre-search point: line 3, char 5 (the L-2/L-4 landing) — forward
@@ -280,10 +280,10 @@ def main():
             mini(app) == "I-search: om (filter: my) [1/1]", f"minibuffer={mini(app)!r}")
         r, c = cup(app)
         rec("L-4: the selection stays on the surviving match (CUP (5,6))",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
         app.key("RET", 0.8)
         rec("L-4: RET confirms the SELECTED filtered row — the old outcome holds (list gone, CUP on line 3 col 5, no highlight)",
-            "(col " not in app.screen_text() and cup(app) == (5, 6)
+            "(col " not in app.screen_text() and cup(app) == (4, 6)
             and app.blue_rows() == [] and app.reverse_rows() == [],
             f"cup={cup(app)} blue={app.blue_rows()}")
 
@@ -307,7 +307,7 @@ def main():
             f"minibuffer={mini(app)!r} rows={rows!r}")
         r, c = cup(app)
         rec("L-5: the point stays on the surviving match (line 3 → CUP (5,6))",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
 
         print("=== L-6: a filter matching nothing shows an honest empty state ===")
         app.key("C-h", 0.4)  # literal back to 'om' (2 matches; the filter keeps line 3)
@@ -327,7 +327,7 @@ def main():
             f"blue={app.blue_rows()} reverse={app.reverse_rows()}")
         app.key("RET", 0.8)
         rec("L-6: RET on an empty filtered set is an honest not-found (no silent jump)",
-            mini(app) == "I-search: om [not found]" and cup(app) == (5, 6),
+            mini(app) == "I-search: om [not found]" and cup(app) == (4, 6),
             f"minibuffer={mini(app)!r} cup={cup(app)}")
 
         print("=== L-7: layered C-g — first clears the filter, second cancels ===")
@@ -346,10 +346,10 @@ def main():
             f"minibuffer={mini(app)!r} rows={list_rows(app)!r}")
         r, c = cup(app)
         rec("L-7: the selection follows its match (line 3 → CUP (5,6), not reset to line 1)",
-            (r, c) == (5, 6), f"cup=({r},{c}) want (5,6)")
+            (r, c) == (4, 6), f"cup=({r},{c}) want (4,6)")
         app.key("C-g", 0.8)
         rec("L-7: the SECOND C-g cancels (echo 'cancel', list gone, pre-search point restored)",
-            mini(app) == "cancel" and list_rows(app) == [] and cup(app) == (5, 6)
+            mini(app) == "cancel" and list_rows(app) == [] and cup(app) == (4, 6)
             and app.blue_rows() == [] and app.reverse_rows() == [],
             f"minibuffer={mini(app)!r} cup={cup(app)}")
     finally:

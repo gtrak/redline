@@ -110,15 +110,16 @@ def main():
 
         # W14: the STRONG claim — the human's live PYTE SCREEN moved, not just
         # a client-side `quote` read of store state. Read the PTY (the repaint
-        # lands asynchronously) and assert the file-view TITLE row AND the
-        # status line both name the file. This is the assertion that FAILS if
-        # the repaint breaks.
+        # lands asynchronously) and assert the file's CONTENT row (W13: the
+        # file view has no title row — row 0 is the first code line) AND the
+        # status line names the file. This is the assertion that FAILS if the
+        # repaint breaks.
         app._read(2.0, quiet=0.3)
-        title_row = app.row_text(0)
+        content_row = app.row_text(0)
         status_row = app.row_text(app.rows - 1)
-        screen_ok = "Cargo.toml" in title_row and "Cargo.toml" in status_row
-        rec("live PYTE screen repaints (title + status name the file)", screen_ok,
-            f"title={title_row.strip()!r} status={status_row.strip()[:60]!r}")
+        screen_ok = "[package]" in content_row and "Cargo.toml" in status_row
+        rec("live PYTE screen repaints (content + status name the file)", screen_ok,
+            f"content={content_row.strip()!r} status={status_row.strip()[:60]!r}")
 
         # ── sugar verbs, one leg each (019-03) ──────────────────────────
 

@@ -14,9 +14,10 @@ use super::snapshot::Snapshot;
 /// column conversion, plan 004 issue 05d) for the read-focused buffer view, 0
 /// for list views).
 ///
-/// Layout (0-based terminal rows): the main view's title is row 0 and its first
-/// content row is row 1, so content row `i` (0-based within the window) is at
-/// terminal row `1 + i`. With the tree sidebar visible the view's column is
+/// Layout (0-based terminal rows): the main view's first content row is row 0
+/// (W13: the file view's title row is gone — the buffer name already appears
+/// on the status line), so content row `i` (0-based within the window) is at
+/// terminal row `i`. With the tree sidebar visible the view's column is
 /// PANE-relative while the terminal cursor is in ABSOLUTE screen coordinates
 /// (the two panes are laid out by the flex row: the tree occupies terminal
 /// columns `[0, TREE_WIDTH)`), so the column is offset by `TREE_WIDTH`
@@ -169,7 +170,7 @@ pub(super) fn cursor_cell(snap: &Snapshot) -> Option<(u16, u16)> {
                     })
                     .unwrap_or(snap.file_view_point_col)
             };
-            Some((col as u16, 1 + banner + content_row as u16))
+            Some((col as u16, banner + content_row as u16))
         }
     };
     // Plan 004 issue 05g: the terminal cursor is in ABSOLUTE screen
@@ -280,7 +281,6 @@ mod tests {
             commit_editor_rows: Vec::new(),
             commit_editor_cursor_line: None,
             dirty: None,
-            file_view_title: String::new(),
             file_view_changed_on_disk: false,
             file_view_current_buffer_editable: false,
             buffer_mode: String::new(),
@@ -306,7 +306,6 @@ mod tests {
             search_underlying: ViewId::Home,
 
 
-            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),
@@ -373,17 +372,17 @@ mod tests {
         let snap = buffer_snapshot(&["CJK: abcd中 efgh", "bb"], 0, 13);
         assert_eq!(
             cursor_cell(&snap),
-            Some((14, 1)),
-            "char 13 → display col 14 (0-based); content row 0 → row 1 (0-based)"
+            Some((14, 0)),
+            "char 13 → display col 14 (0-based); content row 0 → row 0 (W13: no title row)"
         );
         let snap = buffer_snapshot(&["CJK: abcd中 efgh", "bb"], 0, 0);
-        assert_eq!(cursor_cell(&snap), Some((0, 1)));
+        assert_eq!(cursor_cell(&snap), Some((0, 0)));
         // ASCII lines are unchanged: display col == char index.
         let snap = buffer_snapshot(&["abcd", "bb"], 1, 1);
-        assert_eq!(cursor_cell(&snap), Some((1, 2)));
+        assert_eq!(cursor_cell(&snap), Some((1, 1)));
         // Combining marks add no cell: char 2 of e+U+0301+x is at col 1.
         let snap = buffer_snapshot(&["e\u{301}x"], 0, 2);
-        assert_eq!(cursor_cell(&snap), Some((1, 1)));
+        assert_eq!(cursor_cell(&snap), Some((1, 0)));
     }
 
     /// A point line outside the pre-computed visible slice falls back to
@@ -395,8 +394,29 @@ mod tests {
         // plan 005 issue 02b: the clamp is against the RENDERED slice
         // (rows.len() = 2), not the buffer-line viewport. Off-slice point
         // line 4 falls back to char index 2, row clamped to last rendered
-        // row (row 1) → terminal row 1 + 0 + 1 = 2.
-        assert_eq!(cursor_cell(&snap), Some((2, 2)), "char index 2, clamped to rendered-slice row 1 → terminal row 2");
+        // row (row 1) → terminal row 0 + 0 + 1 = 1.
+        assert_eq!(cursor_cell(&snap), Some((2, 1)), "char index 2, clamped to rendered-slice row 1 → terminal row 1");
+    }
+
+    /// W13: with the file view's title row gone, the only optional row above
+    /// the canvas is the "changed on disk" banner. It pushes the content down
+    /// exactly one row (the cursor row is `banner + content_row`, no `1 +`
+    /// title term). Pins the bare-canvas baseline AND the banner case so a
+    /// future re-introduction of a title offset is RED here.
+    #[test]
+    fn cursor_cell_changed_on_disk_banner_is_the_only_row_above_the_canvas() {
+        // No banner: the point's rendered row is its terminal row directly.
+        let snap = buffer_snapshot(&["aa", "bb"], 1, 0);
+        assert_eq!(cursor_cell(&snap), Some((0, 1)), "no banner: content row 1 → terminal row 1");
+        // Banner present: every content row shifts down one.
+        let mut snap = buffer_snapshot(&["aa", "bb"], 1, 0);
+        snap.file_view_changed_on_disk = true;
+        assert_eq!(cursor_cell(&snap), Some((0, 2)), "banner: content row 1 → terminal row 2 (banner + 1)");
+        // Content row 0 with the banner sits at terminal row 1 (right under
+        // the banner), NOT the old title row 1 + banner.
+        let mut snap = buffer_snapshot(&["aa", "bb"], 0, 0);
+        snap.file_view_changed_on_disk = true;
+        assert_eq!(cursor_cell(&snap), Some((0, 1)), "banner: content row 0 → terminal row 1");
     }
 
     // ── plan 005 issue 02b: gutter + note-row overflow regression ────────
@@ -508,7 +528,6 @@ mod tests {
             commit_editor_rows: Vec::new(),
             commit_editor_cursor_line: None,
             dirty: None,
-            file_view_title: String::new(),
             file_view_changed_on_disk: false,
             file_view_current_buffer_editable: false,
             buffer_mode: String::new(),
@@ -534,7 +553,6 @@ mod tests {
             search_underlying: ViewId::Home,
 
 
-            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),
@@ -554,14 +572,14 @@ mod tests {
     /// `code_start = 1`, `indent_chars = 0` — the column-0 shape.)
     /// (annotations-render-fold: the note row emits BEFORE
     /// the code row, so an annotated point's code row sits at slice row 1
-    /// — terminal row 2.)
+    /// — terminal row 1; W13: no title row above the canvas).
     #[test]
     fn cursor_cell_annotated_line_starts_at_anchor_not_gutter() {
         // One annotated column-0 line, point at char 3 (display col 3 in the
         // code). The code sits at cell 1 (the anchor shifted it right by
         // one), so the terminal cursor is at col 1 + 3 = 4; the note row
         // above occupies slice row 0, so the code row is at terminal row
-        // 1 (title) + 1 = 2.
+        // 0 + 1 = 1.
         let snap = annotated_snapshot(
             &[("fn target_one() {}", true)],
             &[0],
@@ -569,16 +587,16 @@ mod tests {
         );
         assert_eq!(
             cursor_cell(&snap),
-            Some((4, 2)),
-            "annotated column-0: code start (1) + display_col(3) = 4; note row above → terminal row 2"
+            Some((4, 1)),
+            "annotated column-0: code start (1) + display_col(3) = 4; note row above → terminal row 1"
         );
         // Point at char 0 → col 1 (the anchor shifted the line right by one;
         // NOT the old 2-cell gutter).
         let snap = annotated_snapshot(&[("fn target_one() {}", true)], &[0], 0, 0, 1);
-        assert_eq!(cursor_cell(&snap), Some((1, 2)), "char 0 → col 1 (the 1-cell shift); note row above");
+        assert_eq!(cursor_cell(&snap), Some((1, 1)), "char 0 → col 1 (the 1-cell shift); note row above");
         // Non-annotated line: code at column 0, no shift.
         let snap = annotated_snapshot(&[("plain line", false)], &[], 0, 3, 1);
-        assert_eq!(cursor_cell(&snap), Some((3, 1)), "non-annotated: code at column 0");
+        assert_eq!(cursor_cell(&snap), Some((3, 0)), "non-annotated: code at column 0, content row 0 → terminal row 0");
     }
 
     /// issue-annotations-anchor-at-symbol: an INDENTED annotated line's code
@@ -637,10 +655,10 @@ mod tests {
         // the stripped code that's char 0 → cursor at code_start (4) + 0 = 4:
         // the code did not move. Row 2 (note above).
         snap.file_view_point_col = 4;
-        assert_eq!(cursor_cell(&snap), Some((4, 2)), "indented: code stays at display col 4");
+        assert_eq!(cursor_cell(&snap), Some((4, 1)), "indented: code stays at display col 4");
         // Point at char 5 (the `n`) → stripped char 1 → cursor at 4 + 1 = 5.
         snap.file_view_point_col = 5;
-        assert_eq!(cursor_cell(&snap), Some((5, 2)), "indented: point one code char in → col 5");
+        assert_eq!(cursor_cell(&snap), Some((5, 1)), "indented: point one code char in → col 5");
     }
 
     /// issue-annotation-marker-cell: the cursor's cell accounts for the
@@ -690,24 +708,24 @@ mod tests {
         snap.file_view_rows = rows;
         // Point at char 4 (the `m`) → stripped char 0 → 4 + 0 + 0 = 4.
         snap.file_view_point_col = 4;
-        assert_eq!(cursor_cell(&snap), Some((4, 2)), "before the gap: the plain column");
+        assert_eq!(cursor_cell(&snap), Some((4, 1)), "before the gap: the plain column");
         // Point at char 6 (the `p` of `map`) → stripped char 2 → 4 + 2 + 0 = 6.
         snap.file_view_point_col = 6;
-        assert_eq!(cursor_cell(&snap), Some((6, 2)), "a point before the gap is unaffected");
+        assert_eq!(cursor_cell(&snap), Some((6, 1)), "a point before the gap is unaffected");
         // Point at char 17 (the `S` — the inserted symbol) → stripped char
         // 13 → 4 + 13 + 1 (the gap at its own char counts: the cursor
         // sits in the symbol's cell, BEHIND the marker) = 18.
         snap.file_view_point_col = 17;
-        assert_eq!(cursor_cell(&snap), Some((18, 2)), "the point on the symbol sits in the symbol's cell (18), not the marker's (17)");
+        assert_eq!(cursor_cell(&snap), Some((18, 1)), "the point on the symbol sits in the symbol's cell (18), not the marker's (17)");
         // Point at char 18 (the `t` of `String`) → stripped char 14 →
         // 4 + 14 + 1 = 19 (the tail shifted +1 by the insertion).
         snap.file_view_point_col = 18;
-        assert_eq!(cursor_cell(&snap), Some((19, 2)), "the tail is shifted +1 by the insertion");
+        assert_eq!(cursor_cell(&snap), Some((19, 1)), "the tail is shifted +1 by the insertion");
         // EOL (char 30 — the line is 4 spaces + 26 code chars) →
         // stripped char 26 → 4 + 26 + 1 = 31 (past the whole shifted
         // tail).
         snap.file_view_point_col = 30;
-        assert_eq!(cursor_cell(&snap), Some((31, 2)), "EOL counts the inserted cell too");
+        assert_eq!(cursor_cell(&snap), Some((31, 1)), "EOL counts the inserted cell too");
     }
 
     /// issue-mid-line-tabs: the cursor re-bases the point's char index
@@ -758,19 +776,19 @@ mod tests {
         // 4 + 8 = 12 (the plain column — the re-base is a no-op before the
         // tab).
         snap.file_view_point_col = 12;
-        assert_eq!(cursor_cell(&snap), Some((12, 2)), "before the tab: the plain column (12)");
+        assert_eq!(cursor_cell(&snap), Some((12, 1)), "before the tab: the plain column (12)");
         // Point on the tab (char 13) → stripped 9, tab_map 9 → 4 + 9 = 13
         // (the tab's first expansion cell).
         snap.file_view_point_col = 13;
-        assert_eq!(cursor_cell(&snap), Some((13, 2)), "on the tab: the first expansion cell (13)");
+        assert_eq!(cursor_cell(&snap), Some((13, 1)), "on the tab: the first expansion cell (13)");
         // Point on `*` (char 14, after the tab) → stripped 10, tab_map 12 →
         // 4 + 12 = 16 (the 8-stop cell). WITHOUT the re-base this would be
         // 4 + 10 = 14 (the tab under-counted by its 3 expansion spaces).
         snap.file_view_point_col = 14;
-        assert_eq!(cursor_cell(&snap), Some((16, 2)), "after the tab: the 8-stop cell (16), not the under-counted 14");
+        assert_eq!(cursor_cell(&snap), Some((16, 1)), "after the tab: the 8-stop cell (16), not the under-counted 14");
         // Point on `m` (char 16) → stripped 12, tab_map 14 → 4 + 14 = 18.
         snap.file_view_point_col = 16;
-        assert_eq!(cursor_cell(&snap), Some((18, 2)), "`m` at the 8-stop cell (18)");
+        assert_eq!(cursor_cell(&snap), Some((18, 1)), "`m` at the 8-stop cell (18)");
     }
 
     /// plan 005 issue 02b regression: a note row above the point must not
@@ -853,7 +871,6 @@ mod tests {
             commit_editor_rows: Vec::new(),
             commit_editor_cursor_line: None,
             dirty: None,
-            file_view_title: String::new(),
             file_view_changed_on_disk: false,
             file_view_current_buffer_editable: false,
             buffer_mode: String::new(),
@@ -879,7 +896,6 @@ mod tests {
             search_underlying: ViewId::Home,
 
 
-            current_buffer_display: String::new(),
             searching: String::new(),
             position: String::new(),
             annotations: String::new(),
@@ -888,9 +904,9 @@ mod tests {
             file_view_notes_folded: false,
         };
         // The point (line 20) is at rendered row 19 (0-indexed in the rows
-        // slice). Terminal row = 1 (title) + 0 (banner) + 19 = 20.
+        // slice). Terminal row = 0 (W13: no title) + 0 (banner) + 19 = 19.
         let result = cursor_cell(&snap);
-        assert_eq!(result, Some((0, 20)), "point's line IS drawn; cursor on it");
+        assert_eq!(result, Some((0, 19)), "point's line IS drawn; cursor on it");
     }
 
     // ── plan 004 issue 05g: cursor_cell tree-sidebar column offset ────
@@ -905,12 +921,12 @@ mod tests {
         snap.tree_visible = true;
         assert_eq!(
             cursor_cell(&snap),
-            Some((TREE_WIDTH + 3, 1)),
+            Some((TREE_WIDTH + 3, 0)),
             "pane col 3 → terminal col 34 + 3 (0-based)"
         );
         // Tree hidden: the column is exactly the pane column.
         let snap = buffer_snapshot(&["abcd"], 0, 3);
-        assert_eq!(cursor_cell(&snap), Some((3, 1)), "tree hidden: unchanged");
+        assert_eq!(cursor_cell(&snap), Some((3, 0)), "tree hidden: unchanged");
     }
 
     /// plan 004 issue 05g: with the tree visible a huge pane column is
@@ -923,13 +939,13 @@ mod tests {
         snap.tree_visible = true;
         assert_eq!(
             cursor_cell(&snap),
-            Some((79, 1)),
+            Some((79, 0)),
             "pane col 100 + tree 34 → clamped to terminal col 79"
         );
         // Tree hidden: no clamp (a beyond-pane column may land off-screen,
         // the pre-05g behavior).
         let snap = buffer_snapshot(&[&long], 0, 100);
-        assert_eq!(cursor_cell(&snap), Some((100, 1)), "tree hidden: unchanged");
+        assert_eq!(cursor_cell(&snap), Some((100, 0)), "tree hidden: unchanged");
     }
 
     // ── plan 004 issue 05e: tree-sidebar click offset ──────────────────

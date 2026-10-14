@@ -54,13 +54,10 @@ fn home_view_element(snap: &Snapshot) -> AnyElement<'static> {
 /// The file (buffer) view's element (the `ViewId::Buffer` render; factored
 /// out so the half-screen search overlay can reuse it as the top half — the
 /// buffer the search was launched from — without disturbing the store's
-/// file-view window). `title` is passed separately: the Buffer arm passes
-/// the view's own title, the search overlay passes the buffer's display
-/// name (the top view's name is `*search*`, not the buffer's).
-fn file_view_element(snap: &Snapshot, title: String) -> AnyElement<'static> {
+/// file-view window).
+fn file_view_element(snap: &Snapshot) -> AnyElement<'static> {
     element! {
         FileView(
-            title: title,
             rows: snap.file_view_rows.clone(),
             total_rows: snap.file_view_total_rows,
             top_line: snap.file_view_top_line,
@@ -81,7 +78,7 @@ fn file_view_element(snap: &Snapshot, title: String) -> AnyElement<'static> {
 pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
     match snap.view {
         ViewId::Home => Some(home_view_element(snap)),
-        ViewId::Buffer => Some(file_view_element(snap, snap.file_view_title.clone())),
+        ViewId::Buffer => Some(file_view_element(snap)),
         ViewId::BufferList => Some(element! {
             BufferListView(
                 rows: snap.buffer_list_rows.clone(),
@@ -147,7 +144,7 @@ pub(super) fn render_view(snap: &Snapshot) -> Option<AnyElement<'static>> {
                 .saturating_sub(snap.search_overlay_half)
                 .max(1) as u32;
             let behind = if snap.search_underlying == ViewId::Buffer {
-                Some(file_view_element(snap, snap.current_buffer_display.clone()))
+                Some(file_view_element(snap))
             } else {
                 Some(home_view_element(snap))
             };

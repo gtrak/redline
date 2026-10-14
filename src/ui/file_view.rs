@@ -271,7 +271,7 @@ impl Component for FileViewCanvas {
         // Scroll indicators: show "↑" when scrolled past the top, "↓" when
         // more rows remain below. The "↓" bound is in RENDERED-row space
         // (plan 005 issue 02): note rows count as rows, and a slice row
-        // below the canvas bottom (the title/indicator overlap, as before)
+        // below the canvas bottom (the indicator overlap, as before)
         // also implies more below. The "↑" keys off the EMITTED window's
         // first buffer line (rows[0].line), not the raw scroll_top: the
         // window may have advanced start above scroll_top to keep the
@@ -668,7 +668,6 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[derive(Default, Props)]
 pub struct FileViewProps {
-    pub title: String,
     /// The pre-computed rendered rows (code rows + virtual annotation note
     /// rows ABOVE their anchored code rows; each carries its buffer-line
     /// index — plan 005 issue 02, annotations-render-fold).
@@ -709,9 +708,11 @@ fn changed_on_disk_hint(buffer_editable: bool) -> &'static str {
     }
 }
 
-/// The virtualized file view: titled, renders visible lines with
-/// highlight spans, shows scroll indicators, and a "changed on disk" banner
-/// when the current buffer has an un-reconciled disk change.
+/// The virtualized file view: renders visible lines with highlight spans,
+/// shows scroll indicators, and a "changed on disk" banner when the current
+/// buffer has an un-reconciled disk change. W13: the buffer's display name is
+/// NOT rendered here — it already appears on the bottom status line — so the
+/// first canvas row is terminal row 0 (or row 1 when the banner is present).
 #[component]
 pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let t = theme::current();
@@ -722,11 +723,6 @@ pub fn FileView(props: &FileViewProps, mut _hooks: Hooks) -> impl Into<AnyElemen
                 flex_grow: 1.0_f32,
                 background_color: crate::ui::face_bg(t.view),
             ) {
-                Text(
-                    content: &props.title,
-                    color: crate::ui::face_color(t.view_title),
-                    weight: crate::ui::face_weight(t.view_title),
-                )
                 #(if props.changed_on_disk {
                     Some(element! {
                         Text(
@@ -1215,7 +1211,10 @@ mod tests {
         );
     }
 
-    /// Static render test: the FileView renders the title and content.
+    /// Static render test: the FileView renders the buffer CONTENT, and the
+    /// buffer's display name is carried by the bottom status line (W13: the
+    /// file view's duplicate title row is GONE — the first rendered row is
+    /// the first code line, not the title).
     #[test]
     fn file_view_static_render() {
         use crate::ui::root::Root;
@@ -1242,7 +1241,12 @@ mod tests {
             }
         };
         let s = app.to_string();
-        assert!(s.contains("src/main.rs"), "title missing:\n{s}");
+        // W13: the first row is the buffer's first code line — there is no
+        // title row above it (the name lives on the status line instead).
+        let first = s.lines().next().unwrap_or("");
+        assert!(first.starts_with("fn main"), "first row must be content (W13: no title row): {first:?}\n{s}");
+        // The bottom status line still names the buffer.
+        assert!(s.contains("src/main.rs"), "status line must carry the buffer name:\n{s}");
     }
 
     /// issue-annotations-anchor-at-symbol / symbol-precise: build a store
@@ -2040,7 +2044,7 @@ mod tests {
         assert_eq!(col_of(code, "a").unwrap(), 4, "`a` keeps its source column: {code:?}");
         assert_eq!(col_of(code, "b").unwrap(), 6, "`b` keeps its source column: {code:?}");
         // Both note rows sit directly above the code row (record order).
-        assert!(code_idx >= 3, "two note rows must precede the code row (title + line 0 code + 2 notes):\n{frame}");
+        assert!(code_idx >= 3, "two note rows plus line 0's code must precede the code row (W13: no title row):\n{frame}");
         assert!(lines[code_idx - 1].contains("note b") && lines[code_idx - 2].contains("note a"),
             "record order: note a then note b, directly above:\n{frame}");
         // The ANCHOR RELATIONSHIP per note: each ╭ at the same column as

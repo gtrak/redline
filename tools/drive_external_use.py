@@ -183,7 +183,7 @@ def main():
             f"landed={landed!r}")
         rec("L1: the window shows the Deserialize trait definition",
             "trait Deserialize" in app.screen_text(),
-            f"top={app.row_text(1)!r}")
+            f"top={app.row_text(0)!r}")
         # Back to the project file (the landing recorded a jump).
         app.key("M-,", 1.2)
         rec("L1: M-, returns to the project file (src/main.rs)",

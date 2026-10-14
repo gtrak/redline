@@ -109,9 +109,10 @@ def main():
             app.row_text(0)[:40])
 
         raw_before = len(app.raw_tail)
-        # Left drag: press terminal (row 1, col 1) [SGR 2;2 → content row
-        # 0 → buffer line 0], drag to (row 3, col 1) [content row 2 → line
-        # 2], release there. SGR is 1-based.
+        # Left drag: press terminal (row 0, col 1) [SGR 1;2 → content row
+        # 0 → buffer line 0], drag to (row 2, col 1) [content row 2 → line
+        # 2], release there. SGR is 1-based. (W13: the file view has no
+        # title row, so terminal row == content row.)
         #
         # crossterm parses SGR mouse: the final char is the press/release
         # discriminator — uppercase M = press/drag, lowercase m = release
@@ -121,22 +122,22 @@ def main():
         # release position and moving the point to col 0 of line 2 (中 is
         # 2 cells, so display col 1 → char 0), shrinking the region to
         # lines 0–1. The probe never measured the real Up path.
-        app.feed(b"\x1b[<0;2;2M", 0.6)   # press (Down, left)
-        app.feed(b"\x1b[<32;2;4M", 0.6)  # drag (Drag, left)
-        # Region face: content rows 0..=2 = terminal rows 1..=3 (row 4 =
+        app.feed(b"\x1b[<0;2;1M", 0.6)   # press (Down, left)
+        app.feed(b"\x1b[<32;2;3M", 0.6)  # drag (Drag, left)
+        # Region face: content rows 0..=2 = terminal rows 0..=2 (row 3 =
         # content row 3, outside the region, must stay default-bg).
         app.wait(0.4)
         hits = region_rows(app)
         rec("B: the dragged rows are highlighted (region face)",
-            set([1, 2, 3]) <= set(hits) and 4 not in hits,
+            set([0, 1, 2]) <= set(hits) and 3 not in hits,
             f"bg rows={hits}")
         # Proper release: lowercase m = Up. The region (mark + point)
         # PERSISTS after release (emacs mark semantics).
-        app.feed(b"\x1b[<0;2;4m", 0.6)
+        app.feed(b"\x1b[<0;2;3m", 0.6)
         app.wait(0.4)
         hits_after_release = region_rows(app)
         rec("B: region persists after release (Up)",
-            set([1, 2, 3]) <= set(hits_after_release) and 4 not in hits_after_release,
+            set([0, 1, 2]) <= set(hits_after_release) and 3 not in hits_after_release,
             f"bg rows={hits_after_release}")
 
         app.key("M-w", 0.8)
@@ -158,7 +159,7 @@ def main():
             rec("B: the literal escape is byte-exact in the stream",
                 esc in app.raw_tail[raw_before:], f"literal={esc!r}")
             # The payload must equal the highlighted text byte-exact:
-            # the highlighted rows are 1,2,3 (content rows 0,1,2 =
+            # the highlighted rows are 0,1,2 (content rows 0,1,2 =
             # buffer lines 0,1,2). If the highlight spanned a different
             # range than the copy, this would catch it.
             highlighted_text = "alpha\ncafé beta\n中 gamma".encode("utf-8")
@@ -174,11 +175,11 @@ def main():
         # math is the read-view's business, plan 004 05d — the paste
         # path itself is byte-verified in C2). So after pasting 中 the
         # cursor must sit on the pasted line (content row 1 → terminal
-        # row 2 0-based → 3 1-based) at col 0 (→ 1 1-based).
+        # row 1 0-based → 2 1-based; W13: no title row) at col 0 (→ 1 1-based).
         app.feed("p中q".encode("utf-8"), 0.8)
         cup = app.cup_settle()
         rec("C1: pasted line tracks the editable cursor (last line, col 0)",
-            cup == (3, 1), f"cup={cup} want (3,1) 1-based")
+            cup == (2, 1), f"cup={cup} want (2,1) 1-based")
         # C2: the multi-byte paste survives end-to-end AND its newlines are
         # preserved (issue-paste-newline-dropped): bytes in → file on disk,
         # é/中 byte-exact, and the pasted LFs land as real '\n' — a pasted LF

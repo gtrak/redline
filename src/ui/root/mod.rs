@@ -478,7 +478,12 @@ mod tests {
         let mut store2 = store(dir.path());
         store2.open_path("src/main.rs");
         let s2 = render_frame(store2);
-        assert!(s2.contains("src/main.rs"), "file title missing after open:\n{s2}");
+        // W13: the file view no longer renders its duplicate title row, so
+        // the frame's FIRST row is the buffer's first code line; the name is
+        // carried by the bottom status line instead of the top.
+        let first2 = s2.lines().next().unwrap_or("");
+        assert!(first2.starts_with("fn main"), "first frame row must be content (W13: no title row): {first2:?}\n{s2}");
+        assert!(s2.contains("src/main.rs"), "status line must name the buffer after open:\n{s2}");
         assert!(s2.contains("fn main"), "file content missing after open:\n{s2}");
     }
 
