@@ -72,6 +72,24 @@ impl Session {
         Arc::clone(&self.store)
     }
 
+    /// Wrap an EXISTING store handle — used by the control socket (019-02)
+    /// so a remote command mutates the very session the human is watching.
+    /// The headless CLI uses [`Session::at`] instead; this constructor never
+    /// owns the store's lifetime, it just shares the `Arc`.
+    pub fn from_store(
+        store: Arc<Mutex<AppStore>>,
+        root: PathBuf,
+        width: u16,
+        height: u16,
+    ) -> Self {
+        Self {
+            store,
+            root,
+            width,
+            height,
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
