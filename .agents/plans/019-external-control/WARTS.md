@@ -86,3 +86,12 @@ materializes `redline_pyte_repo` from scratch (3 tracked files + the 5
 de-strays + a git repo + the baseline staged/unstaged markers), so the battery
 is reproducible on a clean machine. Until then the fixture is reconstructed
 per-machine and the battery is not portable.
+
+**W21 status: FIXED** (`40c1ffa`). `tools/fixture.py` gained a committed
+content spec + `create()` (idempotent; builds `redline_pyte_repo` — 6-commit
+log, staged `src/lib.rs`, unstaged `README.md`, 5 strays — and
+`redline_tall_repo`); `tools/gate.sh` builds the fixtures before the battery.
+**Orchestrator-verified independently on a fresh root (`/tmp/rvfx`): fixture
+builds correctly (exact search counts 2/1/5, correct status) and
+`gate.sh full` = 38/38 suites OK, GATE RESULT: OK (full)** — every previously
+broken shared-fixture suite now passes, with ZERO drive assertions modified.
