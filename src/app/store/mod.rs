@@ -1982,6 +1982,11 @@ pub struct AppStore {
     /// Number of lines visible in the file view (set by the UI on
     /// resize); used for page-scroll and slice math.
     viewport_lines: usize,
+    /// The terminal size the UI last observed (cols, rows). Set at startup
+    /// and on every `TerminalEvent::Resize` in the TUI; the control socket
+    /// reads it so an attached `quote` renders at the HUMAN's width, not a
+    /// fixed 80 (W19). (cols, rows).
+    terminal_size: (u16, u16),
     /// `C-l` recenter cycle index (plan 004 issue 05c; emacs
     /// `recenter-top-bottom` / `recenter-last-op`): counts consecutive
     /// recenters since the last non-recenter command, `mod 3` selects the
@@ -2398,6 +2403,7 @@ impl AppStore {
             goto_line_active: false,
             goto_line_input: String::new(),
             viewport_lines: 24, // default; the UI updates on resize
+            terminal_size: (80, 24), // default; the UI updates on resize (W19)
             recenter_cycle: 0,
             watch_bus: ChangeBus::new(),
             repaint_bus: RepaintBus::new(),
@@ -2813,6 +2819,19 @@ impl AppStore {
     /// Set the viewport height (in lines); called by the UI on resize.
     pub fn set_viewport_lines(&mut self, n: usize) {
         self.viewport_lines = n.max(1);
+    }
+
+    /// The terminal size the UI last observed (cols, rows). The TUI sets it
+    /// at startup and on every resize; the control socket reads it so an
+    /// attached `quote` renders at the human's real width (W19).
+    pub fn terminal_size(&self) -> (u16, u16) {
+        self.terminal_size
+    }
+
+    /// Record the observed terminal size (cols, rows). Called by the TUI's
+    /// resize handler and at startup.
+    pub fn set_terminal_size(&mut self, cols: u16, rows: u16) {
+        self.terminal_size = (cols.max(1), rows.max(1));
     }
 
 

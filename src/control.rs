@@ -149,7 +149,9 @@ async fn handle_connection(stream: UnixStream, store: Arc<Mutex<AppStore>>) -> a
 /// After every request the repaint bus is bumped exactly once.
 pub fn apply_request(store: &Arc<Mutex<AppStore>>, req: &Request) -> Response {
     // Derive the session root/geometry from the live store (the socket's
-    // `Session` wraps the SAME `Arc<Mutex<AppStore>>` the TUI uses).
+    // `Session` wraps the SAME `Arc<Mutex<AppStore>>` the TUI uses). W19:
+    // take the size the TUI last observed so an attached `quote` renders at
+    // the HUMAN's width, not a fixed 80.
     let (root, width, height) = {
         let s = store.lock().unwrap();
         let root = s
@@ -157,7 +159,8 @@ pub fn apply_request(store: &Arc<Mutex<AppStore>>, req: &Request) -> Response {
             .as_ref()
             .map(|p| p.root.clone())
             .unwrap_or_default();
-        (root, 80u16, 24u16)
+        let (w, h) = s.terminal_size();
+        (root, w, h)
     };
     let mut session = Session::from_store(Arc::clone(store), root, width, height);
     let outcome = dispatch(&mut session, req);
@@ -367,6 +370,55 @@ mod tests {
         // still alive, so the stored count reflects the bumps).
         let n = *store.lock().unwrap().repaint_bus().subscribe().borrow();
         assert!(n >= 7, "repaint bus bumped per request, got {n}");
+    }
+
+    /// W19: the attached `quote` renders at the terminal size the TUI
+    /// recorded, not a fixed 80. A wide terminal must produce a frame wider
+    /// than 80 columns; the same store at 80 must not.
+    #[test]
+    fn quote_uses_the_recorded_terminal_width() {
+        let dir = project();
+        // A long line so the frame's content actually reaches the width.
+        let long = "x".repeat(200);
+        std::fs::write(dir.path().join("long.txt"), format!("{long}\n")).unwrap();
+        let store = live_store(&dir);
+        let _keeper = store.lock().unwrap().repaint_bus().subscribe();
+
+        // Open the long file at record width 40 first.
+        store.lock().unwrap().set_terminal_size(40, 24);
+        apply_request(&store, &req(1, "do", serde_json::json!({"name": "find-file"})));
+        apply_request(&store, &req(2, "text", serde_json::json!({"text": "long.txt"})));
+        apply_request(&store, &req(3, "key", serde_json::json!({"token": "RET"})));
+
+        let narrow = apply_request(&store, &req(4, "quote", serde_json::json!({})));
+        let narrow_max = narrow.result.as_ref().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+
+        // Now the human's terminal widens: 120 cols.
+        store.lock().unwrap().set_terminal_size(120, 24);
+        let wide = apply_request(&store, &req(5, "quote", serde_json::json!({})));
+        let wide_max = wide.result.as_ref().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+
+        assert!(
+            narrow_max <= 40,
+            "a 40-col terminal must not render wider than 40: {narrow_max}"
+        );
+        assert!(
+            wide_max >= 100,
+            "a 120-col terminal must render wide (proves the recorded width is used): {wide_max}"
+        );
+        assert!(wide_max > narrow_max, "the width change must widen the frame");
     }
 
     #[test]

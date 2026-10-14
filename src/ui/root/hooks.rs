@@ -23,11 +23,15 @@ pub(super) fn install_terminal_events(
     mut tick: State<u64>,
 ) {
     hooks.use_terminal_events(move |event: TerminalEvent| {
-        if let TerminalEvent::Resize(_, height) = &event {
+        if let TerminalEvent::Resize(width, height) = &event {
             // Update the viewport height on resize (subtract room for
-            // the title, help line, and status line).
+            // the title, help line, and status line). Record the full size
+            // too — the width feeds the control socket's `quote` (W19).
             let viewport = (*height as usize).saturating_sub(3);
-            event_store.lock().unwrap().set_viewport_lines(viewport);
+            let mut st = event_store.lock().unwrap();
+            st.set_viewport_lines(viewport);
+            st.set_terminal_size(*width, *height);
+            drop(st);
             tick.set(tick.get() + 1);
         }
         if let TerminalEvent::Key(key) = &event

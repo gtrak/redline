@@ -1079,11 +1079,13 @@ async fn main() -> anyhow::Result<()> {
 
     let config: config::Config = config::load_tolerant();
     let mut store = AppStore::new();
-    // Measure the terminal height at startup: crossterm emits no Resize
-    // event at startup, so the store's default viewport_lines (24) would
-    // be wrong on terminals that are not ~27 rows.
-    if let Ok((_, h)) = crossterm::terminal::size() {
+    // Measure the terminal at startup: crossterm emits no Resize event at
+    // startup, so the store's defaults (viewport 24, size 80x24) would be
+    // wrong elsewhere. Record BOTH dimensions — the width feeds the control
+    // socket's `quote` (W19).
+    if let Ok((w, h)) = crossterm::terminal::size() {
         store.set_viewport_lines(h.saturating_sub(3) as usize);
+        store.set_terminal_size(w, h);
     }
     if let Err(err) = config.validate_bindings(&store.registry) {
         tracing::warn!("ignoring some key-bindings: {err}");

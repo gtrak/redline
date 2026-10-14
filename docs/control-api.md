@@ -64,7 +64,7 @@ argument replay.
 |------|------|--------|
 | `ping` | — | `{}` (liveness) |
 | `state` | — | the full `Snapshot` (below) |
-| `quote` | — | `{"text": <frame>}`, the static render at the session width (**80 columns unless `--width` matches the human's terminal** — see §4) |
+| `quote` | — | `{"text": <frame>}`, the static render at the session width — the **human's real terminal width** when attached (see §4) |
 | `buffer` | `start`,`end` (1-based inclusive; both or neither) | `{"text": <buffer text>}` |
 | `notes` | `plain` (bool) | `{"text": <annotation dump>}` |
 | `do` | `name`, optional `arg` | `{}` — dispatch a registry command |
@@ -150,16 +150,21 @@ isearch       { active, selected, total }
 buffer_list   { query, total, selected }
 ```
 
-## 4. `quote` and geometry (W19)
+## 4. `quote` and geometry
 
 `quote` renders the frame from the store via the same static render the tests
-use, at the **session width**. A headless session's width comes from
-`--width` (default 80). The attached socket's `Session` also renders at 80
-unless the client passes a matching `--width`, and it does not read the
-human's real terminal size — so `quote` is an **80-column approximation** of
-the human's frame on any terminal that is not 80 columns wide. To compare
-against what the human sees, either run the human at 80 columns or read the
-live terminal directly (the PTY screen), which is what `tools/drive_control.py`
+use, at the **session width**:
+
+- A **headless** session's width comes from `--width` (default 80).
+- The **attached** socket's `Session` reads the terminal size the live TUI
+  last observed (recorded at startup and on every resize), so an attached
+  `quote` renders at the **human's real width** — a 120-column terminal
+  yields a 120-column frame. (Before W19 this was hardcoded to 80 and the
+  attached `quote` was an 80-column approximation; it is now faithful.)
+
+The height is not part of the frame text, so only the width matters here.
+For the strongest proof of what the human sees, read the live terminal
+screen directly (the PTY screen), which is what `tools/drive_control.py`
 does for the repaint assertion (W14).
 
 ## 5. Worked examples
