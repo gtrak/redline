@@ -1007,6 +1007,13 @@ impl AppStore {
         Ok(())
     }
 
+    /// Request that the render loop exit. The single mutation point for the
+    /// `quit` flag (the flag stays `pub` for the read side — `snapshot.rs`,
+    /// `Session`, the Root loop read it directly). Setting it is idempotent.
+    pub fn request_quit(&mut self) {
+        self.quit = true;
+    }
+
     /// Quit interception (plan 004 issue 04): `C-x C-c` (and the palette
     /// `quit`) no longer flips `quit` directly. With NO locally-modified
     /// buffer the quit proceeds immediately (existing behavior); with ≥1
@@ -1023,7 +1030,7 @@ impl AppStore {
             .map(|(k, _)| k.to_string())
             .collect();
         if modified.is_empty() {
-            self.quit = true;
+            self.request_quit();
             return;
         }
         self.quit_prompt = Some(QuitPrompt { pending: modified });
@@ -1145,7 +1152,7 @@ impl AppStore {
                 }
                 // Every snapshotted buffer saved: clear the prompt and quit.
                 self.quit_prompt = None;
-                self.quit = true;
+                self.request_quit();
             }
             _ => {}
         }
@@ -1166,7 +1173,7 @@ impl AppStore {
             .is_some_and(|p| p.pending.is_empty())
         {
             self.quit_prompt = None;
-            self.quit = true;
+            self.request_quit();
         } else {
             self.quit_prompt_show();
         }

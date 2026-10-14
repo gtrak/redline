@@ -87,24 +87,6 @@ impl CommandRegistry {
         self.commands.get(name)
     }
 
-    /// Dispatch-by-name against a standalone registry (the store does not
-    /// need to be the one that owns this registry). In-app dispatch is
-    /// `AppStore::dispatch`, which clones the `Command` out of the store's
-    /// own registry first.
-    #[allow(dead_code)] // unit-tested here; in-app dispatch is AppStore::dispatch
-    pub fn dispatch_by_name(
-        &self,
-        store: &mut AppStore,
-        name: &str,
-        arg: Option<String>,
-    ) -> Result<(), RegistryError> {
-        let command = self
-            .get(name)
-            .ok_or_else(|| RegistryError::UnknownCommand(name.to_string()))?;
-        command.run(store, arg);
-        Ok(())
-    }
-
     /// The command set shipped with issue 01 (and every issue since).
     pub fn seed() -> Self {
         let mut reg = Self::default();
@@ -1129,30 +1111,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_by_name_runs_the_command() {
-        let reg = CommandRegistry::seed();
-        let mut store = new_store();
-        reg.dispatch_by_name(&mut store, "quit", None).unwrap();
-        assert!(store.quit);
-
-        let mut store = new_store();
-        reg.dispatch_by_name(&mut store, "open-scratch", None)
-            .unwrap();
-        assert_eq!(store.view_name_display(), "*scratch*");
-
-        // In-app path: dispatch through the store's own registry.
+    fn dispatch_runs_the_command() {
         let mut store = new_store();
         store.dispatch("quit", None).unwrap();
         assert!(store.quit);
+
+        let mut store = new_store();
+        store.dispatch("open-scratch", None).unwrap();
+        assert_eq!(store.view_name_display(), "*scratch*");
     }
 
     #[test]
     fn dispatch_unknown_command_errors() {
-        let reg = CommandRegistry::seed();
         let mut store = new_store();
-        let err = reg
-            .dispatch_by_name(&mut store, "does-not-exist", None)
-            .unwrap_err();
+        let err = store.dispatch("does-not-exist", None).unwrap_err();
         assert!(matches!(err, RegistryError::UnknownCommand(_)));
         assert!(err.to_string().contains("does-not-exist"));
 
@@ -1162,15 +1134,12 @@ mod tests {
 
     #[test]
     fn view_commands_work() {
-        let reg = CommandRegistry::seed();
         let dir = tempfile::tempdir().unwrap();
         let mut store = AppStore::at(dir.path(), dir.path().to_path_buf());
-        reg.dispatch_by_name(&mut store, "open-scratch", None)
-            .unwrap();
+        store.dispatch("open-scratch", None).unwrap();
         assert_eq!(store.view_name_display(), "*scratch*");
 
-        reg.dispatch_by_name(&mut store, "list-buffers", None)
-            .unwrap();
+        store.dispatch("list-buffers", None).unwrap();
         assert_eq!(store.top_view(), ViewId::BufferList);
     }
 
