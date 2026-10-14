@@ -14,6 +14,7 @@ mod app;
 mod index_profile;
 mod nav;
 mod search;
+mod session;
 mod theme;
 mod ui;
 
