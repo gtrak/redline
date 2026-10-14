@@ -21,17 +21,20 @@ entries with only **11 distinct categories** (git 28, motion 26, navigation
 watching 2, project 1) — a real, consistent system, and the header doc is
 accurate. Disposition: **leave** (no action).
 
-### W2 — `dispatch_by_name` is dead
+### W2 — `dispatch_by_name` is dead — **DONE `6156748`**
 `src/app/command.rs:95` — unit-tested but unused in production (in-app
 dispatch is `AppStore::dispatch`, which clones out of the store's own
-registry). Disposition: **change** — either make it the real entry point or
-delete it. Revisit now that the Session/control layer exists.
+registry); it also skipped the invariants `AppStore::dispatch` applies
+(`self_insert_run`/`jump_highlight`/`recenter_cycle` clears). **Done:**
+deleted; its 3 tests migrated to `store.dispatch` with every assertion
+preserved (`git grep dispatch_by_name` = 0).
 
-### W5 — `quit` is a public bool field mutated in four places
+### W5 — `quit` is a public bool field mutated in four places — **DONE `6156748`**
 `AppStore.quit` (`src/app/store/mod.rs:1925`) is `pub` and set `true` in
 three different `keys.rs` sites (plus the control socket's `do_command`).
-Disposition: **change** (small: add `AppStore::request_quit` and route all
-sites through it).
+**Done:** added `AppStore::request_quit()`; all 3 mutation sites in
+`keys.rs` route through it. The field stays `pub` (the read side spans
+Snapshot/Root/Session). Only `request_quit` sets it now.
 
 ### W6 — headless store construction is duplicated
 `AppStore::at(start, base)` exists; `--index-profile` builds its own headless
