@@ -60,6 +60,8 @@ the offset fix and drive updates in one commit. **Also check `Blame`/`Log`/
 `Search`** — the same "title row + status line" duplication may hold there;
 the directive is stated for the file view, apply consistently where it holds.
 
+**W13 status: DONE** (`3d36c3d`). The file-view title row is gone; the file view's row 0 is now the first code line and the status line still carries the name. `cursor_cell` Buffer arm `1 + banner + content_row` -> `banner + content_row`; both mouse sites subtract only the banner; test/drive row maps shifted -1; `drive_magit_narrow`'s row-0 assertion re-expressed STRONGER (asserts the new content row IS lib.rs AND the status line names it). Scoped to the FILE VIEW (magit/search/log/blame titles untouched). **Orchestrator-verified independently on a fresh root: build/clippy/test clean (1119), `gate.sh full` GATE RESULT: OK (full), zero failures.**
+
 ### W21 — the shared PTY fixture `/tmp/redline_pyte_repo` is UNREPRODUCIBLE (pre-existing infra)
 **Found by the 019 plan-level gate (2026-10-02)**: `tools/gate.sh full` failed
 ~12 suites at SETUP (0–1s each) with
