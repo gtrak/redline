@@ -52,7 +52,11 @@ unaffected (`-c 'open Cargo.toml:5' state` works — that is what the drive
 uses). The spec's own first smoke line used the positional form, so this is a
 real usability gap: for an arg-taking verb, the NEXT positional is the
 argument and any FURTHER token that names a known subcommand should be the
-printer. Disposition: **fix** in the 019 workstream — take exactly one
-argument token for `open`/`goto`/`jump`/`search`/`isearch`/`select` (verbs
-whose arg is a single token) and let a trailing known-subcommand token be the
-printer; keep `text`/`annotate` (free text) greedy. Owner: 019-03-fu.
+printer. **FIXED** (019-03 follow-up): a single-token-arg verb
+(`open`/`goto`/`jump`/`search`/`isearch`/`select`) now takes exactly one
+argument and REJECTS a further positional with a usage error (exit 2) rather
+than swallowing it (`open Cargo.toml:5 state` -> "`open` takes one argument").
+Chain commands with `-c` (`-c 'open f:5' state`), and a lone non-printing
+verb already emits `state`. `text`/`annotate` stay greedy (free text).
+Verified: the rejected form exits 2, `open Cargo.toml:5` alone lands + prints
+state, and the `-c` chain is unaffected.

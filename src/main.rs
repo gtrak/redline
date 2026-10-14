@@ -211,6 +211,22 @@ impl Subcommand {
         )
     }
 
+    /// Whether this verb's argument is a SINGLE token (W20): `open`/`goto`/
+    /// `jump`/`search`/`isearch`/`select`. An extra positional after the one
+    /// argument is a usage error, never swallowed. `text`/`annotate` are NOT
+    /// here: their argument is free text and stays greedy.
+    fn single_token_arg(self) -> bool {
+        matches!(
+            self,
+            Subcommand::Open
+                | Subcommand::Goto
+                | Subcommand::Jump
+                | Subcommand::Search
+                | Subcommand::Isearch
+                | Subcommand::Select
+        )
+    }
+
     /// Whether this is a sugar verb (routed through `Session::verb`).
     fn is_sugar(self) -> bool {
         matches!(
@@ -433,6 +449,19 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
         }
         if sub.requires_arg() && rest.is_empty() {
             return Err(format!("`{}` needs an argument", sub.name()));
+        }
+        // W20: a SINGLE-TOKEN-arg verb (`open`/`goto`/`jump`/`search`/
+        // `isearch`/`select`) takes EXACTLY one token. A further positional
+        // used to be swallowed into the argument (`open f.rs state` tried to
+        // open the file "f.rs state") — reject it instead, so the mistake is
+        // loud. Chain commands with `-c`, or just run the verb: a
+        // non-printing verb already emits `state` afterward.
+        if sub.single_token_arg() && positionals.len() > 2 {
+            return Err(format!(
+                "`{}` takes one argument (got `{}`)",
+                sub.name(),
+                rest
+            ));
         }
         cli.subcommand = Some(sub);
         cli.sub_args = positionals[1..].to_vec();
@@ -1366,5 +1395,16 @@ mod cli_tests {
             (Subcommand::Open, "src/main.rs:5".to_string())
         );
         assert!(split_cmd_line("goto").is_err());
+
+        // W20: a single-token-arg verb takes EXACTLY one positional; an extra
+        // one (the old silent-swallow: `open f.rs state` tried to open the
+        // file "f.rs state") is a usage error, not swallowed. Free-text
+        // verbs (`text`/`annotate`) stay greedy.
+        assert!(parse_cli(strs(&["open", "src/main.rs:5", "state"])).is_err());
+        assert!(parse_cli(strs(&["goto", "10", "state"])).is_err());
+        assert!(parse_cli(strs(&["open", "src/main.rs:5"])).is_ok());
+        // `annotate` keeps the whole free-text argument (spaces and all).
+        let cli = parse_cli(strs(&["annotate", "a", "b", "c"])).unwrap();
+        assert_eq!(cli.sub_args, vec!["a", "b", "c"]);
     }
 }

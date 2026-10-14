@@ -137,7 +137,7 @@ cargo clippy --workspace --all-targets -- -D warnings > /tmp/c3.log 2>&1; echo C
 cargo test --bin redline > /tmp/t3.log 2>&1; echo TEST_EXIT=$?
 python3 tools/drive_control.py > /tmp/d3.log 2>&1; echo DRIVE_EXIT=$?; tail -20 /tmp/d3.log
 ```
-Plus a smoke proving a sugar verb: `redline --project <repo> open Cargo.toml:5 state`
+Plus a smoke proving a sugar verb: `redline --project <repo> -c 'open Cargo.toml:5' state` (the positional form `open X:5 state` is rejected on purpose — see W20)
 (or the attached form). Report the exact command + observed point line.
 
 ## Report format
