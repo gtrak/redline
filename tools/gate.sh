@@ -95,6 +95,18 @@ if [ "$REDLINE_FIXTURE_ROOT" != "/tmp" ] && [ "$TIER" != "pooled" ]; then
   done
 fi
 
+# Ensure the SHARED PTY fixtures exist in this root. The /tmp-baseline copy
+# above is EMPTY on a clean machine (the fixture is not committed — it is built
+# by tools/fixture.py), so the ~12 shared-fixture suites would fail at setup
+# (W21: `git -C .../redline_pyte_repo checkout -- .` -> 128). tools/fixture.py
+# `create()` is idempotent (builds from the committed content spec when absent,
+# resets when present) and covers both redline_pyte_repo and redline_tall_repo.
+# Cheap and safe to run on every invocation; the pooled tier builds its own
+# lane copies (pool.py) so it is skipped here.
+if [ "$TIER" != "pooled" ]; then
+  python3 tools/fixture.py
+fi
+
 # Shared-fixture suites: MUST run one at a time (the driver's flock enforces
 # this and exits 3 if a rival is live). Ordered cheapest-first for a fast fail.
 SHARED_SUITES=(
