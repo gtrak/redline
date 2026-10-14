@@ -159,7 +159,7 @@ def encode_key(seq):
 
 
 class App:
-    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None):
+    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None, args=None):
         # The whole suite process owns the shared fixture (released at exit),
         # not just one App: a suite that released between Apps would still
         # interleave with a rival.
@@ -192,7 +192,7 @@ class App:
             else:
                 env["COLORTERM"] = colorterm
             os.chdir(repo)
-            os.execvpe(BIN, [BIN], env)
+            os.execvpe(BIN, [BIN] + list(args or []), env)
         os.close(slave)
         self.master = master
         self.screen = pyte.Screen(cols, rows)

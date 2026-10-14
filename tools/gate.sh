@@ -216,6 +216,10 @@ SHARED_SUITES=(
   drive_magit.py      # magit status view cursor trajectory: exactly ONE
                      # full-bar blue row per step; n/p advance/retreat the
                      # cursor one row through the sections.
+  drive_control.py    # plan 019 issue 02: the LIVE TUI over the control
+                     # socket — the TUI announces its socket, a second
+                     # process drives find-file + text + RET + quote and
+                     # the frame names Cargo.toml, a remote quit exits.
 )
 # sweep_flows is the heavyweight (29 App launches); keep it last so the
 # common failure surfaces before it.
