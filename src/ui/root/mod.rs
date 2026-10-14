@@ -26,7 +26,7 @@ use crate::app::store::ViewId;
 use geometry::cursor_cell;
 use hooks::{
     drain_crate_index, drain_clipboard, drain_fetch_confirm,
-    drain_project_changes, drain_search, drain_symbol_index,
+    drain_project_changes, drain_repaint, drain_search, drain_symbol_index,
     drain_tooling_resolve, drive_jump_highlight, install_cursor_effect,
     install_terminal_events,
 };
@@ -92,6 +92,9 @@ pub fn Root(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     drain_crate_index(&mut hooks, store.clone(), tick);
     drain_search(&mut hooks, store.clone(), tick);
     drain_clipboard(&mut hooks, store.clone());
+    // 019-02: the control-socket repaint drain (last in the drain list so
+    // hook order stays stable).
+    drain_repaint(&mut hooks, store.clone(), tick);
 
     // jump-highlight: the landing-highlight fade driver (the first
     // time-driven re-render; self-stopping — see `drive_jump_highlight`).

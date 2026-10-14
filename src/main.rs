@@ -11,6 +11,7 @@
 //! all iocraft components; this file only starts/stops the render loop.
 
 mod app;
+mod control;
 mod index_profile;
 mod nav;
 mod search;
@@ -52,7 +53,7 @@ use app::config;
 use app::store::AppStore;
 use iocraft::prelude::*;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use ui::root::Root;
 
 /// CLI args. `--notes=plain` switches the quit-dump shape (plan 005
@@ -96,8 +97,8 @@ struct CliArgs {
     height: u16,
     /// Repeatable `-c CMD` command lines (raw; split at run time).
     commands: Vec<String>,
-    /// `--socket PATH`: reserved for 019-02 (parsed, unused).
-    #[allow(dead_code)]
+    /// `--socket PATH`: the control socket to bind (TUI) or connect to
+    /// (headless client). 019-02.
     socket: Option<PathBuf>,
 }
 
@@ -333,6 +334,142 @@ fn run_do(session: &mut session::Session, rest: &str) -> anyhow::Result<()> {
     session
         .do_command(&name, arg)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
+
+/// The control-socket client path (issue 019-02).
+///
+/// When a socket is requested (`--socket` given, or `$REDLINE_SOCKET` set),
+/// the headless subcommands are routed over the wire to the LIVE TUI instead
+/// of building a local `Session`. Returns `None` when NO socket was requested
+/// (the caller takes the plain headless path). A `--socket` that was given
+/// explicitly and cannot be connected is a HARD error; an env-only socket that
+/// is missing falls back to headless.
+fn try_attached(cli: &CliArgs) -> Option<anyhow::Result<()>> {
+    let env_socket = std::env::var("REDLINE_SOCKET").ok().filter(|s| !s.is_empty());
+    let explicit = cli.socket.clone();
+    if explicit.is_none() && env_socket.is_none() {
+        return None;
+    }
+    let sock = control::socket_path(explicit.as_deref());
+    // Liveness probe: a missing socket with an explicit `--socket` is an error;
+    // an env-only socket falls back to headless.
+    if control::client::try_connect(&sock).is_err() {
+        if explicit.is_some() {
+            return Some(Err(anyhow::anyhow!(
+                "cannot connect to control socket {}",
+                sock.display()
+            )));
+        }
+        return None;
+    }
+    Some(run_attached(cli, &sock))
+}
+
+/// The wire request for a parsed `(Subcommand, rest)` line.
+fn request_for(id: u64, sub: Subcommand, rest: &str, cli: &CliArgs) -> control::Request {
+    let args = match sub {
+        Subcommand::Do => {
+            let (name, arg) = split_do(rest);
+            match arg {
+                Some(a) => serde_json::json!({"name": name, "arg": a}),
+                None => serde_json::json!({"name": name}),
+            }
+        }
+        Subcommand::Key => serde_json::json!({"token": rest.trim()}),
+        Subcommand::Keys => serde_json::json!({"seq": rest.trim()}),
+        Subcommand::Text => serde_json::json!({"text": rest}),
+        Subcommand::Buffer => match parse_range(rest) {
+            Some((s, e)) => serde_json::json!({"start": s, "end": e}),
+            None => serde_json::json!({}),
+        },
+        Subcommand::Notes => serde_json::json!({"plain": cli.notes_plain}),
+        _ => serde_json::json!({}),
+    };
+    let cmd = match sub {
+        Subcommand::State => "state",
+        Subcommand::Quote => "quote",
+        Subcommand::Buffer => "buffer",
+        Subcommand::Notes => "notes",
+        Subcommand::Do => "do",
+        Subcommand::Key => "key",
+        Subcommand::Keys => "keys",
+        Subcommand::Text => "text",
+        Subcommand::Quit => "quit",
+    };
+    control::Request {
+        id,
+        cmd: cmd.to_string(),
+        args,
+    }
+}
+
+/// Print a printing verb's response exactly as the headless path does.
+fn emit_response(sub: Subcommand, json: bool, resp: &control::Response) -> anyhow::Result<()> {
+    let result = resp
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("empty result for a printing verb"))?;
+    match sub {
+        Subcommand::State => {
+            if json {
+                println!("{}", serde_json::to_string(result)?);
+            } else {
+                // The server sends the serialized `Snapshot`; rebuild it and
+                // render the same human text form the headless path uses.
+                let snap: session::Snapshot = serde_json::from_value(result.clone())?;
+                println!("{}", snap.to_text());
+            }
+        }
+        Subcommand::Quote | Subcommand::Buffer | Subcommand::Notes => {
+            print!("{}", result["text"].as_str().unwrap_or_default());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn run_attached(cli: &CliArgs, sock: &Path) -> anyhow::Result<()> {
+    let cmds: Vec<(Subcommand, String)> = cli
+        .commands
+        .iter()
+        .map(|raw| split_cmd_line(raw))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let n = cmds.len();
+    let has_positional = cli.subcommand.is_some();
+    let mut id = 0u64;
+    let mut send = |sub: Subcommand, rest: &str, emit: bool| -> anyhow::Result<()> {
+        id += 1;
+        let req = request_for(id, sub, rest, cli);
+        let resp = control::client::send(sock, &req)?;
+        if !resp.ok {
+            let err = resp.error.map(|e| e.message).unwrap_or_default();
+            anyhow::bail!("{err}");
+        }
+        if emit {
+            emit_response(sub, cli.json, &resp)?;
+        }
+        Ok(())
+    };
+    for (i, (sub, rest)) in cmds.iter().enumerate() {
+        let is_last = i + 1 == n;
+        let emit = is_last && !has_positional && is_printing(*sub);
+        send(*sub, rest, emit)?;
+    }
+    if let Some(sub) = cli.subcommand {
+        let rest = cli.sub_args.join(" ");
+        let printed = is_printing(sub);
+        send(sub, &rest, printed)?;
+        if !printed {
+            send(Subcommand::State, "", true)?;
+        }
+    } else {
+        let last_prints = cmds.last().map(|(s, _)| is_printing(*s)).unwrap_or(false);
+        if !last_prints {
+            send(Subcommand::State, "", true)?;
+        }
+    }
     Ok(())
 }
 
@@ -729,7 +866,13 @@ async fn main() -> anyhow::Result<()> {
     // Headless subcommand mode (issue 019-01b): a positional subcommand or
     // any `-c` line takes the headless path — run BEFORE any terminal/TUI
     // setup and exit. Bare invocation (and `--notes=plain`) is unchanged.
+    // 019-02: when a control socket is requested, the subcommands are routed
+    // over the wire to the live TUI instead of building a local session.
     if cli.subcommand.is_some() || !cli.commands.is_empty() {
+        if let Some(result) = try_attached(&cli) {
+            result?;
+            return Ok(());
+        }
         run_headless(&cli)?;
         return Ok(());
     }
@@ -774,6 +917,23 @@ async fn main() -> anyhow::Result<()> {
     // handle so we can stop the watcher cleanly at shutdown (before the
     // runtime tears down).
     let store_handle = std::sync::Arc::new(std::sync::Mutex::new(store));
+    // 019-02: start the control socket so an external client can drive the
+    // live session. A bind failure is warned (not fatal): the TUI must still
+    // run. The socket wraps the SAME `store_handle` the render loop owns.
+    {
+        let sock = control::socket_path(cli.socket.as_deref());
+        let serve_store = std::sync::Arc::clone(&store_handle);
+        let serve_sock = sock.clone();
+        tokio::spawn(async move {
+            if let Err(e) = control::serve(serve_sock.clone(), serve_store).await {
+                tracing::warn!(path = %serve_sock.display(), "control socket unavailable: {e}");
+                eprintln!("redline: control socket unavailable: {e}");
+            }
+        });
+        // The path is deterministic; print it now (the bind itself is async).
+        eprintln!("redline: control socket at {}", sock.display());
+        tracing::info!(path = %sock.display(), "control socket at");
+    }
     let mut app = element! {
         ContextProvider(value: Context::owned(std::sync::Arc::clone(&store_handle))) {
             Root

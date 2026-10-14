@@ -109,6 +109,40 @@ impl Default for ChangeBus {
     }
 }
 
+/// A monotonically-counting repaint signal: the control socket (019-02)
+/// bumps it after every mutating request so the render loop repaints.
+/// `watch` so many subscribers are fine and the latest value wins.
+#[derive(Clone)]
+pub struct RepaintBus {
+    tx: watch::Sender<u64>,
+}
+
+impl RepaintBus {
+    pub fn new() -> Self {
+        let (tx, _rx) = watch::channel(0u64);
+        Self { tx }
+    }
+
+    /// Subscribe: a receiver initialized to the current count. Awaiting
+    /// `changed()` fires on the NEXT bump (latest value wins).
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.tx.subscribe()
+    }
+
+    /// Bump the counter by one. A dropped receiver (all subscribers gone)
+    /// makes this a no-op.
+    pub fn bump(&self) {
+        let n = *self.tx.borrow() + 1;
+        let _ = self.tx.send(n);
+    }
+}
+
+impl Default for RepaintBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

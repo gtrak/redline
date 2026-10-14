@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app::command::RegistryError;
 use crate::app::keymap::{Key, parse_key, parse_sequence};
@@ -289,7 +289,7 @@ impl Snapshot {
                 .iter()
                 .map(|r| match r {
                     crate::app::store::ResultRow::Header { file, count, .. } => SearchRow {
-                        kind: "header",
+                        kind: "header".to_string(),
                         file: file.clone(),
                         line: None,
                         col: None,
@@ -297,7 +297,7 @@ impl Snapshot {
                         count: Some(*count),
                     },
                     crate::app::store::ResultRow::Hit { hit, .. } => SearchRow {
-                        kind: "hit",
+                        kind: "hit".to_string(),
                         file: hit.file.clone(),
                         line: Some(hit.line_no),
                         col: hit.col,
@@ -498,7 +498,7 @@ fn view_label(v: ViewId) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub project: String,
     pub root: String,
@@ -526,34 +526,34 @@ pub struct Snapshot {
     pub crate_indexing: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Point {
     pub line: usize,
     pub col: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Window {
     pub top_line: usize,
     pub total_lines: usize,
     pub viewport: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dirty {
     pub staged: usize,
     pub unstaged: usize,
     pub untracked: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PickerRow {
     pub name: String,
     pub label: String,
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Picker {
     pub prompt: String,
     pub query: String,
@@ -562,9 +562,9 @@ pub struct Picker {
     pub rows: Vec<PickerRow>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRow {
-    pub kind: &'static str,
+    pub kind: String,
     pub file: String,
     pub line: Option<u64>,
     pub col: Option<u64>,
@@ -572,7 +572,7 @@ pub struct SearchRow {
     pub count: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Search {
     pub title: String,
     pub running: bool,
@@ -583,13 +583,13 @@ pub struct Search {
     pub rows: Vec<SearchRow>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Magit {
     pub rows_total: usize,
     pub narrow_query: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
     pub visible: bool,
     pub query: String,
@@ -597,14 +597,14 @@ pub struct Tree {
     pub selected: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Isearch {
     pub active: bool,
     pub selected: usize,
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferList {
     pub query: String,
     pub total: usize,

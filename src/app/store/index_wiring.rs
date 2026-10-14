@@ -6,6 +6,12 @@ impl AppStore {
         &self.watch_bus
     }
 
+    /// The control-socket repaint bus (019-02): the socket bumps it after
+    /// every request so the render loop repaints the live session.
+    pub fn repaint_bus(&self) -> &RepaintBus {
+        &self.repaint_bus
+    }
+
     /// Whether a file watcher is currently active (0 or 1 — exactly one at a
     /// time). Exposed for test diagnostics (the spec's "handle count" check).
     #[allow(dead_code)] // test-only diagnostic accessor; no production caller

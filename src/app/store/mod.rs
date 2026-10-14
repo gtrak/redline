@@ -24,7 +24,7 @@ use tokio::sync::watch;
 
 use crate::app::command::{CommandRegistry, RegistryError};
 use crate::app::config::Config;
-use crate::app::events::{ChangeBus, ProjectChange};
+use crate::app::events::{ChangeBus, ProjectChange, RepaintBus};
 use crate::app::keymap::{Key, KeyCode, KeyMap, KeySeq, KeymapEngine, Lookup, load_bindings, parse_sequence};
 use crate::app::watcher::{ActiveWatcher, DEFAULT_DEBOUNCE};
 use redline_git::diff::{DiffSide, FileDiff};
@@ -1991,6 +1991,9 @@ pub struct AppStore {
     /// Project-change bus: the file watcher publishes here; the UI
     /// (FileView auto-reload) and git status (07's seam) subscribe.
     pub watch_bus: ChangeBus,
+    /// Control-socket repaint bus (019-02): the socket bumps it after each
+    /// request so the render loop repaints the live session.
+    pub repaint_bus: RepaintBus,
     /// The single active file watcher (exactly one per project at a time).
     watcher: Option<ActiveWatcher>,
     /// Live-reload changed files on disk (config default `true`).
@@ -2397,6 +2400,7 @@ impl AppStore {
             viewport_lines: 24, // default; the UI updates on resize
             recenter_cycle: 0,
             watch_bus: ChangeBus::new(),
+            repaint_bus: RepaintBus::new(),
             watcher: None,
             auto_reload: true,
             watch_suspended: false,

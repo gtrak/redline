@@ -161,6 +161,26 @@ pub(super) fn drain_project_changes(
     });
 }
 
+/// The `use_future` drain of the control-socket repaint bus (019-02). The
+/// socket task bumps it after every mutation; bumping the revision tick makes
+/// iocraft re-render from the already-mutated store.
+pub(super) fn drain_repaint(
+    hooks: &mut Hooks,
+    store: Arc<Mutex<AppStore>>,
+    mut tick: State<u64>,
+) {
+    let mut rx = store.lock().unwrap().repaint_bus().subscribe();
+    hooks.use_future(async move {
+        while rx.changed().await.is_ok() {
+            // Coalesce a burst into one repaint.
+            while rx.has_changed().unwrap_or(false) {
+                let _ = rx.borrow_and_update();
+            }
+            tick.set(tick.get() + 1);
+        }
+    });
+}
+
 /// The `use_future` drain of the symbol-index bus.
 pub(super) fn drain_symbol_index(
     hooks: &mut Hooks,
