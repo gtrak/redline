@@ -15,9 +15,11 @@ Each entry: what, where (evidence), why it matters, disposition
 clone; the actual `seed()` is a long chain of `reg.register_*()` calls. The
 header implies a category system, but categories are ad-hoc string literals.
 Matters: the external CLI now surfaces these names as an API, so the doc/name
-surface should be trustworthy. Disposition: **change** (doc/consistency pass;
-folds naturally into the wart sweep once the 019 command-name surface is
-frozen).
+surface should be trustworthy. **Recon (2026-10-02): FALSE ALARM.** The registry uses 120 `Command::new`
+entries with only **11 distinct categories** (git 28, motion 26, navigation
+16, buffers 11, search 11, editing 9, region 6, files 5, annotations 5,
+watching 2, project 1) — a real, consistent system, and the header doc is
+accurate. Disposition: **leave** (no action).
 
 ### W2 — `dispatch_by_name` is dead
 `src/app/command.rs:95` — unit-tested but unused in production (in-app
@@ -35,7 +37,10 @@ sites through it).
 `AppStore::at(start, base)` exists; `--index-profile` builds its own headless
 path without a store; `main.rs`'s TUI path builds `AppStore::new()` + config +
 watcher + indexing inline; `Session::at` is now a fourth-ish site.
-Disposition: **fix** — converge on one builder; do not let a fifth appear.
+**Recon (2026-10-02): the sites legitimately differ** (the TUI startup runs
+config + watcher + indexing inline on a live store; headless `Session::at`
+builds a throwaway store; `--index-profile` builds none). No dedup without
+adding a mode flag. Disposition: **leave** (do not add a fifth path).
 
 ### W13 — the file-view title (buffer name) is duplicated: top row AND status line
 `src/ui/file_view.rs:726` renders `props.title` (the buffer's display name) as
