@@ -11,6 +11,7 @@ mod render;
 mod snapshot;
 mod widgets;
 
+pub use render::render_handle_text;
 #[cfg(test)]
 pub use render::render_at_width;
 

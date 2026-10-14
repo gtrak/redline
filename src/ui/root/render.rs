@@ -3,12 +3,10 @@
 //! `StaticRenderWidth` context pin and the width-bounded static render
 //! helper used by the app-side tests).
 
-#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use iocraft::prelude::*;
 use iocraft::Size;
 
-#[cfg(test)]
 use crate::app::store::AppStore;
 
 use crate::app::store::ViewId;
@@ -26,7 +24,6 @@ use crate::ui::transient_menu::TransientMenuView;
 use crate::ui::tree::TreeSidebar;
 use crate::ui::buffer_view::BufferListView;
 
-#[cfg(test)]
 use super::Root;
 use super::snapshot::Snapshot;
 use super::widgets::{Minibuffer, StatusLine};
@@ -300,6 +297,23 @@ pub fn render_at_width(store: AppStore, width: usize) -> String {
     let mut app = element! {
         ContextProvider(value: Context::owned(StaticRenderWidth(width as u16))) {
             ContextProvider(value: Context::owned(Arc::new(Mutex::new(store)))) {
+                Root
+            }
+        }
+    };
+    let canvas = app.render(Some(width));
+    canvas.get_text(0, 0, width, canvas.height())
+}
+
+/// Production sibling of [`render_at_width`]: render the current frame to
+/// plain text at a pinned width, taking the SAME `Arc<Mutex<AppStore>>`
+/// handle the render loop uses. `AppStore` is not `Clone`, so the caller
+/// (the external CLI's `quote`) cannot hand its store over — this keeps its
+/// store and lets the render take the lock itself.
+pub fn render_handle_text(store: Arc<Mutex<AppStore>>, width: usize) -> String {
+    let mut app = element! {
+        ContextProvider(value: Context::owned(StaticRenderWidth(width as u16))) {
+            ContextProvider(value: Context::owned(store)) {
                 Root
             }
         }

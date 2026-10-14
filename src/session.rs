@@ -186,10 +186,12 @@ impl Session {
         }
     }
 
-    /// The static frame text. TODO(019-01b): lift `render_at_width` out of
-    /// `#[cfg(test)]` and render the current frame; 01a returns empty.
+    /// The static frame text: what a human would see, rendered at the
+    /// session width (`self.width`, defaults to 80). Takes the session's own
+    /// `Arc<Mutex<AppStore>>` handle — no ownership transfer — and the render
+    /// takes the lock itself (no lock is held across this call).
     pub fn quote(&mut self) -> String {
-        String::new()
+        crate::ui::root::render_handle_text(Arc::clone(&self.store), self.width as usize)
     }
 
     /// A 1-based, inclusive line range over the current buffer's text.
@@ -677,6 +679,32 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(value.get("view").is_some(), "view key missing: {json}");
         assert!(value.get("point").is_some(), "point key missing: {json}");
+    }
+
+    #[test]
+    fn quote_renders_opened_file() {
+        let dir = project();
+        let mut s = session(&dir);
+        open_main(&mut s);
+        let frame = s.quote();
+        assert!(
+            frame.contains("// line 1"),
+            "quote should render the opened file's text: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn headless_state_json_has_view_and_point() {
+        let dir = project();
+        let mut s = session(&dir);
+        open_main(&mut s);
+        s.do_command("goto-line", None).unwrap();
+        s.text("3\n").unwrap();
+        let snap = s.snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("view").is_some(), "view key missing: {json}");
+        assert_eq!(value["point"]["line"], 2, "goto-line 3 lands on line 2 (0-based)");
     }
 
     #[test]

@@ -58,6 +58,10 @@ use ui::root::Root;
 /// CLI args. `--notes=plain` switches the quit-dump shape (plan 005
 /// issue 03); `--index-profile[=PATH]` runs the headless index profiler
 /// (`src/index_profile.rs`) and exits before any terminal/TUI setup.
+/// Issue 019-01b adds the headless subcommand mode: a positional
+/// subcommand (`state`/`quote`/`buffer`/`notes`/`do`/`key`/`keys`/`text`/
+/// `quit`) plus repeatable `-c CMD` lines, `--project`, `--json`,
+/// `--width`, `--height`, and the parsed-but-unused `--socket`.
 /// Unknown args are a HARD ERROR (clear feedback beats silently
 /// ignoring them): usage on stderr, exit 2 — before the TUI starts.
 #[derive(Debug, PartialEq, Eq)]
@@ -75,15 +79,114 @@ struct CliArgs {
     profile_repeat: usize,
     /// `--profile-real-paths`: print real paths (default = anonymized).
     profile_real_paths: bool,
+    /// The headless subcommand (first non-flag arg), if any.
+    subcommand: Option<Subcommand>,
+    /// Positional args AFTER the subcommand (`do <name> [arg]`, `buffer
+    /// START..END`, `text <literal>`, ...). Joined with single spaces when a
+    /// subcommand expects one string argument.
+    sub_args: Vec<String>,
+    /// `--project DIR` (default `.`): the project root a headless session
+    /// opens.
+    project: PathBuf,
+    /// `--json`: emit the snapshot as JSON (only meaningful for `state`).
+    json: bool,
+    /// `--width N` (default 80): the headless session / render width.
+    width: u16,
+    /// `--height N` (default 24): the headless session / render height.
+    height: u16,
+    /// Repeatable `-c CMD` command lines (raw; split at run time).
+    commands: Vec<String>,
+    /// `--socket PATH`: reserved for 019-02 (parsed, unused).
+    #[allow(dead_code)]
+    socket: Option<PathBuf>,
+}
+
+/// A headless subcommand name (issue 019-01b).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Subcommand {
+    State,
+    Quote,
+    Buffer,
+    Notes,
+    Do,
+    Key,
+    Keys,
+    Text,
+    Quit,
+}
+
+impl Subcommand {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "state" => Some(Subcommand::State),
+            "quote" => Some(Subcommand::Quote),
+            "buffer" => Some(Subcommand::Buffer),
+            "notes" => Some(Subcommand::Notes),
+            "do" => Some(Subcommand::Do),
+            "key" => Some(Subcommand::Key),
+            "keys" => Some(Subcommand::Keys),
+            "text" => Some(Subcommand::Text),
+            "quit" => Some(Subcommand::Quit),
+            _ => None,
+        }
+    }
 }
 
 impl CliArgs {
     const DEFAULT_TOP: usize = 25;
+    const DEFAULT_WIDTH: u16 = 80;
+    const DEFAULT_HEIGHT: u16 = 24;
 }
 
 fn usage() {
     eprintln!("usage: redline [--notes=plain]");
     eprintln!("       redline --index-profile[=PATH] [--profile-top=N --profile-out=FILE --profile-repeat=N --profile-real-paths]");
+    eprintln!("       redline [--project DIR] [--json] [--width N] [--height N] [-c CMD]... [SUBCOMMAND [ARGS]]");
+    eprintln!("       subcommands: state | quote | buffer [START..END] | notes | do NAME [ARG] | key TOKEN | keys SEQ | text LITERAL | quit");
+}
+
+/// Split a `-c` line on the FIRST run of whitespace into `verb` + `rest`
+/// (the 019-01b grammar: no `:` splitting). The verb must be a known
+/// subcommand.
+fn split_cmd_line(raw: &str) -> Result<(Subcommand, String), String> {
+    let raw = raw.trim();
+    let (verb, rest) = match raw.split_once(char::is_whitespace) {
+        Some((v, r)) => (v, r.trim()),
+        None => (raw, ""),
+    };
+    let sub = Subcommand::parse(verb)
+        .ok_or_else(|| format!("unknown subcommand in -c: `{verb}`"))?;
+    Ok((sub, rest.to_string()))
+}
+
+/// Split a `do` argument into the registry command name and its optional
+/// argument (first whitespace run separates them).
+fn split_do(rest: &str) -> (String, Option<String>) {
+    let rest = rest.trim();
+    match rest.split_once(char::is_whitespace) {
+        Some((name, arg)) => {
+            let arg = arg.trim();
+            (
+                name.to_string(),
+                if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_string())
+                },
+            )
+        }
+        None => (rest.to_string(), None),
+    }
+}
+
+/// Parse an optional `START..END` (1-based inclusive) for `buffer`.
+fn parse_range(rest: &str) -> Option<(usize, usize)> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let (a, b) = rest.split_once("..")?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
 /// Parse `args` (without the program name) into [`CliArgs`]. Errors are
@@ -96,6 +199,14 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
         profile_out: None,
         profile_repeat: 1,
         profile_real_paths: false,
+        subcommand: None,
+        sub_args: Vec::new(),
+        project: PathBuf::from("."),
+        json: false,
+        width: CliArgs::DEFAULT_WIDTH,
+        height: CliArgs::DEFAULT_HEIGHT,
+        commands: Vec::new(),
+        socket: None,
     };
     // `--profile-top` / `--profile-repeat` validate to a positive int.
     let positive = |rest: &str, flag: &str| -> Result<usize, String> {
@@ -104,9 +215,61 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
             .filter(|v| *v > 0)
             .ok_or_else(|| format!("{flag} expects a positive integer, got `{rest}`"))
     };
-    for arg in args {
+    let args: Vec<String> = args.into_iter().collect();
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].clone();
+        // A flag that consumes the NEXT arg (the value form).
+        let take_value = |flag: &str, i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("{flag} requires a value"))
+        };
         if arg == "--notes=plain" {
             cli.notes_plain = true;
+        } else if arg == "--json" {
+            cli.json = true;
+        } else if arg == "--project" {
+            cli.project = PathBuf::from(take_value("--project", &mut i)?);
+        } else if let Some(p) = arg.strip_prefix("--project=") {
+            if p.is_empty() {
+                return Err("--project= requires a path".into());
+            }
+            cli.project = PathBuf::from(p);
+        } else if arg == "--width" {
+            let v = take_value("--width", &mut i)?;
+            cli.width = v
+                .parse::<u16>()
+                .ok()
+                .filter(|w| *w > 0)
+                .ok_or_else(|| format!("--width expects a positive integer, got `{v}`"))?;
+        } else if let Some(v) = arg.strip_prefix("--width=") {
+            cli.width = v
+                .parse::<u16>()
+                .ok()
+                .filter(|w| *w > 0)
+                .ok_or_else(|| format!("--width expects a positive integer, got `{v}`"))?;
+        } else if arg == "--height" {
+            let v = take_value("--height", &mut i)?;
+            cli.height = v
+                .parse::<u16>()
+                .ok()
+                .filter(|h| *h > 0)
+                .ok_or_else(|| format!("--height expects a positive integer, got `{v}`"))?;
+        } else if let Some(v) = arg.strip_prefix("--height=") {
+            cli.height = v
+                .parse::<u16>()
+                .ok()
+                .filter(|h| *h > 0)
+                .ok_or_else(|| format!("--height expects a positive integer, got `{v}`"))?;
+        } else if arg == "-c" {
+            cli.commands.push(take_value("-c", &mut i)?);
+        } else if arg == "--socket" {
+            cli.socket = Some(PathBuf::from(take_value("--socket", &mut i)?));
+        } else if let Some(p) = arg.strip_prefix("--socket=") {
+            cli.socket = Some(PathBuf::from(p));
         } else if arg == "--index-profile" {
             cli.index_profile = Some(PathBuf::from("."));
         } else if let Some(path) = arg.strip_prefix("--index-profile=") {
@@ -125,9 +288,20 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
             cli.profile_repeat = positive(n, "--profile-repeat")?;
         } else if arg == "--profile-real-paths" {
             cli.profile_real_paths = true;
-        } else {
+        } else if arg.starts_with('-') {
             return Err(format!("unknown argument: {arg}"));
+        } else {
+            positionals.push(arg);
         }
+        i += 1;
+    }
+    // A positional subcommand (the first non-flag arg); an unknown name is
+    // a hard error (usage on stderr, exit 2).
+    if let Some(first) = positionals.first() {
+        let sub = Subcommand::parse(first)
+            .ok_or_else(|| format!("unknown subcommand: {first}"))?;
+        cli.subcommand = Some(sub);
+        cli.sub_args = positionals[1..].to_vec();
     }
     Ok(cli)
 }
@@ -141,6 +315,144 @@ fn parse_args() -> CliArgs {
             std::process::exit(2);
         }
     }
+}
+
+/// Whether a subcommand is a printing verb (it emits to stdout). The
+/// mutation verbs (`do`/`key`/`keys`/`text`/`quit`) do not print.
+fn is_printing(sub: Subcommand) -> bool {
+    matches!(
+        sub,
+        Subcommand::State | Subcommand::Quote | Subcommand::Buffer | Subcommand::Notes
+    )
+}
+
+/// Run a `do` line's `rest` through the registry: first whitespace run
+/// separates the command name from its optional argument.
+fn run_do(session: &mut session::Session, rest: &str) -> anyhow::Result<()> {
+    let (name, arg) = split_do(rest);
+    session
+        .do_command(&name, arg)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
+
+/// Execute a subcommand. `emit` selects whether a printing verb writes to
+/// stdout (mutation verbs always run). Returns whether anything printed.
+fn perform(
+    session: &mut session::Session,
+    sub: Subcommand,
+    rest: &str,
+    notes_plain: bool,
+    json: bool,
+    emit: bool,
+) -> anyhow::Result<bool> {
+    match sub {
+        Subcommand::State => {
+            if emit {
+                let snap = session.snapshot();
+                if json {
+                    println!("{}", serde_json::to_string(&snap)?);
+                } else {
+                    println!("{}", snap.to_text());
+                }
+            }
+            Ok(emit)
+        }
+        Subcommand::Quote => {
+            if emit {
+                println!("{}", session.quote());
+            }
+            Ok(emit)
+        }
+        Subcommand::Buffer => {
+            if emit {
+                print!("{}", session.buffer_text(parse_range(rest)));
+            }
+            Ok(emit)
+        }
+        Subcommand::Notes => {
+            if emit {
+                print!("{}", session.notes(notes_plain));
+            }
+            Ok(emit)
+        }
+        Subcommand::Do => {
+            run_do(session, rest)?;
+            Ok(false)
+        }
+        Subcommand::Key => {
+            session.key(rest.trim()).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(false)
+        }
+        Subcommand::Keys => {
+            session.keys(rest.trim()).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(false)
+        }
+        Subcommand::Text => {
+            session.text(rest).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(false)
+        }
+        Subcommand::Quit => {
+            // Set the quit request through the same registry command the TUI
+            // uses, then exit 0 (no TUI).
+            let _ = session.do_command("quit", None);
+            std::process::exit(0);
+        }
+    }
+}
+
+/// The headless subcommand runner (issue 019-01b). Rule (documented):
+/// every `-c` line runs IN ORDER (mutation verbs always; a printing verb
+/// only emits when it is the final `-c` line and no positional overrides
+/// it). Then the positional subcommand runs if given; if the positional is
+/// a mutation verb that prints nothing, `state` follows as the default
+/// emitter. With no positional: the final `-c` line emits if it was a
+/// printing verb, else `state`. With neither `-c` nor a positional: `state`.
+fn run_headless(cli: &CliArgs) -> anyhow::Result<()> {
+    let mut session = session::Session::at(&cli.project, cli.width, cli.height);
+    // Parse all -c lines up front (a bad verb is a hard error).
+    let cmds: Vec<(Subcommand, String)> = cli
+        .commands
+        .iter()
+        .map(|raw| split_cmd_line(raw))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let n = cmds.len();
+    let has_positional = cli.subcommand.is_some();
+    for (i, (sub, rest)) in cmds.iter().enumerate() {
+        let is_last = i + 1 == n;
+        // A printing -c verb emits only when it is the final line and no
+        // positional subcommand will override it.
+        let emit = is_last && !has_positional && is_printing(*sub);
+        perform(&mut session, *sub, rest, cli.notes_plain, cli.json, emit)?;
+    }
+    if let Some(sub) = cli.subcommand {
+        let rest = cli.sub_args.join(" ");
+        let printed = perform(&mut session, sub, &rest, cli.notes_plain, cli.json, true)?;
+        if !printed {
+            perform(
+                &mut session,
+                Subcommand::State,
+                "",
+                cli.notes_plain,
+                cli.json,
+                true,
+            )?;
+        }
+    } else {
+        let last_prints = cmds.last().map(|(s, _)| is_printing(*s)).unwrap_or(false);
+        if !last_prints {
+            perform(
+                &mut session,
+                Subcommand::State,
+                "",
+                cli.notes_plain,
+                cli.json,
+                true,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -404,7 +716,7 @@ async fn main() -> anyhow::Result<()> {
     // any terminal/TUI setup (before the IsTerminal check and everything
     // after it) and exit. Works with no tty. When the flag is absent this
     // is a single branch miss.
-    if let Some(root) = cli.index_profile {
+    if let Some(root) = cli.index_profile.clone() {
         index_profile::run(&index_profile::Options {
             root,
             top: cli.profile_top,
@@ -412,6 +724,13 @@ async fn main() -> anyhow::Result<()> {
             repeat: cli.profile_repeat,
             real_paths: cli.profile_real_paths,
         })?;
+        return Ok(());
+    }
+    // Headless subcommand mode (issue 019-01b): a positional subcommand or
+    // any `-c` line takes the headless path — run BEFORE any terminal/TUI
+    // setup and exit. Bare invocation (and `--notes=plain`) is unchanged.
+    if cli.subcommand.is_some() || !cli.commands.is_empty() {
+        run_headless(&cli)?;
         return Ok(());
     }
     let log_path = init_tracing();
@@ -580,5 +899,79 @@ mod cli_tests {
         let err = parse_cli(strs(&["--notes=plain", "--nope"]))
             .unwrap_err();
         assert!(err.contains("--nope"), "error names the arg: {err}");
+    }
+
+    #[test]
+    fn bare_invocation_unchanged() {
+        // No subcommand, no -c: the TUI path (nothing headless).
+        let cli = parse_cli(strs(&[])).unwrap();
+        assert!(cli.subcommand.is_none());
+        assert!(cli.commands.is_empty());
+        let cli = parse_cli(strs(&["--notes=plain"])).unwrap();
+        assert!(cli.subcommand.is_none());
+        assert!(cli.commands.is_empty());
+        assert!(cli.notes_plain);
+    }
+
+    #[test]
+    fn subcommand_parses() {
+        let cli = parse_cli(strs(&["state"])).unwrap();
+        assert_eq!(cli.subcommand, Some(Subcommand::State));
+        assert!(cli.sub_args.is_empty());
+        assert!(!cli.json);
+
+        let cli = parse_cli(strs(&["--json", "state"])).unwrap();
+        assert_eq!(cli.subcommand, Some(Subcommand::State));
+        assert!(cli.json);
+
+        let cli = parse_cli(strs(&[
+            "--project",
+            ".",
+            "-c",
+            "open:src/main.rs",
+            "state",
+        ]))
+        .unwrap();
+        assert_eq!(cli.project, PathBuf::from("."));
+        assert_eq!(cli.commands, vec!["open:src/main.rs".to_string()]);
+        assert_eq!(cli.subcommand, Some(Subcommand::State));
+
+        // A positional `do NAME ARG`: rest is joined from sub_args.
+        let cli = parse_cli(strs(&["do", "find-file"])).unwrap();
+        assert_eq!(cli.subcommand, Some(Subcommand::Do));
+        assert_eq!(cli.sub_args, vec!["find-file".to_string()]);
+
+        // Defaults.
+        assert_eq!(cli.width, CliArgs::DEFAULT_WIDTH);
+        let cli = parse_cli(strs(&["--width", "120", "--height", "40", "state"])).unwrap();
+        assert_eq!(cli.width, 120);
+        assert_eq!(cli.height, 40);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_usage_error() {
+        assert!(parse_cli(strs(&["bogus"])).is_err());
+        assert!(parse_cli(strs(&["--json", "bogus"])).is_err());
+    }
+
+    #[test]
+    fn cmd_line_grammar_splits_on_first_whitespace() {
+        assert_eq!(
+            split_cmd_line("do find-file").unwrap(),
+            (Subcommand::Do, "find-file".to_string())
+        );
+        assert_eq!(
+            split_cmd_line("text Cargo.toml").unwrap(),
+            (Subcommand::Text, "Cargo.toml".to_string())
+        );
+        assert_eq!(
+            split_cmd_line("key RET").unwrap(),
+            (Subcommand::Key, "RET".to_string())
+        );
+        assert_eq!(
+            split_cmd_line("state").unwrap(),
+            (Subcommand::State, String::new())
+        );
+        assert!(split_cmd_line("bogus x").is_err());
     }
 }
