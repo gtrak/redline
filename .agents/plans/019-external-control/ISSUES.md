@@ -25,7 +25,7 @@ orchestration lesson is `P1` at the bottom.
 | W16 | the bound socket file is left on disk after a clean exit | observed: `srwxrwxr-x` entry survives the process | remove the socket file on exit (RAII guard or explicit `remove_file`) | 019-03 |
 | W17 | remote `quit` prints a ~25-line state block (the "nothing printed → state" fallback fires) | `src/main.rs` `run_attached` | make `quit` a non-printing terminal verb | 019-03 |
 | W18 | `handle_connection` reads a line with no size cap | `src/control.rs` | **leave** (local, same-uid) — note only; a cap is cheap if the surface widens | 019-03 (note) |
-| W19 | `quote` renders at the session width (default 80); the live TUI renders at the terminal's real size | `docs/control-api.md` (to be written) | document that `quote` is an 80-col approximation unless `--width` matches, OR thread the live width through | 019-03 |
+| W19 | `quote` rendered at a fixed 80; the live TUI renders at the terminal's real size | `src/control.rs` hardcoded `80u16, 24u16`; `TerminalEvent::Resize` discarded the width | **DONE** `3fdf73f` — `AppStore::terminal_size` recorded at startup + on resize; the socket reads it, so an attached `quote` matches the human's width. Test proven to discriminate; gate OK (full) | n/a |
 
 ## Process note (orchestration)
 
