@@ -246,6 +246,159 @@ impl Session {
     pub fn quit_requested(&self) -> bool {
         self.store.lock().unwrap().quit
     }
+
+    /// The shared sugar-verb dispatcher (W8/frozen surface): every sugar
+    /// verb is ONE call here, composed from real store operations — never a
+    /// registry `arg` replay. The local headless CLI and the control-socket
+    /// wire both route through this so the two cannot drift.
+    ///
+    /// `arg` is the verb's single optional string argument:
+    ///
+    /// | verb | arg | semantics |
+    /// |------|-----|-----------|
+    /// | `open` | `PATH[:LINE[:COL]]` | `open_path_at`; `PATH` project-relative; `LINE`/`COL` 1-based |
+    /// | `goto` | `LINE` | land the point on `LINE` (1-based) via the real goto-line prompt |
+    /// | `jump` | `SYMBOL` | open the project symbol picker filtered to `SYMBOL` |
+    /// | `search` | `QUERY` | `start_project_search` (the real store op) |
+    /// | `isearch` | `QUERY` | start an in-buffer isearch and type `QUERY` |
+    /// | `select` | `N` \| `next` \| `prev` | picker: move the selection (1-based row) |
+    /// | `confirm` | — | picker: accept the selected candidate (`run_selected`) |
+    /// | `cancel` | — | the global cancel (`store.cancel`, C-g equivalent) |
+    /// | `annotate` | `TEXT` | annotate at point with `TEXT` |
+    /// | `magit` | — | open magit status |
+    ///
+    /// Unknown names are [`SessionError::UnknownCommand`].
+    pub fn verb(&mut self, name: &str, arg: Option<&str>) -> Result<(), SessionError> {
+        let arg = arg.unwrap_or("").trim();
+        match name {
+            "open" => {
+                if arg.is_empty() {
+                    return Err(SessionError::BadKey("open needs a path".to_string()));
+                }
+                let (path, line, col) = parse_path_spec(arg);
+                self.store.lock().unwrap().open_path_at(&path, line, col);
+            }
+            "goto" => {
+                let line: usize = arg.parse().map_err(|_| {
+                    SessionError::BadKey(format!("goto expects a line number, got `{arg}`"))
+                })?;
+                let mut s = self.store.lock().unwrap();
+                // Exercise the real goto-line prompt (the same path a human
+                // uses): open the prompt, feed the digits, confirm.
+                s.goto_line_start();
+                for c in line.to_string().chars() {
+                    s.key_event(Key::char(c));
+                }
+                // A degenerate input (0/the prompt failing to latch) falls
+                // back to a direct landing so the verb is never a no-op.
+                if s.goto_line_active() {
+                    s.goto_line_confirm();
+                }
+                if line == 0 {
+                    s.goto_line_col(0, 0);
+                }
+            }
+            "jump" => {
+                let mut s = self.store.lock().unwrap();
+                s.open_symbol_picker();
+                // Only type into the picker when it actually opened (an
+                // empty index leaves no picker and typing would self-insert).
+                if s.picker_open() {
+                    for c in arg.chars() {
+                        s.key_event(Key::char(c));
+                    }
+                }
+            }
+            "search" => {
+                if arg.is_empty() {
+                    return Err(SessionError::BadKey("search needs a query".to_string()));
+                }
+                self.store.lock().unwrap().start_project_search(arg.to_string());
+            }
+            "isearch" => {
+                if arg.is_empty() {
+                    return Err(SessionError::BadKey("isearch needs a query".to_string()));
+                }
+                let mut s = self.store.lock().unwrap();
+                s.isearch_start(crate::app::store::IsearchDirection::Forward);
+                if s.isearch_active() {
+                    for c in arg.chars() {
+                        s.key_event(Key::char(c));
+                    }
+                }
+            }
+            "select" => {
+                let mut s = self.store.lock().unwrap();
+                match arg {
+                    "next" => s.picker_select_next(),
+                    "prev" => s.picker_select_prev(),
+                    other => {
+                        let n: usize = other.parse().map_err(|_| {
+                            SessionError::BadKey(format!(
+                                "select expects a row number or next/prev, got `{other}`"
+                            ))
+                        })?;
+                        if n == 0 {
+                            return Err(SessionError::BadKey(
+                                "select row numbers are 1-based".to_string(),
+                            ));
+                        }
+                        s.picker_select_index(n - 1);
+                    }
+                }
+            }
+            "confirm" => {
+                self.store.lock().unwrap().run_selected();
+            }
+            "cancel" => {
+                self.store.lock().unwrap().cancel();
+            }
+            "annotate" => {
+                let mut s = self.store.lock().unwrap();
+                s.annotate();
+                if s.note_prompt_active() {
+                    for c in arg.chars() {
+                        s.key_event(Key::char(c));
+                    }
+                    s.key_event(Key::enter());
+                }
+            }
+            "magit" => {
+                self.store.lock().unwrap().open_magit_status();
+            }
+            other => return Err(SessionError::UnknownCommand(other.to_string())),
+        }
+        Ok(())
+    }
+}
+
+/// Split a `PATH[:LINE[:COL]]` spec into the project-relative path and the
+/// optional 1-based line/column. A trailing run of one or two `:N` numeric
+/// segments is consumed from the right; everything before it is the path
+/// (so a `:` inside a path is preserved as long as the last segment is not
+/// numeric). A non-numeric trailing segment is part of the path.
+fn parse_path_spec(spec: &str) -> (String, Option<usize>, Option<usize>) {
+    let mut it = spec.rsplitn(3, ':');
+    let first = it.next().unwrap_or("");
+    if let Ok(n1) = first.parse::<usize>() {
+        match it.next() {
+            Some(second) => {
+                if let Ok(n2) = second.parse::<usize>() {
+                    // Two trailing numbers: LINE then COL, path is the rest.
+                    match it.next() {
+                        Some(path) if !path.is_empty() => {
+                            return (path.to_string(), Some(n2), Some(n1));
+                        }
+                        _ => return (spec.to_string(), None, None),
+                    }
+                }
+                (second.to_string(), Some(n1), None)
+            }
+            None => (spec.to_string(), None, None),
+        }
+    } else {
+        (spec.to_string(), None, None)
+    }
 }
 
 impl Snapshot {
@@ -734,5 +887,325 @@ mod tests {
         s.text("x").unwrap();
         let after = s.buffer_text(None);
         assert_eq!(before, after, "read-only buffer must refuse literal text");
+    }
+
+    // ── sugar verbs (019-03) ────────────────────────────────────────────
+
+    #[test]
+    fn parse_path_spec_splits_line_and_col() {
+        assert_eq!(parse_path_spec("src/main.rs"), ("src/main.rs".into(), None, None));
+        assert_eq!(
+            parse_path_spec("src/main.rs:5"),
+            ("src/main.rs".into(), Some(5), None)
+        );
+        assert_eq!(
+            parse_path_spec("src/main.rs:5:3"),
+            ("src/main.rs".into(), Some(5), Some(3))
+        );
+        // A non-numeric trailing segment is part of the path (no colon split).
+        assert_eq!(
+            parse_path_spec("weird:name.rs"),
+            ("weird:name.rs".into(), None, None)
+        );
+    }
+
+    #[test]
+    fn open_verb_lands_the_point() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("open", Some("src/main.rs:10")).unwrap();
+        let snap = s.snapshot();
+        assert!(snap.buffer.contains("src/main.rs"), "opened: {:?}", snap.buffer);
+        assert_eq!(snap.point.line, 9, "open src/main.rs:10 lands on line index 9");
+    }
+
+    #[test]
+    fn open_verb_with_col() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("open", Some("src/main.rs:3:2")).unwrap();
+        let snap = s.snapshot();
+        assert_eq!(snap.point.line, 2);
+        assert_eq!(snap.point.col, 1);
+    }
+
+    #[test]
+    fn goto_verb_lands_the_line() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("open", Some("src/main.rs")).unwrap();
+        s.verb("goto", Some("12")).unwrap();
+        assert_eq!(s.snapshot().point.line, 11);
+    }
+
+    #[test]
+    fn jump_verb_opens_symbol_picker() {
+        let dir = project();
+        let mut s = session(&dir);
+        // No index in a headless session, so the picker may not open; the
+        // verb must not error, and must not have self-inserted text.
+        s.verb("jump", Some("alpha")).unwrap();
+    }
+
+    #[test]
+    fn search_verb_starts_a_project_search() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("search", Some("probe")).unwrap();
+        let snap = s.snapshot();
+        assert!(snap.search.is_some() || snap.view == "Search", "search started: {snap:?}");
+    }
+
+    #[test]
+    fn isearch_verb_starts_and_types() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("open", Some("src/main.rs")).unwrap();
+        s.verb("isearch", Some("line")).unwrap();
+        let snap = s.snapshot();
+        let is = snap.isearch.expect("isearch active after the verb");
+        assert!(is.active);
+    }
+
+    #[test]
+    fn cancel_verb_is_a_no_op_without_pending_state() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("cancel", None).unwrap();
+    }
+
+    #[test]
+    fn annotate_verb_writes_a_note() {
+        let dir = project();
+        let mut s = session(&dir);
+        s.verb("open", Some("src/main.rs:2")).unwrap();
+        s.verb("annotate", Some("hello note")).unwrap();
+        // The note count is reflected in the snapshot's annotations string.
+        let snap = s.snapshot();
+        assert!(
+            snap.annotations.contains("note"),
+            "annotation committed: {:?}",
+            snap.annotations
+        );
+    }
+
+    #[test]
+    fn select_verb_rejects_zero_and_bad_tokens() {
+        let dir = project();
+        let mut s = session(&dir);
+        assert!(matches!(
+            s.verb("select", Some("0")),
+            Err(SessionError::BadKey(_))
+        ));
+        assert!(matches!(
+            s.verb("select", Some("nope")),
+            Err(SessionError::BadKey(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_verb_is_unknown_command() {
+        let dir = project();
+        let mut s = session(&dir);
+        assert!(matches!(
+            s.verb("frobnicate", None),
+            Err(SessionError::UnknownCommand(_))
+        ));
+    }
+
+    #[test]
+    fn missing_required_arg_is_an_error() {
+        let dir = project();
+        let mut s = session(&dir);
+        assert!(s.verb("open", None).is_err());
+        assert!(s.verb("search", None).is_err());
+        assert!(s.verb("goto", None).is_err());
+    }
+
+    // ── frozen Snapshot schema (019-03) ─────────────────────────────────
+
+    /// The snapshot's top-level key set is FROZEN: a rename must redden this
+    /// test (the JSON is the documented external API). Update this list and
+    /// `docs/control-api.md` together when the schema genuinely changes.
+    #[test]
+    fn snapshot_top_level_keys_are_frozen() {
+        let dir = project();
+        let mut s = session(&dir);
+        open_main(&mut s);
+        let value = serde_json::to_value(s.snapshot()).unwrap();
+        let obj = value.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "activity",
+                "annotations",
+                "buffer",
+                "buffer_list",
+                "crate_indexing",
+                "dirty",
+                "indexing",
+                "isearch",
+                "magit",
+                "message",
+                "mode",
+                "pending",
+                "picker",
+                "point",
+                "position",
+                "project",
+                "resolving",
+                "root",
+                "search",
+                "tree",
+                "view",
+                "view_name",
+                "which_function",
+                "window",
+            ]
+        );
+    }
+
+    /// Each nested object's key set is frozen too.
+    #[test]
+    fn snapshot_nested_keys_are_frozen() {
+        let dir = project();
+        let mut s = session(&dir);
+        open_main(&mut s);
+        let value = serde_json::to_value(s.snapshot()).unwrap();
+        let keys_of = |path: &[&str]| -> Vec<String> {
+            let mut v = &value;
+            for p in path {
+                v = &v[*p];
+            }
+            let mut ks: Vec<String> = v
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            ks.sort_unstable();
+            ks
+        };
+        assert_eq!(keys_of(&["point"]), vec!["col", "line"]);
+        assert_eq!(keys_of(&["window"]), vec!["top_line", "total_lines", "viewport"]);
+        // `dirty` is null in a clean session; its shape is pinned by the
+        // struct test below where it is Some.
+    }
+
+    /// The nested `Dirty` object keys (exercised via the struct directly, so
+    /// it does not depend on a dirty git fixture).
+    #[test]
+    fn dirty_keys_are_frozen() {
+        let d = Dirty {
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+        };
+        let value = serde_json::to_value(d).unwrap();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["staged", "unstaged", "untracked"]);
+    }
+
+    /// The nested Picker/Search/Magit/Tree/Isearch/BufferList structs' keys
+    /// are frozen (built directly — the surfaces need a live picker).
+    #[test]
+    fn surface_struct_keys_are_frozen() {
+        let keys = |v: serde_json::Value| -> Vec<String> {
+            let mut ks: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            ks.sort_unstable();
+            ks
+        };
+        assert_eq!(
+            keys(serde_json::to_value(Picker {
+                prompt: String::new(),
+                query: String::new(),
+                selected: 0,
+                total: 0,
+                rows: vec![],
+            })
+            .unwrap()),
+            vec!["prompt", "query", "rows", "selected", "total"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(PickerRow {
+                name: String::new(),
+                label: String::new(),
+                detail: String::new(),
+            })
+            .unwrap()),
+            vec!["detail", "label", "name"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(Search {
+                title: String::new(),
+                running: false,
+                error: None,
+                narrow_query: String::new(),
+                total: 0,
+                selected: None,
+                rows: vec![],
+            })
+            .unwrap()),
+            vec![
+                "error",
+                "narrow_query",
+                "rows",
+                "running",
+                "selected",
+                "title",
+                "total"
+            ]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(SearchRow {
+                kind: String::new(),
+                file: String::new(),
+                line: None,
+                col: None,
+                text: String::new(),
+                count: None,
+            })
+            .unwrap()),
+            vec!["col", "count", "file", "kind", "line", "text"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(Magit {
+                rows_total: 0,
+                narrow_query: String::new(),
+            })
+            .unwrap()),
+            vec!["narrow_query", "rows_total"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(Tree {
+                visible: false,
+                query: String::new(),
+                rows_total: 0,
+                selected: 0,
+            })
+            .unwrap()),
+            vec!["query", "rows_total", "selected", "visible"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(Isearch {
+                active: false,
+                selected: 0,
+                total: 0,
+            })
+            .unwrap()),
+            vec!["active", "selected", "total"]
+        );
+        assert_eq!(
+            keys(serde_json::to_value(BufferList {
+                query: String::new(),
+                total: 0,
+                selected: None,
+            })
+            .unwrap()),
+            vec!["query", "selected", "total"]
+        );
     }
 }

@@ -1,6 +1,55 @@
 use super::*;
 
 impl AppStore {
+    /// The `open PATH[:LINE[:COL]]` sugar verb's real op (W8: the sugar
+    /// verbs are genuine store operations, never a registry `arg` replay).
+    /// Opens the project-relative `rel` (exactly [`open_path`]) and, when
+    /// `line`/`col` are given (1-based), lands the point on them. `col`
+    /// alone is ignored without a line (a column has no meaning on a
+    /// whole-file landing). A missing project/file leaves the minibuffer
+    /// message [`open_path`] already set; the point is only moved when the
+    /// open succeeded (a failed open has no buffer to land in).
+    ///
+    /// [`open_path`]: Self::open_path
+    pub fn open_path_at(&mut self, rel: &str, line: Option<usize>, col: Option<usize>) {
+        self.open_path(rel);
+        // Land only when the open SUCCEEDED: `open_path` leaves the previous
+        // current buffer in place on failure, so the current key must name
+        // the requested file's buffer key.
+        let Some(abs) = self
+            .project
+            .as_ref()
+            .map(|p| p.root.join(rel))
+        else {
+            return;
+        };
+        let key = abs.to_string_lossy().into_owned();
+        if self.buffers.current() != Some(key.as_str()) {
+            return;
+        }
+        let Some(l0) = line.map(|l| l.saturating_sub(1)) else {
+            return;
+        };
+        match col {
+            Some(c) => {
+                let c0 = c.saturating_sub(1);
+                self.goto_line_col(l0, c0);
+            }
+            None => self.set_point_line(l0),
+        }
+    }
+
+    /// Land the point on the 0-based `line`, `col` (the sugar `goto`/`open`
+    /// landing). A public wrapper over the `pub(super)` [`set_point`]
+    /// (file_view.rs) so callers OUTSIDE the `store` module (the
+    /// `Session` sugar verbs) can position the point without going through
+    /// the key path. Both coordinates are clamped to the buffer bounds.
+    ///
+    /// [`set_point`]: Self::set_point
+    pub fn goto_line_col(&mut self, line: usize, col: usize) {
+        self.set_point(line, col, col);
+    }
+
     /// Open the project-relative file in a buffer and make it current;
     /// records it in the project's recents (persisted).
     pub fn open_path(&mut self, rel: &str) {

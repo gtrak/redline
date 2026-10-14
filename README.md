@@ -73,6 +73,37 @@ redline
 Redline auto-detects the project root (git repo or marker file). The status
 line shows the project name and current view.
 
+## Driving redline from outside
+
+Redline can be driven from a CLI — attached to a live session (the human's
+screen moves) or headless (an ephemeral session, no terminal). The full
+contract is [`docs/control-api.md`](docs/control-api.md).
+
+**Attached** — with a TUI running, the verbs connect to its control socket:
+
+```sh
+redline open src/main.rs:40      # move the human's cursor
+redline goto 10
+redline search 'fn main'
+redline select 2 && redline confirm
+redline annotate 'look here'
+redline state --json | jq .point
+redline quit
+```
+
+**Headless** — no TUI, a throwaway session:
+
+```sh
+redline --project /repo open Cargo.toml:5 state
+redline --project /repo -c 'open src/main.rs' -c 'goto 10' state --json
+```
+
+Primitives: `state`, `quote`, `buffer`, `notes`, `do`, `key`, `keys`, `text`,
+`quit`. Sugar: `open`, `goto`, `jump`, `search`, `isearch`, `select`,
+`confirm`, `cancel`, `annotate`, `magit`. Use `--socket PATH` (or
+`$REDLINE_SOCKET`) to pick the socket, and `--attached` to require a live
+session (a missing socket is then a hard error).
+
 ## Annotations and the quit dump
 
 In the file view, `A` records a note anchored to the line under the cursor;
@@ -118,6 +149,7 @@ Generated from the command registry. The `M-x` palette lists all commands.
 
 | Key | Command | Description |
 |-----|---------|-------------|
+| *(CLI)* | `redline open PATH[:LINE[:COL]]` | External control: open a file and land the point (see **Driving redline from outside**) |
 | `C-x C-f` / `C-c p f` | find-file | Find a file in the project |
 | `C-x b` | switch-buffer | Switch to an open buffer |
 | `C-x C-b` | list-buffers | List open buffers |

@@ -11,7 +11,12 @@ socket:
   * `redline --socket <tmpsock> -c 'do find-file' -c 'text Cargo.toml'
     -c 'key RET' quote` connects, opens Cargo.toml, and prints the live frame
     — asserted to name Cargo.toml;
-  * `redline --socket <tmpsock> quit` ends the TUI (the PTY child exits).
+  * W14: the SAME mutation is proven on the live PYTE SCREEN (title row +
+    status line name the file), not just the client's `quote`;
+  * a leg per sugar verb (open/goto/search/select+confirm/annotate/magit)
+    asserts each real store op;
+  * `redline --socket <tmpsock> quit` ends the TUI (the PTY child exits) and
+    W16/W17: the socket file is gone and `quit` printed no state block.
 
 Own fixture repo (redline_control_repo) + own per-repo PTY flock, so it never
 contends with the other suites. Registered in tools/gate.sh SHARED_SUITES and
@@ -103,9 +108,68 @@ def main():
             print("--- client stdout tail ---")
             print("\n".join(out.splitlines()[-8:]))
 
-        # A remote quit ends the live TUI.
+        # W14: the STRONG claim — the human's live PYTE SCREEN moved, not just
+        # a client-side `quote` read of store state. Read the PTY (the repaint
+        # lands asynchronously) and assert the file-view TITLE row AND the
+        # status line both name the file. This is the assertion that FAILS if
+        # the repaint breaks.
+        app._read(2.0, quiet=0.3)
+        title_row = app.row_text(0)
+        status_row = app.row_text(app.rows - 1)
+        screen_ok = "Cargo.toml" in title_row and "Cargo.toml" in status_row
+        rec("live PYTE screen repaints (title + status name the file)", screen_ok,
+            f"title={title_row.strip()!r} status={status_row.strip()[:60]!r}")
+
+        # ── sugar verbs, one leg each (019-03) ──────────────────────────
+
+        # open PATH:LINE — lands the point, asserted via `state` + `quote`.
+        rc, out, err = run_client("-c", "open Cargo.toml:3", "state")
+        ok = rc == 0 and "point.line: 2" in out
+        rec("sugar open Cargo.toml:3 lands line 2", ok,
+            f"rc={rc} point={'point.line: 2' in out} err={err.strip()[:60]}")
+
+        # goto LINE.
+        rc, out, err = run_client("-c", "open Cargo.toml", "-c", "goto 1", "state")
+        rec("sugar goto 1 lands line 0", rc == 0 and "point.line: 0" in out,
+            f"rc={rc} err={err.strip()[:60]}")
+
+        # search QUERY — the real project search op. Run this leg LAST among
+        # the mutations: it pushes the Search view on top, which would block
+        # the Buffer-only legs (annotate) that follow.
+
+        # select + confirm on a picker (find-file lists the fixture files).
+        rc, out, err = run_client(
+            "-c", "do find-file", "-c", "select 1", "-c", "confirm",
+            "state")
+        ok = rc == 0 and "view: Buffer" in out
+        rec("sugar select + confirm opens a picker row", ok,
+            f"rc={rc} buffer={'view: Buffer' in out} err={err.strip()[:60]}")
+
+        # annotate TEXT at point.
+        rc, out, err = run_client(
+            "-c", "open Cargo.toml:1", "-c", "annotate a drive note", "state")
+        ok = rc == 0 and "note" in out
+        rec("sugar annotate writes a note", ok,
+            f"rc={rc} annotated={'note' in out} err={err.strip()[:60]}")
+
+        # magit status.
+        rc, out, err = run_client("-c", "magit", "state")
+        ok = rc == 0 and "view: MagitStatus" in out
+        rec("sugar magit opens the status view", ok,
+            f"rc={rc} magit={'view: MagitStatus' in out} err={err.strip()[:60]}")
+
+        # search QUERY — the real project search op.
+        rc, out, err = run_client("-c", "search control-fixture", "state")
+        ok = rc == 0 and "search.title: Search: 'control-fixture'" in out
+        rec("sugar search starts a project search", ok,
+            f"rc={rc} title={'search.title:' in out} err={err.strip()[:60]}")
+
+        # A remote quit ends the live TUI (and W16: the socket file is gone).
         rc, out, err = run_client("quit")
         rec("remote quit accepted", rc == 0, f"rc={rc} err={err.strip()[:80]}")
+        # W17: quit must NOT dump state.
+        rec("remote quit prints no state block", "view:" not in out,
+            f"stdout={out.strip()[:60]!r}")
 
         exited = False
         deadline = time.time() + 10.0
@@ -116,6 +180,16 @@ def main():
                 break
             time.sleep(0.2)
         rec("tui process exits after remote quit", exited)
+        # W16: the socket file is unlinked on clean exit (the child exited
+        # above, so give the unlink a moment).
+        gone = False
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not os.path.exists(SOCK):
+                gone = True
+                break
+            time.sleep(0.1)
+        rec("socket file removed on clean exit", gone, SOCK)
     finally:
         try:
             app.kill()

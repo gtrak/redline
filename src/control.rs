@@ -235,6 +235,16 @@ fn dispatch(session: &mut Session, req: &Request) -> Result<serde_json::Value, W
             session.text(&text).map_err(map_session_err)?;
             Ok(serde_json::json!({}))
         }
+        // Sugar verbs (019-03): one round trip each, routed through the
+        // shared `Session::verb` dispatcher so local and wire cannot drift.
+        "open" | "goto" | "jump" | "search" | "isearch" | "select" | "confirm" | "cancel"
+        | "annotate" | "magit" => {
+            let arg = arg_str("arg");
+            session
+                .verb(req.cmd.as_str(), arg.as_deref())
+                .map_err(map_session_err)?;
+            Ok(serde_json::json!({}))
+        }
         "quit" => {
             // Route through the registry `quit` (`begin_quit`): it prompts on
             // modified buffers, then flips `store.quit`, which Root's

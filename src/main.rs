@@ -100,9 +100,13 @@ struct CliArgs {
     /// `--socket PATH`: the control socket to bind (TUI) or connect to
     /// (headless client). 019-02.
     socket: Option<PathBuf>,
+    /// `--attached` (W15, 019-03): require a reachable control socket — a
+    /// missing socket is a hard error (exit 1) even for an env-only socket,
+    /// instead of the headless fallback.
+    attached: bool,
 }
 
-/// A headless subcommand name (issue 019-01b).
+/// A headless subcommand name (issue 019-01b; sugar verbs issue 019-03).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Subcommand {
     State,
@@ -114,6 +118,17 @@ enum Subcommand {
     Keys,
     Text,
     Quit,
+    // ── sugar verbs (019-03) ──
+    Open,
+    Goto,
+    Jump,
+    Search,
+    Isearch,
+    Select,
+    Confirm,
+    Cancel,
+    Annotate,
+    Magit,
 }
 
 impl Subcommand {
@@ -128,9 +143,107 @@ impl Subcommand {
             "keys" => Some(Subcommand::Keys),
             "text" => Some(Subcommand::Text),
             "quit" => Some(Subcommand::Quit),
+            "open" => Some(Subcommand::Open),
+            "goto" => Some(Subcommand::Goto),
+            "jump" => Some(Subcommand::Jump),
+            "search" => Some(Subcommand::Search),
+            "isearch" => Some(Subcommand::Isearch),
+            "select" => Some(Subcommand::Select),
+            "confirm" => Some(Subcommand::Confirm),
+            "cancel" => Some(Subcommand::Cancel),
+            "annotate" => Some(Subcommand::Annotate),
+            "magit" => Some(Subcommand::Magit),
             _ => None,
         }
     }
+
+    /// The canonical verb name (usage/error text).
+    fn name(self) -> &'static str {
+        match self {
+            Subcommand::State => "state",
+            Subcommand::Quote => "quote",
+            Subcommand::Buffer => "buffer",
+            Subcommand::Notes => "notes",
+            Subcommand::Do => "do",
+            Subcommand::Key => "key",
+            Subcommand::Keys => "keys",
+            Subcommand::Text => "text",
+            Subcommand::Quit => "quit",
+            Subcommand::Open => "open",
+            Subcommand::Goto => "goto",
+            Subcommand::Jump => "jump",
+            Subcommand::Search => "search",
+            Subcommand::Isearch => "isearch",
+            Subcommand::Select => "select",
+            Subcommand::Confirm => "confirm",
+            Subcommand::Cancel => "cancel",
+            Subcommand::Annotate => "annotate",
+            Subcommand::Magit => "magit",
+        }
+    }
+
+    /// Whether the verb refuses any argument. W10/W11: a trailing token on
+    /// one of these is a usage error (exit 2), never silently ignored.
+    fn takes_no_arg(self) -> bool {
+        matches!(
+            self,
+            Subcommand::State
+                | Subcommand::Quote
+                | Subcommand::Notes
+                | Subcommand::Cancel
+                | Subcommand::Confirm
+                | Subcommand::Magit
+                | Subcommand::Quit
+        )
+    }
+
+    /// Whether the verb REQUIRES an argument (the sugar verbs whose whole
+    /// point is the argument). `select` is optional (defaults to `next`).
+    fn requires_arg(self) -> bool {
+        matches!(
+            self,
+            Subcommand::Open
+                | Subcommand::Goto
+                | Subcommand::Jump
+                | Subcommand::Search
+                | Subcommand::Isearch
+                | Subcommand::Annotate
+        )
+    }
+
+    /// Whether this is a sugar verb (routed through `Session::verb`).
+    fn is_sugar(self) -> bool {
+        matches!(
+            self,
+            Subcommand::Open
+                | Subcommand::Goto
+                | Subcommand::Jump
+                | Subcommand::Search
+                | Subcommand::Isearch
+                | Subcommand::Select
+                | Subcommand::Confirm
+                | Subcommand::Cancel
+                | Subcommand::Annotate
+                | Subcommand::Magit
+        )
+    }
+}
+
+/// Validate a verb's trailing text (W10/W11). `rest` is the raw argument
+/// string after the verb (from a `-c` line or the joined positionals).
+fn validate_verb_args(sub: Subcommand, rest: &str) -> Result<(), String> {
+    let rest = rest.trim();
+    if sub.takes_no_arg() && !rest.is_empty() {
+        return Err(format!(
+            "`{}` takes no arguments (got `{}`)",
+            sub.name(),
+            rest
+        ));
+    }
+    if sub.requires_arg() && rest.is_empty() {
+        return Err(format!("`{}` needs an argument", sub.name()));
+    }
+    Ok(())
 }
 
 impl CliArgs {
@@ -142,13 +255,15 @@ impl CliArgs {
 fn usage() {
     eprintln!("usage: redline [--notes=plain]");
     eprintln!("       redline --index-profile[=PATH] [--profile-top=N --profile-out=FILE --profile-repeat=N --profile-real-paths]");
-    eprintln!("       redline [--project DIR] [--json] [--width N] [--height N] [-c CMD]... [SUBCOMMAND [ARGS]]");
-    eprintln!("       subcommands: state | quote | buffer [START..END] | notes | do NAME [ARG] | key TOKEN | keys SEQ | text LITERAL | quit");
+    eprintln!("       redline [--project DIR] [--json] [--width N] [--height N] [--socket PATH] [--attached] [-c CMD]... [SUBCOMMAND [ARGS]]");
+    eprintln!("       primitives: state | quote | buffer [START..END] | notes | do NAME [ARG] | key TOKEN | keys SEQ | text LITERAL | quit");
+    eprintln!("       sugar: open PATH[:LINE[:COL]] | goto LINE | jump SYMBOL | search QUERY | isearch QUERY | select [N|next|prev] | confirm | cancel | annotate TEXT | magit");
 }
 
 /// Split a `-c` line on the FIRST run of whitespace into `verb` + `rest`
 /// (the 019-01b grammar: no `:` splitting). The verb must be a known
-/// subcommand.
+/// subcommand, and the trailing text must satisfy [`validate_verb_args`]
+/// (W10/W11: a verb that takes no argument rejects stray tokens).
 fn split_cmd_line(raw: &str) -> Result<(Subcommand, String), String> {
     let raw = raw.trim();
     let (verb, rest) = match raw.split_once(char::is_whitespace) {
@@ -157,6 +272,7 @@ fn split_cmd_line(raw: &str) -> Result<(Subcommand, String), String> {
     };
     let sub = Subcommand::parse(verb)
         .ok_or_else(|| format!("unknown subcommand in -c: `{verb}`"))?;
+    validate_verb_args(sub, rest)?;
     Ok((sub, rest.to_string()))
 }
 
@@ -208,6 +324,7 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
         height: CliArgs::DEFAULT_HEIGHT,
         commands: Vec::new(),
         socket: None,
+        attached: false,
     };
     // `--profile-top` / `--profile-repeat` validate to a positive int.
     let positive = |rest: &str, flag: &str| -> Result<usize, String> {
@@ -271,6 +388,8 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
             cli.socket = Some(PathBuf::from(take_value("--socket", &mut i)?));
         } else if let Some(p) = arg.strip_prefix("--socket=") {
             cli.socket = Some(PathBuf::from(p));
+        } else if arg == "--attached" {
+            cli.attached = true;
         } else if arg == "--index-profile" {
             cli.index_profile = Some(PathBuf::from("."));
         } else if let Some(path) = arg.strip_prefix("--index-profile=") {
@@ -301,8 +420,29 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, String> 
     if let Some(first) = positionals.first() {
         let sub = Subcommand::parse(first)
             .ok_or_else(|| format!("unknown subcommand: {first}"))?;
+        // W11: extra positionals on a verb that takes none are a usage
+        // error (the second token used to be silently dropped). And a
+        // required-arg verb with no argument is a usage error too.
+        let rest = positionals[1..].join(" ");
+        if sub.takes_no_arg() && !rest.is_empty() {
+            return Err(format!(
+                "`{}` takes no arguments (got `{}`)",
+                sub.name(),
+                rest
+            ));
+        }
+        if sub.requires_arg() && rest.is_empty() {
+            return Err(format!("`{}` needs an argument", sub.name()));
+        }
         cli.subcommand = Some(sub);
         cli.sub_args = positionals[1..].to_vec();
+    }
+    // W10: validate every `-c` line HERE so a bad trailing token (e.g.
+    // `-c 'state --json'`) is the SAME usage error as a bad positional —
+    // printed to stderr with exit 2, not a run-time `anyhow` error (exit 1).
+    // `split_cmd_line` already enforces `validate_verb_args`.
+    for raw in &cli.commands {
+        split_cmd_line(raw)?;
     }
     Ok(cli)
 }
@@ -339,23 +479,26 @@ fn run_do(session: &mut session::Session, rest: &str) -> anyhow::Result<()> {
 
 /// The control-socket client path (issue 019-02).
 ///
-/// When a socket is requested (`--socket` given, or `$REDLINE_SOCKET` set),
-/// the headless subcommands are routed over the wire to the LIVE TUI instead
-/// of building a local `Session`. Returns `None` when NO socket was requested
-/// (the caller takes the plain headless path). A `--socket` that was given
-/// explicitly and cannot be connected is a HARD error; an env-only socket that
-/// is missing falls back to headless.
+/// When a socket is requested (`--socket` given, `$REDLINE_SOCKET` set, or
+/// `--attached` given), the headless subcommands are routed over the wire to
+/// the LIVE TUI instead of building a local `Session`. Returns `None` when NO
+/// socket was requested (the caller takes the plain headless path). A
+/// `--socket` that was given explicitly and cannot be connected is a HARD
+/// error; an env-only socket that is missing falls back to headless. With
+/// `--attached` (W15) ANY missing socket is a hard error — the flag promises
+/// the command runs against a live session, so silently falling back would
+/// lie about what happened.
 fn try_attached(cli: &CliArgs) -> Option<anyhow::Result<()>> {
     let env_socket = std::env::var("REDLINE_SOCKET").ok().filter(|s| !s.is_empty());
     let explicit = cli.socket.clone();
-    if explicit.is_none() && env_socket.is_none() {
+    if explicit.is_none() && env_socket.is_none() && !cli.attached {
         return None;
     }
     let sock = control::socket_path(explicit.as_deref());
-    // Liveness probe: a missing socket with an explicit `--socket` is an error;
-    // an env-only socket falls back to headless.
+    // Liveness probe: a missing socket with an explicit `--socket` (or with
+    // `--attached`) is an error; an env-only socket falls back to headless.
     if control::client::try_connect(&sock).is_err() {
-        if explicit.is_some() {
+        if explicit.is_some() || cli.attached {
             return Some(Err(anyhow::anyhow!(
                 "cannot connect to control socket {}",
                 sock.display()
@@ -384,22 +527,14 @@ fn request_for(id: u64, sub: Subcommand, rest: &str, cli: &CliArgs) -> control::
             None => serde_json::json!({}),
         },
         Subcommand::Notes => serde_json::json!({"plain": cli.notes_plain}),
+        // Sugar verbs (019-03): the raw argument (empty for the no-arg
+        // verbs), routed through `Session::verb` on the server side.
+        _ if sub.is_sugar() => serde_json::json!({"arg": rest.trim()}),
         _ => serde_json::json!({}),
-    };
-    let cmd = match sub {
-        Subcommand::State => "state",
-        Subcommand::Quote => "quote",
-        Subcommand::Buffer => "buffer",
-        Subcommand::Notes => "notes",
-        Subcommand::Do => "do",
-        Subcommand::Key => "key",
-        Subcommand::Keys => "keys",
-        Subcommand::Text => "text",
-        Subcommand::Quit => "quit",
     };
     control::Request {
         id,
-        cmd: cmd.to_string(),
+        cmd: sub.name().to_string(),
         args,
     }
 }
@@ -461,12 +596,15 @@ fn run_attached(cli: &CliArgs, sock: &Path) -> anyhow::Result<()> {
         let rest = cli.sub_args.join(" ");
         let printed = is_printing(sub);
         send(sub, &rest, printed)?;
-        if !printed {
+        // W17: `quit` is a terminal, non-printing verb — do NOT dump state
+        // after it. Every other non-printing verb falls back to `state`.
+        if !printed && sub != Subcommand::Quit {
             send(Subcommand::State, "", true)?;
         }
     } else {
-        let last_prints = cmds.last().map(|(s, _)| is_printing(*s)).unwrap_or(false);
-        if !last_prints {
+        let last = cmds.last().map(|(s, _)| *s);
+        let last_prints = last.map(is_printing).unwrap_or(false);
+        if !last_prints && last != Some(Subcommand::Quit) {
             send(Subcommand::State, "", true)?;
         }
     }
@@ -531,9 +669,31 @@ fn perform(
         }
         Subcommand::Quit => {
             // Set the quit request through the same registry command the TUI
-            // uses, then exit 0 (no TUI).
+            // uses (W12: no `std::process::exit` deep inside `perform`); the
+            // caller sees `session.quit_requested()` and stops.
             let _ = session.do_command("quit", None);
-            std::process::exit(0);
+            Ok(false)
+        }
+        // ── sugar verbs (019-03): all route through `Session::verb` ──
+        Subcommand::Open
+        | Subcommand::Goto
+        | Subcommand::Jump
+        | Subcommand::Search
+        | Subcommand::Isearch
+        | Subcommand::Select
+        | Subcommand::Confirm
+        | Subcommand::Cancel
+        | Subcommand::Annotate
+        | Subcommand::Magit => {
+            let arg = if rest.trim().is_empty() {
+                None
+            } else {
+                Some(rest.trim())
+            };
+            session
+                .verb(sub.name(), arg)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(false)
         }
     }
 }
@@ -562,10 +722,18 @@ fn run_headless(cli: &CliArgs) -> anyhow::Result<()> {
         // positional subcommand will override it.
         let emit = is_last && !has_positional && is_printing(*sub);
         perform(&mut session, *sub, rest, cli.notes_plain, cli.json, emit)?;
+        // W17: `quit` is terminal and non-printing — stop here without a
+        // state dump.
+        if session.quit_requested() {
+            return Ok(());
+        }
     }
     if let Some(sub) = cli.subcommand {
         let rest = cli.sub_args.join(" ");
         let printed = perform(&mut session, sub, &rest, cli.notes_plain, cli.json, true)?;
+        if sub == Subcommand::Quit || session.quit_requested() {
+            return Ok(());
+        }
         if !printed {
             perform(
                 &mut session,
@@ -577,8 +745,9 @@ fn run_headless(cli: &CliArgs) -> anyhow::Result<()> {
             )?;
         }
     } else {
-        let last_prints = cmds.last().map(|(s, _)| is_printing(*s)).unwrap_or(false);
-        if !last_prints {
+        let last = cmds.last().map(|(s, _)| *s);
+        let last_prints = last.map(is_printing).unwrap_or(false);
+        if !last_prints && last != Some(Subcommand::Quit) {
             perform(
                 &mut session,
                 Subcommand::State,
@@ -956,6 +1125,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(mut w) = watcher {
         w.stop_and_wait().await;
     }
+    // W16: remove the control-socket file on clean exit. The path is
+    // deterministic from the same inputs that chose it at startup; a failed
+    // unlink (already gone) is harmless.
+    {
+        let sock = control::socket_path(cli.socket.as_deref());
+        let _ = std::fs::remove_file(&sock);
+    }
     tracing::info!("redline exited cleanly");
     // plan 005 issue 03: the quit-dump — printed AFTER the alternate screen
     // has exited and the watcher has stopped, from the FINAL store state
@@ -1088,12 +1264,12 @@ mod cli_tests {
             "--project",
             ".",
             "-c",
-            "open:src/main.rs",
+            "open src/main.rs:5",
             "state",
         ]))
         .unwrap();
         assert_eq!(cli.project, PathBuf::from("."));
-        assert_eq!(cli.commands, vec!["open:src/main.rs".to_string()]);
+        assert_eq!(cli.commands, vec!["open src/main.rs:5".to_string()]);
         assert_eq!(cli.subcommand, Some(Subcommand::State));
 
         // A positional `do NAME ARG`: rest is joined from sub_args.
@@ -1133,5 +1309,62 @@ mod cli_tests {
             (Subcommand::State, String::new())
         );
         assert!(split_cmd_line("bogus x").is_err());
+    }
+
+    // ── W10: a no-arg verb rejects trailing flags/tokens in `-c` ────────
+    #[test]
+    fn w10_no_arg_verb_rejects_trailing_token_in_c() {
+        let err = split_cmd_line("state --json").unwrap_err();
+        assert!(err.contains("takes no arguments"), "{err}");
+        assert!(split_cmd_line("quote extra").is_err());
+        assert!(split_cmd_line("cancel now").is_err());
+        assert!(split_cmd_line("magit --json").is_err());
+        // A plain state still parses.
+        assert!(split_cmd_line("state").is_ok());
+    }
+
+    // ── W11: extra positionals on a no-arg verb are a usage error ───────
+    #[test]
+    fn w11_extra_positional_is_a_usage_error() {
+        let err = parse_cli(strs(&["state", "state"])).unwrap_err();
+        assert!(err.contains("takes no arguments"), "{err}");
+        assert!(parse_cli(strs(&["quote", "x"])).is_err());
+        // A verb that takes an argument still accepts one.
+        assert!(parse_cli(strs(&["goto", "10"])).is_ok());
+    }
+
+    // ── W15: `--attached` parses ─────────────────────────────────────────
+    #[test]
+    fn w15_attached_flag_parses() {
+        let cli = parse_cli(strs(&["--attached", "state"])).unwrap();
+        assert!(cli.attached);
+        assert_eq!(cli.subcommand, Some(Subcommand::State));
+        let cli = parse_cli(strs(&["state"])).unwrap();
+        assert!(!cli.attached);
+    }
+
+    // ── Sugar verbs parse at the top level and in `-c` ──────────────────
+    #[test]
+    fn sugar_verbs_parse() {
+        assert_eq!(parse_cli(strs(&["open", "src/main.rs:5"])).unwrap().subcommand, Some(Subcommand::Open));
+        assert_eq!(parse_cli(strs(&["goto", "10"])).unwrap().sub_args, vec!["10".to_string()]);
+        assert!(parse_cli(strs(&["jump", "alpha"])).is_ok());
+        assert!(parse_cli(strs(&["search", "needle"])).is_ok());
+        assert!(parse_cli(strs(&["isearch", "needle"])).is_ok());
+        assert!(parse_cli(strs(&["select", "next"])).is_ok());
+        assert!(parse_cli(strs(&["select"])).is_ok());
+        assert!(parse_cli(strs(&["confirm"])).is_ok());
+        assert!(parse_cli(strs(&["cancel"])).is_ok());
+        assert!(parse_cli(strs(&["annotate", "a note"])).is_ok());
+        assert!(parse_cli(strs(&["magit"])).is_ok());
+        // A required-arg verb with no arg is an error.
+        assert!(parse_cli(strs(&["open"])).is_err());
+        assert!(parse_cli(strs(&["goto"])).is_err());
+        // And the -c form.
+        assert_eq!(
+            split_cmd_line("open src/main.rs:5").unwrap(),
+            (Subcommand::Open, "src/main.rs:5".to_string())
+        );
+        assert!(split_cmd_line("goto").is_err());
     }
 }

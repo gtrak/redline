@@ -1077,4 +1077,15 @@ impl AppStore {
         // the newly selected candidate.
         self.refresh_preview();
     }
+
+    /// `select N` sugar (019-03): move the picker's selection to the 0-based
+    /// index `n`, clamped to the filtered list. A no-op when no picker is
+    /// open or the filtered list is empty. Re-renders the preview like the
+    /// next/prev movers.
+    pub fn picker_select_index(&mut self, n: usize) {
+        if let Some(p) = self.picker.as_mut() && !p.filtered.is_empty() {
+            p.session.selected = n.min(p.filtered.len() - 1);
+        }
+        self.refresh_preview();
+    }
 }

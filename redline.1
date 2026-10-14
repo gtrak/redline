@@ -9,6 +9,53 @@ Redline is an emacs/helm/magit-flavored code browser that lives in a terminal
 pane. It provides instant navigation (files, symbols, definitions, references,
 grep), a git status/staging/commit surface, live file watching, and light
 editing (commit messages, per-project notes).
+.PP
+Redline can also be driven from outside: with no subcommand it is the TUI;
+with a subcommand (or repeatable \fB-c\fR command lines) it becomes a control
+client. When a control socket is reachable the verbs drive the LIVE session
+(the human's screen moves); otherwise they run an ephemeral headless session.
+See \fIdocs/control-api.md\fR for the JSON snapshot schema and the full verb
+table.
+.SH CONTROL VERBS
+.TP
+\fBredline state [--json]\fR
+Print the observable session state (text, or JSON with \fB--json\fR).
+.TP
+\fBredline quote\fR
+Print the current frame as text (an 80-column approximation. see docs/control-api.md).
+.TP
+\fBredline buffer [START..END]\fR
+Print the current buffer's text (optionally a 1-based inclusive line range).
+.TP
+\fBredline notes [--plain]\fR
+Print the annotation dump.
+.TP
+\fBredline do NAME [ARG]\fR Dispatch a registry command.
+.TP
+\fBredline key TOKEN\fR \fBredline keys SEQ\fR \fBredline text LITERAL\fR
+Feed one key, a key sequence, or literal text through the same routing the
+terminal uses.
+.TP
+\fBredline open PATH[:LINE[:COL]]\fR
+Open a project-relative file and land the point (1-based line/column).
+.TP
+\fBredline goto LINE\fR Land the point on LINE (1-based).
+.TP
+\fBredline jump SYMBOL\fR Open the symbol picker filtered to SYMBOL.
+.TP
+\fBredline search QUERY\fR \fBredline isearch QUERY\fR
+Start a project search / an in-buffer incremental search.
+.TP
+\fBredline select [N|next|prev]\fR \fBredline confirm\fR
+Move the picker selection / accept it.
+.TP
+\fBredline cancel\fR The global cancel (C-g equivalent).
+.TP
+\fBredline annotate TEXT\fR Annotate at point.
+.TP
+\fBredline magit\fR Open magit status.
+.TP
+\fBredline quit\fR Ask the session to exit.
 .SH KEY BINDINGS
 See the README.md for the full keymap cheat sheet. Common bindings:
 .TP
@@ -25,10 +72,31 @@ See the README.md for the full keymap cheat sheet. Common bindings:
 \fBC-x C-c\fR Quit
 .SH OPTIONS
 .TP
+\fB\-\-socket PATH\fR
+The control socket to bind (TUI) or connect to (client). Defaults to
+\fB$REDLINE_SOCKET\fR, else \fB$XDG_RUNTIME_DIR/redline-<uid>.sock\fR, else
+\fB/tmp/redline-<uid>.sock\fR.
+.TP
+\fB\-\-attached\fR
+Require a reachable control socket: a missing socket is a hard error (exit 1)
+even for an env-only socket, instead of falling back to a headless session.
+.TP
+\fB\-\-project DIR\fR The project root a headless session opens (default `.`).
+.TP
+\fB\-\-json\fR Emit \fBstate\fR as JSON.
+.TP
+\fB\-\-width N\fR / \fB\-\-height N\fR The headless session / render geometry.
+.TP
+\fB\-c CMD\fR Repeatable: run a command line (verb + optional argument) in order.
+.TP
 \fB\-\-notes=plain\fR
 On quit, print the annotation dump in the bare grep-addressable form
 `path:line: text` (no header, no code lines, no orphan marker). The
 default block form carries the orphan marker; see README.md.
+.SH ENVIRONMENT
+.TP
+.I REDLINE_SOCKET
+The control socket path when \fB\-\-socket\fR is not given.
 .SH FILES
 .TP
 .I ~/.config/redline/config.toml
