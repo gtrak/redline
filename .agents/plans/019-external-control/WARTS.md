@@ -59,3 +59,30 @@ buffer lines (the `row = terminal_row - 1` title offset in
 the offset fix and drive updates in one commit. **Also check `Blame`/`Log`/
 `Search`** — the same "title row + status line" duplication may hold there;
 the directive is stated for the file view, apply consistently where it holds.
+
+### W21 — the shared PTY fixture `/tmp/redline_pyte_repo` is UNREPRODUCIBLE (pre-existing infra)
+**Found by the 019 plan-level gate (2026-10-02)**: `tools/gate.sh full` failed
+~12 suites at SETUP (0–1s each) with
+`CalledProcessError: git -C /tmp/fx<pid>/redline_pyte_repo checkout -- .`
+returned 128. Cause: the fixture repo **does not exist** and NO committed tool
+creates it:
+- `tools/fixture.py::reset()` only RESETS an existing repo (`git checkout`,
+  marker re-apply) — it has no `git init`/`mkdir` path;
+- `grep` across every `tools/*.py` shows the suites ASSUME the path
+  (`repo("redline_pyte_repo")`) but nothing builds it;
+- it was never in git (`git ls-files | grep pyte_repo` = 0 commits).
+It was a **developer-machine `/tmp` artifact**; the `/tmp` cleanup (documented
+incident: "PTY fixtures are wiped with /tmp: rebuild (`tools/fixture.py`…)",
+`docs/ux-testing-plan.md`) took it, and the doc's "rebuild via fixture.py"
+instruction is FALSE for a from-scratch machine — fixture.py cannot create it.
+Consequence: **a fresh clone cannot run the PTY battery at all**; on this box
+every shared-fixture suite (sweep, drive_all, drive_*_narrow, windowing,
+check_cursor_stream, drive_xref, …) fails at setup while suites with their own
+fixture (drive_external_*, drive_issue_011_*, drive_control) pass. NOT caused
+by plan 019 (the failure is at fixture setup, before any app code runs).
+Disposition: **fix** (pre-existing infra, own issue) — commit a real fixture
+BUILDER (a `tools/fixture.py::create()` or a `tools/make_fixture.sh`) that
+materializes `redline_pyte_repo` from scratch (3 tracked files + the 5
+de-strays + a git repo + the baseline staged/unstaged markers), so the battery
+is reproducible on a clean machine. Until then the fixture is reconstructed
+per-machine and the battery is not portable.
