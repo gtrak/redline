@@ -159,7 +159,7 @@ def encode_key(seq):
 
 
 class App:
-    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None, args=None):
+    def __init__(self, repo, rows=ROWS, cols=COLS, startup_wait=6.0, colorterm=None, args=None, env_extra=None):
         # The whole suite process owns the shared fixture (released at exit),
         # not just one App: a suite that released between Apps would still
         # interleave with a rival.
@@ -191,6 +191,11 @@ class App:
                 env.pop("COLORTERM", None)
             else:
                 env["COLORTERM"] = colorterm
+            # Test-controlled env (e.g. a scratch XDG_RUNTIME_DIR so a drive
+            # can exercise the control socket's DEFAULT discovery path
+            # without touching the user's real session).
+            for k, v in (env_extra or {}).items():
+                env[k] = v
             os.chdir(repo)
             os.execvpe(BIN, [BIN] + list(args or []), env)
         os.close(slave)

@@ -78,6 +78,72 @@ def run_client(*args):
     return cp.returncode, cp.stdout, cp.stderr
 
 
+# W22: the DECISION the human/agent actually makes is *no* `--socket` — the
+# client must DISCOVER the app's socket via `$XDG_RUNTIME_DIR/redline-<real
+# uid>.sock`. The rest of this drive always passes an explicit `--socket`, so
+# that default path was never exercised end to end and a broken discovery
+# (the W22 bug: `UID` is a bash builtin, absent from the env, so both sides
+# fell back to their own pid) shipped silently. This leg points the app and a
+# bare client at a SCRATCH runtime dir so discovery is tested without
+# touching the user's real session.
+RUNTIME = os.path.join(fixture_root(), "ctl-rt-%d" % os.getpid())
+DISCOVERY_SOCK = os.path.join(RUNTIME, "redline-1000.sock")  # real uid below
+
+
+def run_bare_client(runtime, *args):
+    """Run the client with NO --socket, against a scratch XDG_RUNTIME_DIR."""
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = runtime
+    cp = subprocess.run(
+        [BIN, *args],
+        cwd=REPO, capture_output=True, text=True, timeout=60, env=env)
+    return cp.returncode, cp.stdout, cp.stderr
+
+
+def discover_leg():
+    """W22: a bare `redline <verb>` (no --socket) discovers a running app."""
+    os.makedirs(RUNTIME, exist_ok=True)
+    # The app name comes from the REAL uid (read from /proc/self/status);
+    # compute the same token here so the test knows the expected path.
+    uid = "1000"
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    uid = line.split()[1]
+                    break
+    except OSError:
+        pass
+    want = os.path.join(RUNTIME, "redline-%s.sock" % uid)
+
+    app = App(REPO, rows=24, cols=80, env_extra={"XDG_RUNTIME_DIR": RUNTIME})
+    try:
+        bound = False
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            if os.path.exists(want):
+                bound = True
+                break
+            time.sleep(0.1)
+        if not rec("default-path: app binds $XDG_RUNTIME_DIR/redline-<uid>.sock",
+                   bound, want):
+            return
+        # A BARE client (no --socket) must discover and drive it.
+        rc, out, err = run_bare_client(RUNTIME, "-c", "open Cargo.toml:2", "state")
+        ok = rc == 0 and "view_name: Cargo.toml" in out and "point.line: 1" in out
+        rec("default-path: bare `redline` (no --socket) discovers + drives it",
+            ok, f"rc={rc} err={err.strip()[:70]}")
+        rc2, out2, err2 = run_bare_client(RUNTIME, "quit")
+        rec("default-path: bare `redline quit` accepted", rc2 == 0,
+            f"rc={rc2} err={err2.strip()[:70]}")
+    finally:
+        try:
+            app.kill()
+        except Exception:
+            pass
+        shutil.rmtree(RUNTIME, ignore_errors=True)
+
+
 def main():
     for stray in (SOCK,):
         try:
@@ -191,6 +257,10 @@ def main():
                 break
             time.sleep(0.1)
         rec("socket file removed on clean exit", gone, SOCK)
+
+        # W22: the DEFAULT discovery path (no --socket) — its own scratch
+        # runtime dir, so it never touches the user's real session.
+        discover_leg()
     finally:
         try:
             app.kill()
