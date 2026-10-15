@@ -85,10 +85,42 @@ pub fn socket_path(explicit: Option<&Path>) -> PathBuf {
 }
 
 fn uid_token() -> String {
-    std::env::var("UID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| std::process::id().to_string())
+    // The discovery token MUST be identical for the app and every client
+    // process. `UID` is a bash BUILTIN, not an exported variable, so
+    // `std::env::var("UID")` is empty in almost every launch (confirmed:
+    // a bare `redline` has no `UID` in /proc/<pid>/environ). The old pid
+    // fallback then made the app and each client compute DIFFERENT paths,
+    // so a bare `redline <verb>` could never discover a running session.
+    // Read the REAL uid from /proc (Linux), which is identical across all
+    // of the user's processes.
+    if let Some(uid) = real_uid() {
+        return uid;
+    }
+    // Non-Linux / no /proc: fall back to $UID (works when a shell exports
+    // it), then to a per-USER token that does not vary by process.
+    if let Ok(p) = std::env::var("UID")
+        && !p.is_empty()
+    {
+        return p;
+    }
+    let user = std::env::var("USER").ok().filter(|s| !s.is_empty());
+    match user {
+        Some(u) => u,
+        // Last resort: a FIXED token (not the pid) so the app and clients
+        // still agree. Two different users on one machine collide only if
+        // they share an XDG_RUNTIME_DIR, which the OS does not do.
+        None => "default".to_string(),
+    }
+}
+
+/// The real numeric uid, read from `/proc/self/status` (`Uid:\t<real>\t...`).
+/// `/proc` is world-readable for one's own process and the value is the same
+/// in every process the user runs — exactly the property discovery needs.
+fn real_uid() -> Option<String> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
+    let real = line.split_whitespace().nth(1)?;
+    Some(real.to_string())
 }
 
 /// Serve the control socket until the process exits.
@@ -419,6 +451,33 @@ mod tests {
             "a 120-col terminal must render wide (proves the recorded width is used): {wide_max}"
         );
         assert!(wide_max > narrow_max, "the width change must widen the frame");
+    }
+
+    /// The discovery token must be IDENTICAL for the app and every client
+    /// process, or a bare `redline <verb>` cannot find a running session.
+    /// The original bug: `UID` is a bash builtin (absent from the env), so
+    /// the pid fallback made the app bind `redline-<apppid>.sock` while a
+    /// client computed `redline-<clientpid>.sock` — never equal.
+    #[test]
+    fn uid_token_is_process_stable_and_not_a_pid() {
+        let token = super::uid_token();
+        assert!(!token.is_empty(), "token must be non-empty");
+        assert_ne!(
+            token,
+            std::process::id().to_string(),
+            "the token must NOT be the pid (that is the discovery bug)"
+        );
+        // On Linux the real uid is readable and equals the process's own.
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status")
+            && let Some(real) = status
+                .lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+        {
+            assert_eq!(token, real, "token must be the real uid");
+        }
+        // A second computation in-process is identical (no per-call drift).
+        assert_eq!(super::uid_token(), token);
     }
 
     #[test]

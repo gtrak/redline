@@ -60,3 +60,32 @@ Chain commands with `-c` (`-c 'open f:5' state`), and a lone non-printing
 verb already emits `state`. `text`/`annotate` stay greedy (free text).
 Verified: the rejected form exits 2, `open Cargo.toml:5` alone lands + prints
 state, and the `-c` chain is unaffected.
+
+### W22 — bare `redline <verb>` could NEVER discover a running session (REAL BUG)
+**Found by actually using the feature** (the user's live session): the app had
+bound `/run/user/1000/redline-3540164.sock` (a `<pid>` token) and no client
+could find it without `--socket`.
+
+**Cause**: `control::uid_token()` used `std::env::var("UID")`, but `UID` is a
+**bash builtin, not an exported variable** — it is absent from a process's
+environment (verified: the running app's `/proc/<pid>/environ` has no `UID`).
+So the fallback `std::process::id()` fired, and the app computed
+`redline-<apppid>.sock` while every client computed `redline-<clientpid>.sock`
+— two different paths, never equal. The whole point of discovery (bare
+`redline state` finding the human's session) silently did not work.
+
+**Fix** (`real_uid()`): read the real uid from `/proc/self/status` (`Uid:\t<N>`),
+which is identical in every process the user runs. Fallbacks, in order: `$UID`
+(shells that export it), `$USER`, then the fixed token `"default"` — never the
+pid again. Pinned by `uid_token_is_process_stable_and_not_a_pid` (asserts the
+token is non-empty, is NOT the pid, equals the real uid on Linux, and is
+stable across calls). **Proven live**: the fixed app binds
+`redline-1000.sock`, and a **bare `redline -c 'open Cargo.toml:5' state` with
+no `--socket` discovers it** and reports `view_name: Cargo.toml`,
+`point.line: 4`.
+
+**Not caught by any test or the gate** — the control drive always passed an
+explicit `--socket` (its fixture launched with `--socket <tmp>`), so the
+DEFAULT discovery path — the one a human/agent actually uses — was never
+exercised end to end. A drive leg for the bare-default path is the follow-up
+worth doing (so a regression reddens).
