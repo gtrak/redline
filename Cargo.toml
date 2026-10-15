@@ -11,7 +11,7 @@ resolver = "2"
 # deprecated-but-functional on this toolchain; the part-B negative test
 # proves it fires here). Consequence: it only fires under `cargo clippy`,
 # so the enforcement point is the gate (tools/gate.sh — every tier runs
-# clippy) and the pre-push hook, not plain `cargo build`.
+# clippy), not plain `cargo build`.
 [workspace.lints.rust]
 # The workspace currently has NO `unsafe fn`; deny so one can never
 # appear and silently un-check its inner unsafe ops (that lint is

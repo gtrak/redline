@@ -48,20 +48,18 @@ absent.
 
 ## Development gate
 
-A pre-push hook (tracked at `.githooks/pre-push`) runs the fast gate
-(`tools/gate.sh fast` — build + clippy + tests, no PTY battery) before any
-push. Install it once per clone:
+The gate is a **manual, on-demand** tool — there is no git hook and no CI
+wired into pushes. Run it yourself when you want it:
 
 ```sh
-tools/install-hooks.sh   # = git config core.hooksPath .githooks
+ tools/gate.sh fast   # build + clippy + unit tests
+ tools/gate.sh full   # adds the PTY battery
 ```
 
-It is advisory (`git push --no-verify` bypasses it) and only active in
-clones that ran the install step — `.git/hooks/` is not versioned, so
-`core.hooksPath` is the only shareable install. `core.hooksPath` is repo
-config shared by all worktrees, so a push from any worktree gates that
-worktree's checkout (the branch being pushed). The full release gate is
-`tools/gate.sh full` (adds the PTY battery).
+Pushes are never gated by the repo. (There is deliberately no
+`.githooks/pre-push` and no `core.hooksPath`: running a full build/clippy/test
+loop on every push is not something this project does. Agents and humans run
+the gate explicitly, at the moment they choose.)
 
 ## Quick start
 
